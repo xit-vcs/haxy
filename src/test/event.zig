@@ -91,34 +91,31 @@ test "rebase" {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
+    var first_oid: [hash.byteLen(repo_opts.hash)]u8 = undefined;
+
     {
         var json: std.Io.Writer.Allocating = .init(std.testing.allocator);
         defer json.deinit();
 
-        for (events_to_consume) |event| {
+        for (events_to_consume, 0..) |event, i| {
             json.clearRetainingCapacity();
 
             try std.json.Stringify.value(event, .{}, &json.writer);
 
             // commit the event into a special branch
-            _ = try repo.commitAtRef(io, allocator, .{ .message = json.written() }, null, .{ .kind = .head, .name = "haxy/meta" });
+            const oid = try repo.commitAtRef(io, allocator, .{ .message = json.written() }, null, .{ .kind = .head, .name = "haxy/meta" });
+            if (i == 0) {
+                _ = try std.fmt.hexToBytes(&first_oid, &oid);
+            }
         }
     }
-
-    //
-    // read and parse all of the events from the repo
-    //
-
-    const events = try readEventsFromRepo(Repo, repo_opts.hash, io, &arena, &repo, "haxy/meta");
-
-    const first_oid = events[events.len - 1].oid;
 
     //
     // consume events into the database
     //
 
     {
-        try evt.consume(repo_opts, io, allocator, &repo, events);
+        try evt.consume(repo_opts, io, allocator, &repo, .{ .kind = .head, .name = "haxy/meta" });
 
         const history = try Repo.DB.ArrayList(.read_only).init(repo.core.db.rootCursor().readOnly());
 
@@ -195,17 +192,11 @@ test "rebase" {
     }
 
     //
-    // read and parse all of the events from the repo
-    //
-
-    const events2 = try readEventsFromRepo(Repo, repo_opts.hash, io, &arena, &repo, "haxy/meta");
-
-    //
     // consume events into the database
     //
 
     {
-        try evt.consume(repo_opts, io, allocator, &repo, events2);
+        try evt.consume(repo_opts, io, allocator, &repo, .{ .kind = .head, .name = "haxy/meta" });
 
         const history = try Repo.DB.ArrayList(.read_only).init(repo.core.db.rootCursor().readOnly());
 
@@ -277,17 +268,11 @@ test "rebase" {
     }
 
     //
-    // read and parse all of the events from the repo
-    //
-
-    const events3 = try readEventsFromRepo(Repo, repo_opts.hash, io, &arena, &repo, "haxy/meta");
-
-    //
     // consume events into the database
     //
 
     {
-        try evt.consume(repo_opts, io, allocator, &repo, events3);
+        try evt.consume(repo_opts, io, allocator, &repo, .{ .kind = .head, .name = "haxy/meta" });
 
         const history = try Repo.DB.ArrayList(.read_only).init(repo.core.db.rootCursor().readOnly());
 
@@ -393,32 +378,31 @@ test "merge" {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
+    var first_oid: [hash.byteLen(repo_opts.hash)]u8 = undefined;
+
     {
         var json: std.Io.Writer.Allocating = .init(std.testing.allocator);
         defer json.deinit();
 
-        for (events_to_consume) |event| {
+        for (events_to_consume, 0..) |event, i| {
             json.clearRetainingCapacity();
 
             try std.json.Stringify.value(event, .{}, &json.writer);
 
             // commit the event into a special branch
-            _ = try repo.commitAtRef(io, allocator, .{ .message = json.written() }, null, .{ .kind = .head, .name = "haxy/meta" });
+            const oid = try repo.commitAtRef(io, allocator, .{ .message = json.written() }, null, .{ .kind = .head, .name = "haxy/meta" });
+            if (i == 0) {
+                _ = try std.fmt.hexToBytes(&first_oid, &oid);
+            }
         }
     }
-
-    //
-    // read and parse all of the events from the repo
-    //
-
-    const events = try readEventsFromRepo(Repo, repo_opts.hash, io, &arena, &repo, "haxy/meta");
 
     //
     // consume events into the database
     //
 
     {
-        try evt.consume(repo_opts, io, allocator, &repo, events);
+        try evt.consume(repo_opts, io, allocator, &repo, .{ .kind = .head, .name = "haxy/meta" });
 
         const history = try Repo.DB.ArrayList(.read_only).init(repo.core.db.rootCursor().readOnly());
 
@@ -512,7 +496,7 @@ test "merge" {
                 io,
                 allocator,
                 // make the first commit a child of the first commit on the haxy/meta branch
-                .{ .parent_oids = if (i == 0) &.{std.fmt.bytesToHex(events[events.len - 1].oid, .lower)} else null, .message = json.written() },
+                .{ .parent_oids = if (i == 0) &.{std.fmt.bytesToHex(first_oid, .lower)} else null, .message = json.written() },
                 null,
                 .{ .kind = .head, .name = "haxy/other" },
             );
@@ -527,9 +511,6 @@ test "merge" {
         var result = try repo.switchDir(io, allocator, .{ .target = .{ .ref = .{ .kind = .head, .name = "haxy/meta" } } });
         defer result.deinit();
 
-        const head = (try repo.readRef(io, .{ .kind = .head, .name = "haxy/meta" })).?;
-        try std.testing.expectEqualStrings(&std.fmt.bytesToHex(events[0].oid, .lower), &head);
-
         var merge = try repo.merge(io, allocator, .{ .kind = .full, .action = .{ .new = .{ .source = &.{.{ .ref = .{ .kind = .head, .name = "haxy/other" } }} } } }, null);
         defer merge.deinit();
 
@@ -537,17 +518,11 @@ test "merge" {
     }
 
     //
-    // read and parse all of the events from the repo
-    //
-
-    const events2 = try readEventsFromRepo(Repo, repo_opts.hash, io, &arena, &repo, "haxy/meta");
-
-    //
     // consume events into the database
     //
 
     {
-        try evt.consume(repo_opts, io, allocator, &repo, events2);
+        try evt.consume(repo_opts, io, allocator, &repo, .{ .kind = .head, .name = "haxy/meta" });
 
         const history = try Repo.DB.ArrayList(.read_only).init(repo.core.db.rootCursor().readOnly());
 
@@ -601,47 +576,4 @@ test "merge" {
             try std.testing.expectEqualStrings(other_events_to_consume[0].data.issue.tags, first_issue.issue.tags);
         }
     }
-}
-
-fn readEventsFromRepo(
-    comptime Repo: type,
-    comptime hash_kind: hash.HashKind,
-    io: std.Io,
-    arena: *std.heap.ArenaAllocator,
-    repo: *Repo,
-    branch_name: []const u8,
-) ![]evt.RepoEvent(hash_kind) {
-    const allocator = arena.allocator();
-
-    var events: std.ArrayList(evt.RepoEvent(hash_kind)) = .empty;
-
-    const ref = try repo.readRef(io, .{ .kind = .head, .name = branch_name }) orelse return error.RefNotFound;
-    var commit_iter = try repo.log(io, allocator, &.{ref});
-
-    // read the message from each commit
-    while (try commit_iter.next()) |commit_object| {
-        var oid: [hash.byteLen(hash_kind)]u8 = undefined;
-        _ = try std.fmt.hexToBytes(&oid, &commit_object.oid);
-
-        const parent_oids = commit_object.content.commit.metadata.parent_oids orelse return error.ParentOidsNotFound;
-
-        if (parent_oids.len > 1) {
-            // this is a merge commit
-            try events.append(allocator, .{ .parent_oid = null, .oid = oid, .event = null });
-        } else {
-            try commit_object.object_reader.seekTo(commit_object.content.commit.message_position);
-            const message = try commit_object.object_reader.interface.allocRemaining(allocator, .unlimited);
-            const event = try std.json.parseFromSliceLeaky(evt.Event, allocator, message, .{});
-
-            if (parent_oids.len == 0) {
-                try events.append(allocator, .{ .parent_oid = null, .oid = oid, .event = event });
-            } else {
-                var parent_oid: [hash.byteLen(hash_kind)]u8 = undefined;
-                _ = try std.fmt.hexToBytes(&parent_oid, &parent_oids[0]);
-                try events.append(allocator, .{ .parent_oid = parent_oid, .oid = oid, .event = event });
-            }
-        }
-    }
-
-    return events.items;
 }

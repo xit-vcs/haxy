@@ -3,6 +3,8 @@ const xit = @import("xit");
 const rp = xit.repo;
 const hash = xit.hash;
 const mrg = xit.merge;
+const obj = xit.object;
+const rf = xit.ref;
 
 pub const event_id_size: usize = 32;
 
@@ -52,18 +54,6 @@ pub const Event = struct {
     data: EventData,
 };
 
-/// associates an Event with a git object id.
-/// we save this oid in the database so we can reliably re-consume
-/// events if their oid changed. this can happen if the branch
-/// is rebased and force-pushed.
-pub fn RepoEvent(comptime hash_kind: hash.HashKind) type {
-    return struct {
-        parent_oid: ?[hash.byteLen(hash_kind)]u8,
-        oid: [hash.byteLen(hash_kind)]u8,
-        event: ?Event, // if null, this is a merge commit
-    };
-}
-
 pub fn randomId(random: std.Random) [event_id_size]u8 {
     var id_bytes: [event_id_size]u8 = undefined;
     random.bytes(&id_bytes);
@@ -75,7 +65,7 @@ pub fn consume(
     io: std.Io,
     allocator: std.mem.Allocator,
     repo: *rp.Repo(.xit, repo_opts),
-    repo_events: []RepoEvent(repo_opts.hash),
+    ref: rf.Ref,
 ) !void {
     const DB = rp.Repo(.xit, repo_opts).DB;
     const State = rp.Repo(.xit, repo_opts).State;
@@ -84,12 +74,12 @@ pub fn consume(
         core: *rp.Repo(.xit, repo_opts).Core,
         io: std.Io,
         allocator: std.mem.Allocator,
-        repo_events: []RepoEvent(repo_opts.hash),
+        ref: rf.Ref,
 
         pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
             var moment = try DB.HashMap(.read_write).init(cursor.*);
             const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
-            try consumeInTransaction(repo_opts, state, ctx.io, ctx.allocator, ctx.repo_events);
+            try consumeInTransaction(repo_opts, state, ctx.io, ctx.allocator, ctx.ref);
         }
     };
 
@@ -101,7 +91,7 @@ pub fn consume(
         .core = &repo.core,
         .io = io,
         .allocator = allocator,
-        .repo_events = repo_events,
+        .ref = ref,
     });
 }
 
@@ -110,7 +100,7 @@ pub fn consumeInTransaction(
     state: rp.Repo(.xit, repo_opts).State(.read_write),
     io: std.Io,
     allocator: std.mem.Allocator,
-    repo_events: []RepoEvent(repo_opts.hash),
+    ref: rf.Ref,
 ) !void {
     const DB = rp.Repo(.xit, repo_opts).DB;
 
@@ -140,86 +130,111 @@ pub fn consumeInTransaction(
     }
     var haxy_moments = try DB.HashMap(.read_write).init(haxy_moments_cursor);
 
+    // compute a list of events that haven't been consumed yet
+    const RepoEvent = struct {
+        parent_oid: ?[hash.byteLen(repo_opts.hash)]u8,
+        oid: [hash.byteLen(repo_opts.hash)]u8,
+        is_merge: bool,
+    };
+    var repo_events: std.ArrayList(RepoEvent) = .empty;
+    defer repo_events.deinit(allocator);
+    {
+        var commit_iter = try obj.ObjectIterator(.xit, repo_opts, .full).init(state.readOnly(), io, allocator, .{ .kind = .commit });
+        defer commit_iter.deinit();
+
+        const head_oid = (try rf.readRecur(.xit, repo_opts, state.readOnly(), io, .{ .ref = ref })) orelse return error.OidNotFound;
+        try commit_iter.include(&head_oid);
+
+        while (try commit_iter.next()) |commit_object| {
+            defer commit_object.deinit();
+
+            var oid: [hash.byteLen(repo_opts.hash)]u8 = undefined;
+            _ = try std.fmt.hexToBytes(&oid, &commit_object.oid);
+
+            // if this object id has already been consumed, skip it
+            if (null != try haxy_moments.getCursor(hash.bytesToInt(repo_opts.hash, &oid))) {
+                continue;
+            }
+
+            const parent_oids = commit_object.content.commit.metadata.parent_oids orelse return error.ParentOidsNotFound;
+
+            if (parent_oids.len > 1) {
+                // this is a merge commit
+                try repo_events.append(allocator, .{ .parent_oid = null, .oid = oid, .is_merge = true });
+            } else {
+                if (parent_oids.len == 0) {
+                    try repo_events.append(allocator, .{ .parent_oid = null, .oid = oid, .is_merge = false });
+                } else {
+                    var parent_oid: [hash.byteLen(repo_opts.hash)]u8 = undefined;
+                    _ = try std.fmt.hexToBytes(&parent_oid, &parent_oids[0]);
+                    try repo_events.append(allocator, .{ .parent_oid = parent_oid, .oid = oid, .is_merge = false });
+                }
+            }
+        }
+    }
+
     // if this branch was rebased and force pushed, we need to detect that and
     // properly revert the haxy state to the last valid state. we detect this
     // by simply asking if the last event is a descendent of the last event
     // we consumed. if it isn't, then we know the haxy state needs to be reverted.
-    // from that point on, the rest of the events should be descendents so we no
-    // longer need to even check. this boolean lets us know if that has happened.
-    var checked_for_rebase = false;
+    if (last_object_id_maybe) |*last_object_id| {
+        _ = mrg.getDescendent(
+            .xit,
+            repo_opts,
+            state.readOnly(),
+            io,
+            allocator,
+            &std.fmt.bytesToHex(last_object_id, .lower),
+            &std.fmt.bytesToHex(repo_events.items[0].oid, .lower),
+        ) catch |err| switch (err) {
+            error.DescendentNotFound => {
+                if (repo_events.items[repo_events.items.len - 1].parent_oid) |*parent_oid| {
+                    const old_moment_cursor = try haxy_moments.getCursor(hash.bytesToInt(repo_opts.hash, parent_oid)) orelse return error.CursorNotFound;
+                    const old_moment = try DB.HashMap(.read_only).init(old_moment_cursor);
+
+                    const old_moment_index_cursor = try old_moment.getCursor(hash.hashInt(repo_opts.hash, "moment-index")) orelse return error.CursorNotFound;
+                    const old_moment_index = try old_moment_index_cursor.readUint();
+
+                    // resize the haxy list so we truncate all the moments that were
+                    // created after the parent_oid was consumed
+                    try haxy.slice(old_moment_index + 1);
+
+                    // make a new haxy moment and set its initial value to the last haxy moment
+                    haxy_moments_cursor = try haxy.appendCursor();
+                    const old_haxy_moments_cursor = try haxy.getCursor(old_moment_index) orelse return error.CursorNotFound;
+                    try haxy_moments_cursor.write(.{ .slot = old_haxy_moments_cursor.slot() });
+                    haxy_moments = try DB.HashMap(.read_write).init(haxy_moments_cursor);
+
+                    last_object_id_maybe = parent_oid.*;
+                } else {
+                    // the branch was rebased all the way to the very beginning.
+                    // we have a repo event with no parent, which means it is now
+                    // the very first event. all we need to do is set the haxy list
+                    // to be empty and make a new haxy_moments map to work with.
+
+                    try haxy.slice(0);
+                    haxy_moments_cursor = try haxy.appendCursor();
+                    haxy_moments = try DB.HashMap(.read_write).init(haxy_moments_cursor);
+
+                    last_object_id_maybe = null;
+                }
+            },
+            else => |e| return e,
+        };
+    } else {
+        if (repo_events.items[repo_events.items.len - 1].parent_oid) |_| {
+            // there is no last_object_id, but this event has a parent.
+            // this is an invalid state. if the event has a parent, that
+            // implies that an event has already been processed, but
+            // if that's true then there would be a last_object_id.
+            return error.UnexpectedParent;
+        }
+    }
 
     // iterate over the events in reverse order
     // (they are sorted by most recent events first)
-    for (0..repo_events.len) |i| {
-        const repo_event = repo_events[repo_events.len - i - 1];
-
-        // if this object id has already been consumed, skip it
-        if (null != try haxy_moments.getCursor(hash.bytesToInt(repo_opts.hash, &repo_event.oid))) {
-            continue;
-        }
-
-        if (!checked_for_rebase) {
-            checked_for_rebase = true;
-
-            if (last_object_id_maybe) |*last_object_id| {
-                // if the last event isn't a descendent of the last event that
-                // we consumed, the branch was rebased so we need to revert the
-                // haxy state back to where it was when this event's parent was
-                // consumed. from that point on, we can consume the rest of the
-                // events on top of that state.
-                _ = mrg.getDescendent(
-                    .xit,
-                    repo_opts,
-                    state.readOnly(),
-                    io,
-                    allocator,
-                    &std.fmt.bytesToHex(last_object_id, .lower),
-                    &std.fmt.bytesToHex(repo_events[0].oid, .lower),
-                ) catch |err| switch (err) {
-                    error.DescendentNotFound => {
-                        if (repo_event.parent_oid) |*parent_oid| {
-                            const old_moment_cursor = try haxy_moments.getCursor(hash.bytesToInt(repo_opts.hash, parent_oid)) orelse return error.CursorNotFound;
-                            const old_moment = try DB.HashMap(.read_only).init(old_moment_cursor);
-
-                            const old_moment_index_cursor = try old_moment.getCursor(hash.hashInt(repo_opts.hash, "moment-index")) orelse return error.CursorNotFound;
-                            const old_moment_index = try old_moment_index_cursor.readUint();
-
-                            // resize the haxy list so we truncate all the moments that were
-                            // created after the parent_oid was consumed
-                            try haxy.slice(old_moment_index + 1);
-
-                            // make a new haxy moment and set its initial value to the last haxy moment
-                            haxy_moments_cursor = try haxy.appendCursor();
-                            const old_haxy_moments_cursor = try haxy.getCursor(old_moment_index) orelse return error.CursorNotFound;
-                            try haxy_moments_cursor.write(.{ .slot = old_haxy_moments_cursor.slot() });
-                            haxy_moments = try DB.HashMap(.read_write).init(haxy_moments_cursor);
-
-                            last_object_id_maybe = parent_oid.*;
-                        } else {
-                            // the branch was rebased all the way to the very beginning.
-                            // we have a repo event with no parent, which means it is now
-                            // the very first event. all we need to do is set the haxy list
-                            // to be empty and make a new haxy_moments map to work with.
-
-                            try haxy.slice(0);
-                            haxy_moments_cursor = try haxy.appendCursor();
-                            haxy_moments = try DB.HashMap(.read_write).init(haxy_moments_cursor);
-
-                            last_object_id_maybe = null;
-                        }
-                    },
-                    else => |e| return e,
-                };
-            } else {
-                if (repo_event.parent_oid) |_| {
-                    // there is no last_object_id, but this event has a parent.
-                    // this is an invalid state. if the event has a parent, that
-                    // implies that an event has already been processed, but
-                    // if that's true then there would be a last_object_id.
-                    return error.UnexpectedParent;
-                }
-            }
-        }
+    for (0..repo_events.items.len) |i| {
+        const repo_event = repo_events.items[repo_events.items.len - i - 1];
 
         // create a moment for this object id
         var haxy_moment_cursor = try haxy_moments.putCursor(hash.bytesToInt(repo_opts.hash, &repo_event.oid));
@@ -239,10 +254,20 @@ pub fn consumeInTransaction(
         // rebases starting at this object id.
         try haxy_moment.put(hash.hashInt(repo_opts.hash, "moment-index"), .{ .uint = try haxy.count() - 1 });
 
-        // consume the event into the views map.
-        // if the event is null, it was just a merge commit
-        // so we don't need to update any views.
-        if (repo_event.event) |event| {
+        // consume the event unless it's a merge commit
+        if (!repo_event.is_merge) {
+            var commit_object = try obj.Object(.xit, repo_opts, .full).init(state.readOnly(), io, allocator, &std.fmt.bytesToHex(repo_event.oid, .lower));
+            defer commit_object.deinit();
+
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            defer arena.deinit();
+
+            // read the message from the commit
+            try commit_object.object_reader.seekTo(commit_object.content.commit.message_position);
+            const message = try commit_object.object_reader.interface.allocRemaining(arena.allocator(), .unlimited);
+
+            const event = try std.json.parseFromSliceLeaky(Event, arena.allocator(), message, .{});
+
             // get the id of the current event as bytes
             var current_event_id: [event_id_size]u8 = undefined;
             _ = try std.fmt.hexToBytes(&current_event_id, &event.id);
