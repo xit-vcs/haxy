@@ -32,6 +32,9 @@ test "rebase" {
     var repo = try Repo.init(io, allocator, .{ .path = work_path });
     defer repo.deinit(io, allocator);
 
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
     //
     // define test events
     //
@@ -87,9 +90,6 @@ test "rebase" {
     //
     // insert issues as commits in the repo
     //
-
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
 
     var first_oid: [hash.byteLen(repo_opts.hash)]u8 = undefined;
 
@@ -156,10 +156,65 @@ test "rebase" {
     }
 
     //
+    // add another event
+    //
+
+    const events_to_consume2 = [_]evt.Event{
+        .{
+            .id = std.fmt.bytesToHex(evt.randomId(prng.random()), .lower),
+            .data = .{
+                .issue = .{
+                    .title = "Double clicking causes the form to submit twice",
+                    .description = "When I double click the post button I see duplicate posts.",
+                    .tags = "bug\x00priority-high\x00ui",
+                },
+            },
+        },
+    };
+
+    {
+        var json: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer json.deinit();
+
+        for (events_to_consume2) |event| {
+            json.clearRetainingCapacity();
+
+            try std.json.Stringify.value(event, .{}, &json.writer);
+
+            // commit the event into a special branch
+            _ = try repo.commitAtRef(io, allocator, .{ .message = json.written() }, null, .{ .kind = .head, .name = "haxy/meta" });
+        }
+    }
+
+    //
+    // consume events into the database
+    //
+
+    {
+        try evt.consume(repo_opts, io, allocator, &repo, .{ .kind = .head, .name = "haxy/meta" });
+
+        const history = try Repo.DB.ArrayList(.read_only).init(repo.core.db.rootCursor().readOnly());
+
+        // read the moment we just created
+        const moment_cursor = try history.getCursor(-1) orelse return error.NotFound;
+        const moment = try Repo.DB.HashMap(.read_only).init(moment_cursor);
+
+        // get the last object id
+        const last_object_id_cursor = try moment.getCursor(hash.hashInt(repo_opts.hash, "haxy-last-object-id")) orelse return error.NotFound;
+        var last_object_id: [hash.byteLen(repo_opts.hash)]u8 = undefined;
+        _ = try last_object_id_cursor.readBytes(&last_object_id);
+
+        const haxy_cursor = try moment.getCursor(hash.hashInt(repo_opts.hash, "haxy")) orelse return error.NotFound;
+        const haxy = try Repo.DB.ArrayList(.read_only).init(haxy_cursor);
+
+        try std.testing.expectEqual(2, try haxy.count());
+    }
+
+    //
     // rebase the branch so it no longer includes the edit event
     //
 
-    const rebased_events_to_consume = [_]evt.Event{
+    const events_to_consume3 = [_]evt.Event{
         events_to_consume[2],
         events_to_consume[3],
     };
@@ -168,7 +223,7 @@ test "rebase" {
         var json: std.Io.Writer.Allocating = .init(std.testing.allocator);
         defer json.deinit();
 
-        for (rebased_events_to_consume, 0..) |event, i| {
+        for (events_to_consume3, 0..) |event, i| {
             json.clearRetainingCapacity();
 
             try std.json.Stringify.value(event, .{}, &json.writer);
@@ -234,6 +289,9 @@ test "rebase" {
 
         // the tags are no longer edited
         try std.testing.expectEqualStrings(events_to_consume[0].data.issue.tags, first_issue.issue.tags);
+
+        // an event added by the second push is no longer there because it was wiped out by the rebase
+        try std.testing.expect(null == try event_id_to_issue.getCursor(hash.hashInt(repo_opts.hash, &events_to_consume2[0].id)));
     }
 
     //
@@ -244,7 +302,7 @@ test "rebase" {
         var json: std.Io.Writer.Allocating = .init(std.testing.allocator);
         defer json.deinit();
 
-        for (rebased_events_to_consume, 0..) |event, i| {
+        for (events_to_consume3, 0..) |event, i| {
             json.clearRetainingCapacity();
 
             try std.json.Stringify.value(event, .{}, &json.writer);
@@ -332,6 +390,9 @@ test "merge" {
     var repo = try Repo.init(io, allocator, .{ .path = work_path });
     defer repo.deinit(io, allocator);
 
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
     //
     // define test events
     //
@@ -374,9 +435,6 @@ test "merge" {
     //
     // insert issues as commits in the repo
     //
-
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
 
     var first_oid: [hash.byteLen(repo_opts.hash)]u8 = undefined;
 
@@ -445,7 +503,7 @@ test "merge" {
     // define more test events
     //
 
-    const other_events_to_consume = [_]evt.Event{
+    const events_to_consume2 = [_]evt.Event{
         .{
             .id = std.fmt.bytesToHex(evt.randomId(prng.random()), .lower),
             .data = .{
@@ -486,7 +544,7 @@ test "merge" {
         var json: std.Io.Writer.Allocating = .init(std.testing.allocator);
         defer json.deinit();
 
-        for (other_events_to_consume, 0..) |event, i| {
+        for (events_to_consume2, 0..) |event, i| {
             json.clearRetainingCapacity();
 
             try std.json.Stringify.value(event, .{}, &json.writer);
@@ -567,13 +625,13 @@ test "merge" {
         {
             // get the issue out of the map
             var first_issue_id: [evt.event_id_size]u8 = undefined;
-            _ = try std.fmt.hexToBytes(&first_issue_id, &other_events_to_consume[0].id);
+            _ = try std.fmt.hexToBytes(&first_issue_id, &events_to_consume2[0].id);
             const first_issue_cursor = try event_id_to_issue.getCursor(hash.hashInt(repo_opts.hash, &first_issue_id)) orelse return error.NotFound;
             const first_issue_map = try Repo.DB.HashMap(.read_only).init(first_issue_cursor);
             const first_issue = try evt.EventData.read(Repo.DB, repo_opts.hash, arena.allocator(), first_issue_map, .issue);
 
-            try std.testing.expectEqualStrings(other_events_to_consume[0].data.issue.description, first_issue.issue.description);
-            try std.testing.expectEqualStrings(other_events_to_consume[0].data.issue.tags, first_issue.issue.tags);
+            try std.testing.expectEqualStrings(events_to_consume2[0].data.issue.description, first_issue.issue.description);
+            try std.testing.expectEqualStrings(events_to_consume2[0].data.issue.tags, first_issue.issue.tags);
         }
     }
 }

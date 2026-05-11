@@ -172,6 +172,7 @@ pub fn consumeInTransaction(
             }
         }
     }
+    if (repo_events.items.len == 0) return;
 
     // if this branch was rebased and force pushed, we need to detect that and
     // properly revert the haxy state to the last valid state. we detect this
