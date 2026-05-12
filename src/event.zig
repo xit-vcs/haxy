@@ -271,14 +271,10 @@ pub fn consumeInTransaction(
 
         const haxy_moment = try DB.HashMap(.read_write).init(haxy_moment_cursor);
 
-        // merge changes from every parent after the first parent. the first parent
-        // is the baseline, so a later parent only contributes values it changed.
+        // merge changes from every parent after the first parent. the common
+        // ancestor is the baseline, so a later parent only contributes values
+        // it changed relative to the merge base.
         if (repo_event.parent_oids.len > 1) {
-            var first_parent_oid: [hash.byteLen(repo_opts.hash)]u8 = undefined;
-            _ = try std.fmt.hexToBytes(&first_parent_oid, &repo_event.parent_oids[0]);
-            const first_parent_haxy_moment_cursor = try haxy_moments.getCursor(hash.bytesToInt(repo_opts.hash, &first_parent_oid)) orelse return error.CursorNotFound;
-            const first_parent_haxy_moment = try DB.HashMap(.read_only).init(first_parent_haxy_moment_cursor);
-
             for (repo_event.parent_oids[1..]) |*parent_oid| {
                 var oid: [hash.byteLen(repo_opts.hash)]u8 = undefined;
                 _ = try std.fmt.hexToBytes(&oid, parent_oid);
@@ -286,7 +282,13 @@ pub fn consumeInTransaction(
                 const parent_haxy_moment_cursor = try haxy_moments.getCursor(hash.bytesToInt(repo_opts.hash, &oid)) orelse return error.CursorNotFound;
                 const parent_haxy_moment = try DB.HashMap(.read_only).init(parent_haxy_moment_cursor);
 
-                try mergeChangedMapEntries(DB, haxy_moment, parent_haxy_moment, first_parent_haxy_moment, true);
+                const baseline_oid_hex = try mrg.commonAncestor(.xit, repo_opts, state.readOnly(), io, allocator, &repo_event.parent_oids[0], parent_oid);
+                var baseline_oid: [hash.byteLen(repo_opts.hash)]u8 = undefined;
+                _ = try std.fmt.hexToBytes(&baseline_oid, &baseline_oid_hex);
+                const baseline_haxy_moment_cursor = try haxy_moments.getCursor(hash.bytesToInt(repo_opts.hash, &baseline_oid)) orelse return error.CursorNotFound;
+                const baseline_haxy_moment = try DB.HashMap(.read_only).init(baseline_haxy_moment_cursor);
+
+                try mergeChangedMapEntries(DB, haxy_moment, parent_haxy_moment, baseline_haxy_moment, true);
             }
         }
 
@@ -364,29 +366,45 @@ fn mergeChangedMapEntries(
         const kv_pair = try kv_pair_cursor.readKeyValuePair();
 
         const baseline_value_cursor = try baseline.getCursor(kv_pair.hash) orelse {
+            if ((try target.getCursor(kv_pair.hash)) != null) {
+                return error.MergeConflict;
+            }
+
             try target.put(kv_pair.hash, .{ .slot = kv_pair.value_cursor.slot() });
             continue;
         };
 
-        if (baseline_value_cursor.slot().value == kv_pair.value_cursor.slot().value) {
-            continue;
-        }
+        const tag = kv_pair.value_cursor.slot().tag;
 
-        if (kv_pair.value_cursor.slot().tag != baseline_value_cursor.slot().tag) {
+        if (tag != baseline_value_cursor.slot().tag) {
             return error.UnexpectedTag;
         }
 
-        const tag = kv_pair.value_cursor.slot().tag;
+        if (kv_pair.value_cursor.slot().value == baseline_value_cursor.slot().value) {
+            continue;
+        }
 
         if (tag == .hash_map) {
+            const target_existing_cursor = try target.getCursor(kv_pair.hash) orelse return error.MergeConflict;
+            if (target_existing_cursor.slot().tag != .hash_map) {
+                return error.MergeConflict;
+            }
+
             const target_child_cursor = try target.putCursor(kv_pair.hash);
             const target_child = try DB.HashMap(.read_write).init(target_child_cursor);
             const parent_child = try DB.HashMap(.read_only).init(kv_pair.value_cursor);
             const baseline_child = try DB.HashMap(.read_only).init(baseline_value_cursor);
             try mergeChangedMapEntries(DB, target_child, parent_child, baseline_child, false);
         } else if (is_top_level) {
+            // the moment-index is a top-level key in the haxy moment
+            // and is not a map. we don't want to do any merge of this.
             continue;
         } else {
+            const target_value_cursor = try target.getCursor(kv_pair.hash) orelse return error.MergeConflict;
+            if (target_value_cursor.slot().value != baseline_value_cursor.slot().value) {
+                return error.MergeConflict;
+            }
+
             try target.put(kv_pair.hash, .{ .slot = kv_pair.value_cursor.slot() });
         }
     }

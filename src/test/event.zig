@@ -565,7 +565,7 @@ test "merge" {
     // check out the haxy/meta branch and merge the haxy/other branch into it
     //
 
-    {
+    const merge_oid = blk: {
         var result = try repo.switchDir(io, allocator, .{ .target = .{ .ref = .{ .kind = .head, .name = "haxy/meta" } } });
         defer result.deinit();
 
@@ -573,7 +573,9 @@ test "merge" {
         defer merge.deinit();
 
         try std.testing.expect(.success == merge.result);
-    }
+
+        break :blk merge.result.success.oid;
+    };
 
     //
     // consume events into the database
@@ -703,4 +705,79 @@ test "merge" {
             try std.testing.expect(null == first_issue_cursor);
         }
     }
+
+    //
+    // define test events that modify the same issue in conflicting ways
+    //
+
+    const events_to_consume3 = [_]evt.Event{
+        .{
+            .id = events_to_consume[0].id,
+            .data = .{
+                .issue = .{
+                    .title = "Login form clears password on validation error",
+                    .description = "Submitting an invalid email address resets the password field. Preserve the field value and show an inline validation message.",
+                    .tags = "bug\x00priority-low\x00ui",
+                },
+            },
+        },
+        .{
+            .id = events_to_consume[0].id,
+            .data = .{
+                .issue = .{
+                    .title = "Login form clears password on validation error",
+                    .description = "Submitting an invalid email address resets the password field. Preserve the field value and show an inline validation message.",
+                    .tags = "bug\x00priority-medium\x00ui",
+                },
+            },
+        },
+    };
+
+    //
+    // insert issues as commits in the repo on different branches
+    //
+
+    {
+        var json: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer json.deinit();
+
+        for (events_to_consume3, 0..) |event, i| {
+            json.clearRetainingCapacity();
+
+            try std.json.Stringify.value(event, .{}, &json.writer);
+
+            // commit the event into a special branch
+            _ = try repo.commitAtRef(
+                io,
+                allocator,
+                .{ .parent_oids = &.{merge_oid}, .message = json.written() },
+                null,
+                .{ .kind = .head, .name = switch (i) {
+                    0 => "haxy/meta",
+                    1 => "haxy/other",
+                    else => unreachable,
+                } },
+            );
+        }
+    }
+
+    //
+    // check out the haxy/meta branch and merge the haxy/other branch into it
+    //
+
+    {
+        var result = try repo.switchDir(io, allocator, .{ .target = .{ .ref = .{ .kind = .head, .name = "haxy/meta" } } });
+        defer result.deinit();
+
+        var merge = try repo.merge(io, allocator, .{ .kind = .full, .action = .{ .new = .{ .source = &.{.{ .ref = .{ .kind = .head, .name = "haxy/other" } }} } } }, null);
+        defer merge.deinit();
+
+        try std.testing.expect(.success == merge.result);
+    }
+
+    //
+    // consume events into the database
+    //
+
+    try std.testing.expectError(error.MergeConflict, evt.consume(repo_opts, io, allocator, &repo, .{ .kind = .head, .name = "haxy/meta" }));
 }
