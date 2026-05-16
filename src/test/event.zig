@@ -943,4 +943,144 @@ test "user and repo" {
 
         try std.testing.expect(null != try user_repos.getCursor(hash.hashInt(repo_opts.hash, &repo_event_id)));
     }
+
+    //
+    // remove the repo
+    //
+
+    const events_to_consume2 = [_]evt.Event{
+        .{
+            .id = std.fmt.bytesToHex(repo_event_id, .lower),
+            .data = .{
+                .remove = .{
+                    .event_kind = .repo,
+                },
+            },
+        },
+    };
+
+    {
+        var json: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer json.deinit();
+
+        for (events_to_consume2) |event| {
+            json.clearRetainingCapacity();
+
+            try std.json.Stringify.value(event, .{}, &json.writer);
+
+            // commit the event into a special branch
+            _ = try repo.commitAtRef(io, allocator, .{ .message = json.written() }, null, .{ .kind = .head, .name = "haxy/meta" });
+        }
+    }
+
+    //
+    // consume the removal into the database
+    //
+
+    {
+        try evt.consume(repo_opts, io, allocator, &repo, .{ .kind = .head, .name = "haxy/meta" });
+
+        const history = try Repo.DB.ArrayList(.read_only).init(repo.core.db.rootCursor().readOnly());
+
+        // read the moment we just created
+        const moment_cursor = try history.getCursor(-1) orelse return error.NotFound;
+        const moment = try Repo.DB.HashMap(.read_only).init(moment_cursor);
+
+        // get the last object id
+        const last_object_id_cursor = try moment.getCursor(hash.hashInt(repo_opts.hash, "haxy-last-object-id")) orelse return error.NotFound;
+        var last_object_id: [hash.byteLen(repo_opts.hash)]u8 = undefined;
+        _ = try last_object_id_cursor.readBytes(&last_object_id);
+
+        const haxy_cursor = try moment.getCursor(hash.hashInt(repo_opts.hash, "haxy")) orelse return error.NotFound;
+        const haxy = try Repo.DB.ArrayList(.read_only).init(haxy_cursor);
+
+        try std.testing.expectEqual(2, try haxy.count());
+
+        const haxy_moments_cursor = try haxy.getCursor(-1) orelse return error.NotFound;
+        const haxy_moments = try Repo.DB.HashMap(.read_only).init(haxy_moments_cursor);
+
+        const haxy_moment_cursor = try haxy_moments.getCursor(hash.bytesToInt(repo_opts.hash, &last_object_id)) orelse return error.NotFound;
+        const haxy_moment = try Repo.DB.HashMap(.read_only).init(haxy_moment_cursor);
+
+        // get the map of repos
+        const event_id_to_repo_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, "event-id->repo")) orelse return error.NotFound;
+        const event_id_to_repo = try Repo.DB.HashMap(.read_only).init(event_id_to_repo_cursor);
+
+        try std.testing.expect(null == try event_id_to_repo.getCursor(hash.hashInt(repo_opts.hash, &repo_event_id)));
+
+        // get the repos created by the user
+        const user_id_to_repos_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, "user-id->repos")) orelse return error.NotFound;
+        const user_id_to_repos = try Repo.DB.HashMap(.read_only).init(user_id_to_repos_cursor);
+
+        const user_repos_cursor = try user_id_to_repos.getCursor(hash.hashInt(repo_opts.hash, &user_event_id)) orelse return error.NotFound;
+        const user_repos = try Repo.DB.CountedHashSet(.read_only).init(user_repos_cursor);
+
+        try std.testing.expectEqual(0, try user_repos.count());
+        try std.testing.expect(null == try user_repos.getCursor(hash.hashInt(repo_opts.hash, &repo_event_id)));
+    }
+
+    //
+    // remove the user
+    //
+
+    const events_to_consume3 = [_]evt.Event{
+        .{
+            .id = std.fmt.bytesToHex(user_event_id, .lower),
+            .data = .{
+                .remove = .{
+                    .event_kind = .user,
+                },
+            },
+        },
+    };
+
+    {
+        var json: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer json.deinit();
+
+        for (events_to_consume3) |event| {
+            json.clearRetainingCapacity();
+
+            try std.json.Stringify.value(event, .{}, &json.writer);
+
+            // commit the event into a special branch
+            _ = try repo.commitAtRef(io, allocator, .{ .message = json.written() }, null, .{ .kind = .head, .name = "haxy/meta" });
+        }
+    }
+
+    //
+    // consume the user removal into the database
+    //
+
+    {
+        try evt.consume(repo_opts, io, allocator, &repo, .{ .kind = .head, .name = "haxy/meta" });
+
+        const history = try Repo.DB.ArrayList(.read_only).init(repo.core.db.rootCursor().readOnly());
+
+        // read the moment we just created
+        const moment_cursor = try history.getCursor(-1) orelse return error.NotFound;
+        const moment = try Repo.DB.HashMap(.read_only).init(moment_cursor);
+
+        // get the last object id
+        const last_object_id_cursor = try moment.getCursor(hash.hashInt(repo_opts.hash, "haxy-last-object-id")) orelse return error.NotFound;
+        var last_object_id: [hash.byteLen(repo_opts.hash)]u8 = undefined;
+        _ = try last_object_id_cursor.readBytes(&last_object_id);
+
+        const haxy_cursor = try moment.getCursor(hash.hashInt(repo_opts.hash, "haxy")) orelse return error.NotFound;
+        const haxy = try Repo.DB.ArrayList(.read_only).init(haxy_cursor);
+
+        try std.testing.expectEqual(3, try haxy.count());
+
+        const haxy_moments_cursor = try haxy.getCursor(-1) orelse return error.NotFound;
+        const haxy_moments = try Repo.DB.HashMap(.read_only).init(haxy_moments_cursor);
+
+        const haxy_moment_cursor = try haxy_moments.getCursor(hash.bytesToInt(repo_opts.hash, &last_object_id)) orelse return error.NotFound;
+        const haxy_moment = try Repo.DB.HashMap(.read_only).init(haxy_moment_cursor);
+
+        // get the map of users
+        const event_id_to_user_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, "event-id->user")) orelse return error.NotFound;
+        const event_id_to_user = try Repo.DB.HashMap(.read_only).init(event_id_to_user_cursor);
+
+        try std.testing.expect(null == try event_id_to_user.getCursor(hash.hashInt(repo_opts.hash, &user_event_id)));
+    }
 }
