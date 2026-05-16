@@ -373,6 +373,13 @@ pub fn consumeInTransaction(
                     const repo_map = try DB.HashMap(.read_write).init(repo_cursor);
 
                     try upsert(DB, repo_opts.hash, repo_map, @TypeOf(data), data);
+
+                    const user_id_to_repos_cursor = try haxy_moment.putCursor(hash.hashInt(repo_opts.hash, "user-id->repos"));
+                    const user_id_to_repos = try DB.HashMap(.read_write).init(user_id_to_repos_cursor);
+
+                    const user_repos_cursor = try user_id_to_repos.putCursor(hash.hashInt(repo_opts.hash, data.user_id));
+                    const user_repos = try DB.CountedHashSet(.read_write).init(user_repos_cursor);
+                    try user_repos.put(hash.hashInt(repo_opts.hash, &current_event_id), .{ .bytes = &current_event_id });
                 },
                 .issue => |data| {
                     const event_id_to_issue_cursor = try haxy_moment.putCursor(hash.hashInt(repo_opts.hash, "event-id->issue"));

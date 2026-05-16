@@ -931,5 +931,16 @@ test "user and repo" {
 
         try std.testing.expectEqualSlices(u8, &user_event_id, repo_event.repo.user_id);
         try std.testing.expectEqualStrings("ziglings", repo_event.repo.name);
+
+        // get the repos created by the user
+        const user_id_to_repos_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, "user-id->repos")) orelse return error.NotFound;
+        const user_id_to_repos = try Repo.DB.HashMap(.read_only).init(user_id_to_repos_cursor);
+
+        const user_repos_cursor = try user_id_to_repos.getCursor(hash.hashInt(repo_opts.hash, &user_event_id)) orelse return error.NotFound;
+        const user_repos = try Repo.DB.CountedHashSet(.read_only).init(user_repos_cursor);
+
+        try std.testing.expectEqual(1, try user_repos.count());
+
+        try std.testing.expect(null != try user_repos.getCursor(hash.hashInt(repo_opts.hash, &repo_event_id)));
     }
 }
