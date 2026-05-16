@@ -12,6 +12,7 @@ pub const event_id_size: usize = 32;
 
 pub const EventKind = enum {
     user,
+    repo,
     issue,
 };
 
@@ -20,6 +21,11 @@ pub const EventData = union(EventKind) {
         name: []const u8,
         email: []const u8,
         password_hash: []const u8,
+    },
+    repo: struct {
+        user_id: []const u8,
+        name: []const u8,
+        enable_issue: bool,
     },
     issue: struct {
         title: []const u8,
@@ -42,6 +48,13 @@ pub const EventData = union(EventKind) {
                     .password_hash = try readBytes(DB, hash_kind, allocator, map, "password_hash"),
                 },
             },
+            .repo => .{
+                .repo = .{
+                    .user_id = try readBytes(DB, hash_kind, allocator, map, "user_id"),
+                    .name = try readBytes(DB, hash_kind, allocator, map, "name"),
+                    .enable_issue = try readBool(DB, hash_kind, map, "enable_issue"),
+                },
+            },
             .issue => .{
                 .issue = .{
                     .title = try readBytes(DB, hash_kind, allocator, map, "title"),
@@ -61,6 +74,21 @@ pub const EventData = union(EventKind) {
     ) ![]const u8 {
         const cursor = try map.getCursor(hash.hashInt(hash_kind, field_name)) orelse return error.NotFound;
         return try cursor.readBytesAlloc(allocator, null);
+    }
+
+    fn readBool(
+        comptime DB: type,
+        comptime hash_kind: hash.HashKind,
+        map: DB.HashMap(.read_only),
+        field_name: []const u8,
+    ) !bool {
+        const cursor = try map.getCursor(hash.hashInt(hash_kind, field_name)) orelse return error.NotFound;
+        var buffer: [5]u8 = undefined;
+        const bytes = try cursor.readBytesObject(&buffer);
+        if (bytes.format_tag == null or !std.mem.eql(u8, &bytes.format_tag.?, "bl")) return error.InvalidFormatTag;
+        if (std.mem.eql(u8, bytes.value, "true")) return true;
+        if (std.mem.eql(u8, bytes.value, "false")) return false;
+        return error.InvalidBool;
     }
 };
 
@@ -337,6 +365,15 @@ pub fn consumeInTransaction(
 
                     try upsert(DB, repo_opts.hash, user_map, @TypeOf(data), data);
                 },
+                .repo => |data| {
+                    const event_id_to_repo_cursor = try haxy_moment.putCursor(hash.hashInt(repo_opts.hash, "event-id->repo"));
+                    const event_id_to_repo = try DB.HashMap(.read_write).init(event_id_to_repo_cursor);
+
+                    const repo_cursor = try event_id_to_repo.putCursor(hash.hashInt(repo_opts.hash, &current_event_id));
+                    const repo_map = try DB.HashMap(.read_write).init(repo_cursor);
+
+                    try upsert(DB, repo_opts.hash, repo_map, @TypeOf(data), data);
+                },
                 .issue => |data| {
                     const event_id_to_issue_cursor = try haxy_moment.putCursor(hash.hashInt(repo_opts.hash, "event-id->issue"));
                     const event_id_to_issue = try DB.HashMap(.read_write).init(event_id_to_issue_cursor);
@@ -478,6 +515,21 @@ fn upsertField(
 
                 try map.put(key, .{ .int = value });
             },
+        },
+        .bool => {
+            const bytes = if (value) "true" else "false";
+            if (try map.getCursor(key)) |value_cursor| {
+                var buffer: [5]u8 = undefined;
+                const existing = try value_cursor.readBytesObject(&buffer);
+                if (existing.format_tag != null and
+                    std.mem.eql(u8, &existing.format_tag.?, "bl") and
+                    std.mem.eql(u8, existing.value, bytes))
+                {
+                    return;
+                }
+            }
+
+            try map.put(key, .{ .bytes_object = .{ .value = bytes, .format_tag = "bl".* } });
         },
         else => @compileError("unsupported upsert field type: " ++ @typeName(Field)),
     }

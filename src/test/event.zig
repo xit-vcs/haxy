@@ -783,10 +783,10 @@ test "merge" {
     try std.testing.expectError(error.MergeConflict, evt.consume(repo_opts, io, allocator, &repo, .{ .kind = .head, .name = "haxy/meta" }));
 }
 
-test "user" {
+test "user and repo" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    const temp_dir_name = "temp-event-user";
+    const temp_dir_name = "temp-event-user-and-repo";
 
     // create the temp dir
     const cwd = std.Io.Dir.cwd();
@@ -819,6 +819,7 @@ test "user" {
 
     var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
     const user_event_id = evt.randomId(prng.random());
+    const repo_event_id = evt.randomId(prng.random());
 
     var first_password_hash_buf: [usr.password_hash_max_len]u8 = undefined;
     const first_password_hash = try usr.hashPassword("correct horse battery staple", &first_password_hash_buf, io);
@@ -848,10 +849,20 @@ test "user" {
                 },
             },
         },
+        .{
+            .id = std.fmt.bytesToHex(repo_event_id, .lower),
+            .data = .{
+                .repo = .{
+                    .user_id = &user_event_id,
+                    .name = "ziglings",
+                    .enable_issue = true,
+                },
+            },
+        },
     };
 
     //
-    // insert users as commits in the repo
+    // insert users and repos as commits in the repo
     //
 
     {
@@ -908,5 +919,17 @@ test "user" {
 
         // the password was correctly edited
         try std.testing.expectEqualStrings(events_to_consume[1].data.user.password_hash, user.user.password_hash);
+
+        // get the map of repos
+        const event_id_to_repo_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, "event-id->repo")) orelse return error.NotFound;
+        const event_id_to_repo = try Repo.DB.HashMap(.read_only).init(event_id_to_repo_cursor);
+
+        // get the repo out of the map
+        const repo_cursor = try event_id_to_repo.getCursor(hash.hashInt(repo_opts.hash, &repo_event_id)) orelse return error.NotFound;
+        const repo_map = try Repo.DB.HashMap(.read_only).init(repo_cursor);
+        const repo_event = try evt.EventData.read(Repo.DB, repo_opts.hash, arena.allocator(), repo_map, .repo);
+
+        try std.testing.expectEqualSlices(u8, &user_event_id, repo_event.repo.user_id);
+        try std.testing.expectEqualStrings("ziglings", repo_event.repo.name);
     }
 }
