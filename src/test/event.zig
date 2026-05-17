@@ -41,12 +41,12 @@ test "rebase" {
 
     var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
 
-    const first_event_id = evt.Event.randomId(prng.random());
+    const first_event_id = evt.EventWithId.randomId(prng.random());
 
-    const events_to_consume = [_]evt.Event{
+    const events_to_consume = [_]evt.EventWithId{
         .{
             .id = std.fmt.bytesToHex(first_event_id, .lower),
-            .data = .{
+            .event = .{
                 .issue = .{
                     .title = "Login form clears password on validation error",
                     .description = "Submitting an invalid email address resets the password field. Preserve the field value and show an inline validation message.",
@@ -57,7 +57,7 @@ test "rebase" {
         // this event edits the previous one because it has the same id
         .{
             .id = std.fmt.bytesToHex(first_event_id, .lower),
-            .data = .{
+            .event = .{
                 .issue = .{
                     .title = "Login form clears password on validation error",
                     .description = "Submitting an invalid email address resets the password field and removes typed input. Preserve the field value and show an inline validation message.",
@@ -66,8 +66,8 @@ test "rebase" {
             },
         },
         .{
-            .id = std.fmt.bytesToHex(evt.Event.randomId(prng.random()), .lower),
-            .data = .{
+            .id = std.fmt.bytesToHex(evt.EventWithId.randomId(prng.random()), .lower),
+            .event = .{
                 .issue = .{
                     .title = "Search results ignore archived project filter",
                     .description = "Filtering search results to active projects still returns issues from archived projects. Apply the archived flag before ranking results.",
@@ -76,8 +76,8 @@ test "rebase" {
             },
         },
         .{
-            .id = std.fmt.bytesToHex(evt.Event.randomId(prng.random()), .lower),
-            .data = .{
+            .id = std.fmt.bytesToHex(evt.EventWithId.randomId(prng.random()), .lower),
+            .event = .{
                 .issue = .{
                     .title = "Issue list does not persist selected sort order",
                     .description = "Changing the issue list sort order is lost after refresh. Store the selected sort field and direction with the user's view preferences.",
@@ -149,20 +149,20 @@ test "rebase" {
         const first_issue = try evt.read(evt.Issue, Repo.DB, repo_opts.hash, &arena, first_issue_map);
 
         // the description was correctly edited
-        try std.testing.expectEqualStrings(events_to_consume[1].data.issue.?.description, first_issue.description);
+        try std.testing.expectEqualStrings(events_to_consume[1].event.issue.?.description, first_issue.description);
 
         // the tags were correctly edited
-        try std.testing.expectEqualStrings(events_to_consume[1].data.issue.?.tags, first_issue.tags);
+        try std.testing.expectEqualStrings(events_to_consume[1].event.issue.?.tags, first_issue.tags);
     }
 
     //
     // add another event
     //
 
-    const events_to_consume2 = [_]evt.Event{
+    const events_to_consume2 = [_]evt.EventWithId{
         .{
-            .id = std.fmt.bytesToHex(evt.Event.randomId(prng.random()), .lower),
-            .data = .{
+            .id = std.fmt.bytesToHex(evt.EventWithId.randomId(prng.random()), .lower),
+            .event = .{
                 .issue = .{
                     .title = "Double clicking causes the form to submit twice",
                     .description = "When I double click the post button I see duplicate posts.",
@@ -214,7 +214,7 @@ test "rebase" {
     // rebase the branch so it no longer includes the edit event
     //
 
-    const events_to_consume3 = [_]evt.Event{
+    const events_to_consume3 = [_]evt.EventWithId{
         events_to_consume[2],
         events_to_consume[3],
     };
@@ -285,10 +285,10 @@ test "rebase" {
         const first_issue = try evt.read(evt.Issue, Repo.DB, repo_opts.hash, &arena, first_issue_map);
 
         // the description is no longer edited
-        try std.testing.expectEqualStrings(events_to_consume[0].data.issue.?.description, first_issue.description);
+        try std.testing.expectEqualStrings(events_to_consume[0].event.issue.?.description, first_issue.description);
 
         // the tags are no longer edited
-        try std.testing.expectEqualStrings(events_to_consume[0].data.issue.?.tags, first_issue.tags);
+        try std.testing.expectEqualStrings(events_to_consume[0].event.issue.?.tags, first_issue.tags);
 
         // an event added by the second push is no longer there because it was wiped out by the rebase
         try std.testing.expect(null == try event_id_to_issue.getCursor(hash.hashInt(repo_opts.hash, &events_to_consume2[0].id)));
@@ -399,10 +399,10 @@ test "merge" {
 
     var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
 
-    const events_to_consume = [_]evt.Event{
+    const events_to_consume = [_]evt.EventWithId{
         .{
-            .id = std.fmt.bytesToHex(evt.Event.randomId(prng.random()), .lower),
-            .data = .{
+            .id = std.fmt.bytesToHex(evt.EventWithId.randomId(prng.random()), .lower),
+            .event = .{
                 .issue = .{
                     .title = "Login form clears password on validation error",
                     .description = "Submitting an invalid email address resets the password field. Preserve the field value and show an inline validation message.",
@@ -411,8 +411,8 @@ test "merge" {
             },
         },
         .{
-            .id = std.fmt.bytesToHex(evt.Event.randomId(prng.random()), .lower),
-            .data = .{
+            .id = std.fmt.bytesToHex(evt.EventWithId.randomId(prng.random()), .lower),
+            .event = .{
                 .issue = .{
                     .title = "Search results ignore archived project filter",
                     .description = "Filtering search results to active projects still returns issues from archived projects. Apply the archived flag before ranking results.",
@@ -421,8 +421,8 @@ test "merge" {
             },
         },
         .{
-            .id = std.fmt.bytesToHex(evt.Event.randomId(prng.random()), .lower),
-            .data = .{
+            .id = std.fmt.bytesToHex(evt.EventWithId.randomId(prng.random()), .lower),
+            .event = .{
                 .issue = .{
                     .title = "Issue list does not persist selected sort order",
                     .description = "Changing the issue list sort order is lost after refresh. Store the selected sort field and direction with the user's view preferences.",
@@ -495,18 +495,18 @@ test "merge" {
         const first_issue_map = try Repo.DB.HashMap(.read_only).init(first_issue_cursor);
         const first_issue = try evt.read(evt.Issue, Repo.DB, repo_opts.hash, &arena, first_issue_map);
 
-        try std.testing.expectEqualStrings(events_to_consume[0].data.issue.?.description, first_issue.description);
-        try std.testing.expectEqualStrings(events_to_consume[0].data.issue.?.tags, first_issue.tags);
+        try std.testing.expectEqualStrings(events_to_consume[0].event.issue.?.description, first_issue.description);
+        try std.testing.expectEqualStrings(events_to_consume[0].event.issue.?.tags, first_issue.tags);
     }
 
     //
     // define more test events
     //
 
-    const events_to_consume2 = [_]evt.Event{
+    const events_to_consume2 = [_]evt.EventWithId{
         .{
-            .id = std.fmt.bytesToHex(evt.Event.randomId(prng.random()), .lower),
-            .data = .{
+            .id = std.fmt.bytesToHex(evt.EventWithId.randomId(prng.random()), .lower),
+            .event = .{
                 .issue = .{
                     .title = "Kanban card status badge falls behind after drag",
                     .description = "Moving an issue between columns updates the card position immediately, but the status badge keeps showing the previous state until refresh.",
@@ -515,8 +515,8 @@ test "merge" {
             },
         },
         .{
-            .id = std.fmt.bytesToHex(evt.Event.randomId(prng.random()), .lower),
-            .data = .{
+            .id = std.fmt.bytesToHex(evt.EventWithId.randomId(prng.random()), .lower),
+            .event = .{
                 .issue = .{
                     .title = "Assignee autocomplete omits recently invited users",
                     .description = "Users invited during the current session do not appear in the assignee picker until the project page is reloaded.",
@@ -525,8 +525,8 @@ test "merge" {
             },
         },
         .{
-            .id = std.fmt.bytesToHex(evt.Event.randomId(prng.random()), .lower),
-            .data = .{
+            .id = std.fmt.bytesToHex(evt.EventWithId.randomId(prng.random()), .lower),
+            .event = .{
                 .issue = .{
                     .title = "Add due date warning for issues blocked by dependencies",
                     .description = "Show a warning when an issue's due date is earlier than an unresolved blocking issue so planners can adjust the schedule.",
@@ -619,8 +619,8 @@ test "merge" {
             const first_issue_map = try Repo.DB.HashMap(.read_only).init(first_issue_cursor);
             const first_issue = try evt.read(evt.Issue, Repo.DB, repo_opts.hash, &arena, first_issue_map);
 
-            try std.testing.expectEqualStrings(events_to_consume[0].data.issue.?.description, first_issue.description);
-            try std.testing.expectEqualStrings(events_to_consume[0].data.issue.?.tags, first_issue.tags);
+            try std.testing.expectEqualStrings(events_to_consume[0].event.issue.?.description, first_issue.description);
+            try std.testing.expectEqualStrings(events_to_consume[0].event.issue.?.tags, first_issue.tags);
         }
 
         // make sure one of the new issues is there
@@ -632,8 +632,8 @@ test "merge" {
             const first_issue_map = try Repo.DB.HashMap(.read_only).init(first_issue_cursor);
             const first_issue = try evt.read(evt.Issue, Repo.DB, repo_opts.hash, &arena, first_issue_map);
 
-            try std.testing.expectEqualStrings(events_to_consume2[0].data.issue.?.description, first_issue.description);
-            try std.testing.expectEqualStrings(events_to_consume2[0].data.issue.?.tags, first_issue.tags);
+            try std.testing.expectEqualStrings(events_to_consume2[0].event.issue.?.description, first_issue.description);
+            try std.testing.expectEqualStrings(events_to_consume2[0].event.issue.?.tags, first_issue.tags);
         }
     }
 
@@ -710,10 +710,10 @@ test "merge" {
     // define test events that modify the same issue in conflicting ways
     //
 
-    const events_to_consume3 = [_]evt.Event{
+    const events_to_consume3 = [_]evt.EventWithId{
         .{
             .id = events_to_consume[0].id,
-            .data = .{
+            .event = .{
                 .issue = .{
                     .title = "Login form clears password on validation error",
                     .description = "Submitting an invalid email address resets the password field. Preserve the field value and show an inline validation message.",
@@ -723,7 +723,7 @@ test "merge" {
         },
         .{
             .id = events_to_consume[0].id,
-            .data = .{
+            .event = .{
                 .issue = .{
                     .title = "Login form clears password on validation error",
                     .description = "Submitting an invalid email address resets the password field. Preserve the field value and show an inline validation message.",
@@ -817,8 +817,8 @@ test "user and repo" {
     //
 
     var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
-    const user_event_id = evt.Event.randomId(prng.random());
-    const repo_event_id = evt.Event.randomId(prng.random());
+    const user_event_id = evt.EventWithId.randomId(prng.random());
+    const repo_event_id = evt.EventWithId.randomId(prng.random());
 
     var first_password_hash_buf: [evt.User.password_hash_max_len]u8 = undefined;
     const first_password_hash = try evt.User.hashPassword("correct horse battery staple", &first_password_hash_buf, io);
@@ -826,10 +826,10 @@ test "user and repo" {
     var second_password_hash_buf: [evt.User.password_hash_max_len]u8 = undefined;
     const second_password_hash = try evt.User.hashPassword("Tr0ub4dor&3", &second_password_hash_buf, io);
 
-    const events_to_consume = [_]evt.Event{
+    const events_to_consume = [_]evt.EventWithId{
         .{
             .id = std.fmt.bytesToHex(user_event_id, .lower),
-            .data = .{
+            .event = .{
                 .user = .{
                     .name = "Alice Example",
                     .email = "alice@example.test",
@@ -840,7 +840,7 @@ test "user and repo" {
         // this event edits the previous one because it has the same id
         .{
             .id = std.fmt.bytesToHex(user_event_id, .lower),
-            .data = .{
+            .event = .{
                 .user = .{
                     .name = "Alice Example",
                     .email = "alice@example.test",
@@ -850,7 +850,7 @@ test "user and repo" {
         },
         .{
             .id = std.fmt.bytesToHex(repo_event_id, .lower),
-            .data = .{
+            .event = .{
                 .repo = .{
                     .user_id = &user_event_id,
                     .name = "ziglings",
@@ -917,7 +917,7 @@ test "user and repo" {
         const user_event = try evt.read(evt.User, Repo.DB, repo_opts.hash, &arena, user_map);
 
         // the password was correctly edited
-        try std.testing.expectEqualStrings(events_to_consume[1].data.user.?.password_hash, user_event.password_hash);
+        try std.testing.expectEqualStrings(events_to_consume[1].event.user.?.password_hash, user_event.password_hash);
 
         // get the map of repos
         const event_id_to_repo_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, "event-id->repo")) orelse return error.NotFound;
@@ -947,10 +947,10 @@ test "user and repo" {
     // remove the repo
     //
 
-    const events_to_consume2 = [_]evt.Event{
+    const events_to_consume2 = [_]evt.EventWithId{
         .{
             .id = std.fmt.bytesToHex(repo_event_id, .lower),
-            .data = .{ .repo = null },
+            .event = .{ .repo = null },
         },
     };
 
@@ -1018,10 +1018,10 @@ test "user and repo" {
     // remove the user
     //
 
-    const events_to_consume3 = [_]evt.Event{
+    const events_to_consume3 = [_]evt.EventWithId{
         .{
             .id = std.fmt.bytesToHex(user_event_id, .lower),
-            .data = .{ .user = null },
+            .event = .{ .user = null },
         },
     };
 

@@ -18,28 +18,28 @@ pub const EventKind = enum {
     issue,
 };
 
-pub const Event = struct {
+pub const EventWithId = struct {
     id: [event_id_size * 2]u8,
-    data: union(EventKind) {
+    event: union(EventKind) {
         user: ?User,
         repo: ?Repo,
         issue: ?Issue,
     },
 
-    pub fn jsonStringify(self: Event, jw: anytype) !void {
+    pub fn jsonStringify(self: EventWithId, jw: anytype) !void {
         try jw.beginObject();
         try jw.objectField("id");
         try jw.write(self.id);
         try jw.objectField("kind");
-        try jw.write(@tagName(self.data));
+        try jw.write(@tagName(self.event));
         try jw.objectField("data");
-        switch (self.data) {
-            inline else => |data_maybe| try jw.write(data_maybe),
+        switch (self.event) {
+            inline else => |event_maybe| try jw.write(event_maybe),
         }
         try jw.endObject();
     }
 
-    fn fromString(arena: *std.heap.ArenaAllocator, message: []const u8) !Event {
+    fn fromString(arena: *std.heap.ArenaAllocator, message: []const u8) !EventWithId {
         const JsonEvent = struct {
             id: [event_id_size * 2]u8,
             kind: EventKind,
@@ -48,15 +48,24 @@ pub const Event = struct {
         const json_event = try std.json.parseFromSliceLeaky(JsonEvent, arena.allocator(), message, .{});
         return .{
             .id = json_event.id,
-            .data = switch (json_event.kind) {
+            .event = switch (json_event.kind) {
                 .user => .{
-                    .user = if (json_event.data) |value| try std.json.parseFromValueLeaky(User, arena.allocator(), value, .{}) else null,
+                    .user = if (json_event.data) |value|
+                        try std.json.parseFromValueLeaky(User, arena.allocator(), value, .{})
+                    else
+                        null,
                 },
                 .repo => .{
-                    .repo = if (json_event.data) |value| try std.json.parseFromValueLeaky(Repo, arena.allocator(), value, .{}) else null,
+                    .repo = if (json_event.data) |value|
+                        try std.json.parseFromValueLeaky(Repo, arena.allocator(), value, .{})
+                    else
+                        null,
                 },
                 .issue => .{
-                    .issue = if (json_event.data) |value| try std.json.parseFromValueLeaky(Issue, arena.allocator(), value, .{}) else null,
+                    .issue = if (json_event.data) |value|
+                        try std.json.parseFromValueLeaky(Issue, arena.allocator(), value, .{})
+                    else
+                        null,
                 },
             },
         };
@@ -285,78 +294,16 @@ pub fn consumeInTransaction(
             try commit_object.object_reader.seekTo(commit_object.content.commit.message_position);
             const message = try commit_object.object_reader.interface.allocRemaining(arena.allocator(), .unlimited);
 
-            const event = try Event.fromString(&arena, message);
+            const event_with_id = try EventWithId.fromString(&arena, message);
 
             // get the id of the current event as bytes
             var current_event_id: [event_id_size]u8 = undefined;
-            _ = try std.fmt.hexToBytes(&current_event_id, &event.id);
+            _ = try std.fmt.hexToBytes(&current_event_id, &event_with_id.id);
 
-            switch (event.data) {
-                .user => |user_data_maybe| {
-                    const user_key = hash.hashInt(repo_opts.hash, &current_event_id);
-
-                    const event_id_to_user_cursor = try haxy_moment.putCursor(hash.hashInt(repo_opts.hash, "event-id->user"));
-                    const event_id_to_user = try DB.HashMap(.read_write).init(event_id_to_user_cursor);
-
-                    if (user_data_maybe) |user_data| {
-                        const user_cursor = try event_id_to_user.putCursor(user_key);
-                        const user = try DB.HashMap(.read_write).init(user_cursor);
-                        try upsert(User, DB, repo_opts.hash, user, user_data);
-                    } else {
-                        if (!try event_id_to_user.remove(user_key)) return error.EventNotFound;
-
-                        const user_id_to_repos_cursor = try haxy_moment.putCursor(hash.hashInt(repo_opts.hash, "user-id->repos"));
-                        const user_id_to_repos = try DB.HashMap(.read_write).init(user_id_to_repos_cursor);
-                        _ = try user_id_to_repos.remove(user_key);
-                    }
-                },
-                .repo => |repo_data_maybe| {
-                    const repo_key = hash.hashInt(repo_opts.hash, &current_event_id);
-
-                    const event_id_to_repo_cursor = try haxy_moment.putCursor(hash.hashInt(repo_opts.hash, "event-id->repo"));
-                    const event_id_to_repo = try DB.HashMap(.read_write).init(event_id_to_repo_cursor);
-
-                    if (repo_data_maybe) |repo_data| {
-                        const repo_cursor = try event_id_to_repo.putCursor(repo_key);
-                        const repo = try DB.HashMap(.read_write).init(repo_cursor);
-                        try upsert(Repo, DB, repo_opts.hash, repo, repo_data);
-
-                        const user_id_to_repos_cursor = try haxy_moment.putCursor(hash.hashInt(repo_opts.hash, "user-id->repos"));
-                        const user_id_to_repos = try DB.HashMap(.read_write).init(user_id_to_repos_cursor);
-
-                        const user_repos_cursor = try user_id_to_repos.putCursor(hash.hashInt(repo_opts.hash, repo_data.user_id));
-                        const user_repos = try DB.CountedHashSet(.read_write).init(user_repos_cursor);
-                        try user_repos.put(repo_key, .{ .bytes = &current_event_id });
-                    } else {
-                        if (try event_id_to_repo.getCursor(repo_key)) |existing_repo_cursor| {
-                            const existing_repo = try DB.HashMap(.read_only).init(existing_repo_cursor);
-                            const existing_repo_data = try read(Repo, DB, repo_opts.hash, &arena, existing_repo);
-
-                            const user_id_to_repos_cursor = try haxy_moment.putCursor(hash.hashInt(repo_opts.hash, "user-id->repos"));
-                            const user_id_to_repos = try DB.HashMap(.read_write).init(user_id_to_repos_cursor);
-
-                            const user_key = hash.hashInt(repo_opts.hash, existing_repo_data.user_id);
-                            const user_repos_cursor = try user_id_to_repos.putCursor(user_key);
-                            const user_repos = try DB.CountedHashSet(.read_write).init(user_repos_cursor);
-                            _ = try user_repos.remove(repo_key);
-                        }
-                        if (!try event_id_to_repo.remove(repo_key)) return error.EventNotFound;
-                    }
-                },
-                .issue => |issue_data_maybe| {
-                    const issue_key = hash.hashInt(repo_opts.hash, &current_event_id);
-
-                    const event_id_to_issue_cursor = try haxy_moment.putCursor(hash.hashInt(repo_opts.hash, "event-id->issue"));
-                    const event_id_to_issue = try DB.HashMap(.read_write).init(event_id_to_issue_cursor);
-
-                    if (issue_data_maybe) |issue_data| {
-                        const issue_cursor = try event_id_to_issue.putCursor(issue_key);
-                        const issue = try DB.HashMap(.read_write).init(issue_cursor);
-                        try upsert(Issue, DB, repo_opts.hash, issue, issue_data);
-                    } else {
-                        if (!try event_id_to_issue.remove(issue_key)) return error.EventNotFound;
-                    }
-                },
+            switch (event_with_id.event) {
+                .user => |event_maybe| try User.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, event_maybe),
+                .repo => |event_maybe| try Repo.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, event_maybe, &arena),
+                .issue => |event_maybe| try Issue.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, event_maybe),
             }
         }
 
@@ -383,7 +330,7 @@ pub fn read(
     arena: *std.heap.ArenaAllocator,
     map: DB.HashMap(.read_only),
 ) !T {
-    var value: T = undefined;
+    var event: T = undefined;
 
     switch (@typeInfo(T)) {
         .@"struct" => |struct_info| {
@@ -391,7 +338,7 @@ pub fn read(
                 switch (@typeInfo(field.type)) {
                     .pointer => |pointer_info| {
                         if (pointer_info.size == .slice and pointer_info.child == u8 and pointer_info.is_const) {
-                            @field(value, field.name) = try readBytes(DB, hash_kind, arena.allocator(), map, field.name);
+                            @field(event, field.name) = try readBytes(DB, hash_kind, arena.allocator(), map, field.name);
                         } else {
                             @compileError("unsupported read field type: " ++ @typeName(field.type));
                         }
@@ -400,12 +347,12 @@ pub fn read(
                         if (array_info.child == u8) {
                             const bytes = try readBytes(DB, hash_kind, arena.allocator(), map, field.name);
                             if (bytes.len != array_info.len) return error.InvalidByteArrayLength;
-                            @memcpy(@field(value, field.name)[0..], bytes);
+                            @memcpy(@field(event, field.name)[0..], bytes);
                         } else {
                             @compileError("unsupported read field type: " ++ @typeName(field.type));
                         }
                     },
-                    .bool => @field(value, field.name) = try readBool(DB, hash_kind, map, field.name),
+                    .bool => @field(event, field.name) = try readBool(DB, hash_kind, map, field.name),
                     else => @compileError("unsupported read field type: " ++ @typeName(field.type)),
                 }
             }
@@ -413,7 +360,7 @@ pub fn read(
         else => @compileError("read expects a struct"),
     }
 
-    return value;
+    return event;
 }
 
 fn readBytes(
@@ -447,17 +394,17 @@ fn readBool(
 // writing to xitdb
 //
 
-fn upsert(
+pub fn upsert(
     comptime T: type,
     comptime DB: type,
     comptime hash_kind: hash.HashKind,
     map: DB.HashMap(.read_write),
-    data: T,
+    event: T,
 ) !void {
     switch (@typeInfo(T)) {
         .@"struct" => |struct_info| {
             inline for (struct_info.fields) |field| {
-                try upsertField(DB, hash_kind, map, field.name, field.type, @field(data, field.name));
+                try upsertField(DB, hash_kind, map, field.name, field.type, @field(event, field.name));
             }
         },
         else => @compileError("upsert expects a struct"),
