@@ -230,9 +230,6 @@ pub fn consumeInTransaction(
     }
     var haxy_moments = try DB.HashMap(.read_write).init(haxy_moments_cursor);
 
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-
     var repo_event_iter = try RepoEventIterator(repo_opts).init(state.readOnly(), io, allocator, haxy_moments.readOnly(), ref);
     defer repo_event_iter.deinit(io, allocator);
 
@@ -372,6 +369,9 @@ pub fn consumeInTransaction(
 
         // consume the event unless it's a merge commit
         if (parent_oids.len <= 1) {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            defer arena.deinit();
+
             // read the message from the commit
             try commit_object.object_reader.seekTo(commit_object.content.commit.message_position);
             const message = try commit_object.object_reader.interface.allocRemaining(arena.allocator(), .unlimited);
