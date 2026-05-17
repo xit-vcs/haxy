@@ -233,49 +233,14 @@ pub fn consumeInTransaction(
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    // compute a list of events that haven't been consumed yet
-    const RepoEvent = struct {
-        parent_oids: []const [hash.hexLen(repo_opts.hash)]u8,
-        oid: [hash.byteLen(repo_opts.hash)]u8,
-    };
-    var repo_events: std.ArrayList(RepoEvent) = .empty;
-    defer repo_events.deinit(allocator);
-    {
-        var commit_iter = try obj.ObjectIterator(.xit, repo_opts, .full).init(state.readOnly(), io, allocator, .{ .kind = .commit });
-        defer commit_iter.deinit();
-
-        const head_oid = (try rf.readRecur(.xit, repo_opts, state.readOnly(), io, .{ .ref = ref })) orelse return error.OidNotFound;
-        try commit_iter.include(&head_oid);
-
-        // walk the commits and add all new events we haven't consumed yet.
-        // the `next` call is using the arena because we need the parent_oids
-        // slice to live beyond this scope.
-        // TODO: `repo_events` could in theory contain an unbounded number
-        // of events, so there is an OOM risk here. we definitely need to
-        // guard against this.
-        while (try commit_iter.next(arena.allocator())) |commit_object| {
-            var oid: [hash.byteLen(repo_opts.hash)]u8 = undefined;
-            _ = try std.fmt.hexToBytes(&oid, &commit_object.oid);
-
-            // if this object id has already been consumed, prune its ancestry from
-            // the iterator. other queued paths, such as the second parent of a
-            // merge commit, can still be walked until they hit a consumed commit
-            // or run out of history.
-            if (null != try haxy_moments.getCursor(hash.bytesToInt(repo_opts.hash, &oid))) {
-                try commit_iter.exclude(&commit_object.oid);
-                continue;
-            }
-
-            const parent_oids = commit_object.content.commit.metadata.parent_oids orelse return error.ParentOidsNotFound;
-            try repo_events.append(allocator, .{ .parent_oids = parent_oids, .oid = oid });
-        }
-    }
+    var repo_event_iter = try RepoEventIterator(repo_opts).init(state.readOnly(), io, allocator, haxy_moments.readOnly(), ref);
+    defer repo_event_iter.deinit(io, allocator);
 
     // if there are no events to process, look at the oid at HEAD and update
     // the last_object_id to point to it. this is important in situations
     // where we do a merge and then force-push to remove the merge. see the
     // merge test for an example.
-    if (repo_events.items.len == 0) {
+    if (repo_event_iter.newest_object_id == null) {
         const head_oid_hex = (try rf.readRecur(.xit, repo_opts, state.readOnly(), io, .{ .ref = ref })) orelse return error.OidNotFound;
         var head_oid: [hash.byteLen(repo_opts.hash)]u8 = undefined;
         _ = try std.fmt.hexToBytes(&head_oid, &head_oid_hex);
@@ -297,6 +262,7 @@ pub fn consumeInTransaction(
     // we consumed. if it isn't, then we know the haxy state needs to be reverted.
     if (last_object_id_maybe) |*last_object_id| {
         var is_rebased = false;
+        const newest_object_id = repo_event_iter.newest_object_id orelse return error.OidNotFound;
 
         _ = mrg.getDescendent(
             .xit,
@@ -305,14 +271,18 @@ pub fn consumeInTransaction(
             io,
             allocator,
             &std.fmt.bytesToHex(last_object_id, .lower),
-            &std.fmt.bytesToHex(repo_events.items[0].oid, .lower),
+            &std.fmt.bytesToHex(&newest_object_id, .lower),
         ) catch |err| switch (err) {
             error.DescendentNotFound => is_rebased = true,
             else => |e| return e,
         };
 
         if (is_rebased) {
-            const parent_oids = repo_events.items[repo_events.items.len - 1].parent_oids;
+            const oldest_object_id = repo_event_iter.oldest_object_id orelse return error.OidNotFound;
+            var oldest_object = try obj.Object(.xit, repo_opts, .full).init(state.readOnly(), io, allocator, &std.fmt.bytesToHex(oldest_object_id, .lower));
+            defer oldest_object.deinit();
+
+            const parent_oids = oldest_object.content.commit.metadata.parent_oids orelse return error.ParentOidsNotFound;
             switch (parent_oids.len) {
                 0 => {
                     // the branch was rebased all the way to the very beginning.
@@ -351,29 +321,22 @@ pub fn consumeInTransaction(
                 else => return error.UnexpectedParentCount,
             }
         }
-    } else {
-        if (repo_events.items[repo_events.items.len - 1].parent_oids.len != 0) {
-            // there is no last_object_id, but this event has a parent.
-            // this is an invalid state. if the event has a parent, that
-            // implies that an event has already been processed, but
-            // if that's true then there would be a last_object_id.
-            return error.UnexpectedParent;
-        }
     }
 
-    // iterate over the events in reverse order
-    // (they are sorted by most recent events first)
-    for (0..repo_events.items.len) |i| {
-        const repo_event = repo_events.items[repo_events.items.len - i - 1];
+    while (try repo_event_iter.next()) |repo_event_oid| {
+        var commit_object = try obj.Object(.xit, repo_opts, .full).init(state.readOnly(), io, allocator, &std.fmt.bytesToHex(repo_event_oid, .lower));
+        defer commit_object.deinit();
+
+        const parent_oids = commit_object.content.commit.metadata.parent_oids orelse return error.ParentOidsNotFound;
 
         // create a moment for this object id
-        var haxy_moment_cursor = try haxy_moments.putCursor(hash.bytesToInt(repo_opts.hash, &repo_event.oid));
+        var haxy_moment_cursor = try haxy_moments.putCursor(hash.bytesToInt(repo_opts.hash, &repo_event_oid));
 
         // if there was a previous object id, set this haxy moment's initial value to it.
         // this efficiently "clones" the map so we make further modifications based on it.
-        if (repo_event.parent_oids.len > 0) {
+        if (parent_oids.len > 0) {
             var first_parent_oid: [hash.byteLen(repo_opts.hash)]u8 = undefined;
-            _ = try std.fmt.hexToBytes(&first_parent_oid, &repo_event.parent_oids[0]);
+            _ = try std.fmt.hexToBytes(&first_parent_oid, &parent_oids[0]);
 
             const first_parent_haxy_moment_cursor = try haxy_moments.getCursor(hash.bytesToInt(repo_opts.hash, &first_parent_oid)) orelse return error.CursorNotFound;
             try haxy_moment_cursor.write(.{ .slot = first_parent_haxy_moment_cursor.slot() });
@@ -384,15 +347,15 @@ pub fn consumeInTransaction(
         // merge changes from every parent after the first parent. the common
         // ancestor is the baseline, so a later parent only contributes values
         // it changed relative to the merge base.
-        if (repo_event.parent_oids.len > 1) {
-            for (repo_event.parent_oids[1..]) |*parent_oid| {
+        if (parent_oids.len > 1) {
+            for (parent_oids[1..]) |*parent_oid| {
                 var oid: [hash.byteLen(repo_opts.hash)]u8 = undefined;
                 _ = try std.fmt.hexToBytes(&oid, parent_oid);
 
                 const parent_haxy_moment_cursor = try haxy_moments.getCursor(hash.bytesToInt(repo_opts.hash, &oid)) orelse return error.CursorNotFound;
                 const parent_haxy_moment = try DB.HashMap(.read_only).init(parent_haxy_moment_cursor);
 
-                const baseline_oid_hex = try mrg.commonAncestor(.xit, repo_opts, state.readOnly(), io, allocator, &repo_event.parent_oids[0], parent_oid);
+                const baseline_oid_hex = try mrg.commonAncestor(.xit, repo_opts, state.readOnly(), io, allocator, &parent_oids[0], parent_oid);
                 var baseline_oid: [hash.byteLen(repo_opts.hash)]u8 = undefined;
                 _ = try std.fmt.hexToBytes(&baseline_oid, &baseline_oid_hex);
                 const baseline_haxy_moment_cursor = try haxy_moments.getCursor(hash.bytesToInt(repo_opts.hash, &baseline_oid)) orelse return error.CursorNotFound;
@@ -408,10 +371,7 @@ pub fn consumeInTransaction(
         try haxy_moment.put(hash.hashInt(repo_opts.hash, "moment-index"), .{ .uint = try haxy.count() - 1 });
 
         // consume the event unless it's a merge commit
-        if (repo_event.parent_oids.len <= 1) {
-            var commit_object = try obj.Object(.xit, repo_opts, .full).init(state.readOnly(), io, allocator, &std.fmt.bytesToHex(repo_event.oid, .lower));
-            defer commit_object.deinit();
-
+        if (parent_oids.len <= 1) {
             // read the message from the commit
             try commit_object.object_reader.seekTo(commit_object.content.commit.message_position);
             const message = try commit_object.object_reader.interface.allocRemaining(arena.allocator(), .unlimited);
@@ -493,7 +453,7 @@ pub fn consumeInTransaction(
         }
 
         // the current object id is now the last one
-        last_object_id_maybe = repo_event.oid;
+        last_object_id_maybe = repo_event_oid;
 
         // prevent any of the data created above from being mutated by future iterations of this loop
         try state.core.db.freeze();
@@ -684,4 +644,172 @@ fn bytesEqual(
     }
 
     return true;
+}
+
+pub fn RepoEventIterator(comptime repo_opts: rp.RepoOpts(.xit)) type {
+    return struct {
+        const Self = @This();
+        const DB = rp.Repo(.xit, repo_opts).DB;
+        const db_name = "haxy-repo-events.db";
+
+        repo_dir: std.Io.Dir,
+        db_file: std.Io.File,
+        db: *DB,
+        parent_to_children: DB.HashMap(.read_write),
+        // tracking pending parents is necessary because a child can only
+        // be returned after all of its unconsumed parents have been returned
+        child_to_pending_parents: DB.HashMap(.read_write),
+        oid_queue: std.AutoArrayHashMapUnmanaged([hash.byteLen(repo_opts.hash)]u8, void),
+        allocator: std.mem.Allocator,
+        newest_object_id: ?[hash.byteLen(repo_opts.hash)]u8,
+        oldest_object_id: ?[hash.byteLen(repo_opts.hash)]u8,
+
+        pub fn init(
+            state: rp.Repo(.xit, repo_opts).State(.read_only),
+            io: std.Io,
+            allocator: std.mem.Allocator,
+            haxy_moments: DB.HashMap(.read_only),
+            ref: rf.Ref,
+        ) !Self {
+            const db_file = try state.core.repo_dir.createFile(io, db_name, .{ .truncate = true, .lock = .exclusive, .read = true });
+            errdefer {
+                db_file.close(io);
+                state.core.repo_dir.deleteFile(io, db_name) catch {};
+            }
+
+            const buffer_ptr = try allocator.create(std.Io.Writer.Allocating);
+            errdefer allocator.destroy(buffer_ptr);
+
+            buffer_ptr.* = std.Io.Writer.Allocating.init(allocator);
+            errdefer buffer_ptr.deinit();
+
+            const db_ptr = try allocator.create(DB);
+            errdefer allocator.destroy(db_ptr);
+            db_ptr.* = try DB.init(.{ .io = io, .file = db_file, .buffer = buffer_ptr });
+
+            const map = try DB.HashMap(.read_write).init(db_ptr.rootCursor());
+
+            const parent_to_children_cursor = try map.putCursor(hash.hashInt(repo_opts.hash, "parent->children"));
+            const parent_to_children = try DB.HashMap(.read_write).init(parent_to_children_cursor);
+
+            const child_to_pending_parents_cursor = try map.putCursor(hash.hashInt(repo_opts.hash, "child->pending-parents"));
+            const child_to_pending_parents = try DB.HashMap(.read_write).init(child_to_pending_parents_cursor);
+
+            var self = Self{
+                .repo_dir = state.core.repo_dir,
+                .db_file = db_file,
+                .db = db_ptr,
+                .parent_to_children = parent_to_children,
+                .child_to_pending_parents = child_to_pending_parents,
+                .oid_queue = .{},
+                .allocator = allocator,
+                .newest_object_id = null,
+                .oldest_object_id = null,
+            };
+            errdefer self.deinit(io, allocator);
+
+            try self.collect(state, io, allocator, haxy_moments, ref);
+            return self;
+        }
+
+        pub fn deinit(self: *Self, io: std.Io, allocator: std.mem.Allocator) void {
+            self.db_file.close(io);
+            self.db.core.memory.buffer.deinit();
+            allocator.destroy(self.db.core.memory.buffer);
+            self.repo_dir.deleteFile(io, db_name) catch {};
+            allocator.destroy(self.db);
+            self.oid_queue.deinit(allocator);
+        }
+
+        pub fn next(self: *Self) !?[hash.byteLen(repo_opts.hash)]u8 {
+            if (self.oid_queue.count() == 0) return null;
+
+            // OOM risk: large merge graphs can make this queue grow unbounded
+            const oid = self.oid_queue.keys()[0];
+            self.oid_queue.swapRemoveAt(0);
+
+            try self.enqueueChildren(&oid);
+            return oid;
+        }
+
+        fn collect(
+            self: *Self,
+            state: rp.Repo(.xit, repo_opts).State(.read_only),
+            io: std.Io,
+            allocator: std.mem.Allocator,
+            haxy_moments: DB.HashMap(.read_only),
+            ref: rf.Ref,
+        ) !void {
+            // OOM risk: ObjectIterator keeps its queue and visited/excluded set
+            // in memory, so an extremely large reachable history can grow unbounded
+            var commit_iter = try obj.ObjectIterator(.xit, repo_opts, .full).init(state, io, allocator, .{ .kind = .commit });
+            defer commit_iter.deinit();
+
+            const head_oid = (try rf.readRecur(.xit, repo_opts, state, io, .{ .ref = ref })) orelse return error.OidNotFound;
+            try commit_iter.include(&head_oid);
+
+            while (try commit_iter.next(allocator)) |commit_object| {
+                defer commit_object.deinit();
+
+                var oid: [hash.byteLen(repo_opts.hash)]u8 = undefined;
+                _ = try std.fmt.hexToBytes(&oid, &commit_object.oid);
+                const oid_int = hash.bytesToInt(repo_opts.hash, &oid);
+
+                // if this object id has already been consumed, prune its ancestry from
+                // the iterator. other queued paths, such as the second parent of a
+                // merge commit, can still be walked until they hit a consumed commit
+                // or run out of history.
+                if (null != try haxy_moments.getCursor(oid_int)) {
+                    try commit_iter.exclude(&commit_object.oid);
+                    continue;
+                }
+
+                if (self.newest_object_id == null) self.newest_object_id = oid;
+                self.oldest_object_id = oid;
+
+                const parent_oids = commit_object.content.commit.metadata.parent_oids orelse return error.ParentOidsNotFound;
+                var pending_parent_count: u64 = 0;
+                for (parent_oids) |*parent_oid| {
+                    var parent_oid_bytes: [hash.byteLen(repo_opts.hash)]u8 = undefined;
+                    _ = try std.fmt.hexToBytes(&parent_oid_bytes, parent_oid);
+                    const parent_oid_int = hash.bytesToInt(repo_opts.hash, &parent_oid_bytes);
+
+                    if (null != try haxy_moments.getCursor(parent_oid_int)) continue;
+
+                    const children_cursor = try self.parent_to_children.putCursor(parent_oid_int);
+                    const children = try DB.CountedHashSet(.read_write).init(children_cursor);
+                    try children.put(oid_int, .{ .bytes = &oid });
+                    pending_parent_count += 1;
+                }
+
+                if (pending_parent_count == 0) {
+                    try self.oid_queue.put(allocator, oid, {});
+                } else {
+                    try self.child_to_pending_parents.put(oid_int, .{ .uint = pending_parent_count });
+                }
+            }
+        }
+
+        fn enqueueChildren(self: *Self, oid: *const [hash.byteLen(repo_opts.hash)]u8) !void {
+            const oid_int = hash.bytesToInt(repo_opts.hash, oid);
+            const children_cursor = try self.parent_to_children.getCursor(oid_int) orelse return;
+            const children = try DB.CountedHashSet(.read_only).init(children_cursor);
+            var children_iter = try children.iterator();
+
+            while (try children_iter.next()) |*child_cursor| {
+                const kv_pair = try child_cursor.readKeyValuePair();
+                const child_oid_int = kv_pair.hash;
+                const pending_parent_cursor = try self.child_to_pending_parents.getCursor(child_oid_int) orelse return error.CursorNotFound;
+                const pending_parent_count = try pending_parent_cursor.readUint();
+
+                if (pending_parent_count <= 1) {
+                    _ = try self.child_to_pending_parents.remove(child_oid_int);
+                    const child_oid = hash.intToBytes(hash.HashInt(repo_opts.hash), child_oid_int);
+                    try self.oid_queue.put(self.allocator, child_oid, {});
+                } else {
+                    try self.child_to_pending_parents.put(child_oid_int, .{ .uint = pending_parent_count - 1 });
+                }
+            }
+        }
+    };
 }
