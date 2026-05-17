@@ -91,7 +91,8 @@ pub const EventData = union(EventKind) {
         const cursor = try map.getCursor(hash.hashInt(hash_kind, field_name)) orelse return error.NotFound;
         var buffer: [5]u8 = undefined;
         const bytes = try cursor.readBytesObject(&buffer);
-        if (bytes.format_tag == null or !std.mem.eql(u8, &bytes.format_tag.?, "bl")) return error.InvalidFormatTag;
+        const format_tag = bytes.format_tag orelse return error.InvalidFormatTag;
+        if (!std.mem.eql(u8, &format_tag, "bl")) return error.InvalidFormatTag;
         if (std.mem.eql(u8, bytes.value, "true")) return true;
         if (std.mem.eql(u8, bytes.value, "false")) return false;
         return error.InvalidBool;
@@ -626,11 +627,10 @@ fn upsertField(
             if (try map.getCursor(key)) |value_cursor| {
                 var buffer: [5]u8 = undefined;
                 const existing = try value_cursor.readBytesObject(&buffer);
-                if (existing.format_tag != null and
-                    std.mem.eql(u8, &existing.format_tag.?, "bl") and
-                    std.mem.eql(u8, existing.value, bytes))
-                {
-                    return;
+                if (existing.format_tag) |format_tag| {
+                    if (std.mem.eql(u8, &format_tag, "bl") and std.mem.eql(u8, existing.value, bytes)) {
+                        return;
+                    }
                 }
             }
 
