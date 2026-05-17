@@ -655,13 +655,17 @@ pub fn RepoEventIterator(comptime repo_opts: rp.RepoOpts(.xit)) type {
         repo_dir: std.Io.Dir,
         db_file: std.Io.File,
         db: *DB,
+        // map of each object id to its children
         parent_to_children: DB.HashMap(.read_write),
         // tracking pending parents is necessary because a child can only
         // be returned after all of its unconsumed parents have been returned
         child_to_pending_parents: DB.HashMap(.read_write),
-        oid_queue: std.AutoArrayHashMapUnmanaged([hash.byteLen(repo_opts.hash)]u8, void),
-        allocator: std.mem.Allocator,
+        // queue of object ids that are ready to be returned from `next`
+        ready_queue: DB.ArrayList(.read_write),
+        ready_queue_index: u64,
+        // the object id at the tip of this branch
         newest_object_id: ?[hash.byteLen(repo_opts.hash)]u8,
+        // the object id furthest back in the history that hasn't been consumed
         oldest_object_id: ?[hash.byteLen(repo_opts.hash)]u8,
 
         pub fn init(
@@ -695,14 +699,17 @@ pub fn RepoEventIterator(comptime repo_opts: rp.RepoOpts(.xit)) type {
             const child_to_pending_parents_cursor = try map.putCursor(hash.hashInt(repo_opts.hash, "child->pending-parents"));
             const child_to_pending_parents = try DB.HashMap(.read_write).init(child_to_pending_parents_cursor);
 
+            const ready_queue_cursor = try map.putCursor(hash.hashInt(repo_opts.hash, "ready-queue"));
+            const ready_queue = try DB.ArrayList(.read_write).init(ready_queue_cursor);
+
             var self = Self{
                 .repo_dir = state.core.repo_dir,
                 .db_file = db_file,
                 .db = db_ptr,
                 .parent_to_children = parent_to_children,
                 .child_to_pending_parents = child_to_pending_parents,
-                .oid_queue = .{},
-                .allocator = allocator,
+                .ready_queue = ready_queue,
+                .ready_queue_index = 0,
                 .newest_object_id = null,
                 .oldest_object_id = null,
             };
@@ -718,15 +725,13 @@ pub fn RepoEventIterator(comptime repo_opts: rp.RepoOpts(.xit)) type {
             allocator.destroy(self.db.core.memory.buffer);
             self.repo_dir.deleteFile(io, db_name) catch {};
             allocator.destroy(self.db);
-            self.oid_queue.deinit(allocator);
         }
 
         pub fn next(self: *Self) !?[hash.byteLen(repo_opts.hash)]u8 {
-            if (self.oid_queue.count() == 0) return null;
+            if (self.ready_queue_index >= try self.ready_queue.count()) return null;
 
-            // OOM risk: large merge graphs can make this queue grow unbounded
-            const oid = self.oid_queue.keys()[0];
-            self.oid_queue.swapRemoveAt(0);
+            const oid = try readOidFromList(self.ready_queue.readOnly(), self.ready_queue_index);
+            self.ready_queue_index += 1;
 
             try self.enqueueChildren(&oid);
             return oid;
@@ -740,27 +745,38 @@ pub fn RepoEventIterator(comptime repo_opts: rp.RepoOpts(.xit)) type {
             haxy_moments: DB.HashMap(.read_only),
             ref: rf.Ref,
         ) !void {
-            // OOM risk: ObjectIterator keeps its queue and visited/excluded set
-            // in memory, so an extremely large reachable history can grow unbounded
-            var commit_iter = try obj.ObjectIterator(.xit, repo_opts, .full).init(state, io, allocator, .{ .kind = .commit });
-            defer commit_iter.deinit();
+            const map = try DB.HashMap(.read_write).init(self.db.rootCursor());
 
-            const head_oid = (try rf.readRecur(.xit, repo_opts, state, io, .{ .ref = ref })) orelse return error.OidNotFound;
-            try commit_iter.include(&head_oid);
+            const walk_queue_cursor = try map.putCursor(hash.hashInt(repo_opts.hash, "walk-queue"));
+            const walk_queue = try DB.ArrayList(.read_write).init(walk_queue_cursor);
+            var walk_queue_index: u64 = 0;
 
-            while (try commit_iter.next(allocator)) |commit_object| {
-                defer commit_object.deinit();
+            const seen_commits_cursor = try map.putCursor(hash.hashInt(repo_opts.hash, "seen-commits"));
+            const seen_commits = try DB.HashSet(.read_write).init(seen_commits_cursor);
 
-                var oid: [hash.byteLen(repo_opts.hash)]u8 = undefined;
-                _ = try std.fmt.hexToBytes(&oid, &commit_object.oid);
+            const head_oid_hex = (try rf.readRecur(.xit, repo_opts, state, io, .{ .ref = ref })) orelse return error.OidNotFound;
+            var head_oid: [hash.byteLen(repo_opts.hash)]u8 = undefined;
+            _ = try std.fmt.hexToBytes(&head_oid, &head_oid_hex);
+            try walk_queue.append(.{ .bytes = &head_oid });
+
+            while (walk_queue_index < try walk_queue.count()) {
+                const oid = try readOidFromList(walk_queue.readOnly(), walk_queue_index);
                 const oid_int = hash.bytesToInt(repo_opts.hash, &oid);
 
-                // if this object id has already been consumed, prune its ancestry from
-                // the iterator. other queued paths, such as the second parent of a
-                // merge commit, can still be walked until they hit a consumed commit
-                // or run out of history.
+                walk_queue_index += 1;
+
+                // if we've seen this object id, skip it
+                if (null != try seen_commits.getCursor(oid_int)) {
+                    continue;
+                }
+
+                try seen_commits.put(oid_int, .{ .bytes = &oid });
+
+                var commit_object = try obj.Object(.xit, repo_opts, .full).init(state, io, allocator, &std.fmt.bytesToHex(oid, .lower));
+                defer commit_object.deinit();
+
+                // if this object id has already been consumed, skip it
                 if (null != try haxy_moments.getCursor(oid_int)) {
-                    try commit_iter.exclude(&commit_object.oid);
                     continue;
                 }
 
@@ -774,16 +790,24 @@ pub fn RepoEventIterator(comptime repo_opts: rp.RepoOpts(.xit)) type {
                     _ = try std.fmt.hexToBytes(&parent_oid_bytes, parent_oid);
                     const parent_oid_int = hash.bytesToInt(repo_opts.hash, &parent_oid_bytes);
 
-                    if (null != try haxy_moments.getCursor(parent_oid_int)) continue;
+                    // if this object id has already been consumed, skip it
+                    if (null != try haxy_moments.getCursor(parent_oid_int)) {
+                        continue;
+                    }
+
+                    // if this object id hasn't already been seen, add it to the walk queue
+                    if (null == try seen_commits.getCursor(parent_oid_int)) {
+                        try walk_queue.append(.{ .bytes = &parent_oid_bytes });
+                    }
 
                     const children_cursor = try self.parent_to_children.putCursor(parent_oid_int);
-                    const children = try DB.CountedHashSet(.read_write).init(children_cursor);
+                    const children = try DB.HashSet(.read_write).init(children_cursor);
                     try children.put(oid_int, .{ .bytes = &oid });
                     pending_parent_count += 1;
                 }
 
                 if (pending_parent_count == 0) {
-                    try self.oid_queue.put(allocator, oid, {});
+                    try self.ready_queue.append(.{ .bytes = &oid });
                 } else {
                     try self.child_to_pending_parents.put(oid_int, .{ .uint = pending_parent_count });
                 }
@@ -793,7 +817,7 @@ pub fn RepoEventIterator(comptime repo_opts: rp.RepoOpts(.xit)) type {
         fn enqueueChildren(self: *Self, oid: *const [hash.byteLen(repo_opts.hash)]u8) !void {
             const oid_int = hash.bytesToInt(repo_opts.hash, oid);
             const children_cursor = try self.parent_to_children.getCursor(oid_int) orelse return;
-            const children = try DB.CountedHashSet(.read_only).init(children_cursor);
+            const children = try DB.HashSet(.read_only).init(children_cursor);
             var children_iter = try children.iterator();
 
             while (try children_iter.next()) |*child_cursor| {
@@ -805,11 +829,18 @@ pub fn RepoEventIterator(comptime repo_opts: rp.RepoOpts(.xit)) type {
                 if (pending_parent_count <= 1) {
                     _ = try self.child_to_pending_parents.remove(child_oid_int);
                     const child_oid = hash.intToBytes(hash.HashInt(repo_opts.hash), child_oid_int);
-                    try self.oid_queue.put(self.allocator, child_oid, {});
+                    try self.ready_queue.append(.{ .bytes = &child_oid });
                 } else {
                     try self.child_to_pending_parents.put(child_oid_int, .{ .uint = pending_parent_count - 1 });
                 }
             }
+        }
+
+        fn readOidFromList(list: DB.ArrayList(.read_only), index: u64) ![hash.byteLen(repo_opts.hash)]u8 {
+            const oid_cursor = try list.getCursor(index) orelse return error.CursorNotFound;
+            var oid: [hash.byteLen(repo_opts.hash)]u8 = undefined;
+            _ = try oid_cursor.readBytes(&oid);
+            return oid;
         }
     };
 }
