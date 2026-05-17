@@ -246,12 +246,22 @@ pub fn consumeInTransaction(
         const head_oid = (try rf.readRecur(.xit, repo_opts, state.readOnly(), io, .{ .ref = ref })) orelse return error.OidNotFound;
         try commit_iter.include(&head_oid);
 
+        // walk the commits and add all new events we haven't consumed yet.
+        // the `next` call is using the arena because we need the parent_oids
+        // slice to live beyond this scope.
+        // TODO: `repo_events` could in theory contain an unbounded number
+        // of events, so there is an OOM risk here. we definitely need to
+        // guard against this.
         while (try commit_iter.next(arena.allocator())) |commit_object| {
             var oid: [hash.byteLen(repo_opts.hash)]u8 = undefined;
             _ = try std.fmt.hexToBytes(&oid, &commit_object.oid);
 
-            // if this object id has already been consumed, skip it
+            // if this object id has already been consumed, prune its ancestry from
+            // the iterator. other queued paths, such as the second parent of a
+            // merge commit, can still be walked until they hit a consumed commit
+            // or run out of history.
             if (null != try haxy_moments.getCursor(hash.bytesToInt(repo_opts.hash, &oid))) {
+                try commit_iter.exclude(&commit_object.oid);
                 continue;
             }
 
