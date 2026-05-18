@@ -80,7 +80,7 @@ pub fn run(
                     .http_listen = cli_cmd.serve.http_listen,
                     .ssh_listen = cli_cmd.serve.ssh_listen,
                     .data_dir = cli_cmd.serve.data_dir,
-                    .ui = cli_cmd.serve.ui,
+                    .tui = cli_cmd.serve.tui,
                 }, run_opts.err);
             },
             .ssh_helper => {

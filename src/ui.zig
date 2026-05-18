@@ -63,7 +63,10 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator) !void {
 
         while (try terminal.readKey(io)) |key| {
             switch (key) {
-                .codepoint => |cp| if (cp == 'q') return,
+                .codepoint => |cp| if (cp == 'q') {
+                    term.quit = true;
+                    return;
+                },
                 else => {},
             }
             try root.input(key, root.getFocus());

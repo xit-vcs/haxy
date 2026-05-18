@@ -1,6 +1,46 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
+    const xit_dep = b.dependency("xit", .{});
+
+    // wasm
+    const install_wasm_exe = blk: {
+        const wasm_target = b.resolveTargetQuery(.{
+            .cpu_arch = .wasm32,
+            .os_tag = .freestanding,
+        });
+
+        const exe = b.addExecutable(.{
+            .name = "haxy",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/main_wasm.zig"),
+                .target = wasm_target,
+                .optimize = .ReleaseSmall,
+            }),
+        });
+        exe.root_module.addImport("xit", xit_dep.module("xit"));
+
+        exe.global_base = 6560;
+        exe.entry = .disabled;
+        exe.rdynamic = true;
+        exe.import_memory = false;
+        exe.export_memory = true;
+        exe.stack_size = std.wasm.page_size;
+
+        const initial_pages = 16;
+        const max_pages = 256;
+        exe.initial_memory = std.wasm.page_size * initial_pages;
+        exe.max_memory = std.wasm.page_size * max_pages;
+
+        const install_exe = b.addInstallArtifact(exe, .{});
+        b.getInstallStep().dependOn(&install_exe.step);
+
+        const wasm_step = b.step("wasm", "Generate the wasm");
+        wasm_step.dependOn(&install_exe.step);
+
+        break :blk install_exe;
+    };
+
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
@@ -14,7 +54,8 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
             }),
         });
-        exe.root_module.addImport("xit", b.dependency("xit", .{}).module("xit"));
+        exe.root_module.addImport("xit", xit_dep.module("xit"));
+        exe.step.dependOn(&install_wasm_exe.step);
 
         const install_exe = b.addInstallArtifact(exe, .{});
         b.getInstallStep().dependOn(&install_exe.step);
@@ -33,48 +74,12 @@ pub fn build(b: *std.Build) void {
         break :blk install_exe;
     };
 
-    // wasm
-    {
-        const wasm_target = b.resolveTargetQuery(.{
-            .cpu_arch = .wasm32,
-            .os_tag = .freestanding,
-        });
-
-        const exe = b.addExecutable(.{
-            .name = "haxy",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("src/main_wasm.zig"),
-                .target = wasm_target,
-                .optimize = .ReleaseSmall,
-            }),
-        });
-        exe.root_module.addImport("xit", b.dependency("xit", .{}).module("xit"));
-
-        exe.global_base = 6560;
-        exe.entry = .disabled;
-        exe.rdynamic = true;
-        exe.import_memory = false;
-        exe.export_memory = true;
-        exe.stack_size = std.wasm.page_size;
-
-        const initial_pages = 16;
-        const max_pages = 256;
-        exe.initial_memory = std.wasm.page_size * initial_pages;
-        exe.max_memory = std.wasm.page_size * max_pages;
-
-        b.installArtifact(exe);
-
-        const wasm_step = b.step("wasm", "Generate the wasm");
-        wasm_step.dependOn(&exe.step);
-        wasm_step.dependOn(b.getInstallStep());
-    }
-
     // module for using haxy as a library
     // (the commands below consume haxy this way)
     const haxy = b.addModule("haxy", .{
         .root_source_file = b.path("src/lib.zig"),
     });
-    haxy.addImport("xit", b.dependency("xit", .{}).module("xit"));
+    haxy.addImport("xit", xit_dep.module("xit"));
 
     // test
     {

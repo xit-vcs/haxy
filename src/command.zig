@@ -193,7 +193,7 @@ pub const Command = union(CommandKind) {
         http_listen: []const u8,
         ssh_listen: ?[]const u8,
         data_dir: []const u8,
-        ui: bool,
+        tui: bool,
     },
     ssh_helper: struct {
         ssh_connect: []const u8,
@@ -211,7 +211,7 @@ pub const Command = union(CommandKind) {
                     .http_listen = (cmd_args.get("--http-listen") orelse null) orelse "127.0.0.1:8080",
                     .ssh_listen = (cmd_args.get("--ssh-listen") orelse null),
                     .data_dir = (cmd_args.get("--data-dir") orelse null) orelse ".",
-                    .ui = cmd_args.contains("--ui"),
+                    .tui = cmd_args.contains("--tui"),
                 } };
             },
             .ssh_helper => {

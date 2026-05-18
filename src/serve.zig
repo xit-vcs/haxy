@@ -3,12 +3,15 @@ const xit = @import("xit");
 const rp = xit.repo;
 const hash = xit.hash;
 const ui = @import("./ui.zig");
+const web = @import("./web.zig");
+
+const wui_listen = "127.0.0.1:8082";
 
 pub const Options = struct {
     http_listen: []const u8,
     ssh_listen: ?[]const u8,
     data_dir: []const u8,
-    ui: bool,
+    tui: bool,
 };
 
 const ListenAddress = struct {
@@ -47,18 +50,6 @@ pub fn run(
     var http_server = try http_address.listen(io, .{ .reuse_address = true });
     defer http_server.deinit(io);
 
-    try err.print("serving HTTP on {s}, repo root {s}\n", .{ options.http_listen, repo_root_path });
-    try err.flush();
-
-    var tasks: std.Io.Group = .init;
-    defer tasks.cancel(io);
-
-    runHttpListener(repo_kind, any_repo_opts, io, allocator, repo_root_path, &http_server, &tasks, err);
-
-    if (options.ui) {
-        runTui(io, allocator, &tasks, err);
-    }
-
     // create ssh listener
 
     var ssh_server: ?std.Io.net.Server = null;
@@ -68,16 +59,45 @@ pub fn run(
         const ssh_listen_address = try parseListenAddress(ssh_listen);
         const ssh_address = try std.Io.net.IpAddress.parseIp4(ssh_listen_address.host, ssh_listen_address.port);
         ssh_server = try ssh_address.listen(io, .{ .reuse_address = true });
+    }
 
+    // create wui listener
+
+    const wui_listen_address = try parseListenAddress(wui_listen);
+    const wui_address = try std.Io.net.IpAddress.parseIp4(wui_listen_address.host, wui_listen_address.port);
+    var wui_server = try wui_address.listen(io, .{ .reuse_address = true });
+    defer wui_server.deinit(io);
+
+    var tasks: std.Io.Group = .init;
+    defer tasks.cancel(io);
+
+    try err.print("serving HTTP on {s}, repo root {s}\n", .{ options.http_listen, repo_root_path });
+    try err.flush();
+
+    runHttpListener(repo_kind, any_repo_opts, io, allocator, repo_root_path, &http_server, &tasks, err);
+
+    if (options.ssh_listen) |ssh_listen| {
         try err.print("serving SSH helper connections on {s}, repo root {s}\n", .{ ssh_listen, repo_root_path });
         try err.flush();
 
-        if (ssh_server) |*server| {
-            runSshListener(repo_kind, any_repo_opts, io, allocator, repo_root_path, server, &tasks, err);
-        }
+        const server = &(ssh_server orelse return error.MissingSshServer);
+        runSshListener(repo_kind, any_repo_opts, io, allocator, repo_root_path, server, &tasks, err);
     }
 
-    try tasks.await(io);
+    try err.print("serving web UI on http://{s}/\n", .{wui_listen});
+    try err.flush();
+
+    web.run(io, &wui_server, &tasks, err);
+
+    if (options.tui) {
+        runTui(io, allocator, &tasks, err);
+
+        while (!xit.xitui.terminal.quit) {
+            try std.Io.sleep(io, .fromMilliseconds(5), .real);
+        }
+    } else {
+        try tasks.await(io);
+    }
 }
 
 fn runTui(
@@ -93,6 +113,7 @@ fn runTui(
 
         fn run(ctx: @This()) void {
             ui.run(ctx.io, ctx.allocator) catch |ui_err| {
+                if (ui_err == error.Canceled) return;
                 logError(ctx.err, "ui failed: {s}\n", .{@errorName(ui_err)});
             };
         }
@@ -126,6 +147,7 @@ fn runHttpListener(
         fn run(ctx: @This()) void {
             while (true) {
                 const stream = ctx.net_server.accept(ctx.io) catch |accept_err| {
+                    if (accept_err == error.Canceled) return;
                     logError(ctx.err, "accept failed: {s}\n", .{@errorName(accept_err)});
                     continue;
                 };
@@ -320,6 +342,7 @@ fn runSshListener(
         fn run(ctx: @This()) void {
             while (true) {
                 const stream = ctx.net_server.accept(ctx.io) catch |accept_err| {
+                    if (accept_err == error.Canceled) return;
                     logError(ctx.err, "ssh accept failed: {s}\n", .{@errorName(accept_err)});
                     continue;
                 };
