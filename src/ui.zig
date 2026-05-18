@@ -8,17 +8,48 @@ const inp = xitui.input;
 const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
 
-pub fn run(io: std.Io, allocator: std.mem.Allocator) !void {
-    var root = Widget{ .widget_list = try WidgetList.init(allocator) };
-    defer root.deinit();
+const html_width = 80;
+const html_height = 24;
 
-    try root.build(.{
-        .min_size = .{ .width = null, .height = null },
-        .max_size = .{ .width = 10, .height = 10 },
-    }, root.getFocus());
+pub fn initRoot(allocator: std.mem.Allocator) !Widget {
+    var root = Widget{ .widget_list = try WidgetList.init(allocator) };
+    errdefer root.deinit();
+
+    try buildRoot(&root, html_width, html_height);
     if (root.getFocus().child_id) |child_id| {
         try root.getFocus().setFocus(child_id);
     }
+
+    return root;
+}
+
+pub fn buildRoot(root: *Widget, width: usize, height: usize) !void {
+    try root.build(.{
+        .min_size = .{ .width = null, .height = null },
+        .max_size = .{ .width = width, .height = height },
+    }, root.getFocus());
+}
+
+pub fn generateHtml(allocator: std.mem.Allocator, root: *Widget) ![]const u8 {
+    const grid = root.getGrid() orelse return error.MissingGrid;
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    for (0..grid.size.height) |y| {
+        for (0..grid.size.width) |x| {
+            const rune = grid.cells.items[try grid.cells.at(.{ y, x })].rune orelse " ";
+            try appendEscapedHtml(allocator, &out, rune);
+        }
+        try out.append(allocator, '\n');
+    }
+
+    return try out.toOwnedSlice(allocator);
+}
+
+pub fn run(io: std.Io, allocator: std.mem.Allocator) !void {
+    var root = try initRoot(allocator);
+    defer root.deinit();
 
     var terminal = try term.Terminal.init(io, allocator);
     defer terminal.deinit(io);
@@ -38,12 +69,22 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator) !void {
             try root.input(key, root.getFocus());
         }
 
-        try root.build(.{
-            .min_size = .{ .width = null, .height = null },
-            .max_size = .{ .width = last_size.width, .height = last_size.height },
-        }, root.getFocus());
+        try buildRoot(&root, last_size.width, last_size.height);
 
         try std.Io.sleep(io, .fromMilliseconds(5), .real);
+    }
+}
+
+fn appendEscapedHtml(allocator: std.mem.Allocator, out: *std.ArrayList(u8), input: []const u8) !void {
+    for (input) |ch| {
+        switch (ch) {
+            '&' => try out.appendSlice(allocator, "&amp;"),
+            '<' => try out.appendSlice(allocator, "&lt;"),
+            '>' => try out.appendSlice(allocator, "&gt;"),
+            '"' => try out.appendSlice(allocator, "&quot;"),
+            '\'' => try out.appendSlice(allocator, "&#39;"),
+            else => try out.append(allocator, ch),
+        }
     }
 }
 
