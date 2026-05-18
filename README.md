@@ -11,9 +11,11 @@
 
 You're looking at Haxy, a new git forge. This is a work in progress...there's not much here yet besides hopes and dreams. We're about to do for git forges what Bill Hicks did for comedy, Earth Crisis did for hardcore music, and Marvin Heemeyer did for exterior remodeling. I'm not sure what any of that means but it sounded cool. The point is, strap yourselves in...we're gonna Leeroy Jenkins our way through this!
 
+Haxy isn't usable yet, but you can follow the devlogs starting with [the first one](https://www.youtube.com/watch?v=m7BOY1OCH_Q).
+
 ## Why another git forge?
 
-Haxy isn't usable yet, but it's based around [two design ideas](https://www.youtube.com/watch?v=9YjWGXi5tDw):
+Haxy is based around [two design ideas](https://www.youtube.com/watch?v=9YjWGXi5tDw):
 
 ### 1. Store project metadata (issues, pull requests, and discussions) in the repo
 
@@ -26,9 +28,11 @@ You will still be able to edit this data via the UI of a Haxy instance just like
 
 Haxy repos will have a special branch where events will be stored. Any time project metadata is created or updated, an event will be created. There will be one event per commit and it will be stored as JSON in the commit message itself. The server will consume these events into its database when it receives them -- essentially, a form of event sourcing. See [an early version](https://www.youtube.com/watch?v=0kKKWfaYaKE) of this event system in action.
 
-### 2. Provide a TUI that can be served over SSH, in addition to a web UI
+### 2. Provide a TUI that is served over SSH, in addition to a web UI
 
-Haxy will provide a text user interface (TUI) over ssh, so you can browse the Haxy instance entirely from your terminal. Additionally, it will provide a web UI for a more typical experience in a web browser. To avoid having separate UI codebases, the web UI will simply render the TUI in your browser. This can be done in an accessible way that is usable for screen readers and mobile devices. See [a more detailed look](https://www.youtube.com/watch?v=hDFNcvF80WU) at how the web UI will work.
+Haxy will provide a text user interface (TUI) over SSH, so you can browse the Haxy instance entirely from your terminal. These are sometimes called SSH apps. One big advantage they have is that you are automatically authenticated with your SSH key, so creating an account on a Haxy instance and associating it with your SSH public key can be done instantly.
+
+Additionally, Haxy will provide a web UI for a more typical experience in a web browser. To avoid having separate UI codebases, the web UI will simply render the TUI in your browser. This sounds frightening but it can be done in an accessible way that is usable for screen readers and mobile devices. See [a more detailed look](https://www.youtube.com/watch?v=hDFNcvF80WU) at how the web UI will work.
 
 ## Why not Radicle?
 
