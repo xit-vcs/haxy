@@ -99,7 +99,7 @@ const WidgetList = struct {
 
     pub fn init(allocator: std.mem.Allocator) !WidgetList {
         var self = blk: {
-            var inner_box = try wgt.Box(Widget).init(allocator, null, .vert);
+            var inner_box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });
             errdefer inner_box.deinit();
 
             var scroll = try wgt.Scroll(Widget).init(allocator, .{ .box = inner_box }, .vert);
@@ -115,14 +115,14 @@ const WidgetList = struct {
         const inner_box = &self.scroll.child.box;
 
         {
-            var text_box = try wgt.TextBox(Widget).init(allocator, "this is a TextBox", .single, .none);
+            var text_box = try wgt.TextBox(Widget).init(allocator, "this is a TextBox", .{ .border_style = .single, .wrap_kind = .none });
             errdefer text_box.deinit();
             text_box.getFocus().focusable = true;
             try inner_box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
         }
 
         {
-            var text_box = try wgt.TextBox(Widget).init(allocator, "this is a\nmulti-line TextBox", .single, .none);
+            var text_box = try wgt.TextBox(Widget).init(allocator, "this is a\nmulti-line TextBox", .{ .border_style = .single, .wrap_kind = .none });
             errdefer text_box.deinit();
             text_box.getFocus().focusable = true;
             try inner_box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
@@ -143,7 +143,7 @@ const WidgetList = struct {
         self.clearGrid();
         const children = &self.scroll.child.box.children;
         for (children.keys(), children.values()) |id, *commit| {
-            commit.widget.text_box.border_style = if (self.getFocus().child_id == id)
+            commit.widget.text_box.options.border_style = if (self.getFocus().child_id == id)
                 (if (root_focus.grandchild_id == id) .double else .single)
             else
                 .hidden;
