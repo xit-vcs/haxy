@@ -26,7 +26,11 @@ fn start() !void {
 
 fn tick() !void {
     const root_ptr = if (root) |*root_value| root_value else return error.NotStarted;
-    try ui.buildRoot(root_ptr, 80, 24);
+    // TODO: make this fit the current size of the browser window
+    try root_ptr.build(.{
+        .min_size = .{ .width = null, .height = null },
+        .max_size = .{ .width = 80, .height = 24 },
+    }, root_ptr.getFocus());
     try updateHtml();
 }
 

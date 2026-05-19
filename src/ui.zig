@@ -8,26 +8,59 @@ const inp = xitui.input;
 const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
 
-const html_width = 80;
-const html_height = 24;
+pub fn run(io: std.Io, allocator: std.mem.Allocator) !void {
+    var root = try initRoot(allocator);
+    defer root.deinit();
+
+    var terminal = try term.Terminal.init(io, allocator);
+    defer terminal.deinit(io);
+
+    var last_size = layout.Size{ .width = 0, .height = 0 };
+    var last_grid = try Grid.init(allocator, last_size);
+    defer last_grid.deinit();
+
+    while (!term.quit.load(.monotonic)) {
+        const grid_changed = try terminal.render(&root, &last_grid, &last_size);
+
+        // process any inputs.
+        //
+        // if the grid didn't change, then first do a blocking
+        // read, so the thread will sleep until further input.
+        // after that, all remaining reads are non-blocking so
+        // we can process the rest of the queued inputs.
+        //
+        // if the grid *did* change, then only do non-blocking
+        // reads. we do not want to sleep the thread because
+        // there may be an animation that requires more looping.
+        var blocking = !grid_changed;
+        while (try terminal.readKey(io, blocking)) |key| {
+            switch (key) {
+                .codepoint => |cp| if (cp == 'q') return else try root.input(key, root.getFocus()),
+                else => try root.input(key, root.getFocus()),
+            }
+            blocking = false;
+        }
+
+        try root.build(.{
+            .min_size = .{ .width = null, .height = null },
+            .max_size = .{ .width = last_size.width, .height = last_size.height },
+        }, root.getFocus());
+    }
+}
 
 pub fn initRoot(allocator: std.mem.Allocator) !Widget {
     var root = Widget{ .widget_list = try WidgetList.init(allocator) };
     errdefer root.deinit();
 
-    try buildRoot(&root, html_width, html_height);
+    try root.build(.{
+        .min_size = .{ .width = null, .height = null },
+        .max_size = .{ .width = 80, .height = 24 },
+    }, root.getFocus());
     if (root.getFocus().child_id) |child_id| {
         try root.getFocus().setFocus(child_id);
     }
 
     return root;
-}
-
-pub fn buildRoot(root: *Widget, width: usize, height: usize) !void {
-    try root.build(.{
-        .min_size = .{ .width = null, .height = null },
-        .max_size = .{ .width = width, .height = height },
-    }, root.getFocus());
 }
 
 pub fn generateHtml(allocator: std.mem.Allocator, root: *Widget) ![]const u8 {
@@ -45,37 +78,6 @@ pub fn generateHtml(allocator: std.mem.Allocator, root: *Widget) ![]const u8 {
     }
 
     return try out.toOwnedSlice(allocator);
-}
-
-pub fn run(io: std.Io, allocator: std.mem.Allocator) !void {
-    var root = try initRoot(allocator);
-    defer root.deinit();
-
-    var terminal = try term.Terminal.init(io, allocator);
-    defer terminal.deinit(io);
-
-    var last_size = layout.Size{ .width = 0, .height = 0 };
-    var last_grid = try Grid.init(allocator, last_size);
-    defer last_grid.deinit();
-
-    while (!term.quit) {
-        try terminal.render(&root, &last_grid, &last_size);
-
-        while (try terminal.readKey(io)) |key| {
-            switch (key) {
-                .codepoint => |cp| if (cp == 'q') {
-                    term.quit = true;
-                    return;
-                },
-                else => {},
-            }
-            try root.input(key, root.getFocus());
-        }
-
-        try buildRoot(&root, last_size.width, last_size.height);
-
-        try std.Io.sleep(io, .fromMilliseconds(5), .real);
-    }
 }
 
 fn appendEscapedHtml(allocator: std.mem.Allocator, out: *std.ArrayList(u8), input: []const u8) !void {

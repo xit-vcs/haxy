@@ -86,40 +86,10 @@ pub fn run(
     web.run(io, allocator, &wui_server, &tasks, err);
 
     if (options.tui) {
-        runTui(io, allocator, &tasks, err);
-
-        while (!xit.xitui.terminal.quit) {
-            try std.Io.sleep(io, .fromMilliseconds(5), .real);
-        }
+        try ui.run(io, allocator);
     } else {
         try tasks.await(io);
     }
-}
-
-fn runTui(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    tasks: *std.Io.Group,
-    err: *std.Io.Writer,
-) void {
-    const TuiTask = struct {
-        io: std.Io,
-        allocator: std.mem.Allocator,
-        err: *std.Io.Writer,
-
-        fn run(ctx: @This()) void {
-            ui.run(ctx.io, ctx.allocator) catch |ui_err| {
-                if (ui_err == error.Canceled) return;
-                logError(ctx.err, "ui failed: {s}\n", .{@errorName(ui_err)});
-            };
-        }
-    };
-
-    tasks.async(io, TuiTask.run, .{TuiTask{
-        .io = io,
-        .allocator = allocator,
-        .err = err,
-    }});
 }
 
 fn runHttpListener(
