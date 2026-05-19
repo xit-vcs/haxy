@@ -94,7 +94,7 @@ test "rebase" {
     var first_oid: [hash.byteLen(repo_opts.hash)]u8 = undefined;
 
     {
-        var json: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        var json: std.Io.Writer.Allocating = .init(allocator);
         defer json.deinit();
 
         for (events_to_consume, 0..) |event, i| {
@@ -173,7 +173,7 @@ test "rebase" {
     };
 
     {
-        var json: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        var json: std.Io.Writer.Allocating = .init(allocator);
         defer json.deinit();
 
         for (events_to_consume2) |event| {
@@ -220,7 +220,7 @@ test "rebase" {
     };
 
     {
-        var json: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        var json: std.Io.Writer.Allocating = .init(allocator);
         defer json.deinit();
 
         for (events_to_consume3, 0..) |event, i| {
@@ -299,7 +299,7 @@ test "rebase" {
     //
 
     {
-        var json: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        var json: std.Io.Writer.Allocating = .init(allocator);
         defer json.deinit();
 
         for (events_to_consume3, 0..) |event, i| {
@@ -439,7 +439,7 @@ test "merge" {
     var first_oid: [hash.byteLen(repo_opts.hash)]u8 = undefined;
 
     {
-        var json: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        var json: std.Io.Writer.Allocating = .init(allocator);
         defer json.deinit();
 
         for (events_to_consume, 0..) |event, i| {
@@ -541,7 +541,7 @@ test "merge" {
     //
 
     {
-        var json: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        var json: std.Io.Writer.Allocating = .init(allocator);
         defer json.deinit();
 
         for (events_to_consume2, 0..) |event, i| {
@@ -642,7 +642,7 @@ test "merge" {
     //
 
     {
-        var json: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        var json: std.Io.Writer.Allocating = .init(allocator);
         defer json.deinit();
 
         for (events_to_consume, 0..) |event, i| {
@@ -738,7 +738,7 @@ test "merge" {
     //
 
     {
-        var json: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        var json: std.Io.Writer.Allocating = .init(allocator);
         defer json.deinit();
 
         for (events_to_consume3, 0..) |event, i| {
@@ -865,7 +865,7 @@ test "user and repo" {
     //
 
     {
-        var json: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        var json: std.Io.Writer.Allocating = .init(allocator);
         defer json.deinit();
 
         for (events_to_consume) |event| {
@@ -955,7 +955,7 @@ test "user and repo" {
     };
 
     {
-        var json: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        var json: std.Io.Writer.Allocating = .init(allocator);
         defer json.deinit();
 
         for (events_to_consume2) |event| {
@@ -1026,7 +1026,7 @@ test "user and repo" {
     };
 
     {
-        var json: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        var json: std.Io.Writer.Allocating = .init(allocator);
         defer json.deinit();
 
         for (events_to_consume3) |event| {
