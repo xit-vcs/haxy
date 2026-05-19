@@ -5,6 +5,7 @@ const hash = xit.hash;
 
 user_id: []const u8,
 name: []const u8,
+description: []const u8,
 enable_issue: bool,
 
 pub fn consume(

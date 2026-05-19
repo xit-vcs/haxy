@@ -831,7 +831,8 @@ test "user and repo" {
             .id = std.fmt.bytesToHex(user_event_id, .lower),
             .event = .{
                 .user = .{
-                    .name = "Alice Example",
+                    .name = "alice",
+                    .display_name = "Alice Example",
                     .email = "alice@example.test",
                     .password_hash = first_password_hash,
                 },
@@ -842,7 +843,8 @@ test "user and repo" {
             .id = std.fmt.bytesToHex(user_event_id, .lower),
             .event = .{
                 .user = .{
-                    .name = "Alice Example",
+                    .name = "alice",
+                    .display_name = "Alice Example",
                     .email = "alice@example.test",
                     .password_hash = second_password_hash,
                 },
@@ -854,6 +856,7 @@ test "user and repo" {
                 .repo = .{
                     .user_id = &user_event_id,
                     .name = "ziglings",
+                    .description = "Learn the Zig programming language by fixing tiny broken programs",
                     .enable_issue = true,
                 },
             },

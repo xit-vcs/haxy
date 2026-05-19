@@ -5,6 +5,7 @@ const hash = xit.hash;
 const bcrypt = std.crypto.pwhash.bcrypt;
 
 name: []const u8,
+display_name: []const u8,
 email: []const u8,
 password_hash: []const u8,
 

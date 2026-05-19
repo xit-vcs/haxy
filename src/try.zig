@@ -64,7 +64,8 @@ pub fn main() !void {
                 .id = std.fmt.bytesToHex(alice_id, .lower),
                 .event = .{
                     .user = .{
-                        .name = "Alice Example",
+                        .name = "alice",
+                        .display_name = "Alice Example",
                         .email = "alice@example.test",
                         .password_hash = alice_password_hash,
                     },
@@ -76,6 +77,7 @@ pub fn main() !void {
                     .repo = .{
                         .user_id = &alice_id,
                         .name = "ziglings",
+                        .description = "Learn the Zig programming language by fixing tiny broken programs",
                         .enable_issue = true,
                     },
                 },
