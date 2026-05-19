@@ -81,6 +81,29 @@ pub fn build(b: *std.Build) void {
     });
     haxy.addImport("xit", xit_dep.module("xit"));
 
+    // try
+    {
+        const exe = b.addExecutable(.{
+            .name = "try",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/try.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        exe.root_module.addImport("haxy", haxy);
+        b.installArtifact(exe);
+
+        const run_cmd = b.addRunArtifact(exe);
+        run_cmd.step.dependOn(b.getInstallStep());
+        if (b.args) |args| {
+            run_cmd.addArgs(args);
+        }
+
+        const run_step = b.step("try", "Try the app");
+        run_step.dependOn(&run_cmd.step);
+    }
+
     // test
     {
         const unit_tests = b.addTest(.{
