@@ -1,7 +1,5 @@
 const std = @import("std");
-const xit = @import("xit");
-const rp = xit.repo;
-const hash = xit.hash;
+const srv = @import("./serve.zig");
 
 pub const CommandKind = enum {
     serve,
@@ -190,13 +188,7 @@ pub const CommandArgs = struct {
 /// parses the args into a format that can be directly used by a repo.
 /// if any additional allocation needs to be done, the arena inside the cmd args will be used.
 pub const Command = union(CommandKind) {
-    serve: struct {
-        http_listen: []const u8,
-        ssh_listen: []const u8,
-        wui_listen: []const u8,
-        data_dir: []const u8,
-        tui: bool,
-    },
+    serve: srv.Options,
     ssh_helper: struct {
         ssh_connect: []const u8,
         service: ?[]const u8,
@@ -209,20 +201,37 @@ pub const Command = union(CommandKind) {
             .serve => {
                 if (cmd_args.positional_args.len != 0) return null;
 
-                return .{ .serve = .{
-                    .http_listen = (cmd_args.get("--http-listen") orelse null) orelse "127.0.0.1:8080",
-                    .ssh_listen = (cmd_args.get("--ssh-listen") orelse null) orelse "127.0.0.1:8081",
-                    .wui_listen = (cmd_args.get("--wui-listen") orelse null) orelse "127.0.0.1:8082",
-                    .data_dir = (cmd_args.get("--data-dir") orelse null) orelse ".",
-                    .tui = cmd_args.contains("--tui"),
-                } };
+                var options: srv.Options = .{};
+                if (cmd_args.get("--http-listen")) |val_maybe| {
+                    options.http_listen = val_maybe orelse return error.HttpListenNeedsValue;
+                }
+                if (cmd_args.get("--ssh-listen")) |val_maybe| {
+                    options.ssh_listen = val_maybe orelse return error.SshListenNeedsValue;
+                }
+                if (cmd_args.get("--wui-listen")) |val_maybe| {
+                    options.wui_listen = val_maybe orelse return error.WuiListenNeedsValue;
+                }
+                if (cmd_args.get("--data-dir")) |val_maybe| {
+                    options.data_dir = val_maybe orelse return error.DataDirNeedsValue;
+                }
+                if (cmd_args.contains("--tui")) options.tui = true;
+
+                return .{ .serve = options };
             },
             .ssh_helper => {
                 if (cmd_args.positional_args.len > 1) return null;
 
+                const options: srv.Options = .{};
+
                 return .{ .ssh_helper = .{
-                    .ssh_connect = (cmd_args.get("--ssh-connect") orelse null) orelse "127.0.0.1:8081",
-                    .service = (cmd_args.get("--service") orelse null),
+                    .ssh_connect = if (cmd_args.get("--ssh-connect")) |val_maybe|
+                        val_maybe orelse options.ssh_listen
+                    else
+                        return error.SshListenNeedsValue,
+                    .service = if (cmd_args.get("--service")) |val_maybe|
+                        val_maybe orelse return error.ServiceNeedsValue
+                    else
+                        null,
                     .dir = if (cmd_args.positional_args.len == 1) cmd_args.positional_args[0] else null,
                 } };
             },

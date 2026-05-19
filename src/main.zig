@@ -3,7 +3,7 @@ const builtin = @import("builtin");
 const xit = @import("xit");
 const rp = xit.repo;
 const cmd = @import("./command.zig");
-const serve = @import("./serve.zig");
+const srv = @import("./serve.zig");
 const ssh_helper = @import("./ssh_helper.zig");
 
 pub const RunOpts = struct {
@@ -76,7 +76,7 @@ pub fn run(
         .help => |cmd_kind_maybe| try cmd.printHelp(cmd_kind_maybe, run_opts.out),
         .cli => |cli_cmd| switch (cli_cmd) {
             .serve => {
-                try serve.run(repo_kind, any_repo_opts, io, allocator, cwd_path, .{
+                try srv.run(repo_kind, any_repo_opts, io, allocator, cwd_path, .{
                     .http_listen = cli_cmd.serve.http_listen,
                     .ssh_listen = cli_cmd.serve.ssh_listen,
                     .wui_listen = cli_cmd.serve.wui_listen,

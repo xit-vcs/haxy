@@ -6,11 +6,11 @@ const ui = @import("./ui.zig");
 const web = @import("./web.zig");
 
 pub const Options = struct {
-    http_listen: []const u8,
-    ssh_listen: []const u8,
-    wui_listen: []const u8,
-    data_dir: []const u8,
-    tui: bool,
+    http_listen: []const u8 = "127.0.0.1:8080",
+    ssh_listen: []const u8 = "127.0.0.1:8081",
+    wui_listen: []const u8 = "127.0.0.1:8082",
+    data_dir: []const u8 = ".",
+    tui: bool = false,
 };
 
 const ListenAddress = struct {
