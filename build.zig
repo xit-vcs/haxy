@@ -53,6 +53,7 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = optimize,
             }),
+            .use_llvm = true,
         });
         exe.root_module.addImport("xit", xit_dep.module("xit"));
         exe.step.dependOn(&install_wasm_exe.step);
