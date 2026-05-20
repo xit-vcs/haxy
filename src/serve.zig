@@ -10,7 +10,6 @@ pub const Options = struct {
     ssh_listen: []const u8 = "127.0.0.1:8081",
     wui_listen: []const u8 = "127.0.0.1:8082",
     data_dir: []const u8 = ".",
-    tui: bool = false,
 };
 
 const ListenAddress = struct {
@@ -26,6 +25,7 @@ pub fn run(
     cwd_path: []const u8,
     options: Options,
     err: *std.Io.Writer,
+    runnable: anytype,
 ) !void {
     // create the data dir
 
@@ -41,6 +41,12 @@ pub fn run(
     defer allocator.free(repo_root_path);
 
     try std.Io.Dir.cwd().createDirPath(io, repo_root_path);
+
+    // the admin repo path is where the user/repo metadata events live;
+    // web.zig opens it per request to render the server-side TUI
+
+    const admin_repo_path = try std.fs.path.resolve(allocator, &.{ data_dir_path, "admin" });
+    defer allocator.free(admin_repo_path);
 
     // create http listener
 
@@ -83,10 +89,10 @@ pub fn run(
     try err.print("serving web UI on http://{s}/\n", .{options.wui_listen});
     try err.flush();
 
-    web.run(io, allocator, &wui_server, &tasks, err);
+    web.run(io, allocator, &wui_server, &tasks, admin_repo_path, err);
 
-    if (options.tui) {
-        try ui.run(io, allocator);
+    if (@TypeOf(runnable) != void) {
+        try runnable.run();
     } else {
         try tasks.await(io);
     }

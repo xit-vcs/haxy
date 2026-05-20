@@ -212,7 +212,6 @@ pub const Command = union(CommandKind) {
                 if (cmd_args.get("--data-dir")) |val_maybe| {
                     options.data_dir = val_maybe orelse return error.DataDirNeedsValue;
                 }
-                if (cmd_args.contains("--tui")) options.tui = true;
 
                 return .{ .serve = options };
             },

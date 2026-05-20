@@ -1,5 +1,6 @@
 const std = @import("std");
 const ui = @import("./ui.zig");
+const pg = @import("./page.zig");
 const xitui = @import("xit").xitui;
 const inp = xitui.input;
 
@@ -14,8 +15,15 @@ fn updateHtml() !void {
     setHtml(html);
 }
 
+// TODO: receive the Page as json from the host and parse it back into
+// a Page so initRoot can render real data. for now we initialize with
+// an empty page just so the wasm build compiles.
+var page_maybe: ?pg.Page = null;
+
 fn start() !void {
-    var next_root = try ui.initRoot(allocator);
+    const page = page_maybe orelse pg.Page{ .user_repo = pg.UserRepoPage.empty() };
+
+    var next_root = try ui.initRoot(allocator, &page);
     errdefer next_root.deinit();
 
     if (root) |*old_root| old_root.deinit();

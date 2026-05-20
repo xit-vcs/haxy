@@ -1,5 +1,8 @@
 const std = @import("std");
+const xit = @import("xit");
+const rp = xit.repo;
 const ui = @import("./ui.zig");
+const pg = @import("./page.zig");
 
 const Asset = struct {
     path: []const u8,
@@ -19,6 +22,7 @@ pub fn run(
     allocator: std.mem.Allocator,
     net_server: *std.Io.net.Server,
     tasks: *std.Io.Group,
+    admin_repo_path: []const u8,
     err: *std.Io.Writer,
 ) void {
     const Listener = struct {
@@ -26,6 +30,7 @@ pub fn run(
         allocator: std.mem.Allocator,
         net_server: *std.Io.net.Server,
         tasks: *std.Io.Group,
+        admin_repo_path: []const u8,
         err: *std.Io.Writer,
 
         fn run(ctx: @This()) void {
@@ -40,11 +45,12 @@ pub fn run(
                     io: std.Io,
                     allocator: std.mem.Allocator,
                     stream: std.Io.net.Stream,
+                    admin_repo_path: []const u8,
                     err: *std.Io.Writer,
 
                     fn run(conn: @This()) void {
                         defer conn.stream.close(conn.io);
-                        handleConnection(conn.io, conn.allocator, conn.stream, conn.err) catch |request_err| {
+                        handleConnection(conn.io, conn.allocator, conn.stream, conn.admin_repo_path, conn.err) catch |request_err| {
                             logError(conn.err, "web ui request failed: {s}\n", .{@errorName(request_err)});
                         };
                     }
@@ -54,6 +60,7 @@ pub fn run(
                     .io = ctx.io,
                     .allocator = ctx.allocator,
                     .stream = stream,
+                    .admin_repo_path = ctx.admin_repo_path,
                     .err = ctx.err,
                 }});
             }
@@ -65,14 +72,27 @@ pub fn run(
         .allocator = allocator,
         .net_server = net_server,
         .tasks = tasks,
+        .admin_repo_path = admin_repo_path,
         .err = err,
     }});
 }
 
-fn renderIndexHtml(allocator: std.mem.Allocator) ![]const u8 {
+fn renderIndexHtml(io: std.Io, allocator: std.mem.Allocator, admin_repo_path: []const u8) ![]const u8 {
     const template = (findAsset("/index.html") orelse return error.MissingIndexAsset).body;
 
-    var root = try ui.initRoot(allocator);
+    // open the admin repo to read live user/repo data; if it doesn't exist
+    // yet (e.g. a fresh `haxy serve` with no admin repo) fall back to empty.
+    const repo_opts: rp.RepoOpts(.xit) = .{};
+    const Repo = rp.Repo(.xit, repo_opts);
+    var repo_or_err = Repo.open(io, allocator, .{ .path = admin_repo_path });
+    var page_arena = std.heap.ArenaAllocator.init(allocator);
+    defer page_arena.deinit();
+    const page: pg.Page = if (repo_or_err) |*repo| blk: {
+        defer repo.deinit(io, allocator);
+        break :blk .{ .user_repo = try .init(repo_opts, &page_arena, repo) };
+    } else |_| .{ .user_repo = .empty() };
+
+    var root = try ui.initRoot(allocator, &page);
     defer root.deinit();
 
     const content = try ui.generateHtml(allocator, &root);
@@ -93,6 +113,7 @@ fn handleConnection(
     io: std.Io,
     allocator: std.mem.Allocator,
     stream: std.Io.net.Stream,
+    admin_repo_path: []const u8,
     err: *std.Io.Writer,
 ) !void {
     var send_buffer = [_]u8{0} ** 4096;
@@ -108,7 +129,7 @@ fn handleConnection(
             else => |e| return e,
         };
 
-        handleRequest(&http_server, &request, allocator) catch |request_err| {
+        handleRequest(io, &http_server, &request, allocator, admin_repo_path) catch |request_err| {
             try err.print("web ui request failed: {s}\n", .{@errorName(request_err)});
             try err.flush();
             if (http_server.reader.state == .received_head) {
@@ -122,9 +143,11 @@ fn handleConnection(
 }
 
 fn handleRequest(
+    io: std.Io,
     http_server: *std.http.Server,
     request: *std.http.Server.Request,
     allocator: std.mem.Allocator,
+    admin_repo_path: []const u8,
 ) !void {
     const method = if (request.head.method == .HEAD) .GET else request.head.method;
     if (method != .GET) {
@@ -159,7 +182,7 @@ fn handleRequest(
     }
 
     if (std.mem.eql(u8, asset.path, "index.html")) {
-        const index_html = try renderIndexHtml(allocator);
+        const index_html = try renderIndexHtml(io, allocator, admin_repo_path);
         defer allocator.free(index_html);
         try writeStaticResponse(http_server, 200, "OK", asset.content_type, index_html, request.head.method == .HEAD);
     } else {

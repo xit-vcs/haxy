@@ -64,4 +64,6 @@ git push origin HEAD:master
 
 After that, you'll see your repo in `server/repos/test`. It's MAGIC!
 
+To get an early look at the interface, you can run `zig build try`. This is a special build command that runs a server with fake data and launches the TUI.
+
 *"C'mon Alex! You always dreamt about going on a big adventure! Let this be our first!" -- Lunar: Silver Star Story*

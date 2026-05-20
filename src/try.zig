@@ -8,6 +8,7 @@ const srv = hx.serve;
 const evt = hx.event;
 const xit = hx.xit;
 const rp = xit.repo;
+const Page = hx.page.Page;
 
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
@@ -34,11 +35,11 @@ pub fn main() !void {
     const cwd_path = try std.process.currentPathAlloc(io, allocator);
     defer allocator.free(cwd_path);
 
-    const server_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "server" });
-    defer allocator.free(server_path);
+    var page_arena = std.heap.ArenaAllocator.init(allocator);
+    defer page_arena.deinit();
 
-    // create the admin repo
-    {
+    // create the admin repo and build the Page from it
+    const page: Page = blk: {
         const work_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "server", "admin" });
         defer allocator.free(work_path);
 
@@ -162,17 +163,32 @@ pub fn main() !void {
 
         // consume events into the database
         try evt.consume(repo_opts, io, allocator, &repo, .{ .kind = .head, .name = "haxy/meta" });
-    }
 
-    // start server
+        break :blk .{ .user_repo = try .init(repo_opts, &page_arena, &repo) };
+    };
+
+    // start the server
 
     var null_writer = std.Io.Writer.Discarding.init(&.{});
     var environ_map = std.process.Environ.Map.init(allocator);
     defer environ_map.deinit();
     const run_opts = hx.main.RunOpts{ .out = &null_writer.writer, .err = &null_writer.writer, .environ_map = &environ_map };
 
+    const server_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "server" });
+    defer allocator.free(server_path);
+
+    const Runnable = struct {
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        page: *const Page,
+
+        pub fn run(self: @This()) !void {
+            // launch the TUI
+            try hx.ui.run(self.io, self.allocator, self.page);
+        }
+    };
+
     try srv.run(.xit, .{}, io, allocator, cwd_path, .{
         .data_dir = server_path,
-        .tui = true,
-    }, run_opts.err);
+    }, run_opts.err, Runnable{ .io = io, .allocator = allocator, .page = &page });
 }

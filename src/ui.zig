@@ -7,9 +7,11 @@ const layout = xitui.layout;
 const inp = xitui.input;
 const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
+const evt = @import("./event.zig");
+const pg = @import("./page.zig");
 
-pub fn run(io: std.Io, allocator: std.mem.Allocator) !void {
-    var root = try initRoot(allocator);
+pub fn run(io: std.Io, allocator: std.mem.Allocator, page: *const pg.Page) !void {
+    var root = try initRoot(allocator, page);
     defer root.deinit();
 
     var terminal = try term.Terminal.init(io, allocator);
@@ -48,8 +50,10 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator) !void {
     }
 }
 
-pub fn initRoot(allocator: std.mem.Allocator) !Widget {
-    var root = Widget{ .widget_list = try WidgetList.init(allocator) };
+pub fn initRoot(allocator: std.mem.Allocator, page: *const pg.Page) !Widget {
+    var root: Widget = switch (page.*) {
+        .user_repo => |*p| .{ .user_repo_view = try UserRepoView.init(allocator, p) },
+    };
     errdefer root.deinit();
 
     try root.build(.{
@@ -93,65 +97,134 @@ fn appendEscapedHtml(allocator: std.mem.Allocator, out: *std.ArrayList(u8), inpu
     }
 }
 
-const WidgetList = struct {
+pub const Widget = union(enum) {
+    text: wgt.Text(Widget),
+    box: wgt.Box(Widget),
+    text_box: wgt.TextBox(Widget),
+    scroll: wgt.Scroll(Widget),
+    selectable_list: SelectableList,
+    user_repo_view: UserRepoView,
+
+    pub fn deinit(self: *Widget) void {
+        switch (self.*) {
+            inline else => |*case| case.deinit(),
+        }
+    }
+
+    pub fn build(self: *Widget, constraint: layout.Constraint, root_focus: *Focus) anyerror!void {
+        switch (self.*) {
+            inline else => |*case| try case.build(constraint, root_focus),
+        }
+    }
+
+    pub fn input(self: *Widget, key: inp.Key, root_focus: *Focus) anyerror!void {
+        switch (self.*) {
+            inline else => |*case| try case.input(key, root_focus),
+        }
+    }
+
+    pub fn clearGrid(self: *Widget) void {
+        switch (self.*) {
+            inline else => |*case| case.clearGrid(),
+        }
+    }
+
+    pub fn getGrid(self: Widget) ?Grid {
+        switch (self) {
+            inline else => |*case| return case.getGrid(),
+        }
+    }
+
+    pub fn getFocus(self: *Widget) *Focus {
+        switch (self.*) {
+            inline else => |*case| return case.getFocus(),
+        }
+    }
+};
+
+// a scrollable list of selectable single-line items. content is replaced
+// via setItems, which dupes the strings into the widget's own allocation.
+const SelectableList = struct {
     allocator: std.mem.Allocator,
     scroll: wgt.Scroll(Widget),
+    lines: std.ArrayList([]const u8),
 
-    pub fn init(allocator: std.mem.Allocator) !WidgetList {
+    pub fn init(allocator: std.mem.Allocator) !SelectableList {
         var self = blk: {
-            var inner_box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });
+            var inner_box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .rounded_corners = true, .direction = .vert });
             errdefer inner_box.deinit();
 
             var scroll = try wgt.Scroll(Widget).init(allocator, .{ .box = inner_box }, .vert);
             errdefer scroll.deinit();
 
-            break :blk WidgetList{
+            break :blk SelectableList{
                 .allocator = allocator,
                 .scroll = scroll,
+                .lines = .empty,
             };
         };
         errdefer self.deinit();
+        return self;
+    }
 
+    pub fn deinit(self: *SelectableList) void {
+        self.scroll.deinit();
+        for (self.lines.items) |line| self.allocator.free(line);
+        self.lines.deinit(self.allocator);
+    }
+
+    pub fn setItems(self: *SelectableList, items: []const []const u8) !void {
         const inner_box = &self.scroll.child.box;
 
-        {
-            var text_box = try wgt.TextBox(Widget).init(allocator, "this is a TextBox", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
-            errdefer text_box.deinit();
-            text_box.getFocus().focusable = true;
-            try inner_box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
+        for (inner_box.children.values()) |*child| {
+            child.widget.deinit();
         }
+        inner_box.children.clearAndFree(self.allocator);
 
-        {
-            var text_box = try wgt.TextBox(Widget).init(allocator, "this is a\nmulti-line TextBox", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+        for (self.lines.items) |line| self.allocator.free(line);
+        self.lines.clearAndFree(self.allocator);
+
+        self.scroll.x = 0;
+        self.scroll.y = 0;
+        self.scroll.getFocus().child_id = null;
+
+        for (items) |item| {
+            const line = try self.allocator.dupe(u8, item);
+            {
+                errdefer self.allocator.free(line);
+                try self.lines.append(self.allocator, line);
+            }
+
+            var text_box = try wgt.TextBox(Widget).init(self.allocator, line, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit();
             text_box.getFocus().focusable = true;
-            try inner_box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
+            try inner_box.children.put(self.allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
         }
 
         if (inner_box.children.count() > 0) {
             self.scroll.getFocus().child_id = inner_box.children.keys()[0];
         }
-
-        return self;
     }
 
-    pub fn deinit(self: *WidgetList) void {
-        self.scroll.deinit();
-    }
-
-    pub fn build(self: *WidgetList, constraint: layout.Constraint, root_focus: *Focus) !void {
+    pub fn build(self: *SelectableList, constraint: layout.Constraint, root_focus: *Focus) !void {
         self.clearGrid();
         const children = &self.scroll.child.box.children;
-        for (children.keys(), children.values()) |id, *commit| {
-            commit.widget.text_box.options.border_style = if (self.getFocus().child_id == id)
+        for (children.keys(), children.values()) |id, *item| {
+            item.widget.text_box.options.border_style = if (self.getFocus().child_id == id)
                 (if (root_focus.grandchild_id == id) .double else .single)
             else
-                .single;
+                .hidden;
         }
-        try self.scroll.build(constraint, root_focus);
+        // force a minimum row of content so an empty list still produces a
+        // non-zero grid. without this, xitui's Scroll.build copies from a
+        // zero-cell child grid and traps with OOB in release builds because
+        // NDSlice.at's bounds check is gated on runtime_safety.
+        var adjusted = constraint;
+        adjusted.min_size.height = @max(adjusted.min_size.height orelse 0, 1);
+        try self.scroll.build(adjusted, root_focus);
     }
 
-    pub fn input(self: *WidgetList, key: inp.Key, root_focus: *Focus) !void {
+    pub fn input(self: *SelectableList, key: inp.Key, root_focus: *Focus) !void {
         if (self.getFocus().child_id) |child_id| {
             const children = &self.scroll.child.box.children;
             if (children.getIndex(child_id)) |current_index| {
@@ -199,19 +272,19 @@ const WidgetList = struct {
         }
     }
 
-    pub fn clearGrid(self: *WidgetList) void {
+    pub fn clearGrid(self: *SelectableList) void {
         self.scroll.clearGrid();
     }
 
-    pub fn getGrid(self: WidgetList) ?Grid {
+    pub fn getGrid(self: SelectableList) ?Grid {
         return self.scroll.getGrid();
     }
 
-    pub fn getFocus(self: *WidgetList) *Focus {
+    pub fn getFocus(self: *SelectableList) *Focus {
         return self.scroll.getFocus();
     }
 
-    pub fn getSelectedIndex(self: WidgetList) ?usize {
+    pub fn getSelectedIndex(self: SelectableList) ?usize {
         if (self.scroll.child.box.focus.child_id) |child_id| {
             const children = &self.scroll.child.box.children;
             return children.getIndex(child_id);
@@ -220,54 +293,157 @@ const WidgetList = struct {
         }
     }
 
-    fn updateScroll(self: *WidgetList, index: usize) void {
-        const left_box = &self.scroll.child.box;
-        if (left_box.children.values()[index].rect) |rect| {
+    fn updateScroll(self: *SelectableList, index: usize) void {
+        const inner_box = &self.scroll.child.box;
+        if (inner_box.children.values()[index].rect) |rect| {
             self.scroll.scrollToRect(rect);
         }
     }
 };
 
-pub const Widget = union(enum) {
-    text: wgt.Text(Widget),
+// horizontal two-pane view: users on the left, the selected user's
+// repos on the right. selecting a user repopulates the repo pane.
+const UserRepoView = struct {
+    allocator: std.mem.Allocator,
     box: wgt.Box(Widget),
-    text_box: wgt.TextBox(Widget),
-    scroll: wgt.Scroll(Widget),
-    widget_list: WidgetList,
+    page: *const pg.UserRepoPage,
+    last_user_index: ?usize,
 
-    pub fn deinit(self: *Widget) void {
-        switch (self.*) {
-            inline else => |*case| case.deinit(),
+    const user_list_index: usize = 0;
+    const repo_list_index: usize = 1;
+
+    pub fn init(allocator: std.mem.Allocator, page: *const pg.UserRepoPage) !UserRepoView {
+        var self = blk: {
+            var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .rounded_corners = true, .direction = .horiz });
+            errdefer box.deinit();
+
+            {
+                var user_list = try SelectableList.init(allocator);
+                errdefer user_list.deinit();
+                try box.children.put(allocator, user_list.getFocus().id, .{ .widget = .{ .selectable_list = user_list }, .rect = null, .min_size = .{ .width = 30, .height = null } });
+            }
+
+            {
+                var repo_list = try SelectableList.init(allocator);
+                errdefer repo_list.deinit();
+                try box.children.put(allocator, repo_list.getFocus().id, .{ .widget = .{ .selectable_list = repo_list }, .rect = null, .min_size = .{ .width = 40, .height = null } });
+            }
+
+            break :blk UserRepoView{
+                .allocator = allocator,
+                .box = box,
+                .page = page,
+                .last_user_index = null,
+            };
+        };
+        errdefer self.deinit();
+
+        // populate the user list once at init using a temporary arena
+        // for the formatted lines (setItems dupes them).
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const aa = arena.allocator();
+
+        const user_lines = try aa.alloc([]const u8, page.users.len);
+        for (page.users, 0..) |uwr, i| {
+            user_lines[i] = try std.fmt.allocPrint(aa, "{s} ({s})", .{ uwr.user.name, uwr.user.display_name });
+        }
+        const user_list = &self.box.children.values()[user_list_index].widget.selectable_list;
+        try user_list.setItems(user_lines);
+
+        self.getFocus().child_id = self.box.children.keys()[user_list_index];
+        try self.updateRepos();
+
+        return self;
+    }
+
+    pub fn deinit(self: *UserRepoView) void {
+        self.box.deinit();
+    }
+
+    pub fn build(self: *UserRepoView, constraint: layout.Constraint, root_focus: *Focus) !void {
+        self.clearGrid();
+        try self.box.build(constraint, root_focus);
+    }
+
+    pub fn input(self: *UserRepoView, key: inp.Key, root_focus: *Focus) !void {
+        if (self.getFocus().child_id) |child_id| {
+            if (self.box.children.getIndex(child_id)) |current_index| {
+                const child = &self.box.children.values()[current_index].widget;
+
+                const index = blk: {
+                    switch (key) {
+                        .arrow_left => {
+                            if (current_index == repo_list_index) {
+                                break :blk user_list_index;
+                            }
+                        },
+                        .arrow_right => {
+                            if (current_index == user_list_index) {
+                                break :blk repo_list_index;
+                            }
+                        },
+                        .codepoint => {
+                            switch (key.codepoint) {
+                                13 => {
+                                    if (current_index == user_list_index) {
+                                        break :blk repo_list_index;
+                                    }
+                                },
+                                127, '\x1B' => {
+                                    if (current_index == repo_list_index) {
+                                        break :blk user_list_index;
+                                    }
+                                },
+                                else => {},
+                            }
+                        },
+                        else => {},
+                    }
+                    try child.input(key, root_focus);
+                    if (current_index == user_list_index) {
+                        try self.updateRepos();
+                    }
+                    break :blk current_index;
+                };
+
+                if (index != current_index) {
+                    try root_focus.setFocus(self.box.children.keys()[index]);
+                }
+            }
         }
     }
 
-    pub fn build(self: *Widget, constraint: layout.Constraint, root_focus: *Focus) anyerror!void {
-        switch (self.*) {
-            inline else => |*case| try case.build(constraint, root_focus),
-        }
+    pub fn clearGrid(self: *UserRepoView) void {
+        self.box.clearGrid();
     }
 
-    pub fn input(self: *Widget, key: inp.Key, root_focus: *Focus) anyerror!void {
-        switch (self.*) {
-            inline else => |*case| try case.input(key, root_focus),
-        }
+    pub fn getGrid(self: UserRepoView) ?Grid {
+        return self.box.getGrid();
     }
 
-    pub fn clearGrid(self: *Widget) void {
-        switch (self.*) {
-            inline else => |*case| case.clearGrid(),
-        }
+    pub fn getFocus(self: *UserRepoView) *Focus {
+        return self.box.getFocus();
     }
 
-    pub fn getGrid(self: Widget) ?Grid {
-        switch (self) {
-            inline else => |*case| return case.getGrid(),
-        }
-    }
+    fn updateRepos(self: *UserRepoView) !void {
+        const user_list = &self.box.children.values()[user_list_index].widget.selectable_list;
+        const repo_list = &self.box.children.values()[repo_list_index].widget.selectable_list;
 
-    pub fn getFocus(self: *Widget) *Focus {
-        switch (self.*) {
-            inline else => |*case| return case.getFocus(),
+        const user_index = user_list.getSelectedIndex();
+        if (user_index == self.last_user_index) return;
+        self.last_user_index = user_index;
+
+        const repos = if (user_index) |i| self.page.users[i].repos else &.{};
+
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const aa = arena.allocator();
+
+        const repo_lines = try aa.alloc([]const u8, repos.len);
+        for (repos, 0..) |repo_event, i| {
+            repo_lines[i] = try std.fmt.allocPrint(aa, "{s} - {s}", .{ repo_event.name, repo_event.description });
         }
+        try repo_list.setItems(repo_lines);
     }
 };

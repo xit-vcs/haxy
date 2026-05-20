@@ -77,7 +77,7 @@ pub fn run(
         },
         .help => |cmd_kind_maybe| try cmd.printHelp(cmd_kind_maybe, run_opts.out),
         .cli => |cli_cmd| switch (cli_cmd) {
-            .serve => |options| try srv.run(repo_kind, any_repo_opts, io, allocator, cwd_path, options, run_opts.err),
+            .serve => |options| try srv.run(repo_kind, any_repo_opts, io, allocator, cwd_path, options, run_opts.err, {}),
             .ssh_helper => |options| try ssh.run(io, allocator, options, run_opts.environ_map),
         },
     }
