@@ -208,20 +208,18 @@ const SelectableList = struct {
 
     pub fn build(self: *SelectableList, constraint: layout.Constraint, root_focus: *Focus) !void {
         self.clearGrid();
+        const pane_has_focus = root_focus.grandchild_id == self.getFocus().id;
         const children = &self.scroll.child.box.children;
         for (children.keys(), children.values()) |id, *item| {
             item.widget.text_box.options.border_style = if (self.getFocus().child_id == id)
-                (if (root_focus.grandchild_id == id) .double else .single)
+                // pane_has_focus will be true if the widgets weren't yet in
+                // the focus tree, and so setFocus stopped at the pane itself.
+                // in this case, it should be treated as if it's selected.
+                (if (root_focus.grandchild_id == id or pane_has_focus) .double else .single)
             else
                 .hidden;
         }
-        // force a minimum row of content so an empty list still produces a
-        // non-zero grid. without this, xitui's Scroll.build copies from a
-        // zero-cell child grid and traps with OOB in release builds because
-        // NDSlice.at's bounds check is gated on runtime_safety.
-        var adjusted = constraint;
-        adjusted.min_size.height = @max(adjusted.min_size.height orelse 0, 1);
-        try self.scroll.build(adjusted, root_focus);
+        try self.scroll.build(constraint, root_focus);
     }
 
     pub fn input(self: *SelectableList, key: inp.Key, root_focus: *Focus) !void {
