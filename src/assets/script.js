@@ -1,4 +1,5 @@
 const grid = document.getElementById("grid");
+const pageJsonBase64 = document.getElementById("page").textContent;
 
 let wasmInstance;
 const decoder = new TextDecoder();
@@ -26,10 +27,17 @@ var importObject = {
 
 WebAssembly.instantiateStreaming(fetch("haxy.wasm"), importObject).then((result) => {
     wasmInstance = result.instance;
-    wasmInstance.exports._start();
+
+    // the page is embedded as base64 so it can sit inside the host html
+    // without worrying about characters that would terminate the script tag.
+    // decode here and hand the raw json bytes to the wasm.
+    const jsonBytes = Uint8Array.from(atob(pageJsonBase64), (c) => c.charCodeAt(0));
+    const ptr = wasmInstance.exports._alloc(jsonBytes.length);
+    new Uint8Array(wasmInstance.exports.memory.buffer, ptr, jsonBytes.length).set(jsonBytes);
+    wasmInstance.exports._start(ptr, jsonBytes.length);
 
     document.addEventListener("keydown", (event) => {
-        if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"].includes(event.key)) {
+        if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "PageUp", "PageDown", "Home", "End"].includes(event.key)) {
             event.preventDefault();
         }
         wasmInstance.exports._onKeyDown(event.keyCode);

@@ -98,14 +98,32 @@ fn renderIndexHtml(io: std.Io, allocator: std.mem.Allocator, admin_repo_path: []
     const content = try ui.generateHtml(allocator, &root);
     defer allocator.free(content);
 
-    const needle = "{{{ HAXY_CONTENT }}}";
-    const index = std.mem.indexOf(u8, template, needle) orelse return error.MissingTemplateToken;
+    // serialize the page so the wasm side can parse it back without making
+    // a second request. base64-encoded so the json can be embedded in html.
+    var json: std.Io.Writer.Allocating = .init(allocator);
+    defer json.deinit();
+    try std.json.Stringify.value(page, .{}, &json.writer);
+
+    const b64 = std.base64.standard.Encoder;
+    const json_b64 = try allocator.alloc(u8, b64.calcSize(json.written().len));
+    defer allocator.free(json_b64);
+    _ = b64.encode(json_b64, json.written());
 
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
-    try out.appendSlice(allocator, template[0..index]);
-    try out.appendSlice(allocator, content);
-    try out.appendSlice(allocator, template[index + needle.len ..]);
+    {
+        var cursor: usize = 0;
+        for (&[_]struct { needle: []const u8, replacement: []const u8 }{
+            .{ .needle = "{{{ HAXY_HTML }}}", .replacement = content },
+            .{ .needle = "{{{ HAXY_JSON }}}", .replacement = json_b64 },
+        }) |sub| {
+            const idx = std.mem.indexOfPos(u8, template, cursor, sub.needle) orelse return error.MissingTemplateToken;
+            try out.appendSlice(allocator, template[cursor..idx]);
+            try out.appendSlice(allocator, sub.replacement);
+            cursor = idx + sub.needle.len;
+        }
+        try out.appendSlice(allocator, template[cursor..]);
+    }
     return try out.toOwnedSlice(allocator);
 }
 

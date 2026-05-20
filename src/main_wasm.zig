@@ -15,15 +15,22 @@ fn updateHtml() !void {
     setHtml(html);
 }
 
-// TODO: receive the Page as json from the host and parse it back into
-// a Page so initRoot can render real data. for now we initialize with
-// an empty page just so the wasm build compiles.
-var page_maybe: ?pg.Page = null;
+// the page is allocated into this arena via parseFromSliceLeaky. it has
+// to outlive `root`, because `root` holds slices into the parsed strings.
+var page_arena: ?std.heap.ArenaAllocator = null;
+var page: ?pg.Page = null;
 
-fn start() !void {
-    const page = page_maybe orelse pg.Page{ .user_repo = pg.UserRepoPage.empty() };
+fn start(json: []const u8) !void {
+    if (page_arena) |*a| a.deinit();
+    page_arena = std.heap.ArenaAllocator.init(allocator);
 
-    var next_root = try ui.initRoot(allocator, &page);
+    // alloc_always so the parsed strings live entirely inside the arena
+    // and don't borrow from the caller's json buffer.
+    page = try std.json.parseFromSliceLeaky(pg.Page, (page_arena orelse unreachable).allocator(), json, .{
+        .allocate = .alloc_always,
+    });
+
+    var next_root = try ui.initRoot(allocator, &(page orelse unreachable));
     errdefer next_root.deinit();
 
     if (root) |*old_root| old_root.deinit();
@@ -49,7 +56,9 @@ fn onKeyDown(key_code: u32) !void {
         34 => .page_down,
         35 => .end,
         36 => .home,
+        37 => .arrow_left,
         38 => .arrow_up,
+        39 => .arrow_right,
         40 => .arrow_down,
         else => return,
     };
@@ -67,8 +76,16 @@ fn setHtml(arg: []const u8) void {
 extern fn _consoleLog(arg: [*]const u8, len: u32) void;
 extern fn _setHtml(arg: [*]const u8, len: u32) void;
 
-export fn _start() void {
-    start() catch |err| {
+/// js calls this first to get a wasm pointer it can write the page json into.
+export fn _alloc(len: u32) ?[*]u8 {
+    const slice = allocator.alloc(u8, len) catch return null;
+    return slice.ptr;
+}
+
+export fn _start(json_ptr: [*]u8, json_len: u32) void {
+    const json = json_ptr[0..json_len];
+    defer allocator.free(json);
+    start(json) catch |err| {
         var buf: [256]u8 = undefined;
         const str = std.fmt.bufPrint(&buf, "start: {}", .{err}) catch unreachable;
         consoleLog(str);
