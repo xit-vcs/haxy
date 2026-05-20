@@ -8,7 +8,7 @@ const web = @import("./web.zig");
 pub const Options = struct {
     http_listen: []const u8 = "127.0.0.1:8080",
     ssh_listen: []const u8 = "127.0.0.1:8081",
-    wui_listen: []const u8 = "127.0.0.1:8082",
+    wui_listen: []const u8 = "127.0.0.1:8000",
     data_dir: []const u8 = ".",
 };
 
