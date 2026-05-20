@@ -1,5 +1,6 @@
 const std = @import("std");
 const srv = @import("./serve.zig");
+const ssh = @import("./ssh_helper.zig");
 
 pub const CommandKind = enum {
     serve,
@@ -189,11 +190,7 @@ pub const CommandArgs = struct {
 /// if any additional allocation needs to be done, the arena inside the cmd args will be used.
 pub const Command = union(CommandKind) {
     serve: srv.Options,
-    ssh_helper: struct {
-        ssh_connect: []const u8,
-        service: ?[]const u8,
-        dir: ?[]const u8,
-    },
+    ssh_helper: ssh.Options,
 
     pub fn initMaybe(cmd_args: *CommandArgs) !?Command {
         const command_kind = cmd_args.command_kind orelse return null;
@@ -202,6 +199,7 @@ pub const Command = union(CommandKind) {
                 if (cmd_args.positional_args.len != 0) return null;
 
                 var options: srv.Options = .{};
+
                 if (cmd_args.get("--http-listen")) |val_maybe| {
                     options.http_listen = val_maybe orelse return error.HttpListenNeedsValue;
                 }
@@ -221,19 +219,17 @@ pub const Command = union(CommandKind) {
             .ssh_helper => {
                 if (cmd_args.positional_args.len > 1) return null;
 
-                const options: srv.Options = .{};
+                var options: ssh.Options = .{};
 
-                return .{ .ssh_helper = .{
-                    .ssh_connect = if (cmd_args.get("--ssh-connect")) |val_maybe|
-                        val_maybe orelse options.ssh_listen
-                    else
-                        return error.SshListenNeedsValue,
-                    .service = if (cmd_args.get("--service")) |val_maybe|
-                        val_maybe orelse return error.ServiceNeedsValue
-                    else
-                        null,
-                    .dir = if (cmd_args.positional_args.len == 1) cmd_args.positional_args[0] else null,
-                } };
+                if (cmd_args.get("--ssh-connect")) |val_maybe| {
+                    options.ssh_connect = val_maybe orelse return error.SshConnectNeedsValue;
+                }
+                if (cmd_args.get("--service")) |val_maybe| {
+                    options.service = val_maybe orelse return error.ServiceNeedsValue;
+                }
+                options.dir = if (cmd_args.positional_args.len == 1) cmd_args.positional_args[0] else null;
+
+                return .{ .ssh_helper = options };
             },
         }
     }

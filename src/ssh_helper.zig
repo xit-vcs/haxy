@@ -3,9 +3,13 @@ const builtin = @import("builtin");
 const xit = @import("xit");
 
 pub const Options = struct {
-    ssh_connect: []const u8,
-    service: ?[]const u8,
-    dir: ?[]const u8,
+    ssh_connect: []const u8 = blk: {
+        const srv = @import("./serve.zig");
+        const opts: srv.Options = .{};
+        break :blk opts.ssh_listen;
+    },
+    service: ?[]const u8 = null,
+    dir: ?[]const u8 = null,
 };
 
 const Service = enum {

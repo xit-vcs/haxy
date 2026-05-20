@@ -4,7 +4,7 @@ const xit = @import("xit");
 const rp = xit.repo;
 const cmd = @import("./command.zig");
 const srv = @import("./serve.zig");
-const ssh_helper = @import("./ssh_helper.zig");
+const ssh = @import("./ssh_helper.zig");
 
 pub const RunOpts = struct {
     out: *std.Io.Writer,
@@ -77,22 +77,8 @@ pub fn run(
         },
         .help => |cmd_kind_maybe| try cmd.printHelp(cmd_kind_maybe, run_opts.out),
         .cli => |cli_cmd| switch (cli_cmd) {
-            .serve => {
-                try srv.run(repo_kind, any_repo_opts, io, allocator, cwd_path, .{
-                    .http_listen = cli_cmd.serve.http_listen,
-                    .ssh_listen = cli_cmd.serve.ssh_listen,
-                    .wui_listen = cli_cmd.serve.wui_listen,
-                    .data_dir = cli_cmd.serve.data_dir,
-                    .tui = cli_cmd.serve.tui,
-                }, run_opts.err);
-            },
-            .ssh_helper => {
-                try ssh_helper.run(io, allocator, .{
-                    .ssh_connect = cli_cmd.ssh_helper.ssh_connect,
-                    .service = cli_cmd.ssh_helper.service,
-                    .dir = cli_cmd.ssh_helper.dir,
-                }, run_opts.environ_map);
-            },
+            .serve => |options| try srv.run(repo_kind, any_repo_opts, io, allocator, cwd_path, options, run_opts.err),
+            .ssh_helper => |options| try ssh.run(io, allocator, options, run_opts.environ_map),
         },
     }
 }
