@@ -26,13 +26,13 @@ Keeping project metadata in the repo has a few benefits:
 
 You will still be able to edit this data via the UI of a Haxy instance just like any other git forge. Additionally, however, you'll be able to run the Haxy binary locally to browse a repo's issues and other metadata offline. If you have commit access to the repo, you'll also be able to make changes that you can push later.
 
-Haxy repos will have a special branch where events will be stored. Any time project metadata is created or updated, an event will be created. There will be one event per commit and it will be stored as JSON in the commit message itself. The server will consume these events into its database when it receives them -- essentially, a form of event sourcing. See [an early version](https://www.youtube.com/watch?v=0kKKWfaYaKE) of this event system in action.
+Haxy repos will have a special branch where events will be stored. Any time project metadata is created or updated, an event will be created. There will be one event per commit and it will be stored as JSON in the commit message itself. The server will consume these events into its database when it receives them -- essentially, a form of event sourcing. See [an early look](https://www.youtube.com/watch?v=0kKKWfaYaKE) at this event system in action.
 
 ### 2. Provide a TUI that is served over SSH, in addition to a web UI
 
 Haxy will provide a text user interface (TUI) over SSH, so you can browse the Haxy instance entirely from your terminal. These are sometimes called SSH apps. One big advantage they have is that you are automatically authenticated with your SSH key, so creating an account on a Haxy instance and associating it with your SSH public key can be done instantly.
 
-Additionally, Haxy will provide a web UI for a more typical experience in a web browser. To avoid having separate UI codebases, the web UI will simply render the TUI in your browser. This sounds frightening but it can be done in an accessible way that is usable for screen readers and mobile devices. See [a more detailed look](https://www.youtube.com/watch?v=hDFNcvF80WU) at how the web UI will work.
+Additionally, Haxy will provide a web UI for a more typical experience in a web browser. To avoid having separate UI codebases, the web UI will simply render the TUI in your browser. This sounds frightening but it can be done in an accessible way that is usable for screen readers and mobile devices. See [an early look](https://www.youtube.com/watch?v=08AnxqnhTcs) at how the web UI will work.
 
 ## Why not Radicle?
 
@@ -64,6 +64,6 @@ git push origin HEAD:master
 
 After that, you'll see your repo in `server/repos/test`. It's MAGIC!
 
-To get an early look at the interface, you can run `zig build try`. This is a special build command that runs a server with fake data and launches the TUI.
+To get an early look at the interface, you can run `zig build try`. This is a special build command that runs a server with fake data and launches the TUI. On Arch-based distros you need to edit the `build.zig` so the `try` command has `.use_llvm = true`.
 
 *"C'mon Alex! You always dreamt about going on a big adventure! Let this be our first!" -- Lunar: Silver Star Story*
