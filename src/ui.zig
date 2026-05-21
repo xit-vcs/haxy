@@ -88,19 +88,48 @@ pub fn initRoot(allocator: std.mem.Allocator, page: *const pg.Page) !Widget {
 
 pub fn generateHtml(allocator: std.mem.Allocator, root: *Widget) ![]const u8 {
     const grid = root.getGrid() orelse return error.MissingGrid;
+    const root_focus = root.getFocus();
 
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
 
     for (0..grid.size.height) |y| {
+        // wrap runs of cells belonging to a focusable widget in a span tagged
+        // with that widget's focus id. CSS paints them with a pointer cursor;
+        // JS reads the id on click and dispatches focus directly.
+        var current_id: ?usize = null;
         for (0..grid.size.width) |x| {
+            const cell_id = cellFocusId(root_focus, x, y);
+            if (cell_id != current_id) {
+                if (current_id != null) try out.appendSlice(allocator, "</span>");
+                if (cell_id) |id| {
+                    var buf: [64]u8 = undefined;
+                    const tag = try std.fmt.bufPrint(&buf, "<span class=\"clickable\" data-focus-id=\"{}\">", .{id});
+                    try out.appendSlice(allocator, tag);
+                }
+                current_id = cell_id;
+            }
             const rune = grid.cells.items[try grid.cells.at(.{ y, x })].rune orelse " ";
             try appendEscapedHtml(allocator, &out, rune);
         }
+        if (current_id != null) try out.appendSlice(allocator, "</span>");
         try out.append(allocator, '\n');
     }
 
     return try out.toOwnedSlice(allocator);
+}
+
+fn cellFocusId(focus: *Focus, x: usize, y: usize) ?usize {
+    var iter = focus.children.iterator();
+    while (iter.next()) |entry| {
+        const child = entry.value_ptr.*;
+        if (!child.focus.focusable) continue;
+        const r = child.rect;
+        if (x >= r.x and y >= r.y and x < r.x + r.size.width and y < r.y + r.size.height) {
+            return entry.key_ptr.*;
+        }
+    }
+    return null;
 }
 
 fn appendEscapedHtml(allocator: std.mem.Allocator, out: *std.ArrayList(u8), input: []const u8) !void {
@@ -389,6 +418,11 @@ const UserRepoView = struct {
 
     pub fn build(self: *UserRepoView, constraint: layout.Constraint, root_focus: *Focus) !void {
         self.clearGrid();
+        // refresh the repo list here (rather than in input) so it stays in
+        // sync regardless of how the user selection changed — including
+        // clicks that go straight through setFocus without touching input.
+        // updateRepos is a no-op when the selected user hasn't changed.
+        try self.updateRepos();
         try self.box.build(constraint, root_focus);
     }
 
@@ -427,9 +461,6 @@ const UserRepoView = struct {
                         else => {},
                     }
                     try child.input(key, root_focus);
-                    if (current_index == user_list_index) {
-                        try self.updateRepos();
-                    }
                     break :blk current_index;
                 };
 

@@ -66,19 +66,9 @@ fn onKeyDown(key_code: u32) !void {
     try root_ptr.input(key, root_ptr.getFocus());
 }
 
-fn onMouseClick(x: usize, y: usize) !void {
+fn onMouseClick(focus_id: usize) !void {
     const root_ptr = if (root) |*root_value| root_value else return error.NotStarted;
-    const root_focus = root_ptr.getFocus();
-    var iter = root_focus.children.iterator();
-    while (iter.next()) |entry| {
-        const child = entry.value_ptr.*;
-        if (!child.focus.focusable) continue;
-        const r = child.rect;
-        if (x >= r.x and y >= r.y and x < r.x + r.size.width and y < r.y + r.size.height) {
-            try root_focus.setFocus(entry.key_ptr.*);
-            break;
-        }
-    }
+    try root_ptr.getFocus().setFocus(focus_id);
 }
 
 fn consoleLog(arg: []const u8) void {
@@ -126,8 +116,8 @@ export fn _onKeyDown(key_code: u32) void {
     };
 }
 
-export fn _onMouseClick(x: u32, y: u32) void {
-    onMouseClick(x, y) catch |err| {
+export fn _onMouseClick(focus_id: u32) void {
+    onMouseClick(focus_id) catch |err| {
         var buf: [256]u8 = undefined;
         const str = std.fmt.bufPrint(&buf, "onMouseClick: {}", .{err}) catch unreachable;
         consoleLog(str);
