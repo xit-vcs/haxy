@@ -1,10 +1,10 @@
 const std = @import("std");
 const srv = @import("./serve.zig");
-const ssh = @import("./ssh_helper.zig");
+const ssh = @import("./ssh_git.zig");
 
 pub const CommandKind = enum {
     serve,
-    ssh_helper,
+    ssh_git,
 };
 
 const Help = struct {
@@ -24,13 +24,13 @@ fn commandHelp(command_kind: CommandKind) Help {
             \\haxy serve --http-listen 127.0.0.1:8080 --ssh-listen 127.0.0.1:8081 --wui-listen 127.0.0.1:8082 --data-dir /srv/git
             ,
         },
-        .ssh_helper => .{
-            .name = "ssh-helper",
+        .ssh_git => .{
+            .name = "ssh-git",
             .descrip =
             \\a helper run by sshd that forwards Git SSH service requests to serve.
             ,
             .example =
-            \\haxy ssh-helper --ssh-connect 127.0.0.1:8081 --service upload-pack <directory>
+            \\haxy ssh-git --ssh-connect 127.0.0.1:8081 --service upload-pack <directory>
             ,
         },
     };
@@ -190,7 +190,7 @@ pub const CommandArgs = struct {
 /// if any additional allocation needs to be done, the arena inside the cmd args will be used.
 pub const Command = union(CommandKind) {
     serve: srv.Options,
-    ssh_helper: ssh.Options,
+    ssh_git: ssh.Options,
 
     pub fn initMaybe(cmd_args: *CommandArgs) !?Command {
         const command_kind = cmd_args.command_kind orelse return null;
@@ -215,7 +215,7 @@ pub const Command = union(CommandKind) {
 
                 return .{ .serve = options };
             },
-            .ssh_helper => {
+            .ssh_git => {
                 if (cmd_args.positional_args.len > 1) return null;
 
                 var options: ssh.Options = .{};
@@ -228,7 +228,7 @@ pub const Command = union(CommandKind) {
                 }
                 options.dir = if (cmd_args.positional_args.len == 1) cmd_args.positional_args[0] else null;
 
-                return .{ .ssh_helper = options };
+                return .{ .ssh_git = options };
             },
         }
     }

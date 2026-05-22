@@ -497,7 +497,7 @@ fn isReceivePack(
 
 fn readSshRequest(allocator: std.mem.Allocator, reader: *std.Io.Reader) !SshRequest {
     const magic = try readSshPreludeLine(reader);
-    if (!std.mem.eql(u8, magic, "haxy-ssh-helper-v1")) return error.InvalidSshMagic;
+    if (!std.mem.eql(u8, magic, "haxy-ssh-git-v1")) return error.InvalidSshMagic;
 
     const service_line = try readSshPreludeLine(reader);
     const service = parseSshService(stripPrefix(service_line, "service=") orelse return error.InvalidSshServiceLine) orelse return error.InvalidSshService;

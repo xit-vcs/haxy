@@ -4,7 +4,7 @@ const xit = @import("xit");
 const rp = xit.repo;
 const cmd = @import("./command.zig");
 const srv = @import("./serve.zig");
-const ssh = @import("./ssh_helper.zig");
+const ssh = @import("./ssh_git.zig");
 
 pub const RunOpts = struct {
     out: *std.Io.Writer,
@@ -78,7 +78,7 @@ pub fn run(
         .help => |cmd_kind_maybe| try cmd.printHelp(cmd_kind_maybe, run_opts.out),
         .cli => |cli_cmd| switch (cli_cmd) {
             .serve => |options| try srv.run(repo_kind, any_repo_opts, io, allocator, cwd_path, options, run_opts.err, {}),
-            .ssh_helper => |options| try ssh.run(io, allocator, options, run_opts.environ_map),
+            .ssh_git => |options| try ssh.run(io, allocator, options, run_opts.environ_map),
         },
     }
 }

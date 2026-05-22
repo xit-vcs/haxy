@@ -360,7 +360,7 @@ fn uploadPackCommand(
     comptime port: u16,
 ) ![]const u8 {
     return if (is_ssh)
-        std.fmt.allocPrint(allocator, "{s}/zig-out/bin/haxy ssh-helper --ssh-connect 127.0.0.1:{} --service upload-pack", .{ cwd_path, port + 1000 })
+        std.fmt.allocPrint(allocator, "{s}/zig-out/bin/haxy ssh-git --ssh-connect 127.0.0.1:{} --service upload-pack", .{ cwd_path, port + 1000 })
     else
         allocator.dupe(u8, "git-upload-pack");
 }
@@ -372,7 +372,7 @@ fn receivePackCommand(
     comptime port: u16,
 ) ![]const u8 {
     return if (is_ssh)
-        std.fmt.allocPrint(allocator, "{s}/zig-out/bin/haxy ssh-helper --ssh-connect 127.0.0.1:{} --service receive-pack", .{ cwd_path, port + 1000 })
+        std.fmt.allocPrint(allocator, "{s}/zig-out/bin/haxy ssh-git --ssh-connect 127.0.0.1:{} --service receive-pack", .{ cwd_path, port + 1000 })
     else
         allocator.dupe(u8, "git-receive-pack");
 }
