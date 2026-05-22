@@ -2,7 +2,8 @@ const std = @import("std");
 const xit = @import("xit");
 const rp = xit.repo;
 const ui = @import("./ui.zig");
-const pg = @import("./page.zig");
+const xitui = xit.xitui;
+const Focus = xitui.focus.Focus;
 
 const Embed = struct {
     path: []const u8,
@@ -87,15 +88,15 @@ fn renderIndexHtml(io: std.Io, allocator: std.mem.Allocator, admin_repo_path: []
     var repo_or_err = Repo.open(io, allocator, .{ .path = admin_repo_path });
     var page_arena = std.heap.ArenaAllocator.init(allocator);
     defer page_arena.deinit();
-    const page: pg.Page = if (repo_or_err) |*repo| blk: {
+    const page: ui.Page = if (repo_or_err) |*repo| blk: {
         defer repo.deinit(io, allocator);
-        break :blk .{ .user_repo = try .init(repo_opts, &page_arena, repo) };
-    } else |_| .{ .user_repo = .empty() };
+        break :blk .{ .users_and_repos = try .init(repo_opts, &page_arena, repo) };
+    } else |_| .{ .users_and_repos = .empty() };
 
     var root = try ui.initRoot(allocator, &page);
     defer root.deinit();
 
-    const content = try ui.generateHtml(allocator, &root);
+    const content = try generateHtml(allocator, &root);
     defer allocator.free(content);
 
     // serialize the page so the wasm side can parse it back without making
@@ -255,4 +256,63 @@ fn writeStaticResponse(
 fn logError(err: *std.Io.Writer, comptime fmt: []const u8, args: anytype) void {
     err.print(fmt, args) catch return;
     err.flush() catch {};
+}
+
+pub fn generateHtml(allocator: std.mem.Allocator, root: *ui.Widget) ![]const u8 {
+    const grid = root.getGrid() orelse return error.MissingGrid;
+    const root_focus = root.getFocus();
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    for (0..grid.size.height) |y| {
+        // wrap runs of cells belonging to a focusable widget in a span tagged
+        // with that widget's focus id. CSS paints them with a pointer cursor;
+        // JS reads the id on click and dispatches focus directly.
+        var current_id: ?usize = null;
+        for (0..grid.size.width) |x| {
+            const cell_id = cellFocusId(root_focus, x, y);
+            if (cell_id != current_id) {
+                if (current_id != null) try out.appendSlice(allocator, "</span>");
+                if (cell_id) |id| {
+                    var buf: [64]u8 = undefined;
+                    const tag = try std.fmt.bufPrint(&buf, "<span class=\"clickable\" data-focus-id=\"{}\">", .{id});
+                    try out.appendSlice(allocator, tag);
+                }
+                current_id = cell_id;
+            }
+            const rune = grid.cells.items[try grid.cells.at(.{ y, x })].rune orelse " ";
+            try appendEscapedHtml(allocator, &out, rune);
+        }
+        if (current_id != null) try out.appendSlice(allocator, "</span>");
+        try out.append(allocator, '\n');
+    }
+
+    return try out.toOwnedSlice(allocator);
+}
+
+fn cellFocusId(focus: *Focus, x: usize, y: usize) ?usize {
+    var iter = focus.children.iterator();
+    while (iter.next()) |entry| {
+        const child = entry.value_ptr.*;
+        if (!child.focus.focusable) continue;
+        const r = child.rect;
+        if (x >= r.x and y >= r.y and x < r.x + r.size.width and y < r.y + r.size.height) {
+            return entry.key_ptr.*;
+        }
+    }
+    return null;
+}
+
+fn appendEscapedHtml(allocator: std.mem.Allocator, out: *std.ArrayList(u8), input: []const u8) !void {
+    for (input) |ch| {
+        switch (ch) {
+            '&' => try out.appendSlice(allocator, "&amp;"),
+            '<' => try out.appendSlice(allocator, "&lt;"),
+            '>' => try out.appendSlice(allocator, "&gt;"),
+            '"' => try out.appendSlice(allocator, "&quot;"),
+            '\'' => try out.appendSlice(allocator, "&#39;"),
+            else => try out.append(allocator, ch),
+        }
+    }
 }

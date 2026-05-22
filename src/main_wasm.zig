@@ -1,6 +1,6 @@
 const std = @import("std");
 const ui = @import("./ui.zig");
-const pg = @import("./page.zig");
+const web = @import("./web.zig");
 const xitui = @import("xit").xitui;
 const inp = xitui.input;
 
@@ -10,7 +10,7 @@ var root: ?ui.Widget = null;
 
 fn updateHtml() !void {
     const root_ptr = if (root) |*root_value| root_value else return error.NotStarted;
-    const html = try ui.generateHtml(allocator, root_ptr);
+    const html = try web.generateHtml(allocator, root_ptr);
     defer allocator.free(html);
     setHtml(html);
 }
@@ -18,7 +18,7 @@ fn updateHtml() !void {
 // the page is allocated into this arena via parseFromSliceLeaky. it has
 // to outlive `root`, because `root` holds slices into the parsed strings.
 var page_arena: ?std.heap.ArenaAllocator = null;
-var page: ?pg.Page = null;
+var page: ?ui.Page = null;
 
 fn start(json: []const u8, max_width: u32) !void {
     if (page_arena) |*a| a.deinit();
@@ -26,7 +26,7 @@ fn start(json: []const u8, max_width: u32) !void {
 
     // alloc_always so the parsed strings live entirely inside the arena
     // and don't borrow from the caller's json buffer.
-    page = try std.json.parseFromSliceLeaky(pg.Page, (page_arena orelse unreachable).allocator(), json, .{
+    page = try std.json.parseFromSliceLeaky(ui.Page, (page_arena orelse unreachable).allocator(), json, .{
         .allocate = .alloc_always,
     });
 

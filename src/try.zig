@@ -8,7 +8,7 @@ const srv = hx.serve;
 const evt = hx.event;
 const xit = hx.xit;
 const rp = xit.repo;
-const Page = hx.page.Page;
+const ui = hx.ui;
 
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
@@ -39,7 +39,7 @@ pub fn main() !void {
     defer page_arena.deinit();
 
     // create the admin repo and build the Page from it
-    const page: Page = blk: {
+    const page: ui.Page = blk: {
         const work_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "server", "admin" });
         defer allocator.free(work_path);
 
@@ -184,7 +184,7 @@ pub fn main() !void {
         // consume events into the database
         try evt.consume(repo_opts, io, allocator, &repo, .{ .kind = .head, .name = "haxy/meta" });
 
-        break :blk .{ .user_repo = try .init(repo_opts, &page_arena, &repo) };
+        break :blk .{ .users_and_repos = try .init(repo_opts, &page_arena, &repo) };
     };
 
     // start the server
@@ -200,7 +200,7 @@ pub fn main() !void {
     const Runnable = struct {
         io: std.Io,
         allocator: std.mem.Allocator,
-        page: *const Page,
+        page: *const ui.Page,
 
         pub fn run(self: @This()) !void {
             // launch the TUI
