@@ -4,6 +4,7 @@ const rp = xit.repo;
 const hash = xit.hash;
 const ui = @import("./ui.zig");
 const web = @import("./web.zig");
+const serve_ssh_tui = @import("./serve_ssh_tui.zig");
 
 pub const Options = struct {
     http_listen: []const u8 = "127.0.0.1:8080",
@@ -63,6 +64,13 @@ pub fn run(
     var ssh_server = try ssh_address.listen(io, .{ .reuse_address = true });
     defer ssh_server.deinit(io);
 
+    // create tui listener
+
+    const tui_listen_address = try parseListenAddress(options.tui_listen);
+    const tui_address = try std.Io.net.IpAddress.parseIp4(tui_listen_address.host, tui_listen_address.port);
+    var tui_server = try tui_address.listen(io, .{ .reuse_address = true });
+    defer tui_server.deinit(io);
+
     // create wui listener
 
     const wui_listen_address = try parseListenAddress(options.wui_listen);
@@ -86,6 +94,11 @@ pub fn run(
     try err.flush();
 
     runSshListener(repo_kind, any_repo_opts, io, allocator, repo_root_path, &ssh_server, &tasks, err);
+
+    try err.print("serving TUI sessions on {s}\n", .{options.tui_listen});
+    try err.flush();
+
+    runTuiListener(io, allocator, admin_repo_path, &tui_server, &tasks, err);
 
     try err.print("serving web UI on http://{s}/\n", .{options.wui_listen});
     try err.flush();
@@ -350,6 +363,66 @@ fn runSshListener(
         .io = io,
         .allocator = allocator,
         .repo_root_path = repo_root_path,
+        .net_server = net_server,
+        .tasks = tasks,
+        .err = err,
+    }});
+}
+
+fn runTuiListener(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    admin_repo_path: []const u8,
+    net_server: *std.Io.net.Server,
+    tasks: *std.Io.Group,
+    err: *std.Io.Writer,
+) void {
+    const Listener = struct {
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        admin_repo_path: []const u8,
+        net_server: *std.Io.net.Server,
+        tasks: *std.Io.Group,
+        err: *std.Io.Writer,
+
+        fn run(ctx: @This()) void {
+            while (true) {
+                const stream = ctx.net_server.accept(ctx.io) catch |accept_err| {
+                    if (accept_err == error.Canceled) return;
+                    logError(ctx.err, "tui accept failed: {s}\n", .{@errorName(accept_err)});
+                    continue;
+                };
+
+                const Connection = struct {
+                    io: std.Io,
+                    allocator: std.mem.Allocator,
+                    admin_repo_path: []const u8,
+                    stream: std.Io.net.Stream,
+                    err: *std.Io.Writer,
+
+                    fn run(conn: @This()) void {
+                        defer conn.stream.close(conn.io);
+                        serve_ssh_tui.handleConnection(conn.io, conn.allocator, conn.stream, conn.admin_repo_path) catch |session_err| {
+                            logError(conn.err, "tui session failed: {s}\n", .{@errorName(session_err)});
+                        };
+                    }
+                };
+
+                ctx.tasks.async(ctx.io, Connection.run, .{Connection{
+                    .io = ctx.io,
+                    .allocator = ctx.allocator,
+                    .admin_repo_path = ctx.admin_repo_path,
+                    .stream = stream,
+                    .err = ctx.err,
+                }});
+            }
+        }
+    };
+
+    tasks.async(io, Listener.run, .{Listener{
+        .io = io,
+        .allocator = allocator,
+        .admin_repo_path = admin_repo_path,
         .net_server = net_server,
         .tasks = tasks,
         .err = err,

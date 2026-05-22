@@ -23,7 +23,7 @@ fn commandHelp(command_kind: CommandKind) Help {
             \\a long-running server forwarding receive-pack and upload-pack.
             ,
             .example =
-            \\haxy serve --http-listen 127.0.0.1:8080 --ssh-listen 127.0.0.1:8081 --wui-listen 127.0.0.1:8082 --data-dir /srv/git
+            \\haxy serve --http-listen 127.0.0.1:8080 --ssh-listen 127.0.0.1:8081 --tui-listen 127.0.0.1:8082 --wui-listen 127.0.0.1:8000 --data-dir /srv/git
             ,
         },
         .ssh_git => .{

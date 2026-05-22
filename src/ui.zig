@@ -26,7 +26,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, page: *const Page) !void {
     var last_grid = try Grid.init(allocator, last_size);
     defer last_grid.deinit();
 
-    while (!term.quit.load(.monotonic)) {
+    while (!terminal.shouldQuit()) {
         const grid_changed = try terminal.render(&root, &last_grid, &last_size);
 
         // process any inputs.
@@ -41,29 +41,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, page: *const Page) !void {
         // there may be an animation that requires more looping.
         var blocking = !grid_changed;
         while (try terminal.readKey(io, blocking)) |key| {
-            switch (key) {
-                .codepoint => |cp| if (cp == 'q') return else try root.input(key, root.getFocus()),
-                .mouse => |mouse| {
-                    if (mouse.action == .press and mouse.action.press == .left) {
-                        const root_focus = root.getFocus();
-                        var iter = root_focus.children.iterator();
-                        while (iter.next()) |entry| {
-                            const child = entry.value_ptr.*;
-                            if (!child.focus.focusable) continue;
-                            const r = child.rect;
-                            if (mouse.x >= r.x and mouse.y >= r.y and
-                                mouse.x < r.x + r.size.width and mouse.y < r.y + r.size.height)
-                            {
-                                try root_focus.setFocus(entry.key_ptr.*);
-                                break;
-                            }
-                        }
-                    } else {
-                        try root.input(key, root.getFocus());
-                    }
-                },
-                else => try root.input(key, root.getFocus()),
-            }
+            try inputKey(&root, key, &terminal);
             blocking = false;
         }
 
@@ -71,6 +49,37 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, page: *const Page) !void {
             .min_size = .{ .width = null, .height = null },
             .max_size = .{ .width = last_size.width, .height = last_size.height },
         }, root.getFocus());
+    }
+}
+
+// route a single decoded key into the widget tree, handling 'q'-to-quit and
+// mouse-click focus traversal along the way. shared between the tty event
+// loop (ui.run) and the SSH session event loop in serve_ssh_tui.zig.
+// `terminal` is whatever terminal type the caller is driving — it must
+// expose requestQuit().
+pub fn inputKey(root: *Widget, key: inp.Key, terminal: anytype) !void {
+    switch (key) {
+        .codepoint => |cp| if (cp == 'q') terminal.requestQuit() else try root.input(key, root.getFocus()),
+        .mouse => |mouse| {
+            if (mouse.action == .press and mouse.action.press == .left) {
+                const root_focus = root.getFocus();
+                var iter = root_focus.children.iterator();
+                while (iter.next()) |entry| {
+                    const child = entry.value_ptr.*;
+                    if (!child.focus.focusable) continue;
+                    const r = child.rect;
+                    if (mouse.x >= r.x and mouse.y >= r.y and
+                        mouse.x < r.x + r.size.width and mouse.y < r.y + r.size.height)
+                    {
+                        try root_focus.setFocus(entry.key_ptr.*);
+                        break;
+                    }
+                }
+            } else {
+                try root.input(key, root.getFocus());
+            }
+        },
+        else => try root.input(key, root.getFocus()),
     }
 }
 
