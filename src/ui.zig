@@ -234,7 +234,12 @@ const SelectableList = struct {
 
         self.scroll.x = 0;
         self.scroll.y = 0;
-        self.scroll.getFocus().child_id = null;
+        // keep the focus tree in sync with the widget tree so setFocus can
+        // descend even when the pane isn't laid out this build (e.g. narrow
+        // terminal where only the focused pane fits). build's clear+addChild
+        // would do this otherwise, but it gets skipped for unbuilt panes.
+        inner_box.getFocus().clear();
+        inner_box.getFocus().child_id = null;
 
         for (items) |item| {
             const line = try self.allocator.dupe(u8, item);
@@ -247,23 +252,20 @@ const SelectableList = struct {
             errdefer text_box.deinit();
             text_box.getFocus().focusable = true;
             try inner_box.children.put(self.allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
+            try inner_box.getFocus().addChild(text_box.getFocus(), .{ .width = 0, .height = 0 }, 0, 0);
         }
 
         if (inner_box.children.count() > 0) {
-            self.scroll.getFocus().child_id = inner_box.children.keys()[0];
+            inner_box.getFocus().child_id = inner_box.children.keys()[0];
         }
     }
 
     pub fn build(self: *SelectableList, constraint: layout.Constraint, root_focus: *Focus) !void {
         self.clearGrid();
-        const pane_has_focus = root_focus.grandchild_id == self.getFocus().id;
         const children = &self.scroll.child.box.children;
         for (children.keys(), children.values()) |id, *item| {
             item.widget.text_box.options.border_style = if (self.getFocus().child_id == id)
-                // pane_has_focus will be true if the widgets weren't yet in
-                // the focus tree, and so setFocus stopped at the pane itself.
-                // in this case, it should be treated as if it's selected.
-                (if (root_focus.grandchild_id == id or pane_has_focus) .double else .single)
+                (if (root_focus.grandchild_id == id) .double else .single)
             else
                 .hidden;
         }
