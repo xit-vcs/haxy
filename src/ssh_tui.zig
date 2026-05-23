@@ -192,7 +192,7 @@ pub fn run(
     const user_key = options.user_key orelse return error.MissingUserKey;
     const term_name = environ_map.get("TERM") orelse "xterm";
 
-    const initial_size = try getWinSize();
+    const initial_size = try getWinSize(io);
 
     const conn = try ssh.parseConnectAddress(options.tui_connect);
     const address = try std.Io.net.IpAddress.parseIp4(conn.host, conn.port);
@@ -208,11 +208,7 @@ pub fn run(
 
     // self-pipe: SIGWINCH handler writes a byte, stdinProxy polls on the
     // read end and converts it into a resize frame.
-    var pipe_fds: [2]i32 = undefined;
-    const o_flags: std.os.linux.O = .{ .NONBLOCK = true, .CLOEXEC = true };
-    if (std.posix.errno(std.os.linux.pipe2(&pipe_fds, o_flags)) != .SUCCESS) {
-        return error.PipeFailed;
-    }
+    const pipe_fds = try std.Io.Threaded.pipe2(.{ .NONBLOCK = true, .CLOEXEC = true });
     defer {
         sigwinch_pipe_write = -1;
         _ = std.posix.system.close(pipe_fds[1]);
@@ -276,10 +272,14 @@ const WinSize = struct { width: u16, height: u16 };
 const default_width: u16 = 80;
 const default_height: u16 = 24;
 
-fn getWinSize() !WinSize {
+fn getWinSize(io: std.Io) !WinSize {
     var ws: std.posix.winsize = undefined;
-    const rc = std.os.linux.ioctl(std.posix.STDOUT_FILENO, std.posix.T.IOCGWINSZ, @intFromPtr(&ws));
-    if (std.posix.errno(rc) != .SUCCESS) return error.IoctlFailed;
+    const result = (try io.operate(.{ .device_io_control = .{
+        .file = std.Io.File.stdout(),
+        .code = std.posix.T.IOCGWINSZ,
+        .arg = &ws,
+    } })).device_io_control;
+    if (result < 0) return error.IoctlFailed;
     return .{
         .width = if (ws.col == 0) default_width else ws.col,
         .height = if (ws.row == 0) default_height else ws.row,
@@ -309,7 +309,7 @@ fn stdinProxy(ctx: StdinThreadCtx) void {
             // all collapse into one resize-frame emission.
             var drain: [16]u8 = undefined;
             _ = std.posix.read(ctx.pipe_read, &drain) catch {};
-            if (getWinSize()) |size| {
+            if (getWinSize(ctx.io)) |size| {
                 writeResizeFrame(w, size.width, size.height) catch return;
                 w.flush() catch return;
             } else |_| {}
