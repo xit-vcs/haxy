@@ -89,7 +89,6 @@ fn Server(
                 .ssh => struct {
                     io: std.Io,
                     allocator: std.mem.Allocator,
-                    sshd_process: ?std.process.Child,
                     serve_process: ?std.process.Child,
                 },
             },
@@ -111,138 +110,26 @@ fn Server(
                     },
                     .raw => unreachable,
                     .ssh => {
-                        // create priv host key
-                        const host_key_file = try std.Io.Dir.cwd().createFile(io, temp_dir_name ++ "/host_key", .{});
-                        defer host_key_file.close(io);
-                        try host_key_file.writeStreamingAll(io,
-                            \\-----BEGIN OPENSSH PRIVATE KEY-----
-                            \\b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAaAAAABNlY2RzYS
-                            \\1zaGEyLW5pc3RwMjU2AAAACG5pc3RwMjU2AAAAQQS1ppUfk8n7yvVKEgz3tXjt4q76VGuj
-                            \\LcQlRwmogzovV40LLcX0aTObZlQaLWfzJMNpCa/ztMpQlr86nsarE4lEAAAAqLe43zK3uN
-                            \\8yAAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBLWmlR+TyfvK9UoS
-                            \\DPe1eO3irvpUa6MtxCVHCaiDOi9XjQstxfRpM5tmVBotZ/Mkw2kJr/O0ylCWvzqexqsTiU
-                            \\QAAAAgQ+LCk30ZNJxb2Da5JL+QOFWCMf7bgXCWcEzhEGGvFWYAAAALcmFkYXJAcm9hcmsB
-                            \\AgMEBQ==
-                            \\-----END OPENSSH PRIVATE KEY-----
-                            \\
-                        );
-                        if (.windows != builtin.os.tag) {
-                            try host_key_file.setPermissions(io, @enumFromInt(0o600));
-                        }
+                        // generate a fresh client ed25519 key. haxy's
+                        // in-process SSH accepts any ed25519 key whose
+                        // signature verifies, so there's no authorized_keys
+                        // file or sshd setup to do.
+                        const priv_key_path = try std.fs.path.join(allocator, &.{ temp_dir_name, "key" });
+                        defer allocator.free(priv_key_path);
 
-                        // create priv client key
-                        const priv_key_file = try std.Io.Dir.cwd().createFile(io, temp_dir_name ++ "/key", .{});
-                        defer priv_key_file.close(io);
-                        try priv_key_file.writeStreamingAll(io,
-                            \\-----BEGIN OPENSSH PRIVATE KEY-----
-                            \\b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
-                            \\QyNTUxOQAAACCniLPJiaooAWecvOCeAjoJwCSeWxzysvpTNkpYjF22JgAAAJA+7hikPu4Y
-                            \\pAAAAAtzc2gtZWQyNTUxOQAAACCniLPJiaooAWecvOCeAjoJwCSeWxzysvpTNkpYjF22Jg
-                            \\AAAEDVlopOMnKt/7by/IA8VZvQXUS/O6VLkixOqnnahUdPCKeIs8mJqigBZ5y84J4COgnA
-                            \\JJ5bHPKy+lM2SliMXbYmAAAAC3JhZGFyQHJvYXJrAQI=
-                            \\-----END OPENSSH PRIVATE KEY-----
-                            \\
-                        );
-                        if (.windows != builtin.os.tag) {
-                            try priv_key_file.setPermissions(io, @enumFromInt(0o600));
-                        }
+                        var keygen = try std.process.spawn(io, .{
+                            .argv = &.{ "ssh-keygen", "-t", "ed25519", "-N", "", "-q", "-f", priv_key_path },
+                            .stdin = .ignore,
+                            .stdout = .ignore,
+                            .stderr = .ignore,
+                        });
+                        const term = try keygen.wait(io);
+                        try std.testing.expect(term == .exited and term.exited == 0);
 
-                        // create pub key
-                        const pub_key_file = try std.Io.Dir.cwd().createFile(io, temp_dir_name ++ "/key.pub", .{});
-                        defer pub_key_file.close(io);
-                        try pub_key_file.writeStreamingAll(io,
-                            \\ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKeIs8mJqigBZ5y84J4COgnAJJ5bHPKy+lM2SliMXbYm radar@roark
-                            \\
-                        );
-                        if (.windows != builtin.os.tag) {
-                            try pub_key_file.setPermissions(io, @enumFromInt(0o600));
-                        }
-
-                        // create authorized_keys file
-                        const auth_keys_file = try std.Io.Dir.cwd().createFile(io, temp_dir_name ++ "/authorized_keys", .{});
-                        defer auth_keys_file.close(io);
-                        try auth_keys_file.writeStreamingAll(io,
-                            \\ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKeIs8mJqigBZ5y84J4COgnAJJ5bHPKy+lM2SliMXbYm radar@roark
-                            \\
-                        );
-                        if (.windows != builtin.os.tag) {
-                            try auth_keys_file.setPermissions(io, @enumFromInt(0o600));
-                        }
-
-                        // create known_hosts file
-                        const known_hosts_file = try std.Io.Dir.cwd().createFile(io, temp_dir_name ++ "/known_hosts", .{});
-                        defer known_hosts_file.close(io);
-                        const port_str = std.fmt.comptimePrint("{}", .{port});
-                        try known_hosts_file.writeStreamingAll(io, "[localhost]:" ++ port_str ++ " ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBLWmlR+TyfvK9UoSDPe1eO3irvpUa6MtxCVHCaiDOi9XjQstxfRpM5tmVBotZ/Mkw2kJr/O0ylCWvzqexqsTiUQ=");
-                        if (.windows != builtin.os.tag) {
-                            try known_hosts_file.setPermissions(io, @enumFromInt(0o600));
-                        }
-
-                        // create sshd_config file
-                        const sshd_config_str = blk: {
-                            // SetEnv PATH=... allows us to propagate the test process's PATH
-                            // to the spawned login shell (in sshd).
-                            //
-                            // without it, shells that don't auto-resource PATH on startup (e.g. nushell
-                            // on NixOS) through /etc/set-environment will fail to find
-                            // git-upload-pack / git-receive-pack.
-                            const base_config =
-                                \\AuthenticationMethods publickey
-                                \\PubkeyAuthentication yes
-                                \\PasswordAuthentication no
-                                \\StrictModes no
-                                //SetEnv PATH={s} -- if we find $PATH defined.
-                            ;
-                            var env_map = try std.process.Environ.createMap(std.testing.io_instance.environ.process_environ, allocator);
-                            defer env_map.deinit();
-
-                            const config_str = if (env_map.get("PATH")) |path_str|
-                                try std.fmt.allocPrint(allocator, "{s}\n" ++ "SetEnv PATH={s}\n", .{ base_config, path_str })
-                            else
-                                try std.fmt.allocPrint(allocator, "{s}", .{base_config});
-
-                            break :blk config_str;
-                        };
-                        defer allocator.free(sshd_config_str);
-
-                        const sshd_config_file = try std.Io.Dir.cwd().createFile(io, temp_dir_name ++ "/sshd_config", .{});
-                        defer sshd_config_file.close(io);
-                        try sshd_config_file.writeStreamingAll(io, sshd_config_str);
-                        if (.windows != builtin.os.tag) {
-                            try sshd_config_file.setPermissions(io, @enumFromInt(0o600));
-                        }
-
-                        // create sshd.sh contents
-                        const cwd_path = try std.process.currentPathAlloc(io, allocator);
-                        defer allocator.free(cwd_path);
-                        const host_key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "host_key" });
-                        defer allocator.free(host_key_path);
-                        const auth_keys_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "authorized_keys" });
-                        defer allocator.free(auth_keys_path);
-                        const sshd_contents = try std.fmt.allocPrint(
-                            allocator,
-                            "#!/bin/sh\nexec $(which sshd) -p {} -f sshd_config -h \"{s}\" -D -e -o AuthorizedKeysFile=\"{s}\"",
-                            .{ port, host_key_path, auth_keys_path },
-                        );
-                        defer allocator.free(sshd_contents);
-
-                        // if path has a space char, it fucks up sshd
-                        try std.testing.expect(null == std.mem.indexOfScalar(u8, auth_keys_path, ' '));
-
-                        // create sshd.sh
-                        {
-                            const sshd_file = try std.Io.Dir.cwd().createFile(io, temp_dir_name ++ "/sshd.sh", .{});
-                            defer sshd_file.close(io);
-                            try sshd_file.writeStreamingAll(io, sshd_contents);
-                            if (.windows != builtin.os.tag) {
-                                try sshd_file.setPermissions(io, .executable_file);
-                            }
-                        }
                         return .{
                             .core = .{
                                 .io = io,
                                 .allocator = allocator,
-                                .sshd_process = null,
                                 .serve_process = null,
                             },
                         };
@@ -273,41 +160,21 @@ fn Server(
                     },
                     .raw => unreachable,
                     .ssh => {
-                        std.debug.assert(self.core.sshd_process == null);
                         std.debug.assert(self.core.serve_process == null);
 
                         const cwd_path = try std.process.currentPathAlloc(self.core.io, self.core.allocator);
                         defer self.core.allocator.free(cwd_path);
                         const haxy_path = try std.fs.path.join(self.core.allocator, &.{ cwd_path, "zig-out/bin/haxy" });
                         defer self.core.allocator.free(haxy_path);
-                        const ssh_listen_arg = std.fmt.comptimePrint("127.0.0.1:{}", .{port + 1000});
-                        const http_listen_arg = std.fmt.comptimePrint("127.0.0.1:{}", .{port + 2000});
+                        // haxy's in-process SSH listens on `port`. give the
+                        // (unused-by-this-test) HTTP listener a unique port
+                        // too, so concurrent tests don't collide on 8080.
+                        const ssh_listen_arg = std.fmt.comptimePrint("127.0.0.1:{}", .{port});
+                        const http_listen_arg = std.fmt.comptimePrint("127.0.0.1:{}", .{port + 1000});
 
                         self.core.serve_process = try std.process.spawn(self.core.io, .{
                             .argv = &.{ haxy_path, "serve", "--http-listen", http_listen_arg, "--ssh-listen", ssh_listen_arg, "--data-dir", temp_dir_name },
                             .stdin = .ignore,
-                            .stdout = .ignore,
-                            .stderr = .ignore,
-                        });
-
-                        const serve_address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port + 1000);
-                        for (0..50) |_| {
-                            const stream = serve_address.connect(self.core.io, .{ .mode = .stream }) catch {
-                                try std.Io.sleep(self.core.io, .fromMilliseconds(100), .real);
-                                continue;
-                            };
-                            var probe_buf = [_]u8{0} ** 16;
-                            var probe_writer = stream.writer(self.core.io, &probe_buf);
-                            try probe_writer.interface.writeAll("probe\n");
-                            try probe_writer.interface.flush();
-                            stream.close(self.core.io);
-                            break;
-                        }
-
-                        self.core.sshd_process = try std.process.spawn(self.core.io, .{
-                            .argv = &.{"./sshd.sh"},
-                            .cwd = .{ .path = temp_dir_name },
-                            .stdin = .pipe,
                             .stdout = .ignore,
                             .stderr = .ignore,
                         });
@@ -338,10 +205,6 @@ fn Server(
                     },
                     .raw => unreachable,
                     .ssh => {
-                        if (self.core.sshd_process) |*process| {
-                            _ = process.kill(self.core.io);
-                            self.core.sshd_process = null;
-                        }
                         if (self.core.serve_process) |*process| {
                             _ = process.kill(self.core.io);
                             self.core.serve_process = null;
@@ -351,30 +214,6 @@ fn Server(
             }
         }
     };
-}
-
-fn uploadPackCommand(
-    comptime is_ssh: bool,
-    allocator: std.mem.Allocator,
-    cwd_path: []const u8,
-    comptime port: u16,
-) ![]const u8 {
-    return if (is_ssh)
-        std.fmt.allocPrint(allocator, "{s}/zig-out/bin/haxy ssh-git --ssh-connect 127.0.0.1:{} --service upload-pack", .{ cwd_path, port + 1000 })
-    else
-        allocator.dupe(u8, "git-upload-pack");
-}
-
-fn receivePackCommand(
-    comptime is_ssh: bool,
-    allocator: std.mem.Allocator,
-    cwd_path: []const u8,
-    comptime port: u16,
-) ![]const u8 {
-    return if (is_ssh)
-        std.fmt.allocPrint(allocator, "{s}/zig-out/bin/haxy ssh-git --ssh-connect 127.0.0.1:{} --service receive-pack", .{ cwd_path, port + 1000 })
-    else
-        allocator.dupe(u8, "git-receive-pack");
 }
 
 fn testFetch(
@@ -472,19 +311,17 @@ fn testFetch(
         .file => false,
         .wire => |wire_kind| .ssh == wire_kind,
     };
+    // haxy generates a fresh host key on every run, so don't try to record
+    // it. accept the unknown host and skip writing to known_hosts. the key
+    // identity flag picks the ed25519 key created in Server.init.
     const ssh_cmd_maybe: ?[]const u8 = if (is_ssh) blk: {
-        const known_hosts_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "known_hosts" });
-        defer allocator.free(known_hosts_path);
-
         const priv_key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "key" });
         defer allocator.free(priv_key_path);
 
-        break :blk try std.fmt.allocPrint(allocator, "ssh -o UserKnownHostsFile=\"{s}\" -o IdentityFile=\"{s}\"", .{ known_hosts_path, priv_key_path });
+        break :blk try std.fmt.allocPrint(allocator, "ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o IdentityFile=\"{s}\"", .{priv_key_path});
     } else null;
     defer if (ssh_cmd_maybe) |ssh_cmd| allocator.free(ssh_cmd);
 
-    const upload_pack_command = try uploadPackCommand(is_ssh, allocator, cwd_path, port);
-    defer allocator.free(upload_pack_command);
 
     try client_repo.fetch(
         io,
@@ -492,7 +329,6 @@ fn testFetch(
         "origin",
         .{ .refspecs = refspecs, .wire = .{ .ssh = .{
             .command = ssh_cmd_maybe,
-            .upload_pack_command = upload_pack_command,
         } } },
     );
 
@@ -526,7 +362,6 @@ fn testFetch(
         "origin",
         .{ .refspecs = refspecs, .wire = .{ .ssh = .{
             .command = ssh_cmd_maybe,
-            .upload_pack_command = upload_pack_command,
         } } },
     );
 
@@ -641,21 +476,17 @@ fn testPush(
         .file => false,
         .wire => |wire_kind| .ssh == wire_kind,
     };
+    // haxy generates a fresh host key on every run, so don't try to record
+    // it. accept the unknown host and skip writing to known_hosts. the key
+    // identity flag picks the ed25519 key created in Server.init.
     const ssh_cmd_maybe: ?[]const u8 = if (is_ssh) blk: {
-        const known_hosts_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "known_hosts" });
-        defer allocator.free(known_hosts_path);
-
         const priv_key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "key" });
         defer allocator.free(priv_key_path);
 
-        break :blk try std.fmt.allocPrint(allocator, "ssh -o UserKnownHostsFile=\"{s}\" -o IdentityFile=\"{s}\"", .{ known_hosts_path, priv_key_path });
+        break :blk try std.fmt.allocPrint(allocator, "ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o IdentityFile=\"{s}\"", .{priv_key_path});
     } else null;
     defer if (ssh_cmd_maybe) |ssh_cmd| allocator.free(ssh_cmd);
 
-    const upload_pack_command = try uploadPackCommand(is_ssh, allocator, cwd_path, port);
-    defer allocator.free(upload_pack_command);
-    const receive_pack_command = try receivePackCommand(is_ssh, allocator, cwd_path, port);
-    defer allocator.free(receive_pack_command);
 
     try client_repo.push(
         io,
@@ -665,7 +496,6 @@ fn testPush(
         false,
         .{ .refspecs = refspecs, .wire = .{ .ssh = .{
             .command = ssh_cmd_maybe,
-            .receive_pack_command = receive_pack_command,
         } } },
     );
 
@@ -704,7 +534,6 @@ fn testPush(
         false,
         .{ .wire = .{ .ssh = .{
             .command = ssh_cmd_maybe,
-            .receive_pack_command = receive_pack_command,
         } } },
     ));
 
@@ -726,7 +555,6 @@ fn testPush(
         false,
         .{ .wire = .{ .ssh = .{
             .command = ssh_cmd_maybe,
-            .receive_pack_command = receive_pack_command,
         } } },
     ));
 
@@ -737,7 +565,6 @@ fn testPush(
         "origin",
         .{ .wire = .{ .ssh = .{
             .command = ssh_cmd_maybe,
-            .upload_pack_command = upload_pack_command,
         } } },
     );
 
@@ -750,7 +577,6 @@ fn testPush(
         false,
         .{ .wire = .{ .ssh = .{
             .command = ssh_cmd_maybe,
-            .receive_pack_command = receive_pack_command,
         } } },
     ));
 
@@ -773,8 +599,7 @@ fn testPush(
                 true,
                 .{ .wire = .{ .ssh = .{
                     .command = ssh_cmd_maybe,
-                    .receive_pack_command = receive_pack_command,
-                } } },
+                        } } },
             );
 
             // verify the server ref was not updated (push was denied)
@@ -797,7 +622,6 @@ fn testPush(
         true,
         .{ .wire = .{ .ssh = .{
             .command = ssh_cmd_maybe,
-            .receive_pack_command = receive_pack_command,
         } } },
     );
 
@@ -816,7 +640,6 @@ fn testPush(
         false,
         .{ .wire = .{ .ssh = .{
             .command = ssh_cmd_maybe,
-            .receive_pack_command = receive_pack_command,
         } } },
     );
 
@@ -893,19 +716,17 @@ fn testPushCreatesMissingRepo(
         .file => false,
         .wire => |wire_kind| .ssh == wire_kind,
     };
+    // haxy generates a fresh host key on every run, so don't try to record
+    // it. accept the unknown host and skip writing to known_hosts. the key
+    // identity flag picks the ed25519 key created in Server.init.
     const ssh_cmd_maybe: ?[]const u8 = if (is_ssh) blk: {
-        const known_hosts_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "known_hosts" });
-        defer allocator.free(known_hosts_path);
-
         const priv_key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "key" });
         defer allocator.free(priv_key_path);
 
-        break :blk try std.fmt.allocPrint(allocator, "ssh -o UserKnownHostsFile=\"{s}\" -o IdentityFile=\"{s}\"", .{ known_hosts_path, priv_key_path });
+        break :blk try std.fmt.allocPrint(allocator, "ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o IdentityFile=\"{s}\"", .{priv_key_path});
     } else null;
     defer if (ssh_cmd_maybe) |ssh_cmd| allocator.free(ssh_cmd);
 
-    const receive_pack_command = try receivePackCommand(is_ssh, allocator, cwd_path, port);
-    defer allocator.free(receive_pack_command);
 
     try client_repo.push(
         io,
@@ -915,7 +736,6 @@ fn testPushCreatesMissingRepo(
         false,
         .{ .refspecs = &.{"refs/tags/1.0.0:refs/tags/1.0.0"}, .wire = .{ .ssh = .{
             .command = ssh_cmd_maybe,
-            .receive_pack_command = receive_pack_command,
         } } },
     );
 
@@ -1028,19 +848,17 @@ fn testClone(
         .wire => |wire_kind| .ssh == wire_kind,
     };
 
-    const upload_pack_command = try uploadPackCommand(is_ssh, allocator, cwd_path, port);
-    defer allocator.free(upload_pack_command);
 
     if (shell_out_to_git) {
         const priv_key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "key" });
         defer allocator.free(priv_key_path);
-        const ssh_config_arg = try std.fmt.allocPrint(allocator, "core.sshCommand=ssh -o StrictHostKeyChecking=no -o IdentityFile={s}", .{priv_key_path});
+        const ssh_config_arg = try std.fmt.allocPrint(allocator, "core.sshCommand=ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o IdentityFile={s}", .{priv_key_path});
         defer allocator.free(ssh_config_arg);
 
         {
             var process = try std.process.spawn(io, .{
                 .argv = if (is_ssh)
-                    &.{ "git", "-c", ssh_config_arg, "clone", "--upload-pack", upload_pack_command, "--depth", "1", remote_url, "client" }
+                    &.{ "git", "-c", ssh_config_arg, "clone", "--depth", "1", remote_url, "client" }
                 else
                     &.{ "git", "clone", "--depth", "1", remote_url, "client" },
                 .cwd = .{ .path = temp_path },
@@ -1073,7 +891,7 @@ fn testClone(
         {
             var process = try std.process.spawn(io, .{
                 .argv = if (is_ssh)
-                    &.{ "git", "-c", ssh_config_arg, "pull", "--upload-pack", upload_pack_command, "--unshallow" }
+                    &.{ "git", "-c", ssh_config_arg, "pull", "--unshallow" }
                 else
                     &.{ "git", "pull", "--unshallow" },
                 .cwd = .{ .path = client_path },
@@ -1099,7 +917,7 @@ fn testClone(
         {
             var process = try std.process.spawn(io, .{
                 .argv = if (is_ssh)
-                    &.{ "git", "-c", ssh_config_arg, "clone", "--upload-pack", upload_pack_command, "--shallow-since=2000-01-01", remote_url, "client" }
+                    &.{ "git", "-c", ssh_config_arg, "clone", "--shallow-since=2000-01-01", remote_url, "client" }
                 else
                     &.{ "git", "clone", "--shallow-since=2000-01-01", remote_url, "client" },
                 .cwd = .{ .path = temp_path },
@@ -1125,7 +943,7 @@ fn testClone(
         {
             var process = try std.process.spawn(io, .{
                 .argv = if (is_ssh)
-                    &.{ "git", "-c", ssh_config_arg, "clone", "--upload-pack", upload_pack_command, "--shallow-exclude=v1", remote_url, "client" }
+                    &.{ "git", "-c", ssh_config_arg, "clone", "--shallow-exclude=v1", remote_url, "client" }
                 else
                     &.{ "git", "clone", "--shallow-exclude=v1", remote_url, "client" },
                 .cwd = .{ .path = temp_path },
@@ -1151,7 +969,7 @@ fn testClone(
         {
             var process = try std.process.spawn(io, .{
                 .argv = if (is_ssh)
-                    &.{ "git", "-c", ssh_config_arg, "clone", "--upload-pack", upload_pack_command, "--filter=blob:none", remote_url, "client" }
+                    &.{ "git", "-c", ssh_config_arg, "clone", "--filter=blob:none", remote_url, "client" }
                 else
                     &.{ "git", "clone", "--filter=blob:none", remote_url, "client" },
                 .cwd = .{ .path = temp_path },
@@ -1177,7 +995,7 @@ fn testClone(
         {
             var process = try std.process.spawn(io, .{
                 .argv = if (is_ssh)
-                    &.{ "git", "-c", ssh_config_arg, "clone", "--upload-pack", upload_pack_command, "--filter=tree:0", remote_url, "client" }
+                    &.{ "git", "-c", ssh_config_arg, "clone", "--filter=tree:0", remote_url, "client" }
                 else
                     &.{ "git", "clone", "--filter=tree:0", remote_url, "client" },
                 .cwd = .{ .path = temp_path },
@@ -1198,13 +1016,10 @@ fn testClone(
         }
     } else {
         const ssh_cmd_maybe: ?[]const u8 = if (is_ssh) blk: {
-            const known_hosts_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "known_hosts" });
-            defer allocator.free(known_hosts_path);
-
             const priv_key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "key" });
             defer allocator.free(priv_key_path);
 
-            break :blk try std.fmt.allocPrint(allocator, "ssh -o UserKnownHostsFile=\"{s}\" -o IdentityFile=\"{s}\"", .{ known_hosts_path, priv_key_path });
+            break :blk try std.fmt.allocPrint(allocator, "ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o IdentityFile=\"{s}\"", .{priv_key_path});
         } else null;
         defer if (ssh_cmd_maybe) |ssh_cmd| allocator.free(ssh_cmd);
 
@@ -1217,8 +1032,7 @@ fn testClone(
             client_path,
             .{ .wire = .{ .ssh = .{
                 .command = ssh_cmd_maybe,
-                .upload_pack_command = upload_pack_command,
-            } } },
+                } } },
         );
         defer client_repo.deinit(io, allocator);
 
@@ -1330,19 +1144,17 @@ fn testFetchLarge(
         .wire => |wire_kind| .ssh == wire_kind,
     };
 
-    const upload_pack_command = try uploadPackCommand(is_ssh, allocator, cwd_path, port);
-    defer allocator.free(upload_pack_command);
 
     if (shell_out_to_git) {
         const priv_key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "key" });
         defer allocator.free(priv_key_path);
-        const ssh_config_arg = try std.fmt.allocPrint(allocator, "core.sshCommand=ssh -o StrictHostKeyChecking=no -o IdentityFile={s}", .{priv_key_path});
+        const ssh_config_arg = try std.fmt.allocPrint(allocator, "core.sshCommand=ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o IdentityFile={s}", .{priv_key_path});
         defer allocator.free(ssh_config_arg);
 
         {
             var process = try std.process.spawn(io, .{
                 .argv = if (is_ssh)
-                    &.{ "git", "-c", ssh_config_arg, "pull", "--upload-pack", upload_pack_command, "origin", "master" }
+                    &.{ "git", "-c", ssh_config_arg, "pull", "origin", "master" }
                 else
                     &.{ "git", "pull", "origin", "master" },
                 .cwd = .{ .path = client_path },
@@ -1375,7 +1187,7 @@ fn testFetchLarge(
         {
             var process = try std.process.spawn(io, .{
                 .argv = if (is_ssh)
-                    &.{ "git", "-c", ssh_config_arg, "fetch", "--upload-pack", upload_pack_command, "origin", "master" }
+                    &.{ "git", "-c", ssh_config_arg, "fetch", "origin", "master" }
                 else
                     &.{ "git", "fetch", "origin", "master" },
                 .cwd = .{ .path = client_path },
@@ -1416,8 +1228,7 @@ fn testFetchLarge(
             "origin",
             .{ .refspecs = refspecs, .wire = .{ .ssh = .{
                 .command = ssh_cmd_maybe,
-                .upload_pack_command = upload_pack_command,
-            } } },
+                } } },
         );
 
         // update the working dir
@@ -1565,19 +1376,17 @@ fn testPushLarge(
         .wire => |wire_kind| .ssh == wire_kind,
     };
 
-    const receive_pack_command = try receivePackCommand(is_ssh, allocator, cwd_path, port);
-    defer allocator.free(receive_pack_command);
 
     if (shell_out_to_git) {
         const priv_key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "key" });
         defer allocator.free(priv_key_path);
-        const ssh_config_arg = try std.fmt.allocPrint(allocator, "core.sshCommand=ssh -o StrictHostKeyChecking=no -o IdentityFile={s}", .{priv_key_path});
+        const ssh_config_arg = try std.fmt.allocPrint(allocator, "core.sshCommand=ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o IdentityFile={s}", .{priv_key_path});
         defer allocator.free(ssh_config_arg);
 
         // shell out to git so it will send delta objects
         var process = try std.process.spawn(io, .{
             .argv = if (is_ssh)
-                &.{ "git", "-c", ssh_config_arg, "push", "--receive-pack", receive_pack_command, "origin", "master" }
+                &.{ "git", "-c", ssh_config_arg, "push", "origin", "master" }
             else
                 &.{ "git", "push", "origin", "master" },
             .cwd = .{ .path = client_path },
@@ -1609,8 +1418,7 @@ fn testPushLarge(
             false,
             .{ .wire = .{ .ssh = .{
                 .command = ssh_cmd_maybe,
-                .receive_pack_command = receive_pack_command,
-            } } },
+                } } },
         );
 
         if (transport_def == .file) {

@@ -3,7 +3,6 @@
 //! out safely.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const hx = @import("haxy");
 const srv = hx.serve;
 const evt = hx.event;
@@ -192,262 +191,61 @@ pub fn main(init: std.process.Init) !void {
 
     // start the server
 
-    var launch_sshd = false;
+    var cli = false;
 
     var arg_it = try init.minimal.args.iterateAllocator(allocator);
     defer arg_it.deinit();
     _ = arg_it.skip();
     while (arg_it.next()) |arg| {
-        if (std.mem.eql(u8, "--sshd", arg)) {
-            launch_sshd = true;
+        if (std.mem.eql(u8, "--cli", arg)) {
+            cli = true;
         }
     }
 
     const server_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "server" });
     defer allocator.free(server_path);
 
-    if (launch_sshd) {
+    if (cli) {
         var stdout_writer = std.Io.File.stdout().writer(io, &.{});
         var stderr_writer = std.Io.File.stderr().writer(io, &.{});
-        const run_opts = hx.main.RunOpts{ .out = &stdout_writer.interface, .err = &stderr_writer.interface, .environ_map = init.environ_map };
-
-        const port = 2222;
-
-        // create priv host key
-        const host_key_file = try std.Io.Dir.cwd().createFile(io, temp_dir_name ++ "/host_key", .{});
-        defer host_key_file.close(io);
-        try host_key_file.writeStreamingAll(io,
-            \\-----BEGIN OPENSSH PRIVATE KEY-----
-            \\b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAaAAAABNlY2RzYS
-            \\1zaGEyLW5pc3RwMjU2AAAACG5pc3RwMjU2AAAAQQS1ppUfk8n7yvVKEgz3tXjt4q76VGuj
-            \\LcQlRwmogzovV40LLcX0aTObZlQaLWfzJMNpCa/ztMpQlr86nsarE4lEAAAAqLe43zK3uN
-            \\8yAAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBLWmlR+TyfvK9UoS
-            \\DPe1eO3irvpUa6MtxCVHCaiDOi9XjQstxfRpM5tmVBotZ/Mkw2kJr/O0ylCWvzqexqsTiU
-            \\QAAAAgQ+LCk30ZNJxb2Da5JL+QOFWCMf7bgXCWcEzhEGGvFWYAAAALcmFkYXJAcm9hcmsB
-            \\AgMEBQ==
-            \\-----END OPENSSH PRIVATE KEY-----
-            \\
-        );
-        if (.windows != builtin.os.tag) {
-            try host_key_file.setPermissions(io, @enumFromInt(0o600));
-        }
-
-        // create priv client key
-        const priv_key_file = try std.Io.Dir.cwd().createFile(io, temp_dir_name ++ "/key", .{});
-        defer priv_key_file.close(io);
-        try priv_key_file.writeStreamingAll(io,
-            \\-----BEGIN OPENSSH PRIVATE KEY-----
-            \\b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
-            \\QyNTUxOQAAACCniLPJiaooAWecvOCeAjoJwCSeWxzysvpTNkpYjF22JgAAAJA+7hikPu4Y
-            \\pAAAAAtzc2gtZWQyNTUxOQAAACCniLPJiaooAWecvOCeAjoJwCSeWxzysvpTNkpYjF22Jg
-            \\AAAEDVlopOMnKt/7by/IA8VZvQXUS/O6VLkixOqnnahUdPCKeIs8mJqigBZ5y84J4COgnA
-            \\JJ5bHPKy+lM2SliMXbYmAAAAC3JhZGFyQHJvYXJrAQI=
-            \\-----END OPENSSH PRIVATE KEY-----
-            \\
-        );
-        if (.windows != builtin.os.tag) {
-            try priv_key_file.setPermissions(io, @enumFromInt(0o600));
-        }
-
-        // create pub key
-        const pub_key_file = try std.Io.Dir.cwd().createFile(io, temp_dir_name ++ "/key.pub", .{});
-        defer pub_key_file.close(io);
-        try pub_key_file.writeStreamingAll(io,
-            \\ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKeIs8mJqigBZ5y84J4COgnAJJ5bHPKy+lM2SliMXbYm radar@roark
-            \\
-        );
-        if (.windows != builtin.os.tag) {
-            try pub_key_file.setPermissions(io, @enumFromInt(0o600));
-        }
-
-        const haxy_bin_path = try std.fs.path.join(allocator, &.{ cwd_path, "zig-out", "bin", "haxy" });
-        defer allocator.free(haxy_bin_path);
-
-        // dispatch.sh — sshd's forced command. picks between ssh-tui (for
-        // interactive sessions) and ssh-git (for `git clone`/`git push`) by
-        // checking whether sshd populated $SSH_ORIGINAL_COMMAND
-        const dispatch_contents = try std.fmt.allocPrint(
-            allocator,
-            "#!/bin/sh\n" ++
-                "if [ -z \"$SSH_ORIGINAL_COMMAND\" ]; then\n" ++
-                "    exec {s} ssh-tui --tui-connect 127.0.0.1:8082 --user-key test-user\n" ++
-                "else\n" ++
-                "    exec {s} ssh-git\n" ++
-                "fi\n",
-            .{ haxy_bin_path, haxy_bin_path },
-        );
-        defer allocator.free(dispatch_contents);
-
-        // scope the file handle so the close happens before sshd ever spawns
-        // a shell that tries to exec it — otherwise Linux raises ETXTBSY.
-        {
-            const dispatch_file = try std.Io.Dir.cwd().createFile(io, temp_dir_name ++ "/dispatch.sh", .{});
-            defer dispatch_file.close(io);
-            try dispatch_file.writeStreamingAll(io, dispatch_contents);
-            if (.windows != builtin.os.tag) {
-                try dispatch_file.setPermissions(io, @enumFromInt(0o755));
-            }
-        }
-
-        // create authorized_keys file. forced command runs dispatch.sh so a
-        // single key can drive both the TUI and git operations.
-        const dispatch_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "dispatch.sh" });
-        defer allocator.free(dispatch_path);
-
-        const auth_keys_contents = try std.fmt.allocPrint(
-            allocator,
-            "command=\"{s}\" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKeIs8mJqigBZ5y84J4COgnAJJ5bHPKy+lM2SliMXbYm radar@roark\n",
-            .{dispatch_path},
-        );
-        defer allocator.free(auth_keys_contents);
-
-        const auth_keys_file = try std.Io.Dir.cwd().createFile(io, temp_dir_name ++ "/authorized_keys", .{});
-        defer auth_keys_file.close(io);
-        try auth_keys_file.writeStreamingAll(io, auth_keys_contents);
-        if (.windows != builtin.os.tag) {
-            try auth_keys_file.setPermissions(io, @enumFromInt(0o600));
-        }
-
-        // create known_hosts file
-        const known_hosts_file = try std.Io.Dir.cwd().createFile(io, temp_dir_name ++ "/known_hosts", .{});
-        defer known_hosts_file.close(io);
-        const port_str = std.fmt.comptimePrint("{}", .{port});
-        try known_hosts_file.writeStreamingAll(io, "[localhost]:" ++ port_str ++ " ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBLWmlR+TyfvK9UoSDPe1eO3irvpUa6MtxCVHCaiDOi9XjQstxfRpM5tmVBotZ/Mkw2kJr/O0ylCWvzqexqsTiUQ=");
-        if (.windows != builtin.os.tag) {
-            try known_hosts_file.setPermissions(io, @enumFromInt(0o600));
-        }
-
-        // create sshd_config file
-        const sshd_config_str = blk: {
-            // SetEnv PATH=... allows us to propagate the test process's PATH
-            // to the spawned login shell (in sshd).
-            //
-            // without it, shells that don't auto-resource PATH on startup (e.g. nushell
-            // on NixOS) through /etc/set-environment will fail to find
-            // git-upload-pack / git-receive-pack.
-            const base_config =
-                \\AuthenticationMethods publickey
-                \\PubkeyAuthentication yes
-                \\PasswordAuthentication no
-                \\StrictModes no
-                //SetEnv PATH={s} -- if we find $PATH defined.
-            ;
-            var env_map = try std.process.Environ.createMap(init.minimal.environ, allocator);
-            defer env_map.deinit();
-
-            const config_str = if (env_map.get("PATH")) |path_str|
-                try std.fmt.allocPrint(allocator, "{s}\n" ++ "SetEnv PATH={s}\n", .{ base_config, path_str })
-            else
-                try std.fmt.allocPrint(allocator, "{s}", .{base_config});
-
-            break :blk config_str;
-        };
-        defer allocator.free(sshd_config_str);
-
-        const sshd_config_file = try std.Io.Dir.cwd().createFile(io, temp_dir_name ++ "/sshd_config", .{});
-        defer sshd_config_file.close(io);
-        try sshd_config_file.writeStreamingAll(io, sshd_config_str);
-        if (.windows != builtin.os.tag) {
-            try sshd_config_file.setPermissions(io, @enumFromInt(0o600));
-        }
-
-        // create sshd.sh contents
-        const host_key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "host_key" });
-        defer allocator.free(host_key_path);
-        const auth_keys_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "authorized_keys" });
-        defer allocator.free(auth_keys_path);
-        const sshd_contents = try std.fmt.allocPrint(
-            allocator,
-            "#!/bin/sh\nexec $(which sshd) -p {} -f sshd_config -h \"{s}\" -D -e -o AuthorizedKeysFile=\"{s}\" -o PidFile=none",
-            .{ port, host_key_path, auth_keys_path },
-        );
-        defer allocator.free(sshd_contents);
-
-        // if path has a space char, it fucks up sshd
-        try std.testing.expect(null == std.mem.indexOfScalar(u8, auth_keys_path, ' '));
-
-        // create sshd.sh
-        {
-            const sshd_file = try std.Io.Dir.cwd().createFile(io, temp_dir_name ++ "/sshd.sh", .{});
-            defer sshd_file.close(io);
-            try sshd_file.writeStreamingAll(io, sshd_contents);
-            if (.windows != builtin.os.tag) {
-                try sshd_file.setPermissions(io, .executable_file);
-            }
-        }
-
-        // build a copy-pasteable ssh command line for the user
-        const ssh_key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "key" });
-        defer allocator.free(ssh_key_path);
-        const known_hosts_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "known_hosts" });
-        defer allocator.free(known_hosts_path);
-
-        const ssh_command = try std.fmt.allocPrint(
-            allocator,
-            "ssh -p {} -i {s} -o UserKnownHostsFile={s} -o IdentitiesOnly=yes localhost",
-            .{ port, ssh_key_path, known_hosts_path },
-        );
-        defer allocator.free(ssh_command);
-
-        // git uses GIT_SSH_COMMAND to override the ssh invocation it'd
-        // normally do. uses scp-style `host:path` rather than ssh://host/path
-        // so the path stays relative — ssh://host/test would send /test
-        // (absolute), which haxy serve rejects as outside the repo root.
-        const git_command = try std.fmt.allocPrint(
-            allocator,
-            "GIT_SSH_COMMAND='ssh -p {} -i {s} -o UserKnownHostsFile={s} -o IdentitiesOnly=yes' git push localhost:test master",
-            .{ port, ssh_key_path, known_hosts_path },
-        );
-        defer allocator.free(git_command);
+        const run_opts = hx.main.RunOpts{ .out = &stdout_writer.interface, .err = &stderr_writer.interface };
 
         const Runnable = struct {
             io: std.Io,
-            ssh_command: []const u8,
-            git_command: []const u8,
 
             pub fn run(self: @This()) !void {
                 std.debug.print(
                     \\
-                    \\open the TUI from another terminal with:
+                    \\connect to the TUI with:
+                    \\  ssh -p 8022 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null localhost
                     \\
-                    \\  {s}
-                    \\
-                    \\create a git repo and push it over ssh with:
-                    \\
+                    \\create a git repo and push over SSH:
                     \\  mkdir -p temp-try/client/test
                     \\  cd temp-try/client/test
                     \\  git init
                     \\  echo "hello" > hello.txt
                     \\  git add hello.txt
                     \\  git commit -m "let there be light"
-                    \\  {s}
+                    \\  GIT_SSH_COMMAND='ssh -p 8022 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null' git push localhost:test HEAD:master
                     \\
-                    \\press enter to stop.
+                    \\to quit, press enter.
                     \\
-                    \\
-                , .{ self.ssh_command, self.git_command });
-
-                // launch sshd
-                var process = try std.process.spawn(self.io, .{
-                    .argv = &.{"./sshd.sh"},
-                    .cwd = .{ .path = temp_dir_name },
-                    .stdin = .pipe,
-                    .stdout = .inherit,
-                    .stderr = .inherit,
-                });
-                defer process.kill(self.io);
-
+                , .{});
+                // portable stdin read via std.Io — equivalent to the
+                // std.posix.read(STDIN_FILENO, ...) that doesn't compile
+                // on windows.
                 var buf: [1]u8 = undefined;
-                _ = std.posix.read(std.posix.STDIN_FILENO, &buf) catch {};
+                var stdin_reader = std.Io.File.stdin().reader(self.io, &buf);
+                _ = stdin_reader.interface.takeByte() catch {};
             }
         };
 
         try srv.run(.xit, .{}, io, allocator, cwd_path, .{
             .data_dir = server_path,
-        }, run_opts.err, Runnable{ .io = io, .ssh_command = ssh_command, .git_command = git_command });
+        }, run_opts.err, Runnable{ .io = io });
     } else {
         var null_writer = std.Io.Writer.Discarding.init(&.{});
-        const run_opts = hx.main.RunOpts{ .out = &null_writer.writer, .err = &null_writer.writer, .environ_map = init.environ_map };
+        const run_opts = hx.main.RunOpts{ .out = &null_writer.writer, .err = &null_writer.writer };
 
         const Runnable = struct {
             io: std.Io,

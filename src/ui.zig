@@ -54,7 +54,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, page: *const Page) !void {
 
 // route a single decoded key into the widget tree, handling 'q'-to-quit and
 // mouse-click focus traversal along the way. shared between the tty event
-// loop (ui.run) and the SSH session event loop in serve_ssh_tui.zig.
+// loop (ui.run) and the SSH session event loop in serve_ssh.zig.
 // `terminal` is whatever terminal type the caller is driving — it must
 // expose requestQuit().
 pub fn inputKey(root: *Widget, key: inp.Key, terminal: anytype) !void {

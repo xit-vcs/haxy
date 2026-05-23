@@ -4,13 +4,10 @@ const xit = @import("xit");
 const rp = xit.repo;
 const cmd = @import("./command.zig");
 const srv = @import("./serve.zig");
-const ssh = @import("./ssh_git.zig");
-const ssh_tui = @import("./ssh_tui.zig");
 
 pub const RunOpts = struct {
     out: *std.Io.Writer,
     err: *std.Io.Writer,
-    environ_map: *std.process.Environ.Map,
 };
 
 pub fn main(init: std.process.Init) !u8 {
@@ -38,7 +35,7 @@ pub fn main(init: std.process.Init) !u8 {
 
     var stdout_writer = std.Io.File.stdout().writer(io, &.{});
     var stderr_writer = std.Io.File.stderr().writer(io, &.{});
-    const run_opts = RunOpts{ .out = &stdout_writer.interface, .err = &stderr_writer.interface, .environ_map = init.environ_map };
+    const run_opts = RunOpts{ .out = &stdout_writer.interface, .err = &stderr_writer.interface };
 
     const cwd_path = try std.process.currentPathAlloc(io, allocator);
     defer allocator.free(cwd_path);
@@ -79,8 +76,6 @@ pub fn run(
         .help => |cmd_kind_maybe| try cmd.printHelp(cmd_kind_maybe, run_opts.out),
         .cli => |cli_cmd| switch (cli_cmd) {
             .serve => |options| try srv.run(repo_kind, any_repo_opts, io, allocator, cwd_path, options, run_opts.err, {}),
-            .ssh_git => |options| try ssh.run(io, allocator, options, run_opts.environ_map),
-            .ssh_tui => |options| try ssh_tui.run(io, allocator, options, run_opts.environ_map),
         },
     }
 }
