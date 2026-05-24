@@ -53,40 +53,40 @@ const max_auth_attempts: u32 = 20;
 const max_exit_drain_packets: u32 = 32;
 
 // SSH message type bytes (RFC 4250 §4.1)
-const SSH_MSG_DISCONNECT: u8 = 1;
-const SSH_MSG_SERVICE_REQUEST: u8 = 5;
-const SSH_MSG_SERVICE_ACCEPT: u8 = 6;
-const SSH_MSG_KEXINIT: u8 = 20;
-const SSH_MSG_NEWKEYS: u8 = 21;
-const SSH_MSG_KEX_ECDH_INIT: u8 = 30;
-const SSH_MSG_KEX_ECDH_REPLY: u8 = 31;
-const SSH_MSG_USERAUTH_REQUEST: u8 = 50;
-const SSH_MSG_USERAUTH_FAILURE: u8 = 51;
-const SSH_MSG_USERAUTH_SUCCESS: u8 = 52;
-const SSH_MSG_USERAUTH_PK_OK: u8 = 60; // method-specific name for publickey
-const SSH_MSG_GLOBAL_REQUEST: u8 = 80;
-const SSH_MSG_REQUEST_SUCCESS: u8 = 81;
-const SSH_MSG_REQUEST_FAILURE: u8 = 82;
-const SSH_MSG_CHANNEL_OPEN: u8 = 90;
-const SSH_MSG_CHANNEL_OPEN_CONFIRMATION: u8 = 91;
-const SSH_MSG_CHANNEL_OPEN_FAILURE: u8 = 92;
-const SSH_MSG_CHANNEL_WINDOW_ADJUST: u8 = 93;
-const SSH_MSG_CHANNEL_DATA: u8 = 94;
-const SSH_MSG_CHANNEL_EXTENDED_DATA: u8 = 95;
-const SSH_MSG_CHANNEL_EOF: u8 = 96;
-const SSH_MSG_CHANNEL_CLOSE: u8 = 97;
-const SSH_MSG_CHANNEL_REQUEST: u8 = 98;
-const SSH_MSG_CHANNEL_SUCCESS: u8 = 99;
-const SSH_MSG_CHANNEL_FAILURE: u8 = 100;
+pub const SSH_MSG_DISCONNECT: u8 = 1;
+pub const SSH_MSG_SERVICE_REQUEST: u8 = 5;
+pub const SSH_MSG_SERVICE_ACCEPT: u8 = 6;
+pub const SSH_MSG_KEXINIT: u8 = 20;
+pub const SSH_MSG_NEWKEYS: u8 = 21;
+pub const SSH_MSG_KEX_ECDH_INIT: u8 = 30;
+pub const SSH_MSG_KEX_ECDH_REPLY: u8 = 31;
+pub const SSH_MSG_USERAUTH_REQUEST: u8 = 50;
+pub const SSH_MSG_USERAUTH_FAILURE: u8 = 51;
+pub const SSH_MSG_USERAUTH_SUCCESS: u8 = 52;
+pub const SSH_MSG_USERAUTH_PK_OK: u8 = 60; // method-specific name for publickey
+pub const SSH_MSG_GLOBAL_REQUEST: u8 = 80;
+pub const SSH_MSG_REQUEST_SUCCESS: u8 = 81;
+pub const SSH_MSG_REQUEST_FAILURE: u8 = 82;
+pub const SSH_MSG_CHANNEL_OPEN: u8 = 90;
+pub const SSH_MSG_CHANNEL_OPEN_CONFIRMATION: u8 = 91;
+pub const SSH_MSG_CHANNEL_OPEN_FAILURE: u8 = 92;
+pub const SSH_MSG_CHANNEL_WINDOW_ADJUST: u8 = 93;
+pub const SSH_MSG_CHANNEL_DATA: u8 = 94;
+pub const SSH_MSG_CHANNEL_EXTENDED_DATA: u8 = 95;
+pub const SSH_MSG_CHANNEL_EOF: u8 = 96;
+pub const SSH_MSG_CHANNEL_CLOSE: u8 = 97;
+pub const SSH_MSG_CHANNEL_REQUEST: u8 = 98;
+pub const SSH_MSG_CHANNEL_SUCCESS: u8 = 99;
+pub const SSH_MSG_CHANNEL_FAILURE: u8 = 100;
 
-const SSH_DISCONNECT_PROTOCOL_ERROR: u32 = 2;
+pub const SSH_DISCONNECT_PROTOCOL_ERROR: u32 = 2;
 
 // SSH_OPEN_* reason codes for CHANNEL_OPEN_FAILURE
-const SSH_OPEN_RESOURCE_SHORTAGE: u32 = 4;
-const SSH_OPEN_UNKNOWN_CHANNEL_TYPE: u32 = 3;
+pub const SSH_OPEN_RESOURCE_SHORTAGE: u32 = 4;
+pub const SSH_OPEN_UNKNOWN_CHANNEL_TYPE: u32 = 3;
 
 // data type code for CHANNEL_EXTENDED_DATA (stderr)
-const SSH_EXTENDED_DATA_STDERR: u32 = 1;
+pub const SSH_EXTENDED_DATA_STDERR: u32 = 1;
 
 // initial flow-control window we advertise. typical openssh setting; large
 // enough that small interactive sessions never need a WINDOW_ADJUST.
@@ -133,7 +133,7 @@ pub const HostKey = struct {
 
     /// SSH wire-format ed25519 public key blob (used as K_S in the hash and
     /// returned in KEX_ECDH_REPLY): string "ssh-ed25519" || string pubkey.
-    fn appendPublicBlob(self: HostKey, buf: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
+    pub fn appendPublicBlob(self: HostKey, buf: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
         try writeStringField(buf, allocator, "ssh-ed25519");
         try writeStringField(buf, allocator, &self.keypair.public_key.bytes);
     }
@@ -541,20 +541,16 @@ pub const SessionReader = struct {
 /// `handler` must be a pointer to a struct with a method:
 ///   pub fn handleSession(self, sess: *SessionCtx, request: Request) anyerror!void
 /// invoked once the channel is open and a shell/exec request has arrived.
+///
+/// `reader` and `writer` are the bidirectional byte stream
 pub fn handleConnection(
     io: std.Io,
     allocator: std.mem.Allocator,
-    stream: std.Io.net.Stream,
+    reader: *std.Io.Reader,
+    writer: *std.Io.Writer,
     host_key: *const HostKey,
     handler: anytype,
 ) !void {
-    var recv_buf: [4096]u8 = undefined;
-    var send_buf: [4096]u8 = undefined;
-    var stream_reader = stream.reader(io, &recv_buf);
-    var stream_writer = stream.writer(io, &send_buf);
-    const reader = &stream_reader.interface;
-    const writer = &stream_writer.interface;
-
     const client_version = try exchangeVersions(allocator, reader, writer);
     defer allocator.free(client_version);
 
@@ -598,7 +594,7 @@ fn exchangeVersions(
 // binary packet codec, unencrypted form (RFC 4253 §6)
 // ---------------------------------------------------------------------------
 
-fn writePlainPacket(io: std.Io, writer: *std.Io.Writer, payload: []const u8) !void {
+pub fn writePlainPacket(io: std.Io, writer: *std.Io.Writer, payload: []const u8) !void {
     const block: usize = 8;
     const initial_pad = block - ((5 + payload.len) % block);
     const padding_len: u8 = @intCast(if (initial_pad < 4) initial_pad + block else initial_pad);
@@ -614,7 +610,7 @@ fn writePlainPacket(io: std.Io, writer: *std.Io.Writer, payload: []const u8) !vo
     try writer.flush();
 }
 
-fn readPlainPacket(allocator: std.mem.Allocator, reader: *std.Io.Reader) ![]u8 {
+pub fn readPlainPacket(allocator: std.mem.Allocator, reader: *std.Io.Reader) ![]u8 {
     const packet_len = try reader.takeInt(u32, .big);
     if (packet_len < 8 or packet_len > max_packet_len) return error.InvalidPacketLength;
     const padding_len = try reader.takeByte();
@@ -631,14 +627,14 @@ fn readPlainPacket(allocator: std.mem.Allocator, reader: *std.Io.Reader) ![]u8 {
 // SSH field encoders / decoders (RFC 4251 §5)
 // ---------------------------------------------------------------------------
 
-fn writeStringField(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, bytes: []const u8) !void {
+pub fn writeStringField(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, bytes: []const u8) !void {
     var len_bytes: [4]u8 = undefined;
     std.mem.writeInt(u32, &len_bytes, @intCast(bytes.len), .big);
     try buf.appendSlice(allocator, &len_bytes);
     try buf.appendSlice(allocator, bytes);
 }
 
-fn writeNameList(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, names: []const []const u8) !void {
+pub fn writeNameList(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, names: []const []const u8) !void {
     var total: usize = 0;
     for (names, 0..) |name, i| {
         if (i > 0) total += 1; // comma separator
@@ -657,7 +653,7 @@ fn writeNameList(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, names: [
 /// our use (X25519 shared secret) the value is always non-negative, so we
 /// strip leading zero bytes, then prepend a single 0x00 if the high bit of
 /// the most-significant byte is set (to keep it parsed as positive).
-fn writeMpint(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, bytes: []const u8) !void {
+pub fn writeMpint(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, bytes: []const u8) !void {
     var start: usize = 0;
     while (start < bytes.len and bytes[start] == 0) start += 1;
     const trimmed = bytes[start..];
@@ -674,7 +670,7 @@ fn writeMpint(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, bytes: []co
     try buf.appendSlice(allocator, trimmed);
 }
 
-fn takeStringField(allocator: std.mem.Allocator, reader: *std.Io.Reader, max_len: u32) ![]u8 {
+pub fn takeStringField(allocator: std.mem.Allocator, reader: *std.Io.Reader, max_len: u32) ![]u8 {
     const len = try reader.takeInt(u32, .big);
     if (len > max_len) return error.FieldTooLarge;
     return try reader.readAlloc(allocator, len);
@@ -694,13 +690,20 @@ fn nameListContainsAny(haystack: []const u8, our_options: []const []const u8) bo
 // KEXINIT (RFC 4253 §7.1)
 // ---------------------------------------------------------------------------
 
-const our_kex_algos = [_][]const u8{ "curve25519-sha256", "curve25519-sha256@libssh.org" };
-const our_host_key_algos = [_][]const u8{"ssh-ed25519"};
-const our_ciphers = [_][]const u8{"chacha20-poly1305@openssh.com"};
+pub const our_kex_algos = [_][]const u8{ "curve25519-sha256", "curve25519-sha256@libssh.org" };
+pub const our_host_key_algos = [_][]const u8{"ssh-ed25519"};
+pub const our_ciphers = [_][]const u8{"chacha20-poly1305@openssh.com"};
 const our_macs = [_][]const u8{}; // none — implicit in the AEAD cipher
 const our_compression = [_][]const u8{"none"};
 
-fn buildServerKexInit(io: std.Io, allocator: std.mem.Allocator) ![]u8 {
+/// Build a KEXINIT payload with the given algorithm name-lists
+pub fn buildKexInit(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    kex_algos: []const []const u8,
+    host_key_algos: []const []const u8,
+    ciphers: []const []const u8,
+) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
@@ -710,10 +713,10 @@ fn buildServerKexInit(io: std.Io, allocator: std.mem.Allocator) ![]u8 {
     io.random(&cookie);
     try buf.appendSlice(allocator, &cookie);
 
-    try writeNameList(&buf, allocator, &our_kex_algos);
-    try writeNameList(&buf, allocator, &our_host_key_algos);
-    try writeNameList(&buf, allocator, &our_ciphers); // c->s
-    try writeNameList(&buf, allocator, &our_ciphers); // s->c
+    try writeNameList(&buf, allocator, kex_algos);
+    try writeNameList(&buf, allocator, host_key_algos);
+    try writeNameList(&buf, allocator, ciphers); // c->s
+    try writeNameList(&buf, allocator, ciphers); // s->c
     try writeNameList(&buf, allocator, &our_macs);
     try writeNameList(&buf, allocator, &our_macs);
     try writeNameList(&buf, allocator, &our_compression);
@@ -724,6 +727,10 @@ fn buildServerKexInit(io: std.Io, allocator: std.mem.Allocator) ![]u8 {
     try buf.appendSlice(allocator, &[_]u8{ 0, 0, 0, 0 }); // reserved
 
     return try buf.toOwnedSlice(allocator);
+}
+
+fn buildServerKexInit(io: std.Io, allocator: std.mem.Allocator) ![]u8 {
+    return buildKexInit(io, allocator, &our_kex_algos, &our_host_key_algos, &our_ciphers);
 }
 
 const ParsedKexInit = struct {
@@ -879,7 +886,7 @@ fn runKex(
 // exchange hash (RFC 4253 §8, RFC 5656 §4)
 // ---------------------------------------------------------------------------
 
-fn computeExchangeHash(
+pub fn computeExchangeHash(
     allocator: std.mem.Allocator,
     client_version: []const u8,
     server_version_str: []const u8,
@@ -914,14 +921,14 @@ fn computeExchangeHash(
 // chacha20-poly1305@openssh.com wants 64 bytes per direction (32-byte main key
 // + 32-byte header key); SHA256 produces 32, so each encrypt key is two hash
 // blocks chained per RFC 4253.
-const SessionKeys = struct {
+pub const SessionKeys = struct {
     cs_iv: [16]u8,
     sc_iv: [16]u8,
     cs_enc: [64]u8,
     sc_enc: [64]u8,
 };
 
-fn deriveSessionKeys(
+pub fn deriveSessionKeys(
     allocator: std.mem.Allocator,
     shared_secret: []const u8,
     exchange_hash: []const u8,
@@ -995,12 +1002,12 @@ fn deriveKey(
 // padding) — the 4-byte length field is excluded from alignment. body must
 // be a multiple of 8 bytes; minimum padding 4 bytes.
 
-const Cipher = struct {
+pub const Cipher = struct {
     main_key: [32]u8, // K_2
     header_key: [32]u8, // K_1
     seq: u64,
 
-    fn init(key_material: *const [64]u8, initial_seq: u64) Cipher {
+    pub fn init(key_material: *const [64]u8, initial_seq: u64) Cipher {
         return .{
             .main_key = key_material[0..32].*,
             .header_key = key_material[32..64].*,
@@ -1014,7 +1021,7 @@ const Cipher = struct {
         return nonce;
     }
 
-    fn writePacket(
+    pub fn writePacket(
         self: *Cipher,
         io: std.Io,
         allocator: std.mem.Allocator,
@@ -1064,7 +1071,7 @@ const Cipher = struct {
         self.seq += 1;
     }
 
-    fn readPacket(
+    pub fn readPacket(
         self: *Cipher,
         allocator: std.mem.Allocator,
         reader: *std.Io.Reader,
@@ -1277,6 +1284,27 @@ fn sendDisconnect(
     try sc_cipher.writePacket(io, allocator, writer, buf.items);
 }
 
+/// Append the canonical publickey-signed-data bytes (RFC 4252 §7) to `buf`.
+/// Used by the server to recompute the signed input for verification
+pub fn appendPublickeySignedData(
+    buf: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    session_id: []const u8,
+    user_name: []const u8,
+    service_name: []const u8,
+    algo: []const u8,
+    pubkey_blob: []const u8,
+) !void {
+    try writeStringField(buf, allocator, session_id);
+    try buf.append(allocator, SSH_MSG_USERAUTH_REQUEST);
+    try writeStringField(buf, allocator, user_name);
+    try writeStringField(buf, allocator, service_name);
+    try writeStringField(buf, allocator, "publickey");
+    try buf.append(allocator, 1);
+    try writeStringField(buf, allocator, algo);
+    try writeStringField(buf, allocator, pubkey_blob);
+}
+
 // build the bytes a publickey signature is computed over (RFC 4252 §7) and
 // verify the supplied signature against them.
 fn verifyUserauthSignature(
@@ -1288,25 +1316,9 @@ fn verifyUserauthSignature(
     pubkey_blob: []const u8,
     signature_blob: []const u8,
 ) !bool {
-    // signed data:
-    //   string session_id
-    //   byte   SSH_MSG_USERAUTH_REQUEST
-    //   string user_name
-    //   string service_name
-    //   string "publickey"
-    //   bool   TRUE
-    //   string algo
-    //   string pubkey
     var signed: std.ArrayList(u8) = .empty;
     defer signed.deinit(allocator);
-    try writeStringField(&signed, allocator, session_id);
-    try signed.append(allocator, SSH_MSG_USERAUTH_REQUEST);
-    try writeStringField(&signed, allocator, user_name);
-    try writeStringField(&signed, allocator, service_name);
-    try writeStringField(&signed, allocator, "publickey");
-    try signed.append(allocator, 1);
-    try writeStringField(&signed, allocator, algo);
-    try writeStringField(&signed, allocator, pubkey_blob);
+    try appendPublickeySignedData(&signed, allocator, session_id, user_name, service_name, algo, pubkey_blob);
 
     // parse pubkey_blob: string "ssh-ed25519" || string raw_pubkey
     var pubkey_reader = std.Io.Reader.fixed(pubkey_blob);
@@ -1706,7 +1718,7 @@ fn maybeRefillRecvWindow(
     try sc_cipher.writePacket(io, allocator, writer, adj.items);
 }
 
-fn writeU32(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, value: u32) !void {
+pub fn writeU32(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, value: u32) !void {
     var bytes: [4]u8 = undefined;
     std.mem.writeInt(u32, &bytes, value, .big);
     try buf.appendSlice(allocator, &bytes);

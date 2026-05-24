@@ -322,7 +322,18 @@ fn runSshListener(
 
                     fn run(conn: @This()) void {
                         defer conn.stream.close(conn.io);
-                        serve_ssh_protocol.handleConnection(conn.io, conn.allocator, conn.stream, conn.host_key, conn.session_handler) catch |session_err| {
+                        var recv_buf: [4096]u8 = undefined;
+                        var send_buf: [4096]u8 = undefined;
+                        var stream_reader = conn.stream.reader(conn.io, &recv_buf);
+                        var stream_writer = conn.stream.writer(conn.io, &send_buf);
+                        serve_ssh_protocol.handleConnection(
+                            conn.io,
+                            conn.allocator,
+                            &stream_reader.interface,
+                            &stream_writer.interface,
+                            conn.host_key,
+                            conn.session_handler,
+                        ) catch |session_err| {
                             logError(conn.err, "ssh session failed: {s}\n", .{@errorName(session_err)});
                         };
                     }

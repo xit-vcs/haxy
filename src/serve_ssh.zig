@@ -211,7 +211,7 @@ fn openOrCreate(
     };
 }
 
-pub fn parseGitCommand(allocator: std.mem.Allocator, command: []const u8) !ParsedGitCommand {
+fn parseGitCommand(allocator: std.mem.Allocator, command: []const u8) !ParsedGitCommand {
     var tokens = try std.process.Args.IteratorGeneral(.{ .single_quotes = true }).init(allocator, command);
     defer tokens.deinit();
 
@@ -234,7 +234,7 @@ fn resolveRepoPath(allocator: std.mem.Allocator, repo_root_path: []const u8, dir
     return try std.fs.path.resolve(allocator, &.{ repo_root_path, dir });
 }
 
-pub fn isSubPath(parent: []const u8, child: []const u8) bool {
+fn isSubPath(parent: []const u8, child: []const u8) bool {
     if (std.mem.eql(u8, parent, std.fs.path.sep_str)) return std.fs.path.isAbsolute(child);
     if (!std.mem.startsWith(u8, child, parent)) return false;
     return child.len == parent.len or child[parent.len] == std.fs.path.sep;
@@ -244,4 +244,58 @@ fn writeError(sess: *ssh.SessionCtx, msg: []const u8) !void {
     var buf: [256]u8 = undefined;
     const text = try std.fmt.bufPrint(&buf, "haxy ssh: {s}\n", .{msg});
     try sess.writeBytes(text);
+}
+
+test "parseGitCommand rejects malformed input" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.InvalidCommand, parseGitCommand(allocator, "git-upload-pack"));
+    try std.testing.expectError(error.UnsupportedService, parseGitCommand(allocator, "ls -la"));
+    try std.testing.expectError(error.UnsupportedService, parseGitCommand(allocator, "git-fake-pack 'repo'"));
+}
+
+test "parseGitCommand happy paths" {
+    const allocator = std.testing.allocator;
+
+    {
+        const parsed = try parseGitCommand(allocator, "git-upload-pack 'some-repo'");
+        defer parsed.deinit(allocator);
+        try std.testing.expectEqual(GitService.upload_pack, parsed.service);
+        try std.testing.expectEqualStrings("some-repo", parsed.dir);
+    }
+    {
+        const parsed = try parseGitCommand(allocator, "git-receive-pack 'user/proj'");
+        defer parsed.deinit(allocator);
+        try std.testing.expectEqual(GitService.receive_pack, parsed.service);
+        try std.testing.expectEqualStrings("user/proj", parsed.dir);
+    }
+    {
+        const parsed = try parseGitCommand(allocator, "git-upload-pack repo");
+        defer parsed.deinit(allocator);
+        try std.testing.expectEqual(GitService.upload_pack, parsed.service);
+        try std.testing.expectEqualStrings("repo", parsed.dir);
+    }
+}
+
+test "isSubPath rejects prefix collisions and traversal" {
+    const sep = std.fs.path.sep_str;
+    const parent = sep ++ "srv" ++ sep ++ "git";
+
+    try std.testing.expect(isSubPath(parent, parent ++ sep ++ "repo"));
+    try std.testing.expect(isSubPath(parent, parent));
+
+    // common-prefix-but-not-subpath: "/srv/git" should NOT swallow
+    // "/srv/git2" or "/srv/gitignore" just because the bytes start the same.
+    try std.testing.expect(!isSubPath(parent, parent ++ "2"));
+    try std.testing.expect(!isSubPath(parent, parent ++ "ignore"));
+
+    // resolveRepoPath normalizes `..` first, so `/srv/git/../etc/passwd`
+    // becomes `/etc/passwd` — isSubPath then rejects it.
+    try std.testing.expect(!isSubPath(parent, sep ++ "etc" ++ sep ++ "passwd"));
+
+    const builtin = @import("builtin");
+
+    if (.windows != builtin.os.tag) {
+        try std.testing.expect(isSubPath(sep, sep ++ "anything"));
+        try std.testing.expect(isSubPath(sep, sep));
+    }
 }
