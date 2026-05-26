@@ -47,14 +47,14 @@ pub const View = struct {
     pub fn init(allocator: std.mem.Allocator, data: *const Self) !View {
         var self = blk: {
             var list = try ui.SelectableList.init(allocator);
-            errdefer list.deinit();
+            errdefer list.deinit(allocator);
 
             break :blk View{
                 .list = list,
                 .data = data,
             };
         };
-        errdefer self.deinit();
+        errdefer self.deinit(allocator);
 
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
@@ -64,21 +64,21 @@ pub const View = struct {
         for (data.repos, 0..) |repo, i| {
             lines[i] = try std.fmt.allocPrint(aa, "{s} - {s}", .{ repo.name, repo.description });
         }
-        try self.list.setItems(lines);
+        try self.list.setItems(allocator, lines);
 
         return self;
     }
 
-    pub fn deinit(self: *View) void {
-        self.list.deinit();
+    pub fn deinit(self: *View, allocator: std.mem.Allocator) void {
+        self.list.deinit(allocator);
     }
 
-    pub fn build(self: *View, constraint: layout.Constraint, root_focus: *Focus) !void {
-        try self.list.build(constraint, root_focus);
+    pub fn build(self: *View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
+        try self.list.build(allocator, constraint, root_focus);
     }
 
-    pub fn input(self: *View, key: inp.Key, root_focus: *Focus) !void {
-        try self.list.input(key, root_focus);
+    pub fn input(self: *View, allocator: std.mem.Allocator, key: inp.Key, root_focus: *Focus) !void {
+        try self.list.input(allocator, key, root_focus);
     }
 
     pub fn clearGrid(self: *View) void {

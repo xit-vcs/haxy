@@ -62,7 +62,7 @@ fn runTuiSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh
     const page: ui.Page = .{ .home = try .init(repo_opts, &page_arena, &repo, &ui_session) };
 
     var root = try ui.initRoot(allocator, &page, &ui_session);
-    defer root.deinit();
+    defer root.deinit(allocator);
 
     // terminal and its writer adapter live in a nested block so the deinit
     // (which writes leave-alt / show-cursor / disable-mouse to the channel)
@@ -83,7 +83,7 @@ fn runTuiSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh
         defer last_grid.deinit();
 
         // initial render — user sees the page immediately
-        try root.build(.{
+        try root.build(allocator, .{
             .min_size = .{ .width = null, .height = null },
             .max_size = .{ .width = last_size.width, .height = last_size.height },
         }, root.getFocus());
@@ -99,19 +99,19 @@ fn runTuiSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh
                     defer allocator.free(payload);
                     try terminal.writeBytes(payload);
                     while (terminal.popKey()) |key| {
-                        try ui.inputKey(&root, key, &terminal);
+                        try ui.inputKey(allocator, &root, key, &terminal);
                     }
                 },
                 .resize => |sz| {
                     terminal.pushResize(.{ .width = sz.width_cells, .height = sz.height_cells });
                     while (terminal.popKey()) |key| {
-                        try ui.inputKey(&root, key, &terminal);
+                        try ui.inputKey(allocator, &root, key, &terminal);
                     }
                 },
                 .close => terminal.requestQuit(),
             }
 
-            try root.build(.{
+            try root.build(allocator, .{
                 .min_size = .{ .width = null, .height = null },
                 .max_size = .{ .width = last_size.width, .height = last_size.height },
             }, root.getFocus());

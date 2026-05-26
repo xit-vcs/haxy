@@ -34,9 +34,9 @@ pub const View = struct {
 
     pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session, users_tab_id: usize) !View {
         var login_view = try Login.View.init(allocator, &data.login, session, users_tab_id);
-        errdefer login_view.deinit();
+        errdefer login_view.deinit(allocator);
         var logout_view = try Logout.View.init(allocator, &data.logout, session, users_tab_id);
-        errdefer logout_view.deinit();
+        errdefer logout_view.deinit(allocator);
         return .{
             .focus = Focus.init(allocator, .container),
             .login = login_view,
@@ -45,22 +45,22 @@ pub const View = struct {
         };
     }
 
-    pub fn deinit(self: *View) void {
+    pub fn deinit(self: *View, allocator: std.mem.Allocator) void {
         self.focus.deinit();
-        self.login.deinit();
-        self.logout.deinit();
+        self.login.deinit(allocator);
+        self.logout.deinit(allocator);
     }
 
-    pub fn build(self: *View, constraint: layout.Constraint, root_focus: *Focus) !void {
+    pub fn build(self: *View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
         self.focus.clear();
         if (self.session.user_id != null) {
-            try self.logout.build(constraint, root_focus);
+            try self.logout.build(allocator, constraint, root_focus);
             if (self.logout.getGrid()) |inner_grid| {
                 try self.focus.addChild(self.logout.getFocus(), inner_grid.size, 0, 0);
             }
             self.focus.child_id = self.logout.getFocus().id;
         } else {
-            try self.login.build(constraint, root_focus);
+            try self.login.build(allocator, constraint, root_focus);
             if (self.login.getGrid()) |inner_grid| {
                 try self.focus.addChild(self.login.getFocus(), inner_grid.size, 0, 0);
             }
@@ -68,11 +68,11 @@ pub const View = struct {
         }
     }
 
-    pub fn input(self: *View, key: inp.Key, root_focus: *Focus) !void {
+    pub fn input(self: *View, allocator: std.mem.Allocator, key: inp.Key, root_focus: *Focus) !void {
         if (self.session.user_id != null) {
-            try self.logout.input(key, root_focus);
+            try self.logout.input(allocator, key, root_focus);
         } else {
-            try self.login.input(key, root_focus);
+            try self.login.input(allocator, key, root_focus);
         }
     }
 

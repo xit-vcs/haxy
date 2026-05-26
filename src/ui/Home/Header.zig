@@ -29,7 +29,7 @@ pub const View = struct {
 
     pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !View {
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
-        errdefer box.deinit();
+        errdefer box.deinit(allocator);
 
         var tab_ids: [3]usize = undefined;
 
@@ -37,10 +37,10 @@ pub const View = struct {
         const fixed_tab_names = [_][]const u8{ "users", "repos" };
         for (fixed_tab_names, 0..) |name, i| {
             var text_box = try wgt.TextBox(ui.Widget).init(allocator, name, .{ .border_style = .single, .wrap_kind = .none });
-            errdefer text_box.deinit();
+            errdefer text_box.deinit(allocator);
             text_box.getFocus().focusable = true;
             tab_ids[i] = text_box.getFocus().id;
-            try box.children.put(box.allocator, text_box.getFocus().id, .{
+            try box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
                 .min_size = .{ .width = name.len + 2, .height = null },
@@ -50,8 +50,8 @@ pub const View = struct {
         // spacer pushes the auth tab to the right
         {
             var spacer = ui.Spacer.init(allocator);
-            errdefer spacer.deinit();
-            try box.children.put(box.allocator, spacer.getFocus().id, .{
+            errdefer spacer.deinit(allocator);
+            try box.children.put(allocator, spacer.getFocus().id, .{
                 .widget = .{ .spacer = spacer },
                 .rect = null,
                 .min_size = .{ .width = 1, .height = null },
@@ -61,9 +61,9 @@ pub const View = struct {
         // auth tab — knows how to swap its own label based on session
         {
             var auth_tab = try AuthTab.View.init(allocator, &data.auth_tab, session);
-            errdefer auth_tab.deinit();
+            errdefer auth_tab.deinit(allocator);
             tab_ids[auth_tab_index] = auth_tab.getFocus().id;
-            try box.children.put(box.allocator, auth_tab.getFocus().id, .{
+            try box.children.put(allocator, auth_tab.getFocus().id, .{
                 .widget = .{ .home_auth_tab = auth_tab },
                 .rect = null,
                 .min_size = .{ .width = auth_tab_min_width, .height = null },
@@ -75,11 +75,11 @@ pub const View = struct {
         return self;
     }
 
-    pub fn deinit(self: *View) void {
-        self.box.deinit();
+    pub fn deinit(self: *View, allocator: std.mem.Allocator) void {
+        self.box.deinit(allocator);
     }
 
-    pub fn build(self: *View, constraint: layout.Constraint, root_focus: *Focus) !void {
+    pub fn build(self: *View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
         self.clearGrid();
         for (self.box.children.keys(), self.box.children.values()) |id, *child| {
             const tb: ?*wgt.TextBox(ui.Widget) = switch (child.widget) {
@@ -94,10 +94,11 @@ pub const View = struct {
                     .hidden;
             }
         }
-        try self.box.build(constraint, root_focus);
+        try self.box.build(allocator, constraint, root_focus);
     }
 
-    pub fn input(self: *View, key: inp.Key, root_focus: *Focus) !void {
+    pub fn input(self: *View, allocator: std.mem.Allocator, key: inp.Key, root_focus: *Focus) !void {
+        _ = allocator;
         const current_tab = self.currentTabIndex() orelse return;
         var new_tab = current_tab;
         switch (key) {

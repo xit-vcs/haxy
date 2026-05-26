@@ -260,7 +260,7 @@ fn renderIndexHtml(
 
     const page: ui.Page = .{ .home = try .init(repo_opts, &page_arena, &repo, &session) };
     var root = try ui.initRoot(allocator, &page, &session);
-    defer root.deinit();
+    defer root.deinit(allocator);
 
     const content = try generateHtml(allocator, &root, &session);
     defer allocator.free(content);

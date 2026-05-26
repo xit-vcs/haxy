@@ -41,9 +41,9 @@ fn start(json: []const u8, max_width: u32) !void {
     };
 
     var next_root = try ui.initRoot(allocator, &(page orelse unreachable), &session);
-    errdefer next_root.deinit();
+    errdefer next_root.deinit(allocator);
 
-    if (root) |*old_root| old_root.deinit();
+    if (root) |*old_root| old_root.deinit(allocator);
     root = next_root;
 
     try tick(max_width);
@@ -51,7 +51,7 @@ fn start(json: []const u8, max_width: u32) !void {
 
 fn tick(max_width: u32) !void {
     const root_ptr = if (root) |*root_value| root_value else return error.NotStarted;
-    try root_ptr.build(.{
+    try root_ptr.build(allocator, .{
         .min_size = .{ .width = null, .height = null },
         // height is null so the TUI grows to fit all its content; the browser
         // page handles vertical scrolling.
@@ -74,7 +74,7 @@ fn onKeyDown(key_code: u32) !void {
         40 => .arrow_down,
         else => return,
     };
-    try root_ptr.input(key, root_ptr.getFocus());
+    try root_ptr.input(allocator, key, root_ptr.getFocus());
 }
 
 fn onMouseClick(focus_id: usize) !void {
@@ -154,5 +154,5 @@ fn setTextInputValue(focus_id: u32, bytes: []const u8) !void {
         else => return error.NotATextInput,
     }
     const ti: *wgt.TextInput(ui.Widget) = @fieldParentPtr("focus", child.focus);
-    try ti.setContent(bytes);
+    try ti.setContent(allocator, bytes);
 }

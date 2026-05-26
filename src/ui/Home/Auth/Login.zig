@@ -42,13 +42,13 @@ pub const View = struct {
 
     pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session, users_tab_id: usize) !View {
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert });
-        errdefer box.deinit();
+        errdefer box.deinit(allocator);
 
         var nav_ids: [3]usize = undefined;
 
         {
             var username = wgt.TextInput(ui.Widget).init(allocator, .{ .label = " username ", .name = "username" });
-            errdefer username.deinit();
+            errdefer username.deinit(allocator);
             username.getFocus().focusable = true;
             nav_ids[username_index] = username.getFocus().id;
             try box.children.put(allocator, username.getFocus().id, .{
@@ -60,7 +60,7 @@ pub const View = struct {
 
         {
             var password = wgt.TextInput(ui.Widget).init(allocator, .{ .label = " password ", .password = true, .name = "password" });
-            errdefer password.deinit();
+            errdefer password.deinit(allocator);
             password.getFocus().focusable = true;
             nav_ids[password_index] = password.getFocus().id;
             try box.children.put(allocator, password.getFocus().id, .{
@@ -72,7 +72,7 @@ pub const View = struct {
 
         {
             var button = try wgt.TextBox(ui.Widget).init(allocator, "login", .{ .border_style = .single, .wrap_kind = .none });
-            errdefer button.deinit();
+            errdefer button.deinit(allocator);
             button.getFocus().focusable = true;
             // the renderer distinguishes plain clickables from buttons that
             // should POST to a server route by this kind.
@@ -97,11 +97,11 @@ pub const View = struct {
         };
     }
 
-    pub fn deinit(self: *View) void {
-        self.center.deinit();
+    pub fn deinit(self: *View, allocator: std.mem.Allocator) void {
+        self.center.deinit(allocator);
     }
 
-    pub fn build(self: *View, constraint: layout.Constraint, root_focus: *Focus) !void {
+    pub fn build(self: *View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
         const box = &self.center.child.box;
 
         const button = &box.children.values()[button_index].widget.text_box;
@@ -122,10 +122,10 @@ pub const View = struct {
         else
             " password ";
 
-        try self.center.build(constraint, root_focus);
+        try self.center.build(allocator, constraint, root_focus);
     }
 
-    pub fn input(self: *View, key: inp.Key, root_focus: *Focus) !void {
+    pub fn input(self: *View, allocator: std.mem.Allocator, key: inp.Key, root_focus: *Focus) !void {
         const box = &self.center.child.box;
         const child_id = box.focus.child_id orelse return;
         const current = self.indexOf(child_id) orelse return;
@@ -146,7 +146,7 @@ pub const View = struct {
             // submit on Enter from any nav field — typical "press Enter in
             // a form to submit" UX
             .enter => {
-                try self.submit(root_focus);
+                try self.submit(allocator, root_focus);
                 return;
             },
             else => {},
@@ -161,7 +161,7 @@ pub const View = struct {
                             if (mouse.x >= r.x and mouse.y >= r.y and
                                 mouse.x < r.x + r.size.width and mouse.y < r.y + r.size.height)
                             {
-                                try self.submit(root_focus);
+                                try self.submit(allocator, root_focus);
                                 return;
                             }
                         }
@@ -177,7 +177,7 @@ pub const View = struct {
         const password_len_before = password_input.content.items.len;
 
         if (box.children.getIndex(child_id)) |idx| {
-            try box.children.values()[idx].widget.input(key, root_focus);
+            try box.children.values()[idx].widget.input(allocator, key, root_focus);
         }
 
         if (username_input.content.items.len != username_len_before or
@@ -211,7 +211,7 @@ pub const View = struct {
         return null;
     }
 
-    fn submit(self: *View, root_focus: *Focus) !void {
+    fn submit(self: *View, allocator: std.mem.Allocator, root_focus: *Focus) !void {
         if (comptime wasm) {
             // no DB cursor available on the wasm render path
             self.status = .unknown_user;
@@ -262,8 +262,8 @@ pub const View = struct {
 
                 // wipe the entered credentials so they don't linger if the
                 // user returns to this page after logging out.
-                username_input.clear();
-                password_input.clear();
+                username_input.clear(allocator);
+                password_input.clear(allocator);
 
                 // jump focus back to the users tab — the login button we
                 // just pressed is about to be hidden by the tab-label swap.

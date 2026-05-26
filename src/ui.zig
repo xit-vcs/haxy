@@ -29,7 +29,7 @@ pub const Session = struct {
 
 pub fn run(io: std.Io, allocator: std.mem.Allocator, page: *const Page, session: *Session) !void {
     var root = try initRoot(allocator, page, session);
-    defer root.deinit();
+    defer root.deinit(allocator);
 
     var terminal = try term.Terminal.init(io, allocator);
     defer terminal.deinit(io);
@@ -53,20 +53,20 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, page: *const Page, session:
         // there may be an animation that requires more looping.
         var blocking = !grid_changed;
         while (try terminal.readKey(io, blocking)) |key| {
-            try inputKey(&root, key, &terminal);
+            try inputKey(allocator, &root, key, &terminal);
             blocking = false;
         }
 
-        try root.build(.{
+        try root.build(allocator, .{
             .min_size = .{ .width = null, .height = null },
             .max_size = .{ .width = last_size.width, .height = last_size.height },
         }, root.getFocus());
     }
 }
 
-pub fn inputKey(root: *Widget, key: inp.Key, terminal: anytype) !void {
+pub fn inputKey(allocator: std.mem.Allocator, root: *Widget, key: inp.Key, terminal: anytype) !void {
     switch (key) {
-        .codepoint => |cp| if (cp == 'q') terminal.requestQuit() else try root.input(key, root.getFocus()),
+        .codepoint => |cp| if (cp == 'q') terminal.requestQuit() else try root.input(allocator, key, root.getFocus()),
         .mouse => |mouse| {
             if (mouse.action == .press and mouse.action.press == .left) {
                 const root_focus = root.getFocus();
@@ -85,12 +85,12 @@ pub fn inputKey(root: *Widget, key: inp.Key, terminal: anytype) !void {
                 // forward the press into the widget tree so buttons (and any
                 // future click-aware widgets) can react. widgets that don't
                 // care about presses ignore it.
-                try root.input(key, root.getFocus());
+                try root.input(allocator, key, root.getFocus());
             } else {
-                try root.input(key, root.getFocus());
+                try root.input(allocator, key, root.getFocus());
             }
         },
-        else => try root.input(key, root.getFocus()),
+        else => try root.input(allocator, key, root.getFocus()),
     }
 }
 
@@ -98,9 +98,9 @@ pub fn initRoot(allocator: std.mem.Allocator, page: *const Page, session: *Sessi
     var root: Widget = switch (page.*) {
         .home => |*p| .{ .home = try Home.View.init(allocator, p, session) },
     };
-    errdefer root.deinit();
+    errdefer root.deinit(allocator);
 
-    try root.build(.{
+    try root.build(allocator, .{
         .min_size = .{ .width = null, .height = null },
         .max_size = .{ .width = 80, .height = null },
     }, root.getFocus());
@@ -128,21 +128,21 @@ pub const Widget = union(enum) {
     home_auth_tab: Home.Header.AuthTab.View,
     home_auth: Home.Auth.View,
 
-    pub fn deinit(self: *Widget) void {
+    pub fn deinit(self: *Widget, allocator: std.mem.Allocator) void {
         switch (self.*) {
-            inline else => |*case| case.deinit(),
+            inline else => |*case| case.deinit(allocator),
         }
     }
 
-    pub fn build(self: *Widget, constraint: layout.Constraint, root_focus: *Focus) anyerror!void {
+    pub fn build(self: *Widget, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) anyerror!void {
         switch (self.*) {
-            inline else => |*case| try case.build(constraint, root_focus),
+            inline else => |*case| try case.build(allocator, constraint, root_focus),
         }
     }
 
-    pub fn input(self: *Widget, key: inp.Key, root_focus: *Focus) anyerror!void {
+    pub fn input(self: *Widget, allocator: std.mem.Allocator, key: inp.Key, root_focus: *Focus) anyerror!void {
         switch (self.*) {
-            inline else => |*case| try case.input(key, root_focus),
+            inline else => |*case| try case.input(allocator, key, root_focus),
         }
     }
 
@@ -168,44 +168,42 @@ pub const Widget = union(enum) {
 // a scrollable list of selectable single-line items. content is replaced
 // via setItems, which dupes the strings into the widget's own allocation.
 pub const SelectableList = struct {
-    allocator: std.mem.Allocator,
     scroll: wgt.Scroll(Widget),
     lines: std.ArrayList([]const u8),
 
     pub fn init(allocator: std.mem.Allocator) !SelectableList {
         var self = blk: {
             var inner_box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .rounded_corners = true, .direction = .vert });
-            errdefer inner_box.deinit();
+            errdefer inner_box.deinit(allocator);
 
             var scroll = try wgt.Scroll(Widget).init(allocator, .{ .box = inner_box }, .vert);
-            errdefer scroll.deinit();
+            errdefer scroll.deinit(allocator);
 
             break :blk SelectableList{
-                .allocator = allocator,
                 .scroll = scroll,
                 .lines = .empty,
             };
         };
-        errdefer self.deinit();
+        errdefer self.deinit(allocator);
         return self;
     }
 
-    pub fn deinit(self: *SelectableList) void {
-        self.scroll.deinit();
-        for (self.lines.items) |line| self.allocator.free(line);
-        self.lines.deinit(self.allocator);
+    pub fn deinit(self: *SelectableList, allocator: std.mem.Allocator) void {
+        self.scroll.deinit(allocator);
+        for (self.lines.items) |line| allocator.free(line);
+        self.lines.deinit(allocator);
     }
 
-    pub fn setItems(self: *SelectableList, items: []const []const u8) !void {
+    pub fn setItems(self: *SelectableList, allocator: std.mem.Allocator, items: []const []const u8) !void {
         const inner_box = &self.scroll.child.box;
 
         for (inner_box.children.values()) |*child| {
-            child.widget.deinit();
+            child.widget.deinit(allocator);
         }
-        inner_box.children.clearAndFree(self.allocator);
+        inner_box.children.clearAndFree(allocator);
 
-        for (self.lines.items) |line| self.allocator.free(line);
-        self.lines.clearAndFree(self.allocator);
+        for (self.lines.items) |line| allocator.free(line);
+        self.lines.clearAndFree(allocator);
 
         self.scroll.x = 0;
         self.scroll.y = 0;
@@ -217,16 +215,16 @@ pub const SelectableList = struct {
         inner_box.getFocus().child_id = null;
 
         for (items) |item| {
-            const line = try self.allocator.dupe(u8, item);
+            const line = try allocator.dupe(u8, item);
             {
-                errdefer self.allocator.free(line);
-                try self.lines.append(self.allocator, line);
+                errdefer allocator.free(line);
+                try self.lines.append(allocator, line);
             }
 
-            var text_box = try wgt.TextBox(Widget).init(self.allocator, line, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .none });
-            errdefer text_box.deinit();
+            var text_box = try wgt.TextBox(Widget).init(allocator, line, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .none });
+            errdefer text_box.deinit(allocator);
             text_box.getFocus().focusable = true;
-            try inner_box.children.put(self.allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
+            try inner_box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
             try inner_box.getFocus().addChild(text_box.getFocus(), .{ .width = 0, .height = 0 }, 0, 0);
         }
 
@@ -235,7 +233,7 @@ pub const SelectableList = struct {
         }
     }
 
-    pub fn build(self: *SelectableList, constraint: layout.Constraint, root_focus: *Focus) !void {
+    pub fn build(self: *SelectableList, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
         self.clearGrid();
         const children = &self.scroll.child.box.children;
         for (children.keys(), children.values()) |id, *item| {
@@ -244,10 +242,11 @@ pub const SelectableList = struct {
             else
                 .hidden;
         }
-        try self.scroll.build(constraint, root_focus);
+        try self.scroll.build(allocator, constraint, root_focus);
     }
 
-    pub fn input(self: *SelectableList, key: inp.Key, root_focus: *Focus) !void {
+    pub fn input(self: *SelectableList, allocator: std.mem.Allocator, key: inp.Key, root_focus: *Focus) !void {
+        _ = allocator;
         if (self.getFocus().child_id) |child_id| {
             const children = &self.scroll.child.box.children;
             if (children.getIndex(child_id)) |current_index| {
@@ -337,19 +336,18 @@ pub const SelectableList = struct {
 // used inside Box(horiz) with a min_size so the box reserves space for the
 // children that follow, pushing them to the right.
 pub const Spacer = struct {
-    allocator: std.mem.Allocator,
     focus: Focus,
     grid: ?Grid,
 
     pub fn init(allocator: std.mem.Allocator) Spacer {
         return .{
-            .allocator = allocator,
             .focus = Focus.init(allocator, .container),
             .grid = null,
         };
     }
 
-    pub fn deinit(self: *Spacer) void {
+    pub fn deinit(self: *Spacer, allocator: std.mem.Allocator) void {
+        _ = allocator;
         self.focus.deinit();
         if (self.grid) |*grid| {
             grid.deinit();
@@ -357,16 +355,17 @@ pub const Spacer = struct {
         }
     }
 
-    pub fn build(self: *Spacer, constraint: layout.Constraint, root_focus: *Focus) !void {
+    pub fn build(self: *Spacer, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
         _ = root_focus;
         self.clearGrid();
         const width = constraint.max_size.width orelse return;
         if (width == 0) return;
-        self.grid = try Grid.init(self.allocator, .{ .width = width, .height = 1 });
+        self.grid = try Grid.init(allocator, .{ .width = width, .height = 1 });
     }
 
-    pub fn input(self: *Spacer, key: inp.Key, root_focus: *Focus) !void {
+    pub fn input(self: *Spacer, allocator: std.mem.Allocator, key: inp.Key, root_focus: *Focus) !void {
         _ = self;
+        _ = allocator;
         _ = key;
         _ = root_focus;
     }
@@ -390,7 +389,6 @@ pub const Spacer = struct {
 // a single-child wrapper that builds the child at its natural size and
 // positions its grid in the middle of the area granted by the parent
 pub const Center = struct {
-    allocator: std.mem.Allocator,
     focus: Focus,
     grid: ?Grid,
     child: *Widget,
@@ -403,7 +401,6 @@ pub const Center = struct {
         errdefer allocator.destroy(child);
         child.* = child_widget;
         return .{
-            .allocator = allocator,
             .focus = Focus.init(allocator, .container),
             .grid = null,
             .child = child,
@@ -411,23 +408,23 @@ pub const Center = struct {
         };
     }
 
-    pub fn deinit(self: *Center) void {
+    pub fn deinit(self: *Center, allocator: std.mem.Allocator) void {
         self.focus.deinit();
         if (self.grid) |*grid| {
             grid.deinit();
             self.grid = null;
         }
-        self.child.deinit();
-        self.allocator.destroy(self.child);
+        self.child.deinit(allocator);
+        allocator.destroy(self.child);
     }
 
-    pub fn build(self: *Center, constraint: layout.Constraint, root_focus: *Focus) !void {
+    pub fn build(self: *Center, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
         self.clearGrid();
         self.getFocus().clear();
 
         // build the child without forcing it to fill min_size; it sizes
         // itself to its content within the available max.
-        try self.child.build(.{
+        try self.child.build(allocator, .{
             .min_size = .{ .width = null, .height = null },
             .max_size = constraint.max_size,
         }, root_focus);
@@ -447,7 +444,7 @@ pub const Center = struct {
         else
             0;
 
-        var grid = try Grid.init(self.allocator, .{ .width = width, .height = height });
+        var grid = try Grid.init(allocator, .{ .width = width, .height = height });
         errdefer grid.deinit();
         try grid.drawGrid(child_grid, offset_x, offset_y);
         try self.getFocus().addChild(self.child.getFocus(), child_grid.size, offset_x, offset_y);
@@ -456,8 +453,8 @@ pub const Center = struct {
         self.grid = grid;
     }
 
-    pub fn input(self: *Center, key: inp.Key, root_focus: *Focus) !void {
-        try self.child.input(key, root_focus);
+    pub fn input(self: *Center, allocator: std.mem.Allocator, key: inp.Key, root_focus: *Focus) !void {
+        try self.child.input(allocator, key, root_focus);
     }
 
     pub fn clearGrid(self: *Center) void {

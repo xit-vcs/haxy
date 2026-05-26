@@ -28,11 +28,11 @@ pub const View = struct {
 
     pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session, users_tab_id: usize) !View {
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert });
-        errdefer box.deinit();
+        errdefer box.deinit(allocator);
 
         {
             var prompt = wgt.Text(ui.Widget).init(allocator, "are you sure?");
-            errdefer prompt.deinit();
+            errdefer prompt.deinit(allocator);
             try box.children.put(allocator, prompt.getFocus().id, .{
                 .widget = .{ .text = prompt },
                 .rect = null,
@@ -43,7 +43,7 @@ pub const View = struct {
         var button_id: usize = undefined;
         {
             var button = try wgt.TextBox(ui.Widget).init(allocator, "logout", .{ .border_style = .single, .wrap_kind = .none });
-            errdefer button.deinit();
+            errdefer button.deinit(allocator);
             button.getFocus().focusable = true;
             // the renderer distinguishes plain clickables from buttons that
             // should POST to a server route by this kind.
@@ -67,21 +67,22 @@ pub const View = struct {
         };
     }
 
-    pub fn deinit(self: *View) void {
-        self.center.deinit();
+    pub fn deinit(self: *View, allocator: std.mem.Allocator) void {
+        self.center.deinit(allocator);
     }
 
-    pub fn build(self: *View, constraint: layout.Constraint, root_focus: *Focus) !void {
+    pub fn build(self: *View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
         const box = &self.center.child.box;
         const button = &box.children.values()[button_index].widget.text_box;
         button.options.border_style = if (root_focus.grandchild_id == self.button_id)
             .double
         else
             .single;
-        try self.center.build(constraint, root_focus);
+        try self.center.build(allocator, constraint, root_focus);
     }
 
-    pub fn input(self: *View, key: inp.Key, root_focus: *Focus) !void {
+    pub fn input(self: *View, allocator: std.mem.Allocator, key: inp.Key, root_focus: *Focus) !void {
+        _ = allocator;
         switch (key) {
             .enter => {
                 try self.logout(root_focus);

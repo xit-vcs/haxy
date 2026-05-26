@@ -21,7 +21,7 @@ pub const View = struct {
 
     pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !View {
         var text_box = try wgt.TextBox(ui.Widget).init(allocator, "login", .{ .border_style = .single, .wrap_kind = .none });
-        errdefer text_box.deinit();
+        errdefer text_box.deinit(allocator);
         text_box.getFocus().focusable = true;
         return .{
             .text_box = text_box,
@@ -30,11 +30,11 @@ pub const View = struct {
         };
     }
 
-    pub fn deinit(self: *View) void {
-        self.text_box.deinit();
+    pub fn deinit(self: *View, allocator: std.mem.Allocator) void {
+        self.text_box.deinit(allocator);
     }
 
-    pub fn build(self: *View, constraint: layout.Constraint, root_focus: *Focus) !void {
+    pub fn build(self: *View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
         // update the displayed label based on session state. the inner Text
         // widget's content is just a slice, so we can repoint it without
         // re-allocating.
@@ -42,11 +42,11 @@ pub const View = struct {
             const text_widget = &self.text_box.box.children.values()[0].widget.text;
             text_widget.content = if (self.session.user_id != null) "logout" else "login";
         }
-        try self.text_box.build(constraint, root_focus);
+        try self.text_box.build(allocator, constraint, root_focus);
     }
 
-    pub fn input(self: *View, key: inp.Key, root_focus: *Focus) !void {
-        try self.text_box.input(key, root_focus);
+    pub fn input(self: *View, allocator: std.mem.Allocator, key: inp.Key, root_focus: *Focus) !void {
+        try self.text_box.input(allocator, key, root_focus);
     }
 
     pub fn clearGrid(self: *View) void {
