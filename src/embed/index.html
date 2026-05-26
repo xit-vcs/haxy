@@ -15,24 +15,44 @@
             src: url('term.ttf') format('truetype');
           }
 
-          #grid {
+          .page {
             font-family: '3270', monospace;
-            white-space: pre;
             font-size: 22px;
             line-height: 22px;
             position: relative;
           }
 
-          #grid input {
+          #grid {
+            white-space: pre;
+          }
+
+          /* overlay elements share the grid's coordinate system since
+             their parent (.page) is the positioning ancestor and the
+             grid sits at its top-left. */
+          .page input,
+          .page button {
             position: absolute;
             font: inherit;
+            padding: 0;
+            margin: 0;
+            outline: none;
+            box-sizing: border-box;
+          }
+
+          .page input {
             color: inherit;
             background: rgba(0, 50, 70, 1.0);
             border: none;
-            outline: none;
-            padding: 0;
-            margin: 0;
-            box-sizing: border-box;
+          }
+
+          /* the TUI cells under the button render the border + label;
+             the overlay button stays transparent so they show through
+             and just owns the click + form-submit behavior. */
+          .page button {
+            background: transparent;
+            color: transparent;
+            border: none;
+            cursor: pointer;
           }
 
           #grid a {
@@ -45,8 +65,11 @@
         </style>
     </head>
     <body>
-      <div id="grid">{{{ HAXY_HTML }}}</div>
-      <script id="page" type="text/plain">{{{ HAXY_JSON }}}</script>
+      <div class="page">
+        <div id="grid">{{{ HAXY_HTML }}}</div>
+        <div id="overlay">{{{ HAXY_OVERLAY }}}</div>
+      </div>
+      <script id="page-data" type="text/plain">{{{ HAXY_JSON }}}</script>
       <script src="script.js"></script>
     </body>
 </html>

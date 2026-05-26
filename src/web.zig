@@ -100,6 +100,10 @@ fn handleConnection(
     var conn_bw = stream.writer(io, &send_buffer);
     var http_server = std.http.Server.init(&conn_br.interface, &conn_bw.interface);
 
+    // serve multiple requests on a single connection so HTTP/1.1 keep-alive
+    // works — important for browser-native form POST: after the 303 the
+    // browser issues GET / on the same socket, and forcibly closing here
+    // would race the follow-up request into a "site can't be reached".
     while (http_server.reader.state == .ready) {
         var request = http_server.receiveHead() catch |receive_err| switch (receive_err) {
             error.HttpConnectionClosing => break,
@@ -107,22 +111,22 @@ fn handleConnection(
             else => |e| return e,
         };
 
-        handleRequest(io, &http_server, &request, allocator, admin_repo_path) catch |request_err| {
+        handleRequest(io, &request, allocator, admin_repo_path) catch |request_err| {
             try err.print("web ui request failed: {s}\n", .{@errorName(request_err)});
             try err.flush();
-            if (http_server.reader.state == .received_head) {
-                http_server.reader.state = .ready;
-            }
-            try writeSimpleResponse(&http_server, 500, "Internal Server Error", "text/plain", @errorName(request_err));
+            // best-effort 500. if handleRequest already started writing a
+            // response before throwing, this respond may fail too, but at
+            // that point the connection is unrecoverable anyway.
+            request.respond(@errorName(request_err), .{
+                .status = .internal_server_error,
+                .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+            }) catch {};
         };
-        try http_server.out.flush();
-        break;
     }
 }
 
 fn handleRequest(
     io: std.Io,
-    http_server: *std.http.Server,
     request: *std.http.Server.Request,
     allocator: std.mem.Allocator,
     admin_repo_path: []const u8,
@@ -132,31 +136,29 @@ fn handleRequest(
     const path = uri.path.percent_encoded;
 
     if (method == .POST and std.mem.eql(u8, path, "/login")) {
-        return handleLogin(io, http_server, request, allocator, admin_repo_path);
+        return handleLogin(io, request, allocator, admin_repo_path);
     }
     if (method == .POST and std.mem.eql(u8, path, "/logout")) {
-        return handleLogout(http_server, request);
+        return handleLogout(request);
     }
 
     const get_or_head = method == .GET or method == .HEAD;
     if (!get_or_head) {
-        if (http_server.reader.state == .received_head) {
-            http_server.reader.state = .ready;
-        }
-        try writeSimpleResponse(http_server, 405, "Method Not Allowed", "text/plain", "method not allowed");
+        try request.respond("method not allowed", .{
+            .status = .method_not_allowed,
+            .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+        });
         return;
     }
 
     if (std.mem.eql(u8, path, "/favicon.ico")) {
-        if (http_server.reader.state == .received_head) {
-            http_server.reader.state = .ready;
-        }
-        try writeStaticResponse(http_server, 204, "No Content", "image/x-icon", "", true);
+        try request.respond("", .{
+            .status = .no_content,
+            .extra_headers = &.{.{ .name = "content-type", .value = "image/x-icon" }},
+        });
         return;
     }
 
-    // for the index page we need to consult the session cookie before
-    // consuming the request, so we don't dispatch through findEmbed here.
     if (std.mem.eql(u8, path, "/") or std.mem.eql(u8, path, "/index.html")) {
         const user_id_hex = getCookieValue(request, cookie_name);
         const login_failure: ?ui.Home.Auth.Login.Failure =
@@ -169,42 +171,36 @@ fn handleRequest(
                     null
             else
                 null;
-        if (http_server.reader.state == .received_head) {
-            http_server.reader.state = .ready;
-        }
         const html = try renderIndexHtml(io, allocator, admin_repo_path, user_id_hex, login_failure);
         defer allocator.free(html);
-        // expire the flash cookie on the way out — it's been consumed by
-        // this render and shouldn't survive a refresh.
-        const clear_flash: []const u8 = if (login_failure != null)
-            "Set-Cookie: " ++ login_failure_cookie ++ "=; Path=/; Max-Age=0\r\n"
-        else
-            "";
-        try http_server.out.print(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n{s}Content-Length: {d}\r\n\r\n",
-            .{ clear_flash, html.len },
-        );
-        if (method != .HEAD) try http_server.out.writeAll(html);
+        // expire the flash cookie on the way out so a refresh doesn't keep
+        // showing the failure label.
+        var headers: [2]std.http.Header = undefined;
+        headers[0] = .{ .name = "content-type", .value = "text/html; charset=utf-8" };
+        var headers_slice: []const std.http.Header = headers[0..1];
+        if (login_failure != null) {
+            headers[1] = .{ .name = "set-cookie", .value = login_failure_cookie ++ "=; Path=/; Max-Age=0" };
+            headers_slice = headers[0..2];
+        }
+        try request.respond(html, .{ .extra_headers = headers_slice });
         return;
     }
 
     const embed = findEmbed(path) orelse {
-        if (http_server.reader.state == .received_head) {
-            http_server.reader.state = .ready;
-        }
-        try writeSimpleResponse(http_server, 404, "Not Found", "text/plain", "not found");
+        try request.respond("not found", .{
+            .status = .not_found,
+            .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+        });
         return;
     };
 
-    if (http_server.reader.state == .received_head) {
-        http_server.reader.state = .ready;
-    }
-    try writeStaticResponse(http_server, 200, "OK", embed.content_type, embed.body, method == .HEAD);
+    try request.respond(embed.body, .{
+        .extra_headers = &.{.{ .name = "content-type", .value = embed.content_type }},
+    });
 }
 
 fn handleLogin(
     io: std.Io,
-    http_server: *std.http.Server,
     request: *std.http.Server.Request,
     allocator: std.mem.Allocator,
     admin_repo_path: []const u8,
@@ -233,36 +229,48 @@ fn handleLogin(
     switch (result) {
         .success => |user_id| {
             const hex = std.fmt.bytesToHex(user_id, .lower);
-            try http_server.out.print(
-                "HTTP/1.1 303 See Other\r\nLocation: /\r\nSet-Cookie: " ++ cookie_name ++ "={s}; Path=/; HttpOnly; SameSite=Strict\r\nContent-Length: 0\r\n\r\n",
-                .{hex},
-            );
+            var cookie_buf: [256]u8 = undefined;
+            const cookie = try std.fmt.bufPrint(&cookie_buf, cookie_name ++ "={s}; Path=/; HttpOnly; SameSite=Strict", .{hex});
+            try request.respond("", .{
+                .status = .see_other,
+                .extra_headers = &.{
+                    .{ .name = "location", .value = "/" },
+                    .{ .name = "set-cookie", .value = cookie },
+                },
+            });
         },
         .unknown_user => {
-            try http_server.out.print(
-                "HTTP/1.1 303 See Other\r\nLocation: /\r\nSet-Cookie: " ++ login_failure_cookie ++ "=unknown_user; Path=/; HttpOnly; SameSite=Strict\r\nContent-Length: 0\r\n\r\n",
-                .{},
-            );
+            try request.respond("", .{
+                .status = .see_other,
+                .extra_headers = &.{
+                    .{ .name = "location", .value = "/" },
+                    .{ .name = "set-cookie", .value = login_failure_cookie ++ "=unknown_user; Path=/; HttpOnly; SameSite=Strict" },
+                },
+            });
         },
         .wrong_password => {
-            try http_server.out.print(
-                "HTTP/1.1 303 See Other\r\nLocation: /\r\nSet-Cookie: " ++ login_failure_cookie ++ "=wrong_password; Path=/; HttpOnly; SameSite=Strict\r\nContent-Length: 0\r\n\r\n",
-                .{},
-            );
+            try request.respond("", .{
+                .status = .see_other,
+                .extra_headers = &.{
+                    .{ .name = "location", .value = "/" },
+                    .{ .name = "set-cookie", .value = login_failure_cookie ++ "=wrong_password; Path=/; HttpOnly; SameSite=Strict" },
+                },
+            });
         },
     }
 }
 
-fn handleLogout(http_server: *std.http.Server, request: *std.http.Server.Request) !void {
-    // we don't need the body, but the http server wants the request consumed
-    // before the next one (and before we write the response).
-    var sink_buf: [64]u8 = undefined;
-    _ = request.readerExpectNone(&sink_buf).discardRemaining() catch {};
-
-    try http_server.out.print(
-        "HTTP/1.1 303 See Other\r\nLocation: /\r\nSet-Cookie: " ++ cookie_name ++ "=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0\r\nContent-Length: 0\r\n\r\n",
-        .{},
-    );
+fn handleLogout(request: *std.http.Server.Request) !void {
+    // request.respond's discardBody reads any unused body for us and lands
+    // the connection back in the .ready state for the next request on the
+    // same connection (keep_alive defaults to true).
+    try request.respond("", .{
+        .status = .see_other,
+        .extra_headers = &.{
+            .{ .name = "location", .value = "/" },
+            .{ .name = "set-cookie", .value = cookie_name ++ "=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0" },
+        },
+    });
 }
 
 fn renderIndexHtml(
@@ -299,6 +307,8 @@ fn renderIndexHtml(
 
     const content = try generateHtml(allocator, &root, &session);
     defer allocator.free(content);
+    const overlay = try generateOverlay(allocator, &root, &session);
+    defer allocator.free(overlay);
 
     // serialize the snapshot so the wasm side can parse it back without
     // making a second request. base64-encoded so the json can be embedded
@@ -318,6 +328,7 @@ fn renderIndexHtml(
         var cursor: usize = 0;
         for (&[_]struct { needle: []const u8, replacement: []const u8 }{
             .{ .needle = "{{{ HAXY_HTML }}}", .replacement = content },
+            .{ .needle = "{{{ HAXY_OVERLAY }}}", .replacement = overlay },
             .{ .needle = "{{{ HAXY_JSON }}}", .replacement = json_b64 },
         }) |sub| {
             const idx = std.mem.indexOfPos(u8, template, cursor, sub.needle) orelse return error.MissingTemplateToken;
@@ -344,55 +355,51 @@ fn findEmbed(request_path: []const u8) ?Embed {
     return null;
 }
 
-fn writeSimpleResponse(
-    http_server: *std.http.Server,
-    code: u16,
-    message: []const u8,
-    content_type: []const u8,
-    body: []const u8,
-) !void {
-    try http_server.out.print(
-        "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\n\r\n{s}",
-        .{ code, message, content_type, body.len, body },
-    );
-}
-
-fn writeStaticResponse(
-    http_server: *std.http.Server,
-    code: u16,
-    message: []const u8,
-    content_type: []const u8,
-    body: []const u8,
-    head_only: bool,
-) !void {
-    try http_server.out.print(
-        "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\n\r\n",
-        .{ code, message, content_type, body.len },
-    );
-    if (!head_only) {
-        try http_server.out.writeAll(body);
-    }
-}
-
 fn logError(err: *std.Io.Writer, comptime fmt: []const u8, args: anytype) void {
     err.print(fmt, args) catch return;
     err.flush() catch {};
 }
 
+// emits the TUI grid cells (one <span> run per focusable widget)
 pub fn generateHtml(allocator: std.mem.Allocator, root: *ui.Widget, session: *const ui.Session) ![]const u8 {
+    _ = session;
     const grid = root.getGrid() orelse return error.MissingGrid;
     const root_focus = root.getFocus();
 
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
 
-    // determines the form route for any submit_button on this page. only one
-    // is visible at a time: login when logged out, logout when logged in.
-    const submit_url: []const u8 = if (session.data.user_id != null) "/logout" else "/login";
+    for (0..grid.size.height) |y| {
+        var current_id: ?usize = null;
+        for (0..grid.size.width) |x| {
+            const cell_id = cellFocusId(root_focus, x, y);
+            if (cell_id != current_id) {
+                if (current_id != null) try out.appendSlice(allocator, "</span>");
+                if (cell_id) |id| {
+                    var buf: [128]u8 = undefined;
+                    const tag = try std.fmt.bufPrint(&buf, "<span class=\"clickable\" data-focus-id=\"{d}\">", .{id});
+                    try out.appendSlice(allocator, tag);
+                }
+                current_id = cell_id;
+            }
+            const rune = grid.cells.items[try grid.cells.at(.{ y, x })].rune orelse " ";
+            try appendEscapedHtml(allocator, &out, rune);
+        }
+        if (current_id != null) try out.appendSlice(allocator, "</span>");
+        try out.append(allocator, '\n');
+    }
 
-    // collect the text inputs in deterministic top-to-bottom, left-to-right
-    // order. root_focus.children is a hash map so iterating it directly would
-    // give arbitrary tab order between username / password.
+    return try out.toOwnedSlice(allocator);
+}
+
+// emits the form overlay — a <form> wrapping the text inputs and submit
+// button, positioned absolutely over the matching grid cells
+pub fn generateOverlay(allocator: std.mem.Allocator, root: *ui.Widget, session: *const ui.Session) ![]const u8 {
+    const root_focus = root.getFocus();
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+
     const InputEntry = struct {
         focus_id: usize,
         x: usize,
@@ -401,25 +408,48 @@ pub fn generateHtml(allocator: std.mem.Allocator, root: *ui.Widget, session: *co
         is_password: bool,
         ti: *wgt.TextInput(ui.Widget),
     };
+    const SubmitButton = struct {
+        focus_id: usize,
+        x: usize,
+        y: usize,
+        width: usize,
+        height: usize,
+    };
     var inputs: std.ArrayList(InputEntry) = .empty;
     defer inputs.deinit(allocator);
-    var focus_iter = root_focus.children.iterator();
-    while (focus_iter.next()) |entry| {
+    var submit: ?SubmitButton = null;
+
+    var iter = root_focus.children.iterator();
+    while (iter.next()) |entry| {
         const child = entry.value_ptr.*;
-        const is_password = switch (child.focus.kind) {
-            .text_input => false,
-            .text_input_password => true,
-            else => continue,
-        };
-        try inputs.append(allocator, .{
-            .focus_id = entry.key_ptr.*,
-            .x = child.rect.x,
-            .y = child.rect.y,
-            .width = child.rect.size.width,
-            .is_password = is_password,
-            .ti = @fieldParentPtr("focus", child.focus),
-        });
+        switch (child.focus.kind) {
+            .text_input, .text_input_password => {
+                try inputs.append(allocator, .{
+                    .focus_id = entry.key_ptr.*,
+                    .x = child.rect.x,
+                    .y = child.rect.y,
+                    .width = child.rect.size.width,
+                    .is_password = child.focus.kind == .text_input_password,
+                    .ti = @fieldParentPtr("focus", child.focus),
+                });
+            },
+            .submit_button => {
+                submit = .{
+                    .focus_id = entry.key_ptr.*,
+                    .x = child.rect.x,
+                    .y = child.rect.y,
+                    .width = child.rect.size.width,
+                    .height = child.rect.size.height,
+                };
+            },
+            else => {},
+        }
     }
+
+    if (submit == null and inputs.items.len == 0) return try out.toOwnedSlice(allocator);
+
+    // top-to-bottom, left-to-right order so the natural tab cycle matches
+    // visual layout (username -> password -> submit button).
     std.mem.sort(InputEntry, inputs.items, {}, struct {
         fn lt(_: void, a: InputEntry, b: InputEntry) bool {
             if (a.y != b.y) return a.y < b.y;
@@ -427,9 +457,12 @@ pub fn generateHtml(allocator: std.mem.Allocator, root: *ui.Widget, session: *co
         }
     }.lt);
 
-    // emit the overlay inputs FIRST so they precede any submit-button span
-    // in DOM order; with the submit button carrying tabindex="0", that puts
-    // it at the end of the natural tab order — username -> password -> button.
+    const action_url: []const u8 = if (session.data.user_id != null) "/logout" else "/login";
+
+    try out.appendSlice(allocator, "<form action=\"");
+    try out.appendSlice(allocator, action_url);
+    try out.appendSlice(allocator, "\" method=\"post\">");
+
     for (inputs.items) |entry| {
         const inner_left = entry.x + 1;
         const inner_top = entry.y + 1;
@@ -444,54 +477,32 @@ pub fn generateHtml(allocator: std.mem.Allocator, root: *ui.Widget, session: *co
             try out.appendSlice(allocator, "\" name=\"");
             try appendEscapedHtml(allocator, &out, entry.ti.options.name);
         }
-        // mark the wasm-focused element so JS can mirror it onto DOM focus
-        // — otherwise moving focus via arrow keys leaves the TUI border
-        // showing focus but the underlying <input> unfocused.
-        if (entry.focus_id == root_focus.grandchild_id) {
-            try out.appendSlice(allocator, "\" data-focused=\"true");
-        }
-        try out.appendSlice(allocator, "\" value=\"");
-        var value_buf: std.ArrayList(u8) = .empty;
-        defer value_buf.deinit(allocator);
-        for (entry.ti.content.items) |cp| {
-            try value_buf.appendSlice(allocator, cp);
-        }
-        try appendEscapedHtml(allocator, &out, value_buf.items);
+        // intentionally no `value` attribute: the browser tracks user input
+        // natively, and including the wasm-side value here would make the
+        // overlay HTML differ on every keystroke — that would trip the diff
+        // in _setOverlay and rebuild the <input>, eating the user's caret.
         try out.appendSlice(allocator, "\" style=\"left:");
         var pos_buf: [64]u8 = undefined;
         try out.appendSlice(allocator, try std.fmt.bufPrint(&pos_buf, "{d}ch;top:{d}em;width:{d}ch;height:1em", .{ inner_left, inner_top, inner_width }));
         try out.appendSlice(allocator, "\">");
     }
 
-    for (0..grid.size.height) |y| {
-        // wrap runs of cells belonging to a focusable widget in a span tagged
-        // with that widget's focus id. CSS paints them with a pointer cursor;
-        // JS reads the id on click and dispatches focus directly.
-        var current_id: ?usize = null;
-        for (0..grid.size.width) |x| {
-            const cell_id = cellFocusId(root_focus, x, y);
-            if (cell_id != current_id) {
-                if (current_id != null) try out.appendSlice(allocator, "</span>");
-                if (cell_id) |id| {
-                    const kind = if (root_focus.children.get(id)) |entry| entry.focus.kind else .container;
-                    const focused_attr: []const u8 = if (id == root_focus.grandchild_id) " data-focused=\"true\"" else "";
-                    var buf: [256]u8 = undefined;
-                    // tabindex="0" on submit buttons puts them in the browser's
-                    // natural Tab order alongside the inputs above.
-                    const tag = if (kind == .submit_button)
-                        try std.fmt.bufPrint(&buf, "<span class=\"clickable\" data-focus-id=\"{d}\" data-action=\"submit\" data-url=\"{s}\" tabindex=\"0\"{s}>", .{ id, submit_url, focused_attr })
-                    else
-                        try std.fmt.bufPrint(&buf, "<span class=\"clickable\" data-focus-id=\"{d}\"{s}>", .{ id, focused_attr });
-                    try out.appendSlice(allocator, tag);
-                }
-                current_id = cell_id;
-            }
-            const rune = grid.cells.items[try grid.cells.at(.{ y, x })].rune orelse " ";
-            try appendEscapedHtml(allocator, &out, rune);
-        }
-        if (current_id != null) try out.appendSlice(allocator, "</span>");
-        try out.append(allocator, '\n');
+    if (submit) |btn| {
+        // inside the dashed border the TUI cells draw around the button.
+        const inner_left = btn.x + 1;
+        const inner_top = btn.y + 1;
+        const inner_width = if (btn.width > 2) btn.width - 2 else 0;
+        const inner_height = if (btn.height > 2) btn.height - 2 else 0;
+        try out.appendSlice(allocator, "<button type=\"submit\" data-focus-id=\"");
+        var id_buf: [32]u8 = undefined;
+        try out.appendSlice(allocator, try std.fmt.bufPrint(&id_buf, "{d}", .{btn.focus_id}));
+        try out.appendSlice(allocator, "\" style=\"left:");
+        var pos_buf: [128]u8 = undefined;
+        try out.appendSlice(allocator, try std.fmt.bufPrint(&pos_buf, "{d}ch;top:{d}em;width:{d}ch;height:{d}em", .{ inner_left, inner_top, inner_width, inner_height }));
+        try out.appendSlice(allocator, "\"></button>");
     }
+
+    try out.appendSlice(allocator, "</form>");
 
     return try out.toOwnedSlice(allocator);
 }

@@ -15,6 +15,16 @@ fn updateHtml() !void {
     const html = try web.generateHtml(allocator, root_ptr, &session);
     defer allocator.free(html);
     setHtml(html);
+
+    // emit the overlay (form + inputs + button) on every tick so the wasm
+    // layout drives positions, not just the server's initial render. JS
+    // diffs the result against the previous overlay; an unchanged overlay
+    // leaves the live <form> alone — crucial since wiping it mid-click
+    // would detach the submit button before the browser can dispatch the
+    // form submission.
+    const overlay = try web.generateOverlay(allocator, root_ptr, &session);
+    defer allocator.free(overlay);
+    setOverlay(overlay);
 }
 
 // the snapshot is allocated into this arena via parseFromSliceLeaky. it
@@ -88,8 +98,13 @@ fn setHtml(arg: []const u8) void {
     _setHtml(arg.ptr, @intCast(arg.len));
 }
 
+fn setOverlay(arg: []const u8) void {
+    _setOverlay(arg.ptr, @intCast(arg.len));
+}
+
 extern fn _consoleLog(arg: [*]const u8, len: u32) void;
 extern fn _setHtml(arg: [*]const u8, len: u32) void;
+extern fn _setOverlay(arg: [*]const u8, len: u32) void;
 
 /// js calls this first to get a wasm pointer it can write the page json into.
 export fn _alloc(len: u32) ?[*]u8 {

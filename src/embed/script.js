@@ -1,10 +1,15 @@
 const grid = document.getElementById("grid");
-const pageJsonBase64 = document.getElementById("page").textContent;
+const overlay = document.getElementById("overlay");
+const pageJsonBase64 = document.getElementById("page-data").textContent;
 
 let wasmInstance;
 const decoder = new TextDecoder();
 const encoder = new TextEncoder();
 let currentHtml = "";
+// seeded from the server-rendered overlay so the first wasm tick can no-op
+// when its layout happens to match the server's. otherwise the first tick
+// always rebuilds and any pre-load focus state is lost.
+let currentOverlay = overlay.innerHTML;
 
 const MIN_COLS = 30;
 
@@ -52,42 +57,24 @@ const importObject = {
             const html = readWasmString(ptr, len);
             if (html === currentHtml) return;
             currentHtml = html;
-            // capture which focusable element had focus + (for inputs) its
-            // cursor position so we can restore it after innerHTML wipes
-            // and re-creates the elements. covers both overlay inputs AND
-            // tabbable submit-button spans; otherwise focus on the latter
-            // would be lost on every re-render, and Enter would fall
-            // through to the wasm key dispatch instead of being intercepted
-            // as a form submission.
-            const active = document.activeElement;
-            let savedFocusId = null;
-            let savedStart = null;
-            let savedEnd = null;
-            if (active && active.dataset && active.dataset.focusId) {
-                savedFocusId = active.dataset.focusId;
-                if (active.tagName === "INPUT") {
-                    savedStart = active.selectionStart;
-                    savedEnd = active.selectionEnd;
-                }
-            }
+            // the grid only holds non-focusable TUI cell spans now; the
+            // form (inputs + submit button) lives in #overlay and is
+            // never touched by this wipe, so we don't need to save and
+            // restore focus across the swap.
             grid.innerHTML = html;
-            // prefer whatever wasm marked as focused — that way arrow-key
-            // navigation in the TUI also moves DOM focus to the matching
-            // <input>. fall back to the previously focused element so
-            // typing doesn't lose its caret position on re-renders that
-            // don't change focus.
-            const focused = grid.querySelector('[data-focused="true"]');
-            const target = focused || (savedFocusId !== null
-                ? grid.querySelector(`[data-focus-id="${savedFocusId}"]`)
-                : null);
-            if (target && typeof target.focus === "function") {
-                target.focus();
-                // only restore selection when we land on the same element
-                // we captured from; otherwise the offsets are meaningless.
-                if (savedStart !== null && target.dataset && target.dataset.focusId === savedFocusId && target.setSelectionRange) {
-                    try { target.setSelectionRange(savedStart, savedEnd); } catch (_) {}
-                }
-            }
+        },
+        _setOverlay: function (ptr, len) {
+            const html = readWasmString(ptr, len);
+            // diff against the previous overlay HTML; an unchanged overlay
+            // means no layout/structure has shifted (typing alone doesn't
+            // produce a diff because we deliberately omit the `value`
+            // attribute on inputs — the browser tracks that). skipping the
+            // innerHTML assignment keeps the live <form> alive across the
+            // mousedown→focusin→tick→click sequence, which is what lets
+            // the very first click on the submit button actually submit.
+            if (html === currentOverlay) return;
+            currentOverlay = html;
+            overlay.innerHTML = html;
         },
     },
 };
@@ -98,19 +85,6 @@ function sendTextInputValue(focusId, value) {
     new Uint8Array(wasmInstance.exports.memory.buffer, ptr, bytes.length).set(bytes);
     wasmInstance.exports._setTextInputValue(focusId, ptr, bytes.length);
     wasmInstance.exports._tick(minRows(), maxCols());
-}
-
-// POST the current input values to the server form route. on response (any
-// status) we navigate to / so the server can render the page with whatever
-// session cookie it just set.
-function submitForm(url) {
-    const params = new URLSearchParams();
-    const inputs = grid.querySelectorAll("input");
-    for (const input of inputs) {
-        if (input.name) params.append(input.name, input.value);
-    }
-    fetch(url, { method: "POST", body: params, redirect: "manual", credentials: "same-origin" })
-        .finally(() => { window.location.href = "/"; });
 }
 
 WebAssembly.instantiateStreaming(fetch("haxy.wasm"), importObject).then(async (result) => {
@@ -131,27 +105,12 @@ WebAssembly.instantiateStreaming(fetch("haxy.wasm"), importObject).then(async (r
     wasmInstance.exports._start(ptr, jsonBytes.length, minRows(), maxCols());
 
     document.addEventListener("keydown", (event) => {
-        // when an overlay input owns focus, the browser handles typing &
-        // cursor movement natively; wasm gets the new value via input events
-        // instead of per-key dispatch. don't forward, and don't intercept
-        // arrow / home / end which the input needs for cursor movement.
-        // exception: Enter triggers form submission when one is on the page.
-        if (document.activeElement && document.activeElement.tagName === "INPUT") {
-            if (event.key === "Enter") {
-                event.preventDefault();
-                const submitSpan = grid.querySelector('[data-action="submit"]');
-                if (submitSpan) {
-                    submitForm(submitSpan.dataset.url);
-                }
-            }
-            return;
-        }
-        // a focused submit-button span (Tab can land here now that it has a
-        // tabindex) should submit on Enter the same as a click does.
-        if (event.key === "Enter" && document.activeElement && document.activeElement.dataset && document.activeElement.dataset.action === "submit") {
-            event.preventDefault();
-            submitForm(document.activeElement.dataset.url);
-            return;
+        // when a form element (text input or submit button) owns focus,
+        // the browser handles typing, Enter-to-submit, and Tab natively.
+        // we only forward keys into the TUI when focus is elsewhere.
+        if (document.activeElement) {
+            const tag = document.activeElement.tagName;
+            if (tag === "INPUT" || tag === "BUTTON") return;
         }
         if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "PageUp", "PageDown", "Home", "End"].includes(event.key)) {
             event.preventDefault();
@@ -160,48 +119,26 @@ WebAssembly.instantiateStreaming(fetch("haxy.wasm"), importObject).then(async (r
         wasmInstance.exports._tick(minRows(), maxCols());
     });
 
-    // event delegation: each render rebuilds the input elements (innerHTML
-    // wipe), so we can't attach listeners per-input. delegating on grid
-    // catches inputs created at any point.
-    grid.addEventListener("input", (event) => {
+    // listeners on document (not #grid) since the form lives outside #grid;
+    // input/focus events from form elements still bubble up to document.
+    document.addEventListener("input", (event) => {
         const t = event.target;
         if (!t || t.tagName !== "INPUT" || !t.dataset.focusId) return;
         sendTextInputValue(Number(t.dataset.focusId), t.value);
     });
 
-    grid.addEventListener("focusin", (event) => {
+    document.addEventListener("focusin", (event) => {
         const t = event.target;
         if (!t || !t.dataset || !t.dataset.focusId) return;
         wasmInstance.exports._onMouseClick(Number(t.dataset.focusId));
         wasmInstance.exports._tick(minRows(), maxCols());
     });
 
-    // submit handled on mousedown rather than click because submit-button
-    // spans are tabbable: a mouse click on one moves focus to it, which
-    // fires focusin, which re-renders via innerHTML, which detaches the
-    // very span the click event was about to target. mousedown fires
-    // before the focus change, so the target is guaranteed to be live.
-    grid.addEventListener("mousedown", (event) => {
-        const span = event.target.closest(".clickable");
-        if (!span || span.dataset.action !== "submit") return;
-        event.preventDefault();
-        submitForm(span.dataset.url);
-    });
-
     grid.addEventListener("click", (event) => {
         const span = event.target.closest(".clickable");
         if (!span) return;
-        // submit is handled in mousedown above
-        if (span.dataset.action === "submit") {
-            event.preventDefault();
-            return;
-        }
         const focusId = Number(span.dataset.focusId);
         wasmInstance.exports._onMouseClick(focusId);
-        // synthesize Enter so the focused widget's "activate" handler fires
-        // (e.g. a button click runs its submit handler). widgets that don't
-        // care about Enter just ignore it.
-        wasmInstance.exports._onKeyDown(13);
         wasmInstance.exports._tick(minRows(), maxCols());
     });
 
