@@ -408,6 +408,12 @@ pub fn generateHtml(allocator: std.mem.Allocator, root: *ui.Widget, session: *co
             try out.appendSlice(allocator, "\" name=\"");
             try appendEscapedHtml(allocator, &out, entry.ti.options.name);
         }
+        // mark the wasm-focused element so JS can mirror it onto DOM focus
+        // — otherwise moving focus via arrow keys leaves the TUI border
+        // showing focus but the underlying <input> unfocused.
+        if (entry.focus_id == root_focus.grandchild_id) {
+            try out.appendSlice(allocator, "\" data-focused=\"true");
+        }
         try out.appendSlice(allocator, "\" value=\"");
         var value_buf: std.ArrayList(u8) = .empty;
         defer value_buf.deinit(allocator);
@@ -432,13 +438,14 @@ pub fn generateHtml(allocator: std.mem.Allocator, root: *ui.Widget, session: *co
                 if (current_id != null) try out.appendSlice(allocator, "</span>");
                 if (cell_id) |id| {
                     const kind = if (root_focus.children.get(id)) |entry| entry.focus.kind else .container;
+                    const focused_attr: []const u8 = if (id == root_focus.grandchild_id) " data-focused=\"true\"" else "";
                     var buf: [256]u8 = undefined;
                     // tabindex="0" on submit buttons puts them in the browser's
                     // natural Tab order alongside the inputs above.
                     const tag = if (kind == .submit_button)
-                        try std.fmt.bufPrint(&buf, "<span class=\"clickable\" data-focus-id=\"{d}\" data-action=\"submit\" data-url=\"{s}\" tabindex=\"0\">", .{ id, submit_url })
+                        try std.fmt.bufPrint(&buf, "<span class=\"clickable\" data-focus-id=\"{d}\" data-action=\"submit\" data-url=\"{s}\" tabindex=\"0\"{s}>", .{ id, submit_url, focused_attr })
                     else
-                        try std.fmt.bufPrint(&buf, "<span class=\"clickable\" data-focus-id=\"{d}\">", .{id});
+                        try std.fmt.bufPrint(&buf, "<span class=\"clickable\" data-focus-id=\"{d}\"{s}>", .{ id, focused_attr });
                     try out.appendSlice(allocator, tag);
                 }
                 current_id = cell_id;

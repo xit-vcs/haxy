@@ -8,25 +8,34 @@ let currentHtml = "";
 
 const MIN_COLS = 30;
 
-// measured once after the font is loaded. recomputed lazily if it ever
-// reads back as zero (e.g. measured before the font was actually ready).
+// measured once after the font is loaded. recomputed lazily if either reads
+// back as zero (e.g. measured before the font was actually ready).
 let cellWidth = null;
+let cellHeight = null;
 
-function measureCellWidth() {
+function measureCell() {
     const probe = document.createElement("span");
     probe.style.position = "absolute";
     probe.style.visibility = "hidden";
     probe.style.whiteSpace = "pre";
     probe.textContent = "X".repeat(100);
     grid.appendChild(probe);
-    const w = probe.getBoundingClientRect().width / 100;
+    const rect = probe.getBoundingClientRect();
     probe.remove();
-    return w;
+    cellWidth = rect.width / 100;
+    cellHeight = rect.height;
 }
 
 function maxCols() {
-    if (!cellWidth) cellWidth = measureCellWidth();
+    if (!cellWidth) measureCell();
     return Math.max(MIN_COLS, Math.floor(document.body.clientWidth / cellWidth));
+}
+
+// minimum row count for the wasm build — the TUI fills at least the
+// viewport height, longer content extends past it and the browser scrolls.
+function minRows() {
+    if (!cellHeight) measureCell();
+    return Math.max(1, Math.floor(document.documentElement.clientHeight / cellHeight));
 }
 
 function readWasmString(ptr, len) {
@@ -62,13 +71,21 @@ const importObject = {
                 }
             }
             grid.innerHTML = html;
-            if (savedFocusId !== null) {
-                const restored = grid.querySelector(`[data-focus-id="${savedFocusId}"]`);
-                if (restored && typeof restored.focus === "function") {
-                    restored.focus();
-                    if (savedStart !== null && restored.setSelectionRange) {
-                        try { restored.setSelectionRange(savedStart, savedEnd); } catch (_) {}
-                    }
+            // prefer whatever wasm marked as focused — that way arrow-key
+            // navigation in the TUI also moves DOM focus to the matching
+            // <input>. fall back to the previously focused element so
+            // typing doesn't lose its caret position on re-renders that
+            // don't change focus.
+            const focused = grid.querySelector('[data-focused="true"]');
+            const target = focused || (savedFocusId !== null
+                ? grid.querySelector(`[data-focus-id="${savedFocusId}"]`)
+                : null);
+            if (target && typeof target.focus === "function") {
+                target.focus();
+                // only restore selection when we land on the same element
+                // we captured from; otherwise the offsets are meaningless.
+                if (savedStart !== null && target.dataset && target.dataset.focusId === savedFocusId && target.setSelectionRange) {
+                    try { target.setSelectionRange(savedStart, savedEnd); } catch (_) {}
                 }
             }
         },
@@ -80,7 +97,7 @@ function sendTextInputValue(focusId, value) {
     const ptr = wasmInstance.exports._alloc(bytes.length);
     new Uint8Array(wasmInstance.exports.memory.buffer, ptr, bytes.length).set(bytes);
     wasmInstance.exports._setTextInputValue(focusId, ptr, bytes.length);
-    wasmInstance.exports._tick(maxCols());
+    wasmInstance.exports._tick(minRows(), maxCols());
 }
 
 // POST the current input values to the server form route. on response (any
@@ -111,7 +128,7 @@ WebAssembly.instantiateStreaming(fetch("haxy.wasm"), importObject).then(async (r
     const jsonBytes = Uint8Array.from(atob(pageJsonBase64), (c) => c.charCodeAt(0));
     const ptr = wasmInstance.exports._alloc(jsonBytes.length);
     new Uint8Array(wasmInstance.exports.memory.buffer, ptr, jsonBytes.length).set(jsonBytes);
-    wasmInstance.exports._start(ptr, jsonBytes.length, maxCols());
+    wasmInstance.exports._start(ptr, jsonBytes.length, minRows(), maxCols());
 
     document.addEventListener("keydown", (event) => {
         // when an overlay input owns focus, the browser handles typing &
@@ -140,7 +157,7 @@ WebAssembly.instantiateStreaming(fetch("haxy.wasm"), importObject).then(async (r
             event.preventDefault();
         }
         wasmInstance.exports._onKeyDown(event.keyCode);
-        wasmInstance.exports._tick(maxCols());
+        wasmInstance.exports._tick(minRows(), maxCols());
     });
 
     // event delegation: each render rebuilds the input elements (innerHTML
@@ -156,7 +173,7 @@ WebAssembly.instantiateStreaming(fetch("haxy.wasm"), importObject).then(async (r
         const t = event.target;
         if (!t || !t.dataset || !t.dataset.focusId) return;
         wasmInstance.exports._onMouseClick(Number(t.dataset.focusId));
-        wasmInstance.exports._tick(maxCols());
+        wasmInstance.exports._tick(minRows(), maxCols());
     });
 
     grid.addEventListener("click", (event) => {
@@ -173,14 +190,14 @@ WebAssembly.instantiateStreaming(fetch("haxy.wasm"), importObject).then(async (r
         // (e.g. a button click runs its submit handler). widgets that don't
         // care about Enter just ignore it.
         wasmInstance.exports._onKeyDown(13);
-        wasmInstance.exports._tick(maxCols());
+        wasmInstance.exports._tick(minRows(), maxCols());
     });
 
     let resizeTimer = null;
     window.addEventListener("resize", () => {
         clearTimeout(resizeTimer);
         resizeTimer = setTimeout(() => {
-            wasmInstance.exports._tick(maxCols());
+            wasmInstance.exports._tick(minRows(), maxCols());
         }, 100);
     });
 });

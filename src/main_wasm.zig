@@ -23,7 +23,7 @@ var page_arena: ?std.heap.ArenaAllocator = null;
 var page: ?ui.Page = null;
 var session: ui.Session = .{};
 
-fn start(json: []const u8, max_width: u32) !void {
+fn start(json: []const u8, min_height: u32, max_width: u32) !void {
     if (page_arena) |*a| a.deinit();
     page_arena = std.heap.ArenaAllocator.init(allocator);
 
@@ -46,15 +46,16 @@ fn start(json: []const u8, max_width: u32) !void {
     if (root) |*old_root| old_root.deinit(allocator);
     root = next_root;
 
-    try tick(max_width);
+    try tick(min_height, max_width);
 }
 
-fn tick(max_width: u32) !void {
+fn tick(min_height: u32, max_width: u32) !void {
     const root_ptr = if (root) |*root_value| root_value else return error.NotStarted;
     try root_ptr.build(allocator, .{
-        .min_size = .{ .width = null, .height = null },
-        // height is null so the TUI grows to fit all its content; the browser
-        // page handles vertical scrolling.
+        // min_height lets the TUI fill the viewport when its content is
+        // short; max height stays null so taller content extends downward
+        // and the browser scrolls.
+        .min_size = .{ .width = null, .height = min_height },
         .max_size = .{ .width = max_width, .height = null },
     }, root_ptr.getFocus());
     try updateHtml();
@@ -99,18 +100,18 @@ export fn _alloc(len: u32) ?[*]u8 {
     return slice.ptr;
 }
 
-export fn _start(json_ptr: [*]u8, json_len: u32, max_width: u32) void {
+export fn _start(json_ptr: [*]u8, json_len: u32, min_height: u32, max_width: u32) void {
     const json = json_ptr[0..json_len];
     defer allocator.free(json);
-    start(json, max_width) catch |err| {
+    start(json, min_height, max_width) catch |err| {
         var buf: [256]u8 = undefined;
         const str = std.fmt.bufPrint(&buf, "start: {}", .{err}) catch unreachable;
         consoleLog(str);
     };
 }
 
-export fn _tick(max_width: u32) bool {
-    tick(max_width) catch |err| {
+export fn _tick(min_height: u32, max_width: u32) bool {
+    tick(min_height, max_width) catch |err| {
         var buf: [256]u8 = undefined;
         const str = std.fmt.bufPrint(&buf, "tick: {}", .{err}) catch unreachable;
         consoleLog(str);

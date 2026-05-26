@@ -431,8 +431,16 @@ pub const Center = struct {
 
         const child_grid = self.child.getGrid() orelse return;
 
-        const width = constraint.max_size.width orelse child_grid.size.width;
-        const height = constraint.max_size.height orelse child_grid.size.height;
+        // prefer max when given; otherwise grow to max(min, child) so that
+        // when only a min is set (e.g. the wasm path passes viewport rows
+        // as min_height with no max), we can still vertically center while
+        // letting taller content extend past the min.
+        const width = if (constraint.max_size.width) |w| w
+            else if (constraint.min_size.width) |min_w| @max(min_w, child_grid.size.width)
+            else child_grid.size.width;
+        const height = if (constraint.max_size.height) |h| h
+            else if (constraint.min_size.height) |min_h| @max(min_h, child_grid.size.height)
+            else child_grid.size.height;
         if (width == 0 or height == 0) return;
 
         const offset_x: usize = if (self.direction == .horiz or self.direction == .both)
