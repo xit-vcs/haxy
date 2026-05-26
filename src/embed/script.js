@@ -176,12 +176,24 @@ WebAssembly.instantiateStreaming(fetch("haxy.wasm"), importObject).then(async (r
         wasmInstance.exports._tick(minRows(), maxCols());
     });
 
+    // submit handled on mousedown rather than click because submit-button
+    // spans are tabbable: a mouse click on one moves focus to it, which
+    // fires focusin, which re-renders via innerHTML, which detaches the
+    // very span the click event was about to target. mousedown fires
+    // before the focus change, so the target is guaranteed to be live.
+    grid.addEventListener("mousedown", (event) => {
+        const span = event.target.closest(".clickable");
+        if (!span || span.dataset.action !== "submit") return;
+        event.preventDefault();
+        submitForm(span.dataset.url);
+    });
+
     grid.addEventListener("click", (event) => {
         const span = event.target.closest(".clickable");
         if (!span) return;
+        // submit is handled in mousedown above
         if (span.dataset.action === "submit") {
             event.preventDefault();
-            submitForm(span.dataset.url);
             return;
         }
         const focusId = Number(span.dataset.focusId);
