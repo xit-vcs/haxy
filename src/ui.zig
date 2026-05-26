@@ -104,7 +104,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, page: *const Page, session:
 
 pub fn inputKey(allocator: std.mem.Allocator, root: *Widget, key: inp.Key, terminal: anytype) !void {
     switch (key) {
-        .codepoint => |cp| if (cp == 'q') terminal.requestQuit() else try root.input(allocator, key, root.getFocus()),
+        .escape => terminal.requestQuit(),
         .mouse => |mouse| {
             if (mouse.action == .press and mouse.action.press == .left) {
                 const root_focus = root.getFocus();
