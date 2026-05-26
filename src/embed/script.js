@@ -63,6 +63,16 @@ const importObject = {
             // restore focus across the swap.
             grid.innerHTML = html;
         },
+        _pushState: function (ptr, len) {
+            const url = readWasmString(ptr, len);
+            // idempotent: wasm tells us its current page every tick after a
+            // change, but we don't want to add history entries for a URL
+            // the browser is already on (e.g., right after the page loaded
+            // from a server-side render of the same route).
+            if (window.location.pathname !== url) {
+                history.pushState({}, "", url);
+            }
+        },
         _setOverlay: function (ptr, len) {
             const html = readWasmString(ptr, len);
             // diff against the previous overlay HTML; an unchanged overlay

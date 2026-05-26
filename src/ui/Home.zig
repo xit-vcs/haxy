@@ -129,6 +129,12 @@ pub const View = struct {
         // each header tab maps 1:1 to a stack child by position
         if (header.getSelectedIndex()) |index| {
             stack.getFocus().child_id = stack.children.keys()[index];
+            self.session.data.current_page = switch (index) {
+                0 => .home_users,
+                1 => .home_repos,
+                2 => .home_auth,
+                else => .home_users,
+            };
         }
         try self.box.build(allocator, constraint, root_focus);
     }

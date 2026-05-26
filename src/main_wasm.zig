@@ -32,6 +32,10 @@ fn updateHtml() !void {
 var page_arena: ?std.heap.ArenaAllocator = null;
 var snapshot: ?ui.Snapshot = null;
 var session: ui.Session = .{};
+// last current_page we told JS about. used to avoid pushing the URL on
+// every tick — we only call history.pushState when the tab actually
+// changes.
+var last_pushed_page: ?ui.RoutablePage = null;
 
 fn start(json: []const u8, min_height: u32, max_width: u32) !void {
     if (page_arena) |*a| a.deinit();
@@ -65,6 +69,18 @@ fn tick(min_height: u32, max_width: u32) !void {
         .min_size = .{ .width = null, .height = min_height },
         .max_size = .{ .width = max_width, .height = null },
     }, root_ptr.getFocus());
+
+    // mirror the page Header settled on into the browser URL. _pushState
+    // is idempotent on the JS side (it bails when pathname already matches)
+    // so the first tick after _start is a no-op even though we always send
+    // something through.
+    const current_page = session.data.current_page;
+    if (last_pushed_page == null or last_pushed_page.? != current_page) {
+        last_pushed_page = current_page;
+        const url = current_page.url();
+        _pushState(url.ptr, @intCast(url.len));
+    }
+
     try updateHtml();
 }
 
@@ -105,6 +121,7 @@ fn setOverlay(arg: []const u8) void {
 extern fn _consoleLog(arg: [*]const u8, len: u32) void;
 extern fn _setHtml(arg: [*]const u8, len: u32) void;
 extern fn _setOverlay(arg: [*]const u8, len: u32) void;
+extern fn _pushState(arg: [*]const u8, len: u32) void;
 
 /// js calls this first to get a wasm pointer it can write the page json into.
 export fn _alloc(len: u32) ?[*]u8 {

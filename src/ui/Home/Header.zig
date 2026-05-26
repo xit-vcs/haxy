@@ -71,14 +71,14 @@ pub const View = struct {
         }
 
         var self = View{ .box = box, .data = data, .tab_ids = tab_ids };
-        // when a previous login attempt just failed, land on the auth tab so
-        // the user sees the form (with its "(invalid)" label) instead of the
-        // default users list — otherwise the post-redirect page reads as if
-        // the login silently succeeded.
-        self.getFocus().child_id = if (session.data.login_failure != null)
-            tab_ids[auth_tab_index]
-        else
-            tab_ids[0];
+        // initial selected tab follows session.data.current_page — the web
+        // layer decides this from the request URL, the TTY uses whatever
+        // the session arrives with — so we don't bake a default here.
+        self.getFocus().child_id = tab_ids[switch (session.data.current_page) {
+            .home_users => 0,
+            .home_repos => 1,
+            .home_auth => 2,
+        }];
         return self;
     }
 

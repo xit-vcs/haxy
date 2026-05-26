@@ -159,8 +159,17 @@ fn handleRequest(
         return;
     }
 
-    if (std.mem.eql(u8, path, "/") or std.mem.eql(u8, path, "/index.html")) {
-        const user_id_hex = getCookieValue(request, cookie_name);
+    if (ui.RoutablePage.fromUrl(path)) |current_page| {
+        // decode the haxy_user cookie into raw bytes on the stack; the
+        // slice lives for the rest of handleRequest, which is plenty for
+        // renderIndexHtml to consume.
+        var user_id_buf: [evt.event_id_size]u8 = undefined;
+        const user_id: ?[]const u8 = blk: {
+            const hex = getCookieValue(request, cookie_name) orelse break :blk null;
+            if (hex.len != evt.event_id_size * 2) break :blk null;
+            _ = std.fmt.hexToBytes(&user_id_buf, hex) catch break :blk null;
+            break :blk user_id_buf[0..evt.event_id_size];
+        };
         const login_failure: ?ui.Home.Auth.Login.Failure =
             if (getCookieValue(request, login_failure_cookie)) |raw|
                 if (std.mem.eql(u8, raw, "unknown_user"))
@@ -171,7 +180,11 @@ fn handleRequest(
                     null
             else
                 null;
-        const html = try renderIndexHtml(io, allocator, admin_repo_path, user_id_hex, login_failure);
+        const html = try renderIndexHtml(io, allocator, admin_repo_path, .{
+            .user_id = user_id,
+            .login_failure = login_failure,
+            .current_page = current_page,
+        });
         defer allocator.free(html);
         // expire the flash cookie on the way out so a refresh doesn't keep
         // showing the failure label.
@@ -234,7 +247,7 @@ fn handleLogin(
             try request.respond("", .{
                 .status = .see_other,
                 .extra_headers = &.{
-                    .{ .name = "location", .value = "/" },
+                    .{ .name = "location", .value = ui.RoutablePage.url(.home_users) },
                     .{ .name = "set-cookie", .value = cookie },
                 },
             });
@@ -243,7 +256,7 @@ fn handleLogin(
             try request.respond("", .{
                 .status = .see_other,
                 .extra_headers = &.{
-                    .{ .name = "location", .value = "/" },
+                    .{ .name = "location", .value = ui.RoutablePage.url(.home_auth) },
                     .{ .name = "set-cookie", .value = login_failure_cookie ++ "=unknown_user; Path=/; HttpOnly; SameSite=Strict" },
                 },
             });
@@ -252,7 +265,7 @@ fn handleLogin(
             try request.respond("", .{
                 .status = .see_other,
                 .extra_headers = &.{
-                    .{ .name = "location", .value = "/" },
+                    .{ .name = "location", .value = ui.RoutablePage.url(.home_auth) },
                     .{ .name = "set-cookie", .value = login_failure_cookie ++ "=wrong_password; Path=/; HttpOnly; SameSite=Strict" },
                 },
             });
@@ -267,7 +280,7 @@ fn handleLogout(request: *std.http.Server.Request) !void {
     try request.respond("", .{
         .status = .see_other,
         .extra_headers = &.{
-            .{ .name = "location", .value = "/" },
+            .{ .name = "location", .value = ui.RoutablePage.url(.home_auth) },
             .{ .name = "set-cookie", .value = cookie_name ++ "=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0" },
         },
     });
@@ -277,8 +290,7 @@ fn renderIndexHtml(
     io: std.Io,
     allocator: std.mem.Allocator,
     admin_repo_path: []const u8,
-    user_id_hex_opt: ?[]const u8,
-    login_failure: ?ui.Home.Auth.Login.Failure,
+    session_data: ui.SessionData,
 ) ![]const u8 {
     const template = (findEmbed("/index.html") orelse return error.MissingIndexAsset).body;
 
@@ -290,13 +302,7 @@ fn renderIndexHtml(
     var page_arena = std.heap.ArenaAllocator.init(allocator);
     defer page_arena.deinit();
 
-    var session: ui.Session = .{};
-    if (user_id_hex_opt) |hex| {
-        if (decodeHexAlloc(page_arena.allocator(), hex)) |bytes| {
-            session.data.user_id = bytes;
-        } else |_| {}
-    }
-    session.data.login_failure = login_failure;
+    var session: ui.Session = .{ .data = session_data };
 
     const snapshot: ui.Snapshot = .{
         .page = .{ .home = try .init(repo_opts, &page_arena, &repo, &session) },
@@ -457,7 +463,13 @@ pub fn generateOverlay(allocator: std.mem.Allocator, root: *ui.Widget, session: 
         }
     }.lt);
 
-    const action_url: []const u8 = if (session.data.user_id != null) "/logout" else "/login";
+    // only the auth page hosts a form right now; on any other page we
+    // emit nothing. on auth, the URL depends on whether there's already
+    // an active session.
+    const action_url: []const u8 = switch (session.data.current_page) {
+        .home_auth => if (session.data.user_id != null) "/logout" else "/login",
+        .home_users, .home_repos => return try out.toOwnedSlice(allocator),
+    };
 
     try out.appendSlice(allocator, "<form action=\"");
     try out.appendSlice(allocator, action_url);
@@ -568,14 +580,6 @@ fn getCookieValue(request: *std.http.Server.Request, name: []const u8) ?[]const 
         }
     }
     return null;
-}
-
-fn decodeHexAlloc(allocator: std.mem.Allocator, hex: []const u8) ![]u8 {
-    if (hex.len % 2 != 0) return error.InvalidHex;
-    const bytes = try allocator.alloc(u8, hex.len / 2);
-    errdefer allocator.free(bytes);
-    _ = std.fmt.hexToBytes(bytes, hex) catch return error.InvalidHex;
-    return bytes;
 }
 
 fn parseFormField(allocator: std.mem.Allocator, body: []const u8, key: []const u8) !?[]u8 {
