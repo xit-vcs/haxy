@@ -17,10 +17,10 @@ fn updateHtml() !void {
     setHtml(html);
 }
 
-// the page is allocated into this arena via parseFromSliceLeaky. it has
-// to outlive `root`, because `root` holds slices into the parsed strings.
+// the snapshot is allocated into this arena via parseFromSliceLeaky. it
+// has to outlive `root`, because `root` holds slices into the parsed strings.
 var page_arena: ?std.heap.ArenaAllocator = null;
-var page: ?ui.Page = null;
+var snapshot: ?ui.Snapshot = null;
 var session: ui.Session = .{};
 
 fn start(json: []const u8, min_height: u32, max_width: u32) !void {
@@ -29,18 +29,15 @@ fn start(json: []const u8, min_height: u32, max_width: u32) !void {
 
     // alloc_always so the parsed strings live entirely inside the arena
     // and don't borrow from the caller's json buffer.
-    page = try std.json.parseFromSliceLeaky(ui.Page, (page_arena orelse unreachable).allocator(), json, .{
+    snapshot = try std.json.parseFromSliceLeaky(ui.Snapshot, (page_arena orelse unreachable).allocator(), json, .{
         .allocate = .alloc_always,
     });
 
-    // restore session.user_id from the serialized page so the first render
-    // matches what the server rendered (otherwise wasm would render the
-    // page in a logged-out state on top of a logged-in server-rendered HTML).
-    session.user_id = switch (page orelse unreachable) {
-        .home => |h| h.user_id,
-    };
+    // adopt the server's session view wholesale — one assignment instead of
+    // hand-restoring each field by reaching into the page's data tree.
+    session.data = (snapshot orelse unreachable).session;
 
-    var next_root = try ui.initRoot(allocator, &(page orelse unreachable), &session);
+    var next_root = try ui.initRoot(allocator, &(snapshot orelse unreachable).page, &session);
     errdefer next_root.deinit(allocator);
 
     if (root) |*old_root| old_root.deinit(allocator);
@@ -156,4 +153,8 @@ fn setTextInputValue(focus_id: u32, bytes: []const u8) !void {
     }
     const ti: *wgt.TextInput(ui.Widget) = @fieldParentPtr("focus", child.focus);
     try ti.setContent(allocator, bytes);
+    // mirror the TTY behavior in Login.View.input: editing an input clears
+    // the stale failure flag so the "(invalid)" label doesn't linger after
+    // the user has typed a correction
+    session.data.login_failure = null;
 }

@@ -53,7 +53,7 @@ pub const View = struct {
 
     pub fn build(self: *View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
         self.focus.clear();
-        if (self.session.user_id != null) {
+        if (self.session.data.user_id != null) {
             try self.logout.build(allocator, constraint, root_focus);
             if (self.logout.getGrid()) |inner_grid| {
                 try self.focus.addChild(self.logout.getFocus(), inner_grid.size, 0, 0);
@@ -69,7 +69,7 @@ pub const View = struct {
     }
 
     pub fn input(self: *View, allocator: std.mem.Allocator, key: inp.Key, root_focus: *Focus) !void {
-        if (self.session.user_id != null) {
+        if (self.session.data.user_id != null) {
             try self.logout.input(allocator, key, root_focus);
         } else {
             try self.login.input(allocator, key, root_focus);
@@ -82,7 +82,7 @@ pub const View = struct {
     }
 
     pub fn getGrid(self: View) ?Grid {
-        if (self.session.user_id != null) return self.logout.getGrid();
+        if (self.session.data.user_id != null) return self.logout.getGrid();
         return self.login.getGrid();
     }
 
@@ -91,7 +91,7 @@ pub const View = struct {
     }
 
     pub fn getSelectedIndex(self: View) ?usize {
-        if (self.session.user_id != null) return self.logout.getSelectedIndex();
+        if (self.session.data.user_id != null) return self.logout.getSelectedIndex();
         return self.login.getSelectedIndex();
     }
 };

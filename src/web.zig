@@ -9,6 +9,10 @@ const wgt = xitui.widget;
 const Focus = xitui.focus.Focus;
 
 const cookie_name = "haxy_user";
+// flash cookie for surfacing the outcome of the most recent /login POST.
+// set on the failure redirect, read and immediately expired on the next
+// GET / so refreshing the page doesn't keep showing the error.
+const login_failure_cookie = "haxy_login_failure";
 
 const Embed = struct {
     path: []const u8,
@@ -155,12 +159,32 @@ fn handleRequest(
     // consuming the request, so we don't dispatch through findEmbed here.
     if (std.mem.eql(u8, path, "/") or std.mem.eql(u8, path, "/index.html")) {
         const user_id_hex = getCookieValue(request, cookie_name);
+        const login_failure: ?ui.Home.Auth.Login.Failure =
+            if (getCookieValue(request, login_failure_cookie)) |raw|
+                if (std.mem.eql(u8, raw, "unknown_user"))
+                    .unknown_user
+                else if (std.mem.eql(u8, raw, "wrong_password"))
+                    .wrong_password
+                else
+                    null
+            else
+                null;
         if (http_server.reader.state == .received_head) {
             http_server.reader.state = .ready;
         }
-        const html = try renderIndexHtml(io, allocator, admin_repo_path, user_id_hex);
+        const html = try renderIndexHtml(io, allocator, admin_repo_path, user_id_hex, login_failure);
         defer allocator.free(html);
-        try writeStaticResponse(http_server, 200, "OK", "text/html; charset=utf-8", html, method == .HEAD);
+        // expire the flash cookie on the way out — it's been consumed by
+        // this render and shouldn't survive a refresh.
+        const clear_flash: []const u8 = if (login_failure != null)
+            "Set-Cookie: " ++ login_failure_cookie ++ "=; Path=/; Max-Age=0\r\n"
+        else
+            "";
+        try http_server.out.print(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n{s}Content-Length: {d}\r\n\r\n",
+            .{ clear_flash, html.len },
+        );
+        if (method != .HEAD) try http_server.out.writeAll(html);
         return;
     }
 
@@ -214,9 +238,15 @@ fn handleLogin(
                 .{hex},
             );
         },
-        .unknown_user, .wrong_password => {
+        .unknown_user => {
             try http_server.out.print(
-                "HTTP/1.1 303 See Other\r\nLocation: /\r\nContent-Length: 0\r\n\r\n",
+                "HTTP/1.1 303 See Other\r\nLocation: /\r\nSet-Cookie: " ++ login_failure_cookie ++ "=unknown_user; Path=/; HttpOnly; SameSite=Strict\r\nContent-Length: 0\r\n\r\n",
+                .{},
+            );
+        },
+        .wrong_password => {
+            try http_server.out.print(
+                "HTTP/1.1 303 See Other\r\nLocation: /\r\nSet-Cookie: " ++ login_failure_cookie ++ "=wrong_password; Path=/; HttpOnly; SameSite=Strict\r\nContent-Length: 0\r\n\r\n",
                 .{},
             );
         },
@@ -240,6 +270,7 @@ fn renderIndexHtml(
     allocator: std.mem.Allocator,
     admin_repo_path: []const u8,
     user_id_hex_opt: ?[]const u8,
+    login_failure: ?ui.Home.Auth.Login.Failure,
 ) ![]const u8 {
     const template = (findEmbed("/index.html") orelse return error.MissingIndexAsset).body;
 
@@ -254,22 +285,27 @@ fn renderIndexHtml(
     var session: ui.Session = .{};
     if (user_id_hex_opt) |hex| {
         if (decodeHexAlloc(page_arena.allocator(), hex)) |bytes| {
-            session.user_id = bytes;
+            session.data.user_id = bytes;
         } else |_| {}
     }
+    session.data.login_failure = login_failure;
 
-    const page: ui.Page = .{ .home = try .init(repo_opts, &page_arena, &repo, &session) };
-    var root = try ui.initRoot(allocator, &page, &session);
+    const snapshot: ui.Snapshot = .{
+        .page = .{ .home = try .init(repo_opts, &page_arena, &repo, &session) },
+        .session = session.data,
+    };
+    var root = try ui.initRoot(allocator, &snapshot.page, &session);
     defer root.deinit(allocator);
 
     const content = try generateHtml(allocator, &root, &session);
     defer allocator.free(content);
 
-    // serialize the page so the wasm side can parse it back without making
-    // a second request. base64-encoded so the json can be embedded in html.
+    // serialize the snapshot so the wasm side can parse it back without
+    // making a second request. base64-encoded so the json can be embedded
+    // safely inside the host html.
     var json: std.Io.Writer.Allocating = .init(allocator);
     defer json.deinit();
-    try std.json.Stringify.value(page, .{}, &json.writer);
+    try std.json.Stringify.value(snapshot, .{}, &json.writer);
 
     const b64 = std.base64.standard.Encoder;
     const json_b64 = try allocator.alloc(u8, b64.calcSize(json.written().len));
@@ -352,7 +388,7 @@ pub fn generateHtml(allocator: std.mem.Allocator, root: *ui.Widget, session: *co
 
     // determines the form route for any submit_button on this page. only one
     // is visible at a time: login when logged out, logout when logged in.
-    const submit_url: []const u8 = if (session.user_id != null) "/logout" else "/login";
+    const submit_url: []const u8 = if (session.data.user_id != null) "/logout" else "/login";
 
     // collect the text inputs in deterministic top-to-bottom, left-to-right
     // order. root_focus.children is a hash map so iterating it directly would

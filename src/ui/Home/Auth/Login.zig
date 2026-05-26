@@ -20,6 +20,10 @@ const DB = ui.DB;
 
 const Self = @This();
 
+// classifies a failed /login attempt; null in session.data.login_failure means
+// "no failure to surface".
+pub const Failure = enum { wrong_password, unknown_user };
+
 pub fn init() Self {
     return .{};
 }
@@ -29,12 +33,9 @@ pub const View = struct {
     data: *const Self,
     session: *ui.Session,
     nav_ids: [3]usize,
-    status: Status,
     // focus id of the header's "users" tab; on a successful submit we jump
     // focus there so the user isn't stranded on the login button.
     users_tab_id: usize,
-
-    pub const Status = enum { none, success, wrong_password, unknown_user };
 
     const username_index: usize = 0;
     const password_index: usize = 1;
@@ -92,7 +93,6 @@ pub const View = struct {
             .data = data,
             .session = session,
             .nav_ids = nav_ids,
-            .status = .none,
             .users_tab_id = users_tab_id,
         };
     }
@@ -110,14 +110,16 @@ pub const View = struct {
         else
             .single;
 
+        const failure = self.session.data.login_failure;
+
         const username_input = &box.children.values()[username_index].widget.text_input;
-        username_input.options.label = if (self.status == .unknown_user)
+        username_input.options.label = if (failure == .unknown_user)
             " username (invalid) "
         else
             " username ";
 
         const password_input = &box.children.values()[password_index].widget.text_input;
-        password_input.options.label = if (self.status == .wrong_password)
+        password_input.options.label = if (failure == .wrong_password)
             " password (invalid) "
         else
             " password ";
@@ -183,7 +185,9 @@ pub const View = struct {
         if (username_input.content.items.len != username_len_before or
             password_input.content.items.len != password_len_before)
         {
-            self.status = .none;
+            // any edit clears the failure flag so the "(invalid)" label
+            // doesn't linger after the user has typed a correction.
+            self.session.data.login_failure = null;
         }
     }
 
@@ -214,7 +218,7 @@ pub const View = struct {
     fn submit(self: *View, allocator: std.mem.Allocator, root_focus: *Focus) !void {
         if (comptime wasm) {
             // no DB cursor available on the wasm render path
-            self.status = .unknown_user;
+            self.session.data.login_failure = .unknown_user;
             return;
         }
 
@@ -224,41 +228,41 @@ pub const View = struct {
 
         var username_buf: [256]u8 = undefined;
         const username = joinCodepoints(&username_buf, username_input.content.items) orelse {
-            self.status = .unknown_user;
+            self.session.data.login_failure = .unknown_user;
             return;
         };
 
         var password_buf: [256]u8 = undefined;
         const password = joinCodepoints(&password_buf, password_input.content.items) orelse {
-            self.status = .wrong_password;
+            self.session.data.login_failure = .wrong_password;
             return;
         };
 
         const haxy_moment = self.session.haxy_moment orelse {
             // no DB context (e.g. wasm/web rendering path); treat as unknown.
-            self.status = .unknown_user;
+            self.session.data.login_failure = .unknown_user;
             return;
         };
         const arena = self.session.arena orelse {
-            self.status = .unknown_user;
+            self.session.data.login_failure = .unknown_user;
             return;
         };
 
         const result = try evt.User.verifyCredentials(DB, repo_opts.hash, haxy_moment, arena, username, password);
         switch (result) {
             .unknown_user => {
-                self.status = .unknown_user;
+                self.session.data.login_failure = .unknown_user;
                 return;
             },
             .wrong_password => {
-                self.status = .wrong_password;
+                self.session.data.login_failure = .wrong_password;
                 return;
             },
             .success => |user_id| {
                 // dupe user_id into the arena so the session can hold a stable slice
                 const user_id_stable = try arena.allocator().dupe(u8, &user_id);
-                self.session.user_id = user_id_stable;
-                self.status = .success;
+                self.session.data.user_id = user_id_stable;
+                self.session.data.login_failure = null;
 
                 // wipe the entered credentials so they don't linger if the
                 // user returns to this page after logging out.

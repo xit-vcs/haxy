@@ -40,7 +40,7 @@ pub const View = struct {
         // re-allocating.
         if (self.text_box.box.children.values().len > 0) {
             const text_widget = &self.text_box.box.children.values()[0].widget.text;
-            text_widget.content = if (self.session.user_id != null) "logout" else "login";
+            text_widget.content = if (self.session.data.user_id != null) "logout" else "login";
         }
         try self.text_box.build(allocator, constraint, root_focus);
     }

@@ -106,7 +106,7 @@ pub const View = struct {
     }
 
     fn logout(self: *View, root_focus: *Focus) !void {
-        self.session.user_id = null;
+        self.session.data.user_id = null;
         // jump focus back to the users tab — the logout button is about to
         // be hidden by the tab-label swap.
         try root_focus.setFocus(self.users_tab_id);

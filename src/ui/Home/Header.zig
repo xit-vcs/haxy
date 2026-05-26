@@ -71,7 +71,14 @@ pub const View = struct {
         }
 
         var self = View{ .box = box, .data = data, .tab_ids = tab_ids };
-        self.getFocus().child_id = tab_ids[0];
+        // when a previous login attempt just failed, land on the auth tab so
+        // the user sees the form (with its "(invalid)" label) instead of the
+        // default users list — otherwise the post-redirect page reads as if
+        // the login silently succeeded.
+        self.getFocus().child_id = if (session.data.login_failure != null)
+            tab_ids[auth_tab_index]
+        else
+            tab_ids[0];
         return self;
     }
 

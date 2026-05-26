@@ -19,7 +19,6 @@ header: Header,
 users: Users,
 repos: Repos,
 auth: Auth,
-user_id: ?[]const u8 = null,
 
 const Self = @This();
 
@@ -59,7 +58,6 @@ pub fn init(
         .users = try Users.init(repo_opts, arena, haxy_moment),
         .repos = try Repos.init(repo_opts, arena, haxy_moment),
         .auth = Auth.init(),
-        .user_id = session.user_id,
     };
 }
 
