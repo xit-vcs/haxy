@@ -74,6 +74,17 @@ fn tick(min_height: u32, max_width: u32) !void {
     const overlay = try web.generateOverlay(allocator, root_ptr, &session);
     defer allocator.free(overlay);
     setOverlay(overlay);
+
+    // if focused widget is a TextInput, focus on the HTML element
+    const root_focus = root_ptr.getFocus();
+    if (root_focus.grandchild_id) |gid| {
+        if (root_focus.children.get(gid)) |child| {
+            switch (child.focus.kind) {
+                .text_input, .text_input_password => _focusInput(@intCast(gid)),
+                else => {},
+            }
+        }
+    }
 }
 
 fn onKeyDown(key_code: u32) !void {
@@ -114,6 +125,7 @@ extern fn _consoleLog(arg: [*]const u8, len: u32) void;
 extern fn _setHtml(arg: [*]const u8, len: u32) void;
 extern fn _setOverlay(arg: [*]const u8, len: u32) void;
 extern fn _pushState(arg: [*]const u8, len: u32) void;
+extern fn _focusInput(focus_id: u32) void;
 
 /// js calls this first to get a wasm pointer it can write the page json into.
 export fn _alloc(len: u32) ?[*]u8 {

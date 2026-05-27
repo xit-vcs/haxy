@@ -86,6 +86,10 @@ const importObject = {
             currentOverlay = html;
             overlay.innerHTML = html;
         },
+        _focusInput: function (id) {
+            const target = overlay.querySelector(`input[data-focus-id="${id}"]`);
+            if (target && document.activeElement !== target) target.focus();
+        },
     },
 };
 
