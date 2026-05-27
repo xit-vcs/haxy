@@ -40,30 +40,29 @@ The main difference between Haxy's design and [Radicle](https://radicle.dev/) is
 
 ## How to fire this puppy up and get 'er done
 
-To build, install zig 0.16.0 and do `zig build` and you'll find the binary at `zig-out/bin/haxy`.
+To build, install zig 0.16.0 and do `zig build` and you'll find the binary at `zig-out/bin/haxy`. On a production server you would run this binary with the `serve` subcommand.
 
-It can't do much right now...it's just a git server at the moment. If you want to try it out, do this:
-
-```
-mkdir -p server
-./zig-out/bin/haxy serve --http-listen 127.0.0.1:8080 --data-dir server
-```
-
-Then, in another terminal, do this:
+The easiest way to try Haxy out is like this:
 
 ```
-mkdir -p client/test
-cd client/test
+zig build try
+```
+
+This will launch a server with fake data that it stores in the `temp-try` directory. It will then launch the TUI directly in your terminal (you can exit by pressing escape).
+
+Additionally, you can view the web UI at http://localhost:8000 and push a git repo to http://localhost:8080 like this:
+
+```
+mkdir -p temp-try/client/test
+cd temp-try/client/test
 git init
 echo "hello" > hello.txt
 git add hello.txt
 git commit -m "let there be light"
-git remote add origin http://127.0.0.1:8080/test
+git remote add origin http://localhost:8080/test
 git push origin HEAD:master
 ```
 
-After that, you'll see your repo in `server/repos/test`. It's MAGIC!
-
-To get an early look at the interface, you can run `zig build try`. This is a special build command that runs a server with fake data and launches the TUI. On Arch-based distros you need to edit the `build.zig` so the `try` command has `.use_llvm = true`.
+After that, you'll see your repo in `temp-try/server/repos/test`. It's MAGIC!
 
 *"C'mon Alex! You always dreamt about going on a big adventure! Let this be our first!" -- Lunar: Silver Star Story*
