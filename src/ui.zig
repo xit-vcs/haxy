@@ -1,6 +1,7 @@
 const std = @import("std");
 const xit = @import("xit");
 const rp = xit.repo;
+const hash = xit.hash;
 const xitui = xit.xitui;
 const term = xitui.terminal;
 const wgt = xitui.widget;
@@ -25,6 +26,8 @@ pub const RoutablePage = enum {
     home_repos,
     home_auth,
 
+    pub const default: RoutablePage = .home_users;
+
     pub fn url(self: RoutablePage) []const u8 {
         return switch (self) {
             .home_users => "/users",
@@ -34,7 +37,8 @@ pub const RoutablePage = enum {
     }
 
     pub fn fromUrl(path: []const u8) ?RoutablePage {
-        if (std.mem.eql(u8, path, "/") or std.mem.eql(u8, path, "/users")) return .home_users;
+        if (std.mem.eql(u8, path, "/")) return default;
+        if (std.mem.eql(u8, path, "/users")) return .home_users;
         if (std.mem.eql(u8, path, "/repos")) return .home_repos;
         if (std.mem.eql(u8, path, "/auth")) return .home_auth;
         return null;
@@ -42,27 +46,58 @@ pub const RoutablePage = enum {
 };
 
 // per-connection mutable state. each SSH session / web session / local TUI
-// run gets its own. `data` is the subset that round-trips between server
-// and wasm; the other fields are runtime context only and stay local.
+// run gets its own
 pub const Session = struct {
-    data: SessionData = .{},
-    arena: ?*std.heap.ArenaAllocator = null,
-    haxy_moment: ?DB.HashMap(.read_only) = null,
-};
+    data: Data = .{}, // serializable data sent down to web client
+    arena: *std.heap.ArenaAllocator,
+    haxy_moment: ?DB.HashMap(.read_only) = null, // db cursor (null on the wasm side)
 
-// the serializable part of session
-pub const SessionData = struct {
-    user_id: ?[]const u8 = null,
-    // a transient outcome to surface from the last /login POST attempt
-    login_failure: ?Home.Auth.Login.Failure = null,
-    current_page: RoutablePage = .home_users,
+    pub const Data = struct {
+        user_id: ?[]const u8 = null,
+        // a transient outcome to surface from the last /login POST attempt
+        login_failure: ?Home.Auth.Login.Failure = null,
+        current_page: RoutablePage = .default,
+    };
+
+    pub fn init(
+        comptime repo_opts: rp.RepoOpts(.xit),
+        arena: *std.heap.ArenaAllocator,
+        repo: *rp.Repo(.xit, repo_opts),
+        data: Data,
+    ) !Session {
+        const RepoDB = rp.Repo(.xit, repo_opts).DB;
+
+        const history = try RepoDB.ArrayList(.read_only).init(repo.core.db.rootCursor().readOnly());
+
+        const moment_cursor = try history.getCursor(-1) orelse return error.NotFound;
+        const moment = try RepoDB.HashMap(.read_only).init(moment_cursor);
+
+        const last_object_id_cursor = try moment.getCursor(hash.hashInt(repo_opts.hash, "haxy-last-object-id")) orelse return error.NotFound;
+        var last_object_id: [hash.byteLen(repo_opts.hash)]u8 = undefined;
+        _ = try last_object_id_cursor.readBytes(&last_object_id);
+
+        const haxy_cursor = try moment.getCursor(hash.hashInt(repo_opts.hash, "haxy")) orelse return error.NotFound;
+        const haxy = try RepoDB.ArrayList(.read_only).init(haxy_cursor);
+
+        const haxy_moments_cursor = try haxy.getCursor(-1) orelse return error.NotFound;
+        const haxy_moments = try RepoDB.HashMap(.read_only).init(haxy_moments_cursor);
+
+        const haxy_moment_cursor = try haxy_moments.getCursor(hash.bytesToInt(repo_opts.hash, &last_object_id)) orelse return error.NotFound;
+        const haxy_moment = try RepoDB.HashMap(.read_only).init(haxy_moment_cursor);
+
+        return .{
+            .data = data,
+            .arena = arena,
+            .haxy_moment = haxy_moment,
+        };
+    }
 };
 
 // what the server hands to the client (and what main_wasm parses on _start).
 // keeps Page free of any per-request session state.
 pub const Snapshot = struct {
     page: Page,
-    session: SessionData = .{},
+    session: Session.Data = .{},
 };
 
 pub fn run(io: std.Io, allocator: std.mem.Allocator, page: *const Page, session: *Session) !void {
@@ -134,7 +169,7 @@ pub fn inputKey(allocator: std.mem.Allocator, root: *Widget, key: inp.Key, termi
 
 pub fn initRoot(allocator: std.mem.Allocator, page: *const Page, session: *Session) !Widget {
     var root: Widget = switch (page.*) {
-        .home => |*p| .{ .home = try Home.View.init(allocator, p, session) },
+        .home => |*p| .{ .home = try .init(allocator, p, session) },
     };
     errdefer root.deinit(allocator);
 

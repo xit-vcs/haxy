@@ -48,7 +48,7 @@ pub fn main(init: std.process.Init) !void {
     var repo = try Repo.init(io, allocator, .{ .path = work_path });
     defer repo.deinit(io, allocator);
 
-    var session: ui.Session = .{};
+    var session: ui.Session = undefined;
 
     const page: ui.Page = blk: {
         var arena = std.heap.ArenaAllocator.init(allocator);
@@ -187,7 +187,8 @@ pub fn main(init: std.process.Init) !void {
         // consume events into the database
         try evt.consume(repo_opts, io, allocator, &repo, .{ .kind = .head, .name = "haxy/meta" });
 
-        break :blk .{ .home = try .init(repo_opts, &page_arena, &repo, &session) };
+        session = try ui.Session.init(repo_opts, &page_arena, &repo, .{});
+        break :blk .{ .home = try .init(repo_opts, &page_arena, session.haxy_moment orelse unreachable) };
     };
 
     // start the server

@@ -9,49 +9,28 @@ const wgt = xitui.widget;
 const allocator = std.heap.wasm_allocator;
 
 var root: ?ui.Widget = null;
+var page_arena = std.heap.ArenaAllocator.init(allocator);
+var snapshot: ui.Snapshot = undefined;
+var session: ui.Session = undefined;
+var last_pushed_page_maybe: ?ui.RoutablePage = null; // last current_page we told JS about
 
-fn updateHtml() !void {
-    const root_ptr = if (root) |*root_value| root_value else return error.NotStarted;
-    const html = try web.generateHtml(allocator, root_ptr, &session);
-    defer allocator.free(html);
-    setHtml(html);
-
-    // emit the overlay (form + inputs + button) on every tick so the wasm
-    // layout drives positions, not just the server's initial render. JS
-    // diffs the result against the previous overlay; an unchanged overlay
-    // leaves the live <form> alone — crucial since wiping it mid-click
-    // would detach the submit button before the browser can dispatch the
-    // form submission.
-    const overlay = try web.generateOverlay(allocator, root_ptr, &session);
-    defer allocator.free(overlay);
-    setOverlay(overlay);
-}
-
-// the snapshot is allocated into this arena via parseFromSliceLeaky. it
-// has to outlive `root`, because `root` holds slices into the parsed strings.
-var page_arena: ?std.heap.ArenaAllocator = null;
-var snapshot: ?ui.Snapshot = null;
-var session: ui.Session = .{};
-// last current_page we told JS about. used to avoid pushing the URL on
-// every tick — we only call history.pushState when the tab actually
-// changes.
-var last_pushed_page: ?ui.RoutablePage = null;
-
-fn start(json: []const u8, min_height: u32, max_width: u32) !void {
-    if (page_arena) |*a| a.deinit();
-    page_arena = std.heap.ArenaAllocator.init(allocator);
+fn init(json: []const u8, min_height: u32, max_width: u32) !void {
+    _ = page_arena.reset(.free_all);
 
     // alloc_always so the parsed strings live entirely inside the arena
     // and don't borrow from the caller's json buffer.
-    snapshot = try std.json.parseFromSliceLeaky(ui.Snapshot, (page_arena orelse unreachable).allocator(), json, .{
+    snapshot = try std.json.parseFromSliceLeaky(ui.Snapshot, page_arena.allocator(), json, .{
         .allocate = .alloc_always,
     });
 
     // adopt the server's session view wholesale — one assignment instead of
     // hand-restoring each field by reaching into the page's data tree.
-    session.data = (snapshot orelse unreachable).session;
+    session = .{
+        .data = snapshot.session,
+        .arena = &page_arena,
+    };
 
-    var next_root = try ui.initRoot(allocator, &(snapshot orelse unreachable).page, &session);
+    var next_root = try ui.initRoot(allocator, &snapshot.page, &session);
     errdefer next_root.deinit(allocator);
 
     if (root) |*old_root| old_root.deinit(allocator);
@@ -72,16 +51,29 @@ fn tick(min_height: u32, max_width: u32) !void {
 
     // mirror the page Header settled on into the browser URL. _pushState
     // is idempotent on the JS side (it bails when pathname already matches)
-    // so the first tick after _start is a no-op even though we always send
+    // so the first tick after _init is a no-op even though we always send
     // something through.
     const current_page = session.data.current_page;
-    if (last_pushed_page == null or last_pushed_page.? != current_page) {
-        last_pushed_page = current_page;
+    const should_push = if (last_pushed_page_maybe) |lp| lp != current_page else true;
+    if (should_push) {
+        last_pushed_page_maybe = current_page;
         const url = current_page.url();
         _pushState(url.ptr, @intCast(url.len));
     }
 
-    try updateHtml();
+    const html = try web.generateHtml(allocator, root_ptr, &session);
+    defer allocator.free(html);
+    setHtml(html);
+
+    // emit the overlay (form + inputs + button) on every tick so the wasm
+    // layout drives positions, not just the server's initial render. JS
+    // diffs the result against the previous overlay; an unchanged overlay
+    // leaves the live <form> alone — crucial since wiping it mid-click
+    // would detach the submit button before the browser can dispatch the
+    // form submission.
+    const overlay = try web.generateOverlay(allocator, root_ptr, &session);
+    defer allocator.free(overlay);
+    setOverlay(overlay);
 }
 
 fn onKeyDown(key_code: u32) !void {
@@ -129,12 +121,12 @@ export fn _alloc(len: u32) ?[*]u8 {
     return slice.ptr;
 }
 
-export fn _start(json_ptr: [*]u8, json_len: u32, min_height: u32, max_width: u32) void {
+export fn _init(json_ptr: [*]u8, json_len: u32, min_height: u32, max_width: u32) void {
     const json = json_ptr[0..json_len];
     defer allocator.free(json);
-    start(json, min_height, max_width) catch |err| {
+    init(json, min_height, max_width) catch |err| {
         var buf: [256]u8 = undefined;
-        const str = std.fmt.bufPrint(&buf, "start: {}", .{err}) catch unreachable;
+        const str = std.fmt.bufPrint(&buf, "init: {}", .{err}) catch unreachable;
         consoleLog(str);
     };
 }

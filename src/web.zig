@@ -247,7 +247,7 @@ fn handleLogin(
             try request.respond("", .{
                 .status = .see_other,
                 .extra_headers = &.{
-                    .{ .name = "location", .value = ui.RoutablePage.url(.home_users) },
+                    .{ .name = "location", .value = ui.RoutablePage.url(.default) },
                     .{ .name = "set-cookie", .value = cookie },
                 },
             });
@@ -290,7 +290,7 @@ fn renderIndexHtml(
     io: std.Io,
     allocator: std.mem.Allocator,
     admin_repo_path: []const u8,
-    session_data: ui.SessionData,
+    session_data: ui.Session.Data,
 ) ![]const u8 {
     const template = (findEmbed("/index.html") orelse return error.MissingIndexAsset).body;
 
@@ -302,10 +302,10 @@ fn renderIndexHtml(
     var page_arena = std.heap.ArenaAllocator.init(allocator);
     defer page_arena.deinit();
 
-    var session: ui.Session = .{ .data = session_data };
+    var session = try ui.Session.init(repo_opts, &page_arena, &repo, session_data);
 
     const snapshot: ui.Snapshot = .{
-        .page = .{ .home = try .init(repo_opts, &page_arena, &repo, &session) },
+        .page = .{ .home = try .init(repo_opts, session.arena, session.haxy_moment orelse unreachable) },
         .session = session.data,
     };
     var root = try ui.initRoot(allocator, &snapshot.page, &session);

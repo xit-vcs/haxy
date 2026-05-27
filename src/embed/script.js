@@ -112,7 +112,7 @@ WebAssembly.instantiateStreaming(fetch("haxy.wasm"), importObject).then(async (r
     const jsonBytes = Uint8Array.from(atob(pageJsonBase64), (c) => c.charCodeAt(0));
     const ptr = wasmInstance.exports._alloc(jsonBytes.length);
     new Uint8Array(wasmInstance.exports.memory.buffer, ptr, jsonBytes.length).set(jsonBytes);
-    wasmInstance.exports._start(ptr, jsonBytes.length, minRows(), maxCols());
+    wasmInstance.exports._init(ptr, jsonBytes.length, minRows(), maxCols());
 
     document.addEventListener("keydown", (event) => {
         // when a form element (text input or submit button) owns focus,

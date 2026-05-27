@@ -2,7 +2,6 @@ const std = @import("std");
 const ui = @import("../ui.zig");
 const xit = @import("xit");
 const rp = xit.repo;
-const hash = xit.hash;
 const xitui = xit.xitui;
 const wgt = xitui.widget;
 const layout = xitui.layout;
@@ -25,34 +24,8 @@ const Self = @This();
 pub fn init(
     comptime repo_opts: rp.RepoOpts(.xit),
     arena: *std.heap.ArenaAllocator,
-    repo: *rp.Repo(.xit, repo_opts),
-    session: *ui.Session,
+    haxy_moment: rp.Repo(.xit, repo_opts).DB.HashMap(.read_only),
 ) !Self {
-    const DB = rp.Repo(.xit, repo_opts).DB;
-
-    const history = try DB.ArrayList(.read_only).init(repo.core.db.rootCursor().readOnly());
-
-    const moment_cursor = try history.getCursor(-1) orelse return error.NotFound;
-    const moment = try DB.HashMap(.read_only).init(moment_cursor);
-
-    const last_object_id_cursor = try moment.getCursor(hash.hashInt(repo_opts.hash, "haxy-last-object-id")) orelse return error.NotFound;
-    var last_object_id: [hash.byteLen(repo_opts.hash)]u8 = undefined;
-    _ = try last_object_id_cursor.readBytes(&last_object_id);
-
-    const haxy_cursor = try moment.getCursor(hash.hashInt(repo_opts.hash, "haxy")) orelse return error.NotFound;
-    const haxy = try DB.ArrayList(.read_only).init(haxy_cursor);
-
-    const haxy_moments_cursor = try haxy.getCursor(-1) orelse return error.NotFound;
-    const haxy_moments = try DB.HashMap(.read_only).init(haxy_moments_cursor);
-
-    const haxy_moment_cursor = try haxy_moments.getCursor(hash.bytesToInt(repo_opts.hash, &last_object_id)) orelse return error.NotFound;
-    const haxy_moment = try DB.HashMap(.read_only).init(haxy_moment_cursor);
-
-    // hand the cursor + arena off to the session so Login (and any future
-    // page that needs DB access at input time) can use them on demand.
-    session.arena = arena;
-    session.haxy_moment = haxy_moment;
-
     return .{
         .header = Header.init(),
         .users = try Users.init(repo_opts, arena, haxy_moment),

@@ -57,9 +57,9 @@ fn runTuiSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh
     const Repo = rp.Repo(.xit, repo_opts);
     var repo = try Repo.open(io, allocator, .{ .path = handler.admin_repo_path });
     defer repo.deinit(io, allocator);
-    var ui_session: ui.Session = .{};
+    var ui_session = try ui.Session.init(repo_opts, &page_arena, &repo, .{});
 
-    const page: ui.Page = .{ .home = try .init(repo_opts, &page_arena, &repo, &ui_session) };
+    const page: ui.Page = .{ .home = try .init(repo_opts, &page_arena, ui_session.haxy_moment orelse unreachable) };
 
     var root = try ui.initRoot(allocator, &page, &ui_session);
     defer root.deinit(allocator);

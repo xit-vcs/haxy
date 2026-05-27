@@ -243,12 +243,8 @@ pub const View = struct {
             self.session.data.login_failure = .unknown_user;
             return;
         };
-        const arena = self.session.arena orelse {
-            self.session.data.login_failure = .unknown_user;
-            return;
-        };
 
-        const result = try evt.User.verifyCredentials(DB, repo_opts.hash, haxy_moment, arena, username, password);
+        const result = try evt.User.verifyCredentials(DB, repo_opts.hash, haxy_moment, self.session.arena, username, password);
         switch (result) {
             .unknown_user => {
                 self.session.data.login_failure = .unknown_user;
@@ -260,7 +256,7 @@ pub const View = struct {
             },
             .success => |user_id| {
                 // dupe user_id into the arena so the session can hold a stable slice
-                const user_id_stable = try arena.allocator().dupe(u8, &user_id);
+                const user_id_stable = try self.session.arena.allocator().dupe(u8, &user_id);
                 self.session.data.user_id = user_id_stable;
                 self.session.data.login_failure = null;
 
