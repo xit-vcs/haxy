@@ -47,7 +47,7 @@ pub const View = struct {
             button.getFocus().focusable = true;
             // the renderer distinguishes plain clickables from buttons that
             // should POST to a server route by this kind.
-            button.getFocus().kind = .submit_button;
+            button.getFocus().kind = .{ .custom = "submit" };
             button_id = button.getFocus().id;
             try box.children.put(allocator, button.getFocus().id, .{
                 .widget = .{ .text_box = button },
@@ -72,12 +72,6 @@ pub const View = struct {
     }
 
     pub fn build(self: *View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
-        const box = &self.center.child.box;
-        const button = &box.children.values()[button_index].widget.text_box;
-        button.options.border_style = if (root_focus.grandchild_id == self.button_id)
-            .double
-        else
-            .single;
         try self.center.build(allocator, constraint, root_focus);
     }
 

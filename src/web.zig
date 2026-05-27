@@ -439,14 +439,16 @@ pub fn generateOverlay(allocator: std.mem.Allocator, root: *ui.Widget, session: 
                     .ti = @fieldParentPtr("focus", child.focus),
                 });
             },
-            .submit_button => {
-                submit = .{
-                    .focus_id = entry.key_ptr.*,
-                    .x = child.rect.x,
-                    .y = child.rect.y,
-                    .width = child.rect.size.width,
-                    .height = child.rect.size.height,
-                };
+            .custom => |custom| {
+                if (std.mem.eql(u8, "submit", custom)) {
+                    submit = .{
+                        .focus_id = entry.key_ptr.*,
+                        .x = child.rect.x,
+                        .y = child.rect.y,
+                        .width = child.rect.size.width,
+                        .height = child.rect.size.height,
+                    };
+                }
             },
             else => {},
         }

@@ -95,10 +95,7 @@ pub const View = struct {
                 else => null,
             };
             if (tb) |t| {
-                t.options.border_style = if (self.getFocus().child_id == id)
-                    (if (root_focus.grandchild_id == id) .double else .single)
-                else
-                    .hidden;
+                t.options.border_style = if (self.getFocus().child_id == id) .single else .hidden;
             }
         }
         try self.box.build(allocator, constraint, root_focus);

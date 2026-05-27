@@ -77,7 +77,7 @@ pub const View = struct {
             button.getFocus().focusable = true;
             // the renderer distinguishes plain clickables from buttons that
             // should POST to a server route by this kind.
-            button.getFocus().kind = .submit_button;
+            button.getFocus().kind = .{ .custom = "submit" };
             nav_ids[button_index] = button.getFocus().id;
             try box.children.put(allocator, button.getFocus().id, .{
                 .widget = .{ .text_box = button },
@@ -103,12 +103,6 @@ pub const View = struct {
 
     pub fn build(self: *View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
         const box = &self.center.child.box;
-
-        const button = &box.children.values()[button_index].widget.text_box;
-        button.options.border_style = if (root_focus.grandchild_id == self.nav_ids[button_index])
-            .double
-        else
-            .single;
 
         const failure = self.session.data.login_failure;
 
@@ -226,17 +220,11 @@ pub const View = struct {
         const username_input = &box.children.values()[username_index].widget.text_input;
         const password_input = &box.children.values()[password_index].widget.text_input;
 
-        var username_buf: [256]u8 = undefined;
-        const username = joinCodepoints(&username_buf, username_input.content.items) orelse {
-            self.session.data.login_failure = .unknown_user;
-            return;
-        };
+        const username = try username_input.text(allocator);
+        defer allocator.free(username);
 
-        var password_buf: [256]u8 = undefined;
-        const password = joinCodepoints(&password_buf, password_input.content.items) orelse {
-            self.session.data.login_failure = .wrong_password;
-            return;
-        };
+        const password = try password_input.text(allocator);
+        defer allocator.free(password);
 
         const haxy_moment = self.session.haxy_moment orelse {
             // no DB context (e.g. wasm/web rendering path); treat as unknown.
@@ -272,15 +260,3 @@ pub const View = struct {
         }
     }
 };
-
-// joins a list of utf-8 codepoint slices (as TextInput stores them) into a
-// flat buffer. returns null if the joined bytes don't fit.
-fn joinCodepoints(buf: []u8, codepoints: []const []const u8) ?[]const u8 {
-    var len: usize = 0;
-    for (codepoints) |cp| {
-        if (len + cp.len > buf.len) return null;
-        @memcpy(buf[len..][0..cp.len], cp);
-        len += cp.len;
-    }
-    return buf[0..len];
-}

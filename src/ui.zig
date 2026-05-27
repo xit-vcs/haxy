@@ -310,10 +310,7 @@ pub const SelectableList = struct {
         self.clearGrid();
         const children = &self.scroll.child.box.children;
         for (children.keys(), children.values()) |id, *item| {
-            item.widget.text_box.options.border_style = if (self.getFocus().child_id == id)
-                (if (root_focus.grandchild_id == id) .double else .single)
-            else
-                .hidden;
+            item.widget.text_box.options.border_style = if (self.getFocus().child_id == id) .single else .hidden;
         }
         try self.scroll.build(allocator, constraint, root_focus);
     }
