@@ -13,19 +13,17 @@ width: usize,
 
 const Self = @This();
 
-pub fn init(comptime orig_content: []const u8) Self {
-    const rendered = comptime renderTitle(orig_content);
+pub fn init(arena: *std.heap.ArenaAllocator, orig_content: []const u8) !Self {
+    const rendered = try renderTitle(arena.allocator(), orig_content);
+    // count cells in the first row: one per UTF-8 codepoint start
+    var width: usize = 0;
+    for (rendered) |byte| {
+        if (byte == '\n') break;
+        if (byte & 0xC0 != 0x80) width += 1;
+    }
     return .{
         .content = rendered,
-        .width = comptime blk: {
-            // count cells in the first row: one per UTF-8 codepoint start
-            var width: usize = 0;
-            for (rendered) |byte| {
-                if (byte == '\n') break;
-                if (byte & 0xC0 != 0x80) width += 1;
-            }
-            break :blk width;
-        },
+        .width = width,
     };
 }
 
@@ -527,49 +525,54 @@ fn sextantCodepoint(pattern: u6) u21 {
     };
 }
 
-fn renderTitle(comptime input: []const u8) []const u8 {
-    comptime {
-        @setEvalBranchQuota(100_000);
-        var rows: [3][]const u8 = .{ "", "", "" };
-        var first = true;
-        for (input) |c| {
-            const glyph = glyphFor(c) orelse continue;
+fn renderTitle(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
+    var rows: [3]std.ArrayList(u8) = .{ .empty, .empty, .empty };
+    defer for (&rows) |*r| r.deinit(allocator);
 
-            // row-aligned dither: keep on-pixels only at even bitmap rows.
-            var kept: [9][6]bool = std.mem.zeroes([9][6]bool);
-            for (0..9) |r| {
-                if (r % 2 != 0) continue;
-                for (0..6) |col| {
-                    kept[r][col] = glyph[r][col] == '#';
-                }
-            }
+    var first = true;
+    for (input) |c| {
+        const glyph = glyphFor(c) orelse continue;
 
-            if (!first) {
-                for (&rows) |*r| {
-                    r.* = r.* ++ " ";
-                }
-            }
-            first = false;
-
-            for (0..3) |text_row| {
-                for (0..3) |text_col| {
-                    var pattern: u6 = 0;
-                    for (0..3) |sub_row| {
-                        for (0..2) |sub_col| {
-                            const row_idx = text_row * 3 + sub_row;
-                            const col_idx = text_col * 2 + sub_col;
-                            if (kept[row_idx][col_idx]) {
-                                pattern |= @as(u6, 1) << @intCast(sub_row * 2 + sub_col);
-                            }
-                        }
-                    }
-                    const cp = sextantCodepoint(pattern);
-                    var utf8_buf: [4]u8 = undefined;
-                    const len = std.unicode.utf8Encode(cp, &utf8_buf) catch unreachable;
-                    rows[text_row] = rows[text_row] ++ utf8_buf[0..len];
-                }
+        // row-aligned dither: keep on-pixels only at even bitmap rows.
+        var kept: [9][6]bool = std.mem.zeroes([9][6]bool);
+        for (0..9) |r| {
+            if (r % 2 != 0) continue;
+            for (0..6) |col| {
+                kept[r][col] = glyph[r][col] == '#';
             }
         }
-        return rows[0] ++ "\n" ++ rows[1] ++ "\n" ++ rows[2];
+
+        if (!first) {
+            for (&rows) |*r| try r.append(allocator, ' ');
+        }
+        first = false;
+
+        for (0..3) |text_row| {
+            for (0..3) |text_col| {
+                var pattern: u6 = 0;
+                for (0..3) |sub_row| {
+                    for (0..2) |sub_col| {
+                        const row_idx = text_row * 3 + sub_row;
+                        const col_idx = text_col * 2 + sub_col;
+                        if (kept[row_idx][col_idx]) {
+                            pattern |= @as(u6, 1) << @intCast(sub_row * 2 + sub_col);
+                        }
+                    }
+                }
+                const cp = sextantCodepoint(pattern);
+                var utf8_buf: [4]u8 = undefined;
+                const len = try std.unicode.utf8Encode(cp, &utf8_buf);
+                try rows[text_row].appendSlice(allocator, utf8_buf[0..len]);
+            }
+        }
     }
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, rows[0].items);
+    try out.append(allocator, '\n');
+    try out.appendSlice(allocator, rows[1].items);
+    try out.append(allocator, '\n');
+    try out.appendSlice(allocator, rows[2].items);
+    return out.toOwnedSlice(allocator);
 }

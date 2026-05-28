@@ -27,7 +27,7 @@ pub fn init(
     haxy_moment: rp.Repo(.xit, repo_opts).DB.HashMap(.read_only),
 ) !Self {
     return .{
-        .header = Header.init(),
+        .header = try Header.init(arena),
         .users = try Users.init(repo_opts, arena, haxy_moment),
         .repos = try Repos.init(repo_opts, arena, haxy_moment),
         .auth = Auth.init(),

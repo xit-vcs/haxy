@@ -15,9 +15,9 @@ auth_tab: AuthTab,
 
 const Self = @This();
 
-pub fn init() Self {
+pub fn init(arena: *std.heap.ArenaAllocator) !Self {
     return .{
-        .title = ui.Title.init("haxy"),
+        .title = try ui.Title.init(arena, "haxy"),
         .auth_tab = AuthTab.init(),
     };
 }
