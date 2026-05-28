@@ -10,12 +10,16 @@ const Focus = xitui.focus.Focus;
 
 pub const AuthTab = @import("./AuthTab.zig");
 
+title: ui.Title,
 auth_tab: AuthTab,
 
 const Self = @This();
 
 pub fn init() Self {
-    return .{ .auth_tab = AuthTab.init() };
+    return .{
+        .title = ui.Title.init("haxy"),
+        .auth_tab = AuthTab.init(),
+    };
 }
 
 pub const View = struct {
@@ -32,6 +36,28 @@ pub const View = struct {
         errdefer box.deinit(allocator);
 
         var tab_ids: [3]usize = undefined;
+
+        // title sits to the left of the tabs
+        {
+            var title_view = try ui.Title.View.init(allocator, &data.title);
+            errdefer title_view.deinit(allocator);
+            try box.children.put(allocator, title_view.getFocus().id, .{
+                .widget = .{ .title = title_view },
+                .rect = null,
+                .min_size = .{ .width = data.title.width, .height = null },
+            });
+        }
+
+        // gap between title and the users tab
+        {
+            var text = wgt.Text(ui.Widget).init(" ");
+            errdefer text.deinit(allocator);
+            try box.children.put(allocator, text.getFocus().id, .{
+                .widget = .{ .text = text },
+                .rect = null,
+                .min_size = .{ .width = 1, .height = null },
+            });
+        }
 
         // fixed tabs: users, repos
         for (

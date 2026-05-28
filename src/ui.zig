@@ -15,6 +15,7 @@ pub const canonical_repo_opts: rp.RepoOpts(.xit) = .{};
 pub const DB = rp.Repo(.xit, canonical_repo_opts).DB;
 
 pub const Home = @import("./ui/Home.zig");
+pub const Title = @import("./ui/Title.zig");
 
 pub const Page = union(enum) {
     home: Home,
@@ -195,6 +196,7 @@ pub const Widget = union(enum) {
     spacer: Spacer,
     center: Center,
     home: Home.View,
+    title: Title.View,
     home_header: Home.Header.View,
     home_users: Home.Users.View,
     home_repos: Home.Repos.View,
