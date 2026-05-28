@@ -27,13 +27,13 @@ pub const View = struct {
     const button_index: usize = 1;
 
     pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session, users_tab_id: usize) !View {
-        var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .rounded_corners = true, .direction = .vert });
+        var box = wgt.Box(ui.Widget).init(.{ .border_style = null, .rounded_corners = true, .direction = .vert });
         errdefer box.deinit(allocator);
         // marks this subtree as an HTML form scope for the web overlay
         box.getFocus().kind = .{ .custom = "form:/logout" };
 
         {
-            var prompt = wgt.Text(ui.Widget).init(allocator, "are you sure?");
+            var prompt = wgt.Text(ui.Widget).init("are you sure?");
             errdefer prompt.deinit(allocator);
             try box.children.put(allocator, prompt.getFocus().id, .{
                 .widget = .{ .text = prompt },

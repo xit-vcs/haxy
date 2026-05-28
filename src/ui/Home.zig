@@ -43,7 +43,7 @@ pub const View = struct {
     const stack_index: usize = 1;
 
     pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !View {
-        var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .rounded_corners = true, .direction = .vert });
+        var box = wgt.Box(ui.Widget).init(.{ .border_style = null, .rounded_corners = true, .direction = .vert });
         errdefer box.deinit(allocator);
 
         // build the header first so we can grab the users-tab focus id and
@@ -57,7 +57,7 @@ pub const View = struct {
         }
 
         {
-            var stack = wgt.Stack(ui.Widget).init(allocator);
+            var stack = wgt.Stack(ui.Widget).init();
             errdefer stack.deinit(allocator);
 
             {

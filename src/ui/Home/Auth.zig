@@ -38,7 +38,7 @@ pub const View = struct {
         var logout_view = try Logout.View.init(allocator, &data.logout, session, users_tab_id);
         errdefer logout_view.deinit(allocator);
         return .{
-            .focus = Focus.init(allocator, .container),
+            .focus = Focus.init(.container),
             .login = login_view,
             .logout = logout_view,
             .session = session,
@@ -46,7 +46,7 @@ pub const View = struct {
     }
 
     pub fn deinit(self: *View, allocator: std.mem.Allocator) void {
-        self.focus.deinit();
+        self.focus.deinit(allocator);
         self.login.deinit(allocator);
         self.logout.deinit(allocator);
     }
@@ -56,13 +56,13 @@ pub const View = struct {
         if (self.session.data.user_id != null) {
             try self.logout.build(allocator, constraint, root_focus);
             if (self.logout.getGrid()) |inner_grid| {
-                try self.focus.addChild(self.logout.getFocus(), inner_grid.size, 0, 0);
+                try self.focus.addChild(allocator, self.logout.getFocus(), inner_grid.size, 0, 0);
             }
             self.focus.child_id = self.logout.getFocus().id;
         } else {
             try self.login.build(allocator, constraint, root_focus);
             if (self.login.getGrid()) |inner_grid| {
-                try self.focus.addChild(self.login.getFocus(), inner_grid.size, 0, 0);
+                try self.focus.addChild(allocator, self.login.getFocus(), inner_grid.size, 0, 0);
             }
             self.focus.child_id = self.login.getFocus().id;
         }

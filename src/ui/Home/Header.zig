@@ -28,7 +28,7 @@ pub const View = struct {
     const auth_tab_min_width: usize = @as(usize, "logout".len) + 2;
 
     pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !View {
-        var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .rounded_corners = true, .direction = .horiz });
+        var box = wgt.Box(ui.Widget).init(.{ .border_style = null, .rounded_corners = true, .direction = .horiz });
         errdefer box.deinit(allocator);
 
         var tab_ids: [3]usize = undefined;
@@ -49,7 +49,7 @@ pub const View = struct {
 
         // spacer pushes the auth tab to the right
         {
-            var spacer = ui.Spacer.init(allocator);
+            var spacer = ui.Spacer.init();
             errdefer spacer.deinit(allocator);
             try box.children.put(allocator, spacer.getFocus().id, .{
                 .widget = .{ .spacer = spacer },

@@ -246,7 +246,7 @@ pub const SelectableList = struct {
 
     pub fn init(allocator: std.mem.Allocator) !SelectableList {
         var self = blk: {
-            var inner_box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .rounded_corners = true, .direction = .vert });
+            var inner_box = wgt.Box(Widget).init(.{ .border_style = null, .rounded_corners = true, .direction = .vert });
             errdefer inner_box.deinit(allocator);
 
             var scroll = try wgt.Scroll(Widget).init(allocator, .{ .box = inner_box }, .vert);
@@ -298,7 +298,7 @@ pub const SelectableList = struct {
             errdefer text_box.deinit(allocator);
             text_box.getFocus().focusable = true;
             try inner_box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
-            try inner_box.getFocus().addChild(text_box.getFocus(), .{ .width = 0, .height = 0 }, 0, 0);
+            try inner_box.getFocus().addChild(allocator, text_box.getFocus(), .{ .width = 0, .height = 0 }, 0, 0);
         }
 
         if (inner_box.children.count() > 0) {
@@ -409,16 +409,15 @@ pub const Spacer = struct {
     focus: Focus,
     grid: ?Grid,
 
-    pub fn init(allocator: std.mem.Allocator) Spacer {
+    pub fn init() Spacer {
         return .{
-            .focus = Focus.init(allocator, .container),
+            .focus = Focus.init(.container),
             .grid = null,
         };
     }
 
     pub fn deinit(self: *Spacer, allocator: std.mem.Allocator) void {
-        _ = allocator;
-        self.focus.deinit();
+        self.focus.deinit(allocator);
         if (self.grid) |*grid| {
             grid.deinit();
             self.grid = null;
@@ -471,7 +470,7 @@ pub const Center = struct {
         errdefer allocator.destroy(child);
         child.* = child_widget;
         return .{
-            .focus = Focus.init(allocator, .container),
+            .focus = Focus.init(.container),
             .grid = null,
             .child = child,
             .direction = direction,
@@ -479,7 +478,7 @@ pub const Center = struct {
     }
 
     pub fn deinit(self: *Center, allocator: std.mem.Allocator) void {
-        self.focus.deinit();
+        self.focus.deinit(allocator);
         if (self.grid) |*grid| {
             grid.deinit();
             self.grid = null;
@@ -521,7 +520,7 @@ pub const Center = struct {
         var grid = try Grid.init(allocator, .{ .width = width, .height = height });
         errdefer grid.deinit();
         try grid.drawGrid(child_grid, offset_x, offset_y);
-        try self.getFocus().addChild(self.child.getFocus(), child_grid.size, offset_x, offset_y);
+        try self.getFocus().addChild(allocator, self.child.getFocus(), child_grid.size, offset_x, offset_y);
         self.getFocus().child_id = self.child.getFocus().id;
 
         self.grid = grid;
