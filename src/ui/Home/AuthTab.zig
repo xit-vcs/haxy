@@ -23,6 +23,7 @@ pub const View = struct {
         var text_box = try wgt.TextBox(ui.Widget).init(allocator, "login", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
         errdefer text_box.deinit(allocator);
         text_box.getFocus().focusable = true;
+        text_box.getFocus().kind = .{ .custom = "a:/auth" };
         return .{
             .text_box = text_box,
             .data = data,

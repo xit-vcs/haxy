@@ -34,11 +34,15 @@ pub const View = struct {
         var tab_ids: [3]usize = undefined;
 
         // fixed tabs: users, repos
-        const fixed_tab_names = [_][]const u8{ "users", "repos" };
-        for (fixed_tab_names, 0..) |name, i| {
+        for (
+            [_][]const u8{ "users", "repos" },
+            [_][]const u8{ "a:/users", "a:/repos" },
+            0..,
+        ) |name, focus_name, i| {
             var text_box = try wgt.TextBox(ui.Widget).init(allocator, name, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().focusable = true;
+            text_box.getFocus().kind = .{ .custom = focus_name };
             tab_ids[i] = text_box.getFocus().id;
             try box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
@@ -74,11 +78,13 @@ pub const View = struct {
         // initial selected tab follows session.data.current_page — the web
         // layer decides this from the request URL, the TTY uses whatever
         // the session arrives with — so we don't bake a default here.
-        self.getFocus().child_id = tab_ids[switch (session.data.current_page) {
-            .home_users => 0,
-            .home_repos => 1,
-            .home_auth => 2,
-        }];
+        self.getFocus().child_id = tab_ids[
+            switch (session.data.current_page) {
+                .home_users => 0,
+                .home_repos => 1,
+                .home_auth => 2,
+            }
+        ];
         return self;
     }
 

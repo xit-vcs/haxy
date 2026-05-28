@@ -311,7 +311,7 @@ fn renderIndexHtml(
     var root = try ui.initRoot(allocator, &snapshot.page, &session);
     defer root.deinit(allocator);
 
-    const content = try generateHtml(allocator, &root, &session);
+    const content = try generateHtml(allocator, &root);
     defer allocator.free(content);
     const overlay = try generateOverlay(allocator, &root);
     defer allocator.free(overlay);
@@ -367,31 +367,77 @@ fn logError(err: *std.Io.Writer, comptime fmt: []const u8, args: anytype) void {
 }
 
 // emits the TUI grid cells (one <span> run per focusable widget)
-pub fn generateHtml(allocator: std.mem.Allocator, root: *ui.Widget, session: *const ui.Session) ![]const u8 {
-    _ = session;
+pub fn generateHtml(allocator: std.mem.Allocator, root: *ui.Widget) ![]const u8 {
     const grid = root.getGrid() orelse return error.MissingGrid;
     const root_focus = root.getFocus();
+
+    const Tag = union(enum) {
+        span,
+        a: []const u8,
+
+        const a_prefix = "a:";
+
+        fn init(str: []const u8) @This() {
+            if (std.mem.startsWith(u8, str, a_prefix)) {
+                return .{ .a = str[a_prefix.len..] };
+            }
+            return .span;
+        }
+
+        fn writeOpenTag(self: @This(), alloc: std.mem.Allocator, out: *std.ArrayList(u8), id: usize) !void {
+            switch (self) {
+                .span => {
+                    var buf: [128]u8 = undefined;
+                    const open = try std.fmt.bufPrint(&buf, "<span class=\"clickable\" data-focus-id=\"{d}\">", .{id});
+                    try out.appendSlice(alloc, open);
+                },
+                .a => |href| {
+                    try out.appendSlice(alloc, "<a class=\"clickable\" data-focus-id=\"");
+                    var id_buf: [32]u8 = undefined;
+                    try out.appendSlice(alloc, try std.fmt.bufPrint(&id_buf, "{d}", .{id}));
+                    try out.appendSlice(alloc, "\" href=\"");
+                    try appendEscapedHtml(alloc, out, href);
+                    try out.appendSlice(alloc, "\">");
+                },
+            }
+        }
+
+        fn closeTag(self: @This()) []const u8 {
+            return switch (self) {
+                .span => "</span>",
+                .a => "</a>",
+            };
+        }
+    };
 
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
 
     for (0..grid.size.height) |y| {
-        var current_id: ?usize = null;
+        var current_id_maybe: ?usize = null;
+        var current_tag_maybe: ?Tag = null;
         for (0..grid.size.width) |x| {
             const cell_id = cellFocusId(root_focus, x, y);
-            if (cell_id != current_id) {
-                if (current_id != null) try out.appendSlice(allocator, "</span>");
+            if (cell_id != current_id_maybe) {
+                if (current_tag_maybe) |current_tag| try out.appendSlice(allocator, current_tag.closeTag());
+                current_tag_maybe = null;
+
                 if (cell_id) |id| {
-                    var buf: [128]u8 = undefined;
-                    const tag = try std.fmt.bufPrint(&buf, "<span class=\"clickable\" data-focus-id=\"{d}\">", .{id});
-                    try out.appendSlice(allocator, tag);
+                    current_tag_maybe = if (root_focus.children.get(id)) |child| switch (child.focus.kind) {
+                        .custom => |custom| .init(custom),
+                        else => .span,
+                    } else null;
+
+                    if (current_tag_maybe) |current_tag| {
+                        try current_tag.writeOpenTag(allocator, &out, id);
+                    }
                 }
-                current_id = cell_id;
+                current_id_maybe = cell_id;
             }
             const rune = grid.cells.items[try grid.cells.at(.{ y, x })].rune orelse " ";
             try appendEscapedHtml(allocator, &out, rune);
         }
-        if (current_id != null) try out.appendSlice(allocator, "</span>");
+        if (current_tag_maybe) |current_tag| try out.appendSlice(allocator, current_tag.closeTag());
         try out.append(allocator, '\n');
     }
 

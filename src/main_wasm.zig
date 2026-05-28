@@ -61,7 +61,7 @@ fn tick(min_height: u32, max_width: u32) !void {
         _pushState(url.ptr, @intCast(url.len));
     }
 
-    const html = try web.generateHtml(allocator, root_ptr, &session);
+    const html = try web.generateHtml(allocator, root_ptr);
     defer allocator.free(html);
     setHtml(html);
 
