@@ -909,6 +909,22 @@ pub const AnsiBackground = struct {
         };
     }
 
+    // terminals that don't support truecolor misparse a "38;2;r;g;b"/"48;2;…"
+    // SGR as a list of plain SGR codes, so any channel value in 1..9 turns on
+    // a text attribute (5/6 = blink, 7 = inverse, 8 = conceal, …).
+    // snap such channels clear of that range so the backdrop doesn't blink or
+    // hide text there; the ≤9/255 shift is imperceptible on terminals that
+    // actually render truecolor.
+    fn sgrSafe(color: ?Grid.Color) ?Grid.Color {
+        const c = color orelse return null;
+        const snap = struct {
+            fn f(v: u8) u8 {
+                return if (v >= 1 and v <= 9) 10 else v;
+            }
+        }.f;
+        return .{ .r = snap(c.r), .g = snap(c.g), .b = snap(c.b) };
+    }
+
     // composites ANSI art behind a foreground grid
     fn artBehind(allocator: std.mem.Allocator, foreground: Grid, art: *AnsiArt, anchor: ArtAnchor, root_focus: *Focus) !Grid {
         art.clearGrid();
@@ -933,8 +949,10 @@ pub const AnsiBackground = struct {
                     const dst = &out.cells.items[idx];
                     if (cellIsBlank(dst.*)) {
                         dst.* = src;
+                        dst.style.fg = sgrSafe(dst.style.fg);
+                        dst.style.bg = sgrSafe(dst.style.bg);
                     } else if (dst.style.bg == null) {
-                        dst.style.bg = dimColor(artCellColor(src.style));
+                        dst.style.bg = sgrSafe(dimColor(artCellColor(src.style)));
                         if (dst.style.fg == null) dst.style.fg = glyph_fg_over_art;
                     }
                 }
