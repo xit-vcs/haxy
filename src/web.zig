@@ -275,11 +275,14 @@ fn handleLogin(
 }
 
 fn handleLogout(request: *std.http.Server.Request) !void {
-    // request.respond's discardBody reads any unused body for us and lands
-    // the connection back in the .ready state for the next request on the
-    // same connection (keep_alive defaults to true).
+    // close the connection instead of keeping it alive: we don't read the
+    // request body, and respond()'s keep-alive path would otherwise try to
+    // discard it — which asserts on a bodyless POST that carries no
+    // content-length, and would block on one with no framing at all. a logout
+    // is just a redirect, so the browser reconnects for the follow-up GET.
     try request.respond("", .{
         .status = .see_other,
+        .keep_alive = false,
         .extra_headers = &.{
             .{ .name = "location", .value = ui.RoutablePage.url(.home_auth) },
             .{ .name = "set-cookie", .value = cookie_name ++ "=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0" },
