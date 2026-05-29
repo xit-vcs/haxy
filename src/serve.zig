@@ -66,6 +66,10 @@ pub fn run(
     // load or generate the SSH host key
     const host_key = try serve_ssh_protocol.HostKey.loadOrGenerate(io, allocator, data_dir_path);
 
+    // disk-backed store for web login sessions
+    const session_store = try web.SessionStore.init(io, data_dir);
+    defer session_store.deinit();
+
     // create wui listener
 
     const wui_listen_address = try parseListenAddress(options.wui_listen);
@@ -97,7 +101,7 @@ pub fn run(
     try err.print("serving web UI on http://{s}/\n", .{options.wui_listen});
     try err.flush();
 
-    web.run(io, allocator, &wui_server, &tasks, admin_repo_path, err);
+    web.run(io, allocator, &wui_server, &tasks, admin_repo_path, session_store, err);
 
     if (@TypeOf(runnable) != void) {
         try runnable.run();

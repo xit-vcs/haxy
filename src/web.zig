@@ -9,7 +9,7 @@ const wgt = xitui.widget;
 const Focus = xitui.focus.Focus;
 const Grid = xitui.grid.Grid;
 
-const cookie_name = "haxy_user";
+const cookie_name = "haxy_session";
 // flash cookie for surfacing the outcome of the most recent /login POST.
 // set on the failure redirect, read and immediately expired on the next
 // GET / so refreshing the page doesn't keep showing the error.
@@ -34,6 +34,7 @@ pub fn run(
     net_server: *std.Io.net.Server,
     tasks: *std.Io.Group,
     admin_repo_path: []const u8,
+    session_store: SessionStore,
     err: *std.Io.Writer,
 ) void {
     const Listener = struct {
@@ -42,6 +43,7 @@ pub fn run(
         net_server: *std.Io.net.Server,
         tasks: *std.Io.Group,
         admin_repo_path: []const u8,
+        session_store: SessionStore,
         err: *std.Io.Writer,
 
         fn run(ctx: @This()) void {
@@ -57,11 +59,12 @@ pub fn run(
                     allocator: std.mem.Allocator,
                     stream: std.Io.net.Stream,
                     admin_repo_path: []const u8,
+                    session_store: SessionStore,
                     err: *std.Io.Writer,
 
                     fn run(conn: @This()) void {
                         defer conn.stream.close(conn.io);
-                        handleConnection(conn.io, conn.allocator, conn.stream, conn.admin_repo_path, conn.err) catch |request_err| {
+                        handleConnection(conn.io, conn.allocator, conn.stream, conn.admin_repo_path, conn.session_store, conn.err) catch |request_err| {
                             logError(conn.err, "web ui request failed: {s}\n", .{@errorName(request_err)});
                         };
                     }
@@ -72,6 +75,7 @@ pub fn run(
                     .allocator = ctx.allocator,
                     .stream = stream,
                     .admin_repo_path = ctx.admin_repo_path,
+                    .session_store = ctx.session_store,
                     .err = ctx.err,
                 }});
             }
@@ -84,6 +88,7 @@ pub fn run(
         .net_server = net_server,
         .tasks = tasks,
         .admin_repo_path = admin_repo_path,
+        .session_store = session_store,
         .err = err,
     }});
 }
@@ -93,6 +98,7 @@ fn handleConnection(
     allocator: std.mem.Allocator,
     stream: std.Io.net.Stream,
     admin_repo_path: []const u8,
+    session_store: SessionStore,
     err: *std.Io.Writer,
 ) !void {
     var send_buffer = [_]u8{0} ** 4096;
@@ -112,7 +118,7 @@ fn handleConnection(
             else => |e| return e,
         };
 
-        handleRequest(io, &request, allocator, admin_repo_path) catch |request_err| {
+        handleRequest(io, &request, allocator, admin_repo_path, session_store) catch |request_err| {
             try err.print("web ui request failed: {s}\n", .{@errorName(request_err)});
             try err.flush();
             // best-effort 500. if handleRequest already started writing a
@@ -131,16 +137,17 @@ fn handleRequest(
     request: *std.http.Server.Request,
     allocator: std.mem.Allocator,
     admin_repo_path: []const u8,
+    session_store: SessionStore,
 ) !void {
     const method = request.head.method;
     const uri = try std.Uri.parseAfterScheme("", request.head.target);
     const path = uri.path.percent_encoded;
 
     if (method == .POST and std.mem.eql(u8, path, "/login")) {
-        return handleLogin(io, request, allocator, admin_repo_path);
+        return handleLogin(io, request, allocator, admin_repo_path, session_store);
     }
     if (method == .POST and std.mem.eql(u8, path, "/logout")) {
-        return handleLogout(request);
+        return handleLogout(request, session_store);
     }
 
     const get_or_head = method == .GET or method == .HEAD;
@@ -161,14 +168,13 @@ fn handleRequest(
     }
 
     if (ui.RoutablePage.fromUrl(path)) |current_page| {
-        // decode the haxy_user cookie into raw bytes on the stack; the
-        // slice lives for the rest of handleRequest, which is plenty for
-        // renderIndexHtml to consume.
+        // resolve the haxy_session cookie's token to a user_id via the
+        // store. user_id_buf lives on the stack for the rest of handleRequest,
+        // which is plenty for renderIndexHtml to consume.
         var user_id_buf: [evt.event_id_size]u8 = undefined;
         const user_id: ?[]const u8 = blk: {
-            const hex = getCookieValue(request, cookie_name) orelse break :blk null;
-            if (hex.len != evt.event_id_size * 2) break :blk null;
-            _ = std.fmt.hexToBytes(&user_id_buf, hex) catch break :blk null;
+            const token = getCookieValue(request, cookie_name) orelse break :blk null;
+            if (!session_store.lookup(token, &user_id_buf)) break :blk null;
             break :blk user_id_buf[0..evt.event_id_size];
         };
         const login_failure: ?ui.Home.Auth.Login.Failure =
@@ -218,6 +224,7 @@ fn handleLogin(
     request: *std.http.Server.Request,
     allocator: std.mem.Allocator,
     admin_repo_path: []const u8,
+    session_store: SessionStore,
 ) !void {
     var body_buf: [256]u8 = undefined;
     const reader = request.readerExpectNone(&body_buf);
@@ -242,9 +249,9 @@ fn handleLogin(
 
     switch (result) {
         .success => |user_id| {
-            const hex = std.fmt.bytesToHex(user_id, .lower);
+            const token = try session_store.create(&user_id);
             var cookie_buf: [256]u8 = undefined;
-            const cookie = try std.fmt.bufPrint(&cookie_buf, cookie_name ++ "={s}; Path=/; HttpOnly; SameSite=Strict", .{hex});
+            const cookie = try std.fmt.bufPrint(&cookie_buf, cookie_name ++ "={s}; Path=/; HttpOnly; SameSite=Strict", .{token});
             try request.respond("", .{
                 .status = .see_other,
                 .extra_headers = &.{
@@ -274,7 +281,10 @@ fn handleLogin(
     }
 }
 
-fn handleLogout(request: *std.http.Server.Request) !void {
+fn handleLogout(request: *std.http.Server.Request, session_store: SessionStore) !void {
+    // revoke the session server-side so the cookie is dead for anyone holding
+    // a copy, not just this browser.
+    if (getCookieValue(request, cookie_name)) |token| session_store.remove(token);
     // close the connection instead of keeping it alive: we don't read the
     // request body, and respond()'s keep-alive path would otherwise try to
     // discard it — which asserts on a bodyless POST that carries no
@@ -681,3 +691,64 @@ fn decodeFormValue(allocator: std.mem.Allocator, encoded: []const u8) ![]u8 {
     }
     return try out.toOwnedSlice(allocator);
 }
+
+// disk-backed web session store. each login mints a random, opaque token
+// (not the user's id) that is stored as a file named by the token hex, whose
+// contents are the raw user_id bytes. authenticating a request is a lookup of
+// the cookie's token; logout deletes the file, revoking the session. there is
+// deliberately no expiry — a session lives until logout.
+pub const SessionStore = struct {
+    io: std.Io,
+    dir: std.Io.Dir,
+
+    pub const token_hex_len = evt.event_id_size * 2;
+
+    pub fn init(io: std.Io, data_dir: std.Io.Dir) !SessionStore {
+        try data_dir.createDirPath(io, "sessions");
+        const dir = try data_dir.openDir(io, "sessions", .{});
+        return .{ .io = io, .dir = dir };
+    }
+
+    pub fn deinit(self: SessionStore) void {
+        self.dir.close(self.io);
+    }
+
+    // mint a new session for user_id, returning the token hex to set as the
+    // cookie value.
+    pub fn create(self: SessionStore, user_id: *const [evt.event_id_size]u8) ![token_hex_len]u8 {
+        var token: [evt.event_id_size]u8 = undefined;
+        self.io.random(&token);
+        const token_hex = std.fmt.bytesToHex(token, .lower);
+        const file = try self.dir.createFile(self.io, &token_hex, .{});
+        defer file.close(self.io);
+        try file.writeStreamingAll(self.io, user_id);
+        return token_hex;
+    }
+
+    // resolve a cookie's token to its user_id. returns false (logged out) for a
+    // missing, malformed, or unknown token.
+    pub fn lookup(self: SessionStore, token_hex: []const u8, out: *[evt.event_id_size]u8) bool {
+        if (!isToken(token_hex)) return false;
+        const file = self.dir.openFile(self.io, token_hex, .{ .mode = .read_only }) catch return false;
+        defer file.close(self.io);
+        var storage: [evt.event_id_size]u8 = undefined;
+        var file_reader = file.reader(self.io, &storage);
+        file_reader.interface.readSliceAll(out) catch return false;
+        return true;
+    }
+
+    // revoke a session. a no-op for a missing or malformed token.
+    pub fn remove(self: SessionStore, token_hex: []const u8) void {
+        if (!isToken(token_hex)) return;
+        self.dir.deleteFile(self.io, token_hex) catch {};
+    }
+
+    // a token is exactly token_hex_len hex chars. validating before using the
+    // value as a path keeps attacker-supplied cookies from escaping the
+    // sessions dir (e.g. via "/" or ".." bytes).
+    fn isToken(token_hex: []const u8) bool {
+        if (token_hex.len != token_hex_len) return false;
+        for (token_hex) |c| if (!std.ascii.isHex(c)) return false;
+        return true;
+    }
+};
