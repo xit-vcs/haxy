@@ -127,6 +127,9 @@ WebAssembly.instantiateStreaming(fetch("haxy.wasm"), importObject).then(async (r
     wasmInstance.exports._init(ptr, jsonBytes.length, minRows(), maxCols());
 
     document.addEventListener("keydown", (event) => {
+        // let the browser handle modifier combos. the TUI only uses unmodified keys,
+        // so intercepting these would just break normal browser navigation.
+        if (event.altKey || event.ctrlKey || event.metaKey) return;
         // when a form element (text input or submit button) owns focus,
         // the browser handles typing, Enter-to-submit, and Tab natively.
         // we only forward keys into the TUI when focus is elsewhere.
