@@ -1,5 +1,5 @@
 const std = @import("std");
-const ui = @import("../../ui.zig");
+const ui = @import("../ui.zig");
 const xit = @import("xit");
 const xitui = xit.xitui;
 const wgt = xitui.widget;

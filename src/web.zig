@@ -267,7 +267,7 @@ fn handleLogin(
             try request.respond("", .{
                 .status = .see_other,
                 .extra_headers = &.{
-                    .{ .name = "location", .value = ui.RoutablePage.url(.home_auth) },
+                    .{ .name = "location", .value = ui.RoutablePage.url(.auth) },
                     .{ .name = "set-cookie", .value = login_failure_cookie ++ "=unknown_user; Path=/; HttpOnly; SameSite=Strict" },
                 },
             });
@@ -276,7 +276,7 @@ fn handleLogin(
             try request.respond("", .{
                 .status = .see_other,
                 .extra_headers = &.{
-                    .{ .name = "location", .value = ui.RoutablePage.url(.home_auth) },
+                    .{ .name = "location", .value = ui.RoutablePage.url(.auth) },
                     .{ .name = "set-cookie", .value = login_failure_cookie ++ "=wrong_password; Path=/; HttpOnly; SameSite=Strict" },
                 },
             });
@@ -297,7 +297,7 @@ fn handleLogout(request: *std.http.Server.Request, session_store: SessionStore) 
         .status = .see_other,
         .keep_alive = false,
         .extra_headers = &.{
-            .{ .name = "location", .value = ui.RoutablePage.url(.home_auth) },
+            .{ .name = "location", .value = ui.RoutablePage.url(.auth) },
             .{ .name = "set-cookie", .value = cookie_name ++ "=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0" },
         },
     });
@@ -327,7 +327,7 @@ fn handleAnsi(
         .status = .see_other,
         .keep_alive = false,
         .extra_headers = &.{
-            .{ .name = "location", .value = ui.RoutablePage.url(.home_ansi) },
+            .{ .name = "location", .value = ui.RoutablePage.url(.settings) },
         },
     });
 }

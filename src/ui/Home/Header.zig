@@ -8,7 +8,7 @@ const inp = xitui.input;
 const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
 
-pub const AuthTab = @import("./AuthTab.zig");
+pub const AuthTab = @import("./../AuthTab.zig");
 
 title: ui.Title,
 auth_tab: AuthTab,
@@ -58,8 +58,8 @@ pub const View = struct {
         // tabs
         var tab_index: usize = 0;
         for (
-            [_][]const u8{ "users", "repos", "", "ANSI art", "" },
-            [_][]const u8{ "a:/users", "a:/repos", "", "a:/ansi", "a:/auth" },
+            [_][]const u8{ "users", "repos", "", "settings", "" },
+            [_][]const u8{ "a:/users", "a:/repos", "", "a:/settings", "a:/auth" },
         ) |name, focus_name| {
             // spacer
             if (focus_name.len == 0) {
@@ -78,7 +78,7 @@ pub const View = struct {
                 tab_ids[tab_index] = auth_tab.getFocus().id;
                 tab_index += 1;
                 try box.children.put(allocator, auth_tab.getFocus().id, .{
-                    .widget = .{ .home_auth_tab = auth_tab },
+                    .widget = .{ .auth_tab = auth_tab },
                     .rect = null,
                     .min_size = .{ .width = AuthTab.min_width, .height = null },
                 });
@@ -107,8 +107,8 @@ pub const View = struct {
             switch (session.data.current_page) {
                 .home_users => 0,
                 .home_repos => 1,
-                .home_ansi => 2,
-                .home_auth => 3,
+                .settings => 2,
+                .auth => 3,
             }
         ];
         return self;
@@ -123,7 +123,7 @@ pub const View = struct {
         for (self.box.children.keys(), self.box.children.values()) |id, *child| {
             const tb: ?*wgt.TextBox(ui.Widget) = switch (child.widget) {
                 .text_box => |*x| x,
-                .home_auth_tab => |*at| &at.text_box,
+                .auth_tab => |*at| &at.text_box,
                 else => null,
             };
             if (tb) |t| {

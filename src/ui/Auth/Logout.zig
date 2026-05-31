@@ -10,9 +10,6 @@ const Focus = xitui.focus.Focus;
 
 const Self = @This();
 
-const label_on = "turn off ANSI art";
-const label_off = "turn on ANSI art";
-
 pub fn init() Self {
     return .{};
 }
@@ -22,19 +19,32 @@ pub const View = struct {
     data: *const Self,
     session: *ui.Session,
     button_id: usize,
+    // focus id of the header's "users" tab; on logout we jump there so the
+    // user isn't stranded on a button that's about to be hidden.
+    users_tab_id: usize,
 
-    const button_index: usize = 0;
+    const prompt_index: usize = 0;
+    const button_index: usize = 1;
 
-    pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !View {
-        const logged_in = session.data.user_id != null;
-
+    pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session, users_tab_id: usize) !View {
         var box = wgt.Box(ui.Widget).init(.{ .border_style = null, .rounded_corners = true, .direction = .vert });
         errdefer box.deinit(allocator);
-        box.getFocus().kind = .{ .custom = if (logged_in) "form:/ansi" else "form:" };
+        // marks this subtree as an HTML form scope for the web overlay
+        box.getFocus().kind = .{ .custom = "form:/logout" };
+
+        {
+            var prompt = wgt.Text(ui.Widget).init("are you sure?");
+            errdefer prompt.deinit(allocator);
+            try box.children.put(allocator, prompt.getFocus().id, .{
+                .widget = .{ .text = prompt },
+                .rect = null,
+                .min_size = null,
+            });
+        }
 
         var button_id: usize = undefined;
         {
-            var button = try wgt.TextBox(ui.Widget).init(allocator, labelFor(session), .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            var button = try wgt.TextBox(ui.Widget).init(allocator, "logout", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer button.deinit(allocator);
             button.getFocus().focusable = true;
             // the renderer distinguishes plain clickables from buttons that
@@ -55,6 +65,7 @@ pub const View = struct {
             .data = data,
             .session = session,
             .button_id = button_id,
+            .users_tab_id = users_tab_id,
         };
     }
 
@@ -63,18 +74,16 @@ pub const View = struct {
     }
 
     pub fn build(self: *View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
-        const box = &self.center.child.box;
-        if (box.children.values().len > 0) {
-            const button = &box.children.values()[button_index].widget.text_box;
-            button.box.children.values()[0].widget.text.content = labelFor(self.session);
-        }
         try self.center.build(allocator, constraint, root_focus);
     }
 
     pub fn input(self: *View, allocator: std.mem.Allocator, key: inp.Key, root_focus: *Focus) !void {
         _ = allocator;
         switch (key) {
-            .enter => try self.toggle(),
+            .enter => {
+                try self.logout(root_focus);
+                return;
+            },
             .mouse => |mouse| {
                 if (mouse.action == .press and mouse.action.press == .left) {
                     if (root_focus.children.get(self.button_id)) |entry| {
@@ -82,7 +91,8 @@ pub const View = struct {
                         if (mouse.x >= r.x and mouse.y >= r.y and
                             mouse.x < r.x + r.size.width and mouse.y < r.y + r.size.height)
                         {
-                            try self.toggle();
+                            try self.logout(root_focus);
+                            return;
                         }
                     }
                 }
@@ -91,9 +101,11 @@ pub const View = struct {
         }
     }
 
-    // enqueue the toggle; the host drains it (applying + persisting) this frame.
-    fn toggle(self: *View) !void {
-        try self.session.push(.toggle_ansi);
+    fn logout(self: *View, root_focus: *Focus) !void {
+        self.session.data.user_id = null;
+        // jump focus back to the users tab — the logout button is about to
+        // be hidden by the tab-label swap.
+        try root_focus.setFocus(self.users_tab_id);
     }
 
     pub fn clearGrid(self: *View) void {
@@ -113,7 +125,3 @@ pub const View = struct {
         return 0;
     }
 };
-
-fn labelFor(session: *const ui.Session) []const u8 {
-    return if (session.data.enable_ansi) label_on else label_off;
-}

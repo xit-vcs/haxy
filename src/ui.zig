@@ -28,8 +28,8 @@ pub const Snapshot = struct {
 pub const RoutablePage = enum {
     home_users,
     home_repos,
-    home_ansi,
-    home_auth,
+    settings,
+    auth,
 
     pub const default: RoutablePage = .home_users;
 
@@ -37,8 +37,8 @@ pub const RoutablePage = enum {
         return switch (self) {
             .home_users => "/users",
             .home_repos => "/repos",
-            .home_ansi => "/ansi",
-            .home_auth => "/auth",
+            .settings => "/settings",
+            .auth => "/auth",
         };
     }
 
@@ -46,8 +46,8 @@ pub const RoutablePage = enum {
         if (std.mem.eql(u8, path, "/")) return default;
         if (std.mem.eql(u8, path, "/users")) return .home_users;
         if (std.mem.eql(u8, path, "/repos")) return .home_repos;
-        if (std.mem.eql(u8, path, "/ansi")) return .home_ansi;
-        if (std.mem.eql(u8, path, "/auth")) return .home_auth;
+        if (std.mem.eql(u8, path, "/settings")) return .settings;
+        if (std.mem.eql(u8, path, "/auth")) return .auth;
         return null;
     }
 };
@@ -251,9 +251,9 @@ pub const Widget = union(enum) {
     home_header: Home.Header.View,
     home_users: Home.Users.View,
     home_repos: Home.Repos.View,
-    home_auth_tab: Home.Header.AuthTab.View,
-    home_ansi: Home.Ansi.View,
-    home_auth: Home.Auth.View,
+    auth_tab: Home.Header.AuthTab.View,
+    settings: Home.Settings.View,
+    auth: Home.Auth.View,
 
     pub fn deinit(self: *Widget, allocator: std.mem.Allocator) void {
         switch (self.*) {
