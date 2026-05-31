@@ -189,14 +189,23 @@ fn handleRequest(
                     null
             else
                 null;
-        // enable_ansi is omitted here on purpose: Session.init fills it in from
-        // the logged-in user's event, falling back to false when anonymous.
-        const html = try renderIndexHtml(io, allocator, admin_repo_path, .{
+
+        const html = renderIndexHtml(io, allocator, admin_repo_path, .{
             .user_id = user_id,
             .login_failure = login_failure,
             .current_page = current_page,
-        });
+        }) catch |err| switch (err) {
+            error.NotFound => {
+                try request.respond("not found", .{
+                    .status = .not_found,
+                    .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+                });
+                return;
+            },
+            else => |e| return e,
+        };
         defer allocator.free(html);
+
         // expire the flash cookie on the way out so a refresh doesn't keep
         // showing the failure label.
         var headers: [2]std.http.Header = undefined;
