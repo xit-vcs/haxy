@@ -50,13 +50,34 @@ pub const RoutablePage = union(enum) {
     home_repos,
     home_settings,
     home_auth,
-    user: []const u8,
-    user_settings: []const u8,
-    user_auth: []const u8,
+    user: Array(evt.User.name_max_len),
+    user_settings: Array(evt.User.name_max_len),
+    user_auth: Array(evt.User.name_max_len),
 
     pub const default: RoutablePage = .home_users;
 
     const user_segment = "/user/";
+
+    // an inline, owned array of data. keeping it in the route (rather than a
+    // borrowed slice) makes RoutablePage a plain value: it can be copied, stored
+    // in history, and serialized without any arena tracking.
+    pub fn Array(comptime max_len: usize) type {
+        return struct {
+            bytes: [max_len]u8 = undefined,
+            len: u8 = 0,
+
+            pub fn from(s: []const u8) ?Array(max_len) {
+                if (s.len > max_len) return null;
+                var name = Array(max_len){ .len = @intCast(s.len) };
+                @memcpy(name.bytes[0..s.len], s);
+                return name;
+            }
+
+            pub fn slice(self: *const Array(max_len)) []const u8 {
+                return self.bytes[0..self.len];
+            }
+        };
+    }
 
     pub fn url(comptime self: RoutablePage) []const u8 {
         return switch (self) {
@@ -71,9 +92,9 @@ pub const RoutablePage = union(enum) {
 
     pub fn urlAlloc(self: RoutablePage, arena: *std.heap.ArenaAllocator) ![]const u8 {
         return switch (self) {
-            .user => |name| try std.fmt.allocPrint(arena.allocator(), user_segment ++ "{s}", .{name}),
-            .user_settings => |name| try std.fmt.allocPrint(arena.allocator(), user_segment ++ "{s}/settings", .{name}),
-            .user_auth => |name| try std.fmt.allocPrint(arena.allocator(), user_segment ++ "{s}/auth", .{name}),
+            .user => |name| try std.fmt.allocPrint(arena.allocator(), user_segment ++ "{s}", .{name.slice()}),
+            .user_settings => |name| try std.fmt.allocPrint(arena.allocator(), user_segment ++ "{s}/settings", .{name.slice()}),
+            .user_auth => |name| try std.fmt.allocPrint(arena.allocator(), user_segment ++ "{s}/auth", .{name.slice()}),
             inline else => |_, tag| url(tag),
         };
     }
@@ -96,13 +117,14 @@ pub const RoutablePage = union(enum) {
             const slash = std.mem.indexOfScalar(u8, rest, '/');
             const name = if (slash) |s| rest[0..s] else rest;
             if (name.len == 0) return null;
+            const parsed = Array(evt.User.name_max_len).from(name) orelse return null; // name too long
             if (slash) |s| {
                 const sub = rest[s + 1 ..];
-                if (std.mem.eql(u8, sub, "settings")) return .{ .user_settings = name };
-                if (std.mem.eql(u8, sub, "auth")) return .{ .user_auth = name };
+                if (std.mem.eql(u8, sub, "settings")) return .{ .user_settings = parsed };
+                if (std.mem.eql(u8, sub, "auth")) return .{ .user_auth = parsed };
                 return null; // unknown user sub-path
             }
-            return .{ .user = name };
+            return .{ .user = parsed };
         }
         return null;
     }
@@ -110,9 +132,9 @@ pub const RoutablePage = union(enum) {
     pub fn eql(a: RoutablePage, b: RoutablePage) bool {
         if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
         return switch (a) {
-            .user => |a_name| std.mem.eql(u8, a_name, b.user),
-            .user_settings => |a_name| std.mem.eql(u8, a_name, b.user_settings),
-            .user_auth => |a_name| std.mem.eql(u8, a_name, b.user_auth),
+            .user => |a_name| std.mem.eql(u8, a_name.slice(), b.user.slice()),
+            .user_settings => |a_name| std.mem.eql(u8, a_name.slice(), b.user_settings.slice()),
+            .user_auth => |a_name| std.mem.eql(u8, a_name.slice(), b.user_auth.slice()),
             else => true,
         };
     }
@@ -128,7 +150,7 @@ pub const RoutablePage = union(enum) {
         switch (self) {
             .user, .user_settings, .user_auth => |name| {
                 try jw.objectField("name");
-                try jw.write(name);
+                try jw.write(name.slice());
             },
             else => {},
         }
@@ -138,14 +160,21 @@ pub const RoutablePage = union(enum) {
     pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !RoutablePage {
         const Helper = struct { kind: std.meta.Tag(RoutablePage), name: ?[]const u8 = null };
         const helper = try std.json.innerParse(Helper, allocator, source, options);
+        const parseName = struct {
+            // errors must stay within std.json's ParseError set; ValueTooLong
+            // is its member for an over-long field.
+            fn f(maybe: ?[]const u8) !Array(evt.User.name_max_len) {
+                return Array(evt.User.name_max_len).from(maybe orelse return error.MissingField) orelse error.ValueTooLong;
+            }
+        }.f;
         return switch (helper.kind) {
             .home_users => .home_users,
             .home_repos => .home_repos,
             .home_settings => .home_settings,
             .home_auth => .home_auth,
-            .user => .{ .user = helper.name orelse return error.MissingField },
-            .user_settings => .{ .user_settings = helper.name orelse return error.MissingField },
-            .user_auth => .{ .user_auth = helper.name orelse return error.MissingField },
+            .user => .{ .user = try parseName(helper.name) },
+            .user_settings => .{ .user_settings = try parseName(helper.name) },
+            .user_auth => .{ .user_auth = try parseName(helper.name) },
         };
     }
 };
@@ -154,7 +183,14 @@ pub const RoutablePage = union(enum) {
 // run gets its own.
 pub const Session = struct {
     data: Data = .{},
+    // session-lifetime allocations: login/user_id, persisted prefs, queued
+    // actions. lives as long as the connection.
     arena: *std.heap.ArenaAllocator,
+    // current page's allocations: page data and the page-scoped strings widgets
+    // build (form actions, links). owned by Nav, swapped on each navigation, so
+    // it doesn't accumulate over a long-lived session. on the web/wasm paths,
+    // where a render is one-shot, this points at the same arena as `arena`.
+    page_arena: *std.heap.ArenaAllocator,
     haxy_moment: ?evt.AdminDB.HashMap(.read_only) = null, // db cursor (null on the wasm side)
     pending: std.ArrayList(Action) = .empty, // actions queued by widgets this frame
     nav_back: bool = false, // set by input (escape) to request the native TUI pop a page; see Nav
@@ -188,6 +224,10 @@ pub const Session = struct {
         var session = Self{
             .data = data,
             .arena = arena,
+            // until a host swaps in a page-scoped arena (Nav does this), page
+            // allocations land in the session arena. on the web path that's the
+            // intended behavior, since the whole arena is per-request.
+            .page_arena = arena,
             .haxy_moment = try evt.currentMoment(evt.admin_repo_opts, repo),
         };
         try session.loadUserPrefs();
@@ -241,19 +281,16 @@ pub const Session = struct {
         }
     }
 
+    // record the requested page. `route` may borrow a name slice from the
+    // current page's widget tree, which stays alive until Nav.sync runs (this
+    // frame); sync re-anchors the name into the new page's arena.
     fn navigate(self: *Session, route: RoutablePage) !void {
-        const aa = self.arena.allocator();
-        self.data.current_page = switch (route) {
-            .user => |name| .{ .user = try aa.dupe(u8, name) },
-            .user_settings => |name| .{ .user_settings = try aa.dupe(u8, name) },
-            .user_auth => |name| .{ .user_auth = try aa.dupe(u8, name) },
-            else => route,
-        };
+        self.data.current_page = route;
     }
 };
 
-pub fn run(io: std.Io, allocator: std.mem.Allocator, page: *const Page, session: *Session) !void {
-    var nav = try Nav.init(allocator, page, session);
+pub fn run(io: std.Io, allocator: std.mem.Allocator, session: *Session) !void {
+    var nav = try Nav.init(allocator, session);
     defer nav.deinit(allocator);
 
     var terminal = try term.Terminal.init(io, allocator);
@@ -366,57 +403,99 @@ pub fn crossPageLink(root_focus: *Focus, focus_id: usize, current: RoutablePage)
 pub const Nav = struct {
     root: Widget,
     route: RoutablePage,
+    // backs the current page (its Page data and the page-scoped strings its
+    // widgets build). owned here, swapped on each navigation. session.page_arena
+    // tracks whichever of these is current so widgets allocate into it.
+    arena: *std.heap.ArenaAllocator,
     history: std.ArrayList(Entry),
 
-    const Entry = struct { root: Widget, route: RoutablePage };
+    // each retained page keeps its own arena, freed when the page leaves the
+    // stack (popped on back, evicted at cap, or on deinit). this is what keeps a
+    // long-lived session from accumulating every page it ever visited.
+    const Entry = struct { root: Widget, route: RoutablePage, arena: *std.heap.ArenaAllocator };
 
-    // cap on retained back-history so chain can't grow memory without bound
+    // cap on retained back-history so the chain can't grow memory without bound
     const max_history: usize = 16;
 
-    pub fn init(allocator: std.mem.Allocator, page: *const Page, session: *Session) !Nav {
+    pub fn init(allocator: std.mem.Allocator, session: *Session) !Nav {
+        const moment = session.haxy_moment orelse unreachable;
+        const arena = try allocator.create(std.heap.ArenaAllocator);
+        arena.* = std.heap.ArenaAllocator.init(allocator);
+        errdefer {
+            arena.deinit();
+            allocator.destroy(arena);
+        }
+
+        session.page_arena = arena;
+        const route = session.data.current_page;
+
+        const page = try arena.allocator().create(Page);
+        page.* = try Page.init(arena, moment, route);
         return .{
             .root = try initRoot(allocator, page, session),
-            .route = session.data.current_page,
+            .route = route,
+            .arena = arena,
             .history = .empty,
         };
     }
 
     pub fn deinit(self: *Nav, allocator: std.mem.Allocator) void {
         self.root.deinit(allocator);
-        for (self.history.items) |*entry| entry.root.deinit(allocator);
+        freeArena(allocator, self.arena);
+        for (self.history.items) |*entry| {
+            entry.root.deinit(allocator);
+            freeArena(allocator, entry.arena);
+        }
         self.history.deinit(allocator);
+    }
+
+    fn freeArena(allocator: std.mem.Allocator, arena: *std.heap.ArenaAllocator) void {
+        arena.deinit();
+        allocator.destroy(arena);
     }
 
     // reconcile the displayed root with the session's navigation state. returns
     // false when escape was pressed with no history left, so the caller can quit.
     // a forward nav (current_page moved to a different parent page) pushes the
-    // current root and builds the new page; a back request pops and restores the
-    // previous root. the new Page is allocated in the session arena so the widget
-    // tree's data pointers stay valid for the life of the session.
+    // current root and builds the new page in a fresh arena; a back request frees
+    // the current page and restores the previous one.
     pub fn sync(self: *Nav, allocator: std.mem.Allocator, session: *Session) !bool {
         if (session.nav_back) {
             session.nav_back = false;
             const entry = self.history.pop() orelse return false;
             self.root.deinit(allocator);
+            freeArena(allocator, self.arena);
             self.root = entry.root;
             self.route = entry.route;
+            self.arena = entry.arena;
+            session.page_arena = entry.arena;
             session.data.current_page = entry.route;
             return true;
         }
 
         if (session.data.current_page.parent() != self.route.parent()) {
             const moment = session.haxy_moment orelse return true;
-            const page = try session.arena.allocator().create(Page);
-            page.* = try Page.init(session.arena, moment, session.data.current_page);
+            const arena = try allocator.create(std.heap.ArenaAllocator);
+            arena.* = std.heap.ArenaAllocator.init(allocator);
+            errdefer freeArena(allocator, arena);
+
+            session.page_arena = arena;
+            const route = session.data.current_page;
+
+            const page = try arena.allocator().create(Page);
+            page.* = try Page.init(arena, moment, route);
             const new_root = try initRoot(allocator, page, session);
-            try self.history.append(allocator, .{ .root = self.root, .route = self.route });
-            // drop the oldest entry (freeing its widget tree) once we're over cap
+
+            try self.history.append(allocator, .{ .root = self.root, .route = self.route, .arena = self.arena });
+            // drop the oldest entry (freeing its widget tree and arena) once over cap
             if (self.history.items.len > max_history) {
                 var oldest = self.history.orderedRemove(0);
                 oldest.root.deinit(allocator);
+                freeArena(allocator, oldest.arena);
             }
             self.root = new_root;
-            self.route = session.data.current_page;
+            self.route = route;
+            self.arena = arena;
         }
         return true;
     }

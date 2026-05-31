@@ -16,9 +16,8 @@ var last_pushed_page_maybe: ?ui.RoutablePage = null; // last current_page we tol
 
 fn init(json: []const u8, min_height: u32, max_width: u32) !void {
     _ = page_arena.reset(.free_all);
-    // the stored page can borrow a name slice from page_arena (a .user route),
-    // which we just freed — drop it so the next tick's eql never reads it and
-    // always pushes the fresh page's url.
+    // drop the last-pushed page so the next tick pushes the freshly-loaded
+    // page's url.
     last_pushed_page_maybe = null;
 
     // alloc_always so the parsed strings live entirely inside the arena
@@ -32,6 +31,9 @@ fn init(json: []const u8, min_height: u32, max_width: u32) !void {
     session = .{
         .data = snapshot.session,
         .arena = &page_arena,
+        // one render per page load (init resets the arena), so page-scoped and
+        // session-scoped allocations share the same arena here.
+        .page_arena = &page_arena,
     };
 
     var next_root = try ui.initRoot(allocator, &snapshot.page, &session);

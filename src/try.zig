@@ -37,9 +37,6 @@ pub fn main(init: std.process.Init) !void {
     const cwd_path = try std.process.currentPathAlloc(io, allocator);
     defer allocator.free(cwd_path);
 
-    var page_arena = std.heap.ArenaAllocator.init(allocator);
-    defer page_arena.deinit();
-
     const work_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "server", "admin" });
     defer allocator.free(work_path);
 
@@ -50,9 +47,10 @@ pub fn main(init: std.process.Init) !void {
     try repo.addConfig(io, allocator, .{ .name = "user.name", .value = "haxy" });
     try repo.addConfig(io, allocator, .{ .name = "user.email", .value = "admin@haxy" });
 
-    var session: ui.Session = undefined;
+    var session_arena = std.heap.ArenaAllocator.init(allocator);
+    defer session_arena.deinit();
 
-    const page: ui.Page = blk: {
+    var session: ui.Session = blk: {
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
 
@@ -174,8 +172,7 @@ pub fn main(init: std.process.Init) !void {
         // commit the seed events and consume them into the database
         try evt.commitAndConsume(evt.admin_repo_opts, io, allocator, &repo, evt.events_ref, &events_to_consume);
 
-        session = try ui.Session.init(&page_arena, &repo, .{});
-        break :blk try ui.Page.init(&page_arena, session.haxy_moment orelse unreachable, session.data.current_page);
+        break :blk try ui.Session.init(&session_arena, &repo, .{});
     };
 
     // start the server
@@ -239,17 +236,16 @@ pub fn main(init: std.process.Init) !void {
         const Runnable = struct {
             io: std.Io,
             allocator: std.mem.Allocator,
-            page: *const ui.Page,
             session: *ui.Session,
 
             pub fn run(self: @This()) !void {
                 // launch the TUI
-                try hx.ui.run(self.io, self.allocator, self.page, self.session);
+                try hx.ui.run(self.io, self.allocator, self.session);
             }
         };
 
         try srv.run(.xit, .{}, io, allocator, cwd_path, .{
             .data_dir = server_path,
-        }, run_opts.err, Runnable{ .io = io, .allocator = allocator, .page = &page, .session = &session });
+        }, run_opts.err, Runnable{ .io = io, .allocator = allocator, .session = &session });
     }
 }

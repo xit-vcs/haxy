@@ -19,13 +19,14 @@ user: evt.User.Safe,
 repos: []const evt.Repo,
 settings: Settings,
 auth: Auth,
+route_name: ui.RoutablePage.Array(evt.User.name_max_len),
 
 const Self = @This();
 
 pub fn init(
     arena: *std.heap.ArenaAllocator,
     haxy_moment: evt.AdminDB.HashMap(.read_only),
-    name: []const u8,
+    name: ui.RoutablePage.Array(evt.User.name_max_len),
 ) !Self {
     const DB = evt.AdminDB;
     const hash_kind = evt.admin_repo_opts.hash;
@@ -34,7 +35,7 @@ pub fn init(
     // the name->user-id index, which everything below keys off of.
     const name_to_user_id_cursor = try haxy_moment.getCursor(hash.hashInt(hash_kind, "name->user-id")) orelse return error.NotFound;
     const name_to_user_id = try DB.HashMap(.read_only).init(name_to_user_id_cursor);
-    const user_id_cursor = try name_to_user_id.getCursor(hash.hashInt(hash_kind, name)) orelse return error.NotFound;
+    const user_id_cursor = try name_to_user_id.getCursor(hash.hashInt(hash_kind, name.slice())) orelse return error.NotFound;
     var user_id_buf: [evt.event_id_size]u8 = undefined;
     _ = try user_id_cursor.readBytes(&user_id_buf);
     const user_id: []const u8 = &user_id_buf;
@@ -71,6 +72,7 @@ pub fn init(
         .repos = repos.items,
         .settings = Settings.init(),
         .auth = Auth.init(),
+        .route_name = name,
     };
 }
 
@@ -153,7 +155,7 @@ pub const View = struct {
         // rather than navigating.
         if (header.getSelectedIndex()) |index| {
             stack.getFocus().child_id = stack.children.keys()[index];
-            const name = self.data.user.name;
+            const name = self.data.route_name;
             self.session.data.current_page = switch (index) {
                 1 => .{ .user_settings = name },
                 2 => .{ .user_auth = name },

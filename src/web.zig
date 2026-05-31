@@ -380,7 +380,7 @@ fn renderIndexHtml(
     var session = try ui.Session.init(&page_arena, &repo, session_data);
 
     const snapshot: ui.Snapshot = .{
-        .page = try ui.Page.init(session.arena, session.haxy_moment orelse unreachable, session.data.current_page),
+        .page = try ui.Page.init(session.page_arena, session.haxy_moment orelse unreachable, session.data.current_page),
         .session = session.data,
     };
     var root = try ui.initRoot(allocator, &snapshot.page, &session);

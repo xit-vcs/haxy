@@ -65,18 +65,16 @@ fn runTui(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh.PtySiz
         .height_cells = if (pty.height_cells == 0) 24 else pty.height_cells,
     };
 
-    // build the Home page in a session-scoped arena.
-    var page_arena = std.heap.ArenaAllocator.init(allocator);
-    defer page_arena.deinit();
+    // session-lifetime allocations (login, prefs); Nav owns the per-page arenas.
+    var session_arena = std.heap.ArenaAllocator.init(allocator);
+    defer session_arena.deinit();
 
     const Repo = rp.Repo(.xit, evt.admin_repo_opts);
     var repo = try Repo.open(io, allocator, .{ .path = handler.admin_repo_path });
     defer repo.deinit(io, allocator);
-    var ui_session = try ui.Session.init(&page_arena, &repo, .{});
+    var ui_session = try ui.Session.init(&session_arena, &repo, .{});
 
-    const page: ui.Page = try ui.Page.init(&page_arena, ui_session.haxy_moment orelse unreachable, ui_session.data.current_page);
-
-    var nav = try ui.Nav.init(allocator, &page, &ui_session);
+    var nav = try ui.Nav.init(allocator, &ui_session);
     defer nav.deinit(allocator);
 
     var session_writer_buf: [8192]u8 = undefined;

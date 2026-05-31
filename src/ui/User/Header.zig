@@ -61,9 +61,9 @@ pub const View = struct {
 
         // every tab link is user-scoped so selecting one stays on this page —
         // switching its stack and updating the url — instead of navigating to
-        // the global settings or auth pages. allocated in the session arena so
-        // the focus kinds that borrow them outlive this view.
-        const aa = session.arena.allocator();
+        // the global settings or auth pages. allocated in the page arena so the
+        // focus kinds that borrow them live as long as this page's widget tree.
+        const aa = session.page_arena.allocator();
         const repos_link = try std.fmt.allocPrint(aa, "a:/user/{s}", .{data.name});
         const settings_link = try std.fmt.allocPrint(aa, "a:/user/{s}/settings", .{data.name});
         const auth_link = try std.fmt.allocPrint(aa, "a:/user/{s}/auth", .{data.name});

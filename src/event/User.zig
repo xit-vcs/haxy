@@ -13,6 +13,8 @@ enable_ansi: bool = false,
 
 const Self = @This();
 
+pub const name_max_len = 32;
+
 // the subset of a user that's safe to hand to clients
 pub const Safe = struct {
     name: []const u8,
@@ -40,6 +42,8 @@ pub fn consume(
     const name_to_user_id = try DB.HashMap(.read_write).init(name_to_user_id_cursor);
 
     if (event_maybe) |event| {
+        if (event.name.len > name_max_len) return error.NameTooLong;
+
         // if this event_id already maps to a user with a different name,
         // drop the stale name->id entry first
         if (try event_id_to_user.getCursor(user_key)) |existing_cursor| {

@@ -34,7 +34,7 @@ pub const View = struct {
         // server sends us back to this page's settings tab; logged out, the
         // empty action blocks the POST and the input goes to the TUI instead.
         box.getFocus().kind = .{ .custom = if (!logged_in) "form:" else switch (session.data.current_page) {
-            .user, .user_settings, .user_auth => |name| try std.fmt.allocPrint(session.arena.allocator(), "form:/user/{s}/ansi", .{name}),
+            .user, .user_settings, .user_auth => |name| try std.fmt.allocPrint(session.page_arena.allocator(), "form:/user/{s}/ansi", .{name.slice()}),
             else => "form:/ansi",
         } };
 
