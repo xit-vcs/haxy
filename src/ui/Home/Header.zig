@@ -38,10 +38,12 @@ pub const View = struct {
         {
             var title_view = try ui.Title.View.init(allocator, &data.title);
             errdefer title_view.deinit(allocator);
+            // shrink the title when there is not enough space
             try box.children.put(allocator, title_view.getFocus().id, .{
                 .widget = .{ .title = title_view },
                 .rect = null,
-                .min_size = .{ .width = data.title.width, .height = null },
+                .min_size = null,
+                .shrink = true,
             });
         }
 
@@ -68,7 +70,7 @@ pub const View = struct {
                 try box.children.put(allocator, spacer.getFocus().id, .{
                     .widget = .{ .spacer = spacer },
                     .rect = null,
-                    .min_size = .{ .width = 1, .height = null },
+                    .min_size = null,
                 });
             }
             // auth

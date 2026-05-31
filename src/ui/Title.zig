@@ -9,21 +9,12 @@ const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
 
 content: []const u8,
-width: usize,
 
 const Self = @This();
 
 pub fn init(arena: *std.heap.ArenaAllocator, orig_content: []const u8) !Self {
-    const rendered = try renderTitle(arena.allocator(), orig_content);
-    // count cells in the first row: one per UTF-8 codepoint start
-    var width: usize = 0;
-    for (rendered) |byte| {
-        if (byte == '\n') break;
-        if (byte & 0xC0 != 0x80) width += 1;
-    }
     return .{
-        .content = rendered,
-        .width = width,
+        .content = try renderTitle(arena.allocator(), orig_content),
     };
 }
 
