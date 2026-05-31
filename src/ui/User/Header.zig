@@ -27,13 +27,14 @@ pub fn init(arena: *std.heap.ArenaAllocator, name: []const u8) !Self {
 pub const View = struct {
     box: wgt.Box(ui.Widget),
     data: *const Self,
-    tab_ids: [3]usize,
+    tab_ids: std.AutoArrayHashMapUnmanaged(usize, void),
 
     pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !View {
         var box = wgt.Box(ui.Widget).init(.{ .border_style = .hidden, .rounded_corners = true, .direction = .horiz });
         errdefer box.deinit(allocator);
 
-        var tab_ids: [3]usize = undefined;
+        var tab_ids: std.AutoArrayHashMapUnmanaged(usize, void) = .empty;
+        errdefer tab_ids.deinit(allocator);
 
         // title sits to the left of the tabs
         {
@@ -74,7 +75,7 @@ pub const View = struct {
             errdefer text_box.deinit(allocator);
             text_box.getFocus().focusable = true;
             text_box.getFocus().kind = .{ .custom = repos_link };
-            tab_ids[0] = text_box.getFocus().id;
+            try tab_ids.put(allocator, text_box.getFocus().id, {});
             try box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
@@ -99,7 +100,7 @@ pub const View = struct {
             errdefer text_box.deinit(allocator);
             text_box.getFocus().focusable = true;
             text_box.getFocus().kind = .{ .custom = settings_link };
-            tab_ids[1] = text_box.getFocus().id;
+            try tab_ids.put(allocator, text_box.getFocus().id, {});
             try box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
@@ -113,7 +114,7 @@ pub const View = struct {
             var auth_tab = try AuthTab.View.init(allocator, &data.auth_tab, session);
             errdefer auth_tab.deinit(allocator);
             auth_tab.text_box.getFocus().kind = .{ .custom = auth_link };
-            tab_ids[2] = auth_tab.getFocus().id;
+            try tab_ids.put(allocator, auth_tab.getFocus().id, {});
             try box.children.put(allocator, auth_tab.getFocus().id, .{
                 .widget = .{ .auth_tab = auth_tab },
                 .rect = null,
@@ -121,9 +122,24 @@ pub const View = struct {
             });
         }
 
+        // quit tab
+        if (session.is_terminal) {
+            var text_box = try wgt.TextBox(ui.Widget).init(allocator, ui.Quit.tab_label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            errdefer text_box.deinit(allocator);
+            text_box.getFocus().focusable = true;
+            text_box.getFocus().kind = .{ .custom = ui.Quit.tab_kind };
+            try tab_ids.put(allocator, text_box.getFocus().id, {});
+            try box.children.put(allocator, text_box.getFocus().id, .{
+                .widget = .{ .text_box = text_box },
+                .rect = null,
+                // the label is a single column; +2 for the border
+                .min_size = .{ .width = 1 + 2, .height = null },
+            });
+        }
+
         var self = View{ .box = box, .data = data, .tab_ids = tab_ids };
         // open on the tab named by the current route
-        self.getFocus().child_id = tab_ids[
+        self.getFocus().child_id = self.tab_ids.keys()[
             switch (session.data.current_page) {
                 .user_settings => 1,
                 .user_auth => 2,
@@ -135,6 +151,7 @@ pub const View = struct {
 
     pub fn deinit(self: *View, allocator: std.mem.Allocator) void {
         self.box.deinit(allocator);
+        self.tab_ids.deinit(allocator);
     }
 
     pub fn build(self: *View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
@@ -159,13 +176,13 @@ pub const View = struct {
         var new_tab = current_tab;
         switch (key) {
             .arrow_left => new_tab -|= 1,
-            .arrow_right => if (new_tab + 1 < self.tab_ids.len) {
+            .arrow_right => if (new_tab + 1 < self.tab_ids.count()) {
                 new_tab += 1;
             },
             else => {},
         }
         if (new_tab != current_tab) {
-            try root_focus.setFocus(self.tab_ids[new_tab]);
+            try root_focus.setFocus(self.tab_ids.keys()[new_tab]);
         }
     }
 
@@ -187,9 +204,6 @@ pub const View = struct {
 
     fn currentTabIndex(self: View) ?usize {
         const child_id = self.box.focus.child_id orelse return null;
-        for (self.tab_ids, 0..) |id, i| {
-            if (id == child_id) return i;
-        }
-        return null;
+        return self.tab_ids.getIndex(child_id);
     }
 };

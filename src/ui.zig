@@ -13,6 +13,7 @@ const evt = @import("./event.zig");
 pub const Home = @import("./ui/Home.zig");
 pub const User = @import("./ui/User.zig");
 pub const Title = @import("./ui/Title.zig");
+pub const Quit = @import("./ui/Quit.zig");
 
 pub const PageKind = enum {
     home,
@@ -194,6 +195,8 @@ pub const Session = struct {
     haxy_moment: ?evt.AdminDB.HashMap(.read_only) = null, // db cursor (null on the wasm side)
     pending: std.ArrayList(Action) = .empty, // actions queued by widgets this frame
     nav_back: bool = false, // set by input (escape) to request the native TUI pop a page; see Nav
+    is_terminal: bool = false, // true on remote SSH and local TUI
+    quit_requested: bool = false,
 
     const Self = @This();
 
@@ -322,9 +325,11 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, session: *Session) !void {
         // local run has no repo to persist to, so just apply in-memory
         session.applyPending();
 
-        // reconcile navigation: forward to a new page, or back on escape (and
-        // quit when there's nothing left to go back to).
-        if (!try nav.sync(allocator, session)) terminal.requestQuit();
+        // reconcile navigation: forward to a new page, or back on escape.
+        try nav.sync(allocator, session);
+
+        // the quit button (on the quit tab) asks the host to tear down.
+        if (session.quit_requested) terminal.requestQuit();
 
         try nav.root.build(allocator, .{
             .min_size = .{ .width = null, .height = null },
@@ -454,27 +459,51 @@ pub const Nav = struct {
         allocator.destroy(arena);
     }
 
-    // reconcile the displayed root with the session's navigation state. returns
-    // false when escape was pressed with no history left, so the caller can quit.
-    // a forward nav (current_page moved to a different parent page) pushes the
-    // current root and builds the new page in a fresh arena; a back request frees
-    // the current page and restores the previous one.
-    pub fn sync(self: *Nav, allocator: std.mem.Allocator, session: *Session) !bool {
+    // reconcile the displayed root with the session's navigation state. a
+    // forward nav (current_page moved to a different parent page) pushes the
+    // current root and builds the new page in a fresh arena; a back request
+    // frees the current page and restores the previous one. when escape is
+    // pressed with no history left we switch to the quit tab instead of quitting.
+    pub fn sync(self: *Nav, allocator: std.mem.Allocator, session: *Session) !void {
         if (session.nav_back) {
             session.nav_back = false;
-            const entry = self.history.pop() orelse return false;
-            self.root.deinit(allocator);
-            freeArena(allocator, self.arena);
-            self.root = entry.root;
-            self.route = entry.route;
-            self.arena = entry.arena;
-            session.page_arena = entry.arena;
-            session.data.current_page = entry.route;
-            return true;
+            if (self.history.pop()) |entry| {
+                self.root.deinit(allocator);
+                freeArena(allocator, self.arena);
+                self.root = entry.root;
+                self.route = entry.route;
+                self.arena = entry.arena;
+                session.page_arena = entry.arena;
+                session.data.current_page = entry.route;
+                return;
+            }
+            // nothing to go back to; switch to the quit confirmation
+            const root_focus = self.root.getFocus();
+            var iter = root_focus.children.iterator();
+            while (iter.next()) |entry| {
+                switch (entry.value_ptr.focus.kind) {
+                    .custom => |custom| if (std.mem.eql(u8, custom, Quit.tab_kind)) {
+                        try root_focus.setFocus(entry.key_ptr.*);
+                        // a Stack only builds its selected child, so the quit
+                        // button isn't in the focus tree until a build runs with
+                        // the quit tab selected. build once, then send a
+                        // synthetic arrow_down to drop focus from the tab onto
+                        // the button so it's ready to confirm.
+                        try self.root.build(allocator, .{
+                            .min_size = .{ .width = null, .height = 40 },
+                            .max_size = .{ .width = 80, .height = null },
+                        }, root_focus);
+                        try self.root.input(allocator, .arrow_down, root_focus);
+                        break;
+                    },
+                    else => {},
+                }
+            }
+            return;
         }
 
         if (session.data.current_page.parent() != self.route.parent()) {
-            const moment = session.haxy_moment orelse return true;
+            const moment = session.haxy_moment orelse return;
             const arena = try allocator.create(std.heap.ArenaAllocator);
             arena.* = std.heap.ArenaAllocator.init(allocator);
             errdefer freeArena(allocator, arena);
@@ -497,7 +526,6 @@ pub const Nav = struct {
             self.route = route;
             self.arena = arena;
         }
-        return true;
     }
 };
 
@@ -538,6 +566,7 @@ pub const Widget = union(enum) {
     background: AnsiBackground,
     home: Home.View,
     user: User.View,
+    quit: Quit.View,
     title: Title.View,
     home_header: Home.Header.View,
     user_header: User.Header.View,

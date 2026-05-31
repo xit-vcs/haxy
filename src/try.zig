@@ -174,6 +174,7 @@ pub fn main(init: std.process.Init) !void {
 
         break :blk try ui.Session.init(&session_arena, &repo, .{});
     };
+    session.is_terminal = true;
 
     // start the server
 

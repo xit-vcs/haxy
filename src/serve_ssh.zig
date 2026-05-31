@@ -73,6 +73,7 @@ fn runTui(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh.PtySiz
     var repo = try Repo.open(io, allocator, .{ .path = handler.admin_repo_path });
     defer repo.deinit(io, allocator);
     var ui_session = try ui.Session.init(&session_arena, &repo, .{});
+    ui_session.is_terminal = true;
 
     var nav = try ui.Nav.init(allocator, &ui_session);
     defer nav.deinit(allocator);
@@ -125,9 +126,11 @@ fn runTui(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh.PtySiz
 
         try ui_session.applyAndWritePending(io, allocator, &repo);
 
-        // reconcile navigation: forward to a new page, or back on escape (and
-        // quit when there's nothing left to go back to).
-        if (!try nav.sync(allocator, &ui_session)) terminal.requestQuit();
+        // reconcile navigation: forward to a new page, or back on escape
+        try nav.sync(allocator, &ui_session);
+
+        // the quit button (on the quit tab) asks the host to tear down
+        if (ui_session.quit_requested) terminal.requestQuit();
 
         try nav.root.build(allocator, .{
             .min_size = .{ .width = null, .height = null },

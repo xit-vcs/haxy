@@ -14,12 +14,14 @@ pub const Repos = @import("./Home/Repos.zig");
 pub const Header = @import("./Home/Header.zig");
 pub const Settings = @import("./Settings.zig");
 pub const Auth = @import("./Auth.zig");
+pub const Quit = @import("./Quit.zig");
 
 header: Header,
 users: Users,
 repos: Repos,
 settings: Settings,
 auth: Auth,
+quit: Quit,
 
 const Self = @This();
 
@@ -33,6 +35,7 @@ pub fn init(
         .repos = try Repos.init(arena, haxy_moment),
         .settings = Settings.init(),
         .auth = Auth.init(),
+        .quit = Quit.init(),
     };
 }
 
@@ -54,7 +57,7 @@ pub const View = struct {
         {
             var header_view = try Header.View.init(allocator, &data.header, session);
             errdefer header_view.deinit(allocator);
-            users_tab_id = header_view.tab_ids[0];
+            users_tab_id = header_view.tab_ids.keys()[0];
             try box.children.put(allocator, header_view.getFocus().id, .{ .widget = .{ .home_header = header_view }, .rect = null, .min_size = null });
         }
 
@@ -86,6 +89,12 @@ pub const View = struct {
                 try stack.children.put(allocator, auth_view.getFocus().id, .{ .home_auth = auth_view });
             }
 
+            if (session.is_terminal) {
+                var quit_view = try Quit.View.init(allocator, &data.quit, session);
+                errdefer quit_view.deinit(allocator);
+                try stack.children.put(allocator, quit_view.getFocus().id, .{ .quit = quit_view });
+            }
+
             try box.children.put(allocator, stack.getFocus().id, .{ .widget = .{ .stack = stack }, .rect = null, .min_size = null });
         }
 
@@ -110,13 +119,15 @@ pub const View = struct {
         // each header tab maps 1:1 to a stack child by position
         if (header.getSelectedIndex()) |index| {
             stack.getFocus().child_id = stack.children.keys()[index];
-            self.session.data.current_page = switch (index) {
-                0 => .home_users,
-                1 => .home_repos,
-                2 => .home_settings,
-                3 => .home_auth,
-                else => .home_users,
-            };
+            switch (index) {
+                0 => self.session.data.current_page = .home_users,
+                1 => self.session.data.current_page = .home_repos,
+                2 => self.session.data.current_page = .home_settings,
+                3 => self.session.data.current_page = .home_auth,
+                // the quit tab is tty-only and not a route, so leave current_page
+                // alone (nothing to mirror into the url).
+                else => {},
+            }
         }
         try self.box.build(allocator, constraint, root_focus);
     }
@@ -151,6 +162,7 @@ pub const View = struct {
                                         .home_repos => |*v| v.getSelectedIndex() == 0,
                                         .home_settings => |*v| v.getSelectedIndex() == 0,
                                         .home_auth => |*v| v.getSelectedIndex() == 0,
+                                        .quit => |*v| v.getSelectedIndex() == 0,
                                         else => false,
                                     };
                                     if (at_top) {

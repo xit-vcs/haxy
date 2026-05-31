@@ -13,12 +13,14 @@ const Focus = xitui.focus.Focus;
 pub const Header = @import("./User/Header.zig");
 pub const Settings = @import("./Settings.zig");
 pub const Auth = @import("./Auth.zig");
+pub const Quit = @import("./Quit.zig");
 
 header: Header,
 user: evt.User.Safe,
 repos: []const evt.Repo,
 settings: Settings,
 auth: Auth,
+quit: Quit,
 route_name: ui.RoutablePage.Array(evt.User.name_max_len),
 
 const Self = @This();
@@ -72,6 +74,7 @@ pub fn init(
         .repos = repos.items,
         .settings = Settings.init(),
         .auth = Auth.init(),
+        .quit = Quit.init(),
         .route_name = name,
     };
 }
@@ -94,7 +97,7 @@ pub const View = struct {
         {
             var header_view = try Header.View.init(allocator, &data.header, session);
             errdefer header_view.deinit(allocator);
-            repos_tab_id = header_view.tab_ids[0];
+            repos_tab_id = header_view.tab_ids.keys()[0];
             try box.children.put(allocator, header_view.getFocus().id, .{ .widget = .{ .user_header = header_view }, .rect = null, .min_size = null });
         }
 
@@ -132,6 +135,12 @@ pub const View = struct {
                 try stack.children.put(allocator, auth_view.getFocus().id, .{ .home_auth = auth_view });
             }
 
+            if (session.is_terminal) {
+                var quit_view = try Quit.View.init(allocator, &data.quit, session);
+                errdefer quit_view.deinit(allocator);
+                try stack.children.put(allocator, quit_view.getFocus().id, .{ .quit = quit_view });
+            }
+
             try box.children.put(allocator, stack.getFocus().id, .{ .widget = .{ .stack = stack }, .rect = null, .min_size = null });
         }
 
@@ -156,11 +165,14 @@ pub const View = struct {
         if (header.getSelectedIndex()) |index| {
             stack.getFocus().child_id = stack.children.keys()[index];
             const name = self.data.route_name;
-            self.session.data.current_page = switch (index) {
-                1 => .{ .user_settings = name },
-                2 => .{ .user_auth = name },
-                else => .{ .user = name },
-            };
+            switch (index) {
+                1 => self.session.data.current_page = .{ .user_settings = name },
+                2 => self.session.data.current_page = .{ .user_auth = name },
+                // the quit tab is tty-only and not a route, so leave current_page
+                // alone (nothing to mirror into the url).
+                3 => {},
+                else => self.session.data.current_page = .{ .user = name },
+            }
         }
         try self.box.build(allocator, constraint, root_focus);
     }
@@ -194,6 +206,7 @@ pub const View = struct {
                                         .flow_box_scroll => |*v| v.getSelectedIndex() == 0,
                                         .home_settings => |*v| v.getSelectedIndex() == 0,
                                         .home_auth => |*v| v.getSelectedIndex() == 0,
+                                        .quit => |*v| v.getSelectedIndex() == 0,
                                         else => false,
                                     };
                                     if (at_top) {
