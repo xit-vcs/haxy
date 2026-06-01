@@ -95,6 +95,22 @@ const importObject = {
             // can't render it client-side without server data).
             window.location.assign(readWasmString(ptr, len));
         },
+        _scrollToRect: function (x, y, w, h) {
+            // the rect arrives in grid cells; map it to document coordinates
+            // via the measured cell size and the grid origin, then scroll the
+            // minimum needed to bring the widget fully into view
+            if (!cellHeight) measureCell();
+            const gridTop = grid.getBoundingClientRect().top + window.scrollY;
+            const top = gridTop + y * cellHeight;
+            const bottom = top + h * cellHeight;
+            const viewTop = window.scrollY;
+            const viewBottom = viewTop + document.documentElement.clientHeight;
+            if (top < viewTop) {
+                window.scrollTo({ top });
+            } else if (bottom > viewBottom) {
+                window.scrollTo({ top: bottom - document.documentElement.clientHeight });
+            }
+        },
     },
 };
 

@@ -13,6 +13,7 @@ var page_arena = std.heap.ArenaAllocator.init(allocator);
 var snapshot: ui.Snapshot = undefined;
 var session: ui.Session = undefined;
 var last_pushed_page_maybe: ?ui.RoutablePage = null; // last current_page we told JS about
+var last_scrolled_focus_id: ?usize = null; // last focused widget we asked JS to scroll into view
 
 fn init(json: []const u8, min_height: u32, max_width: u32) !void {
     _ = page_arena.reset(.free_all);
@@ -86,16 +87,25 @@ fn tick(min_height: u32, max_width: u32) !void {
     defer allocator.free(overlay);
     setOverlay(overlay);
 
-    // browser-focus the focused overlay control (text input or submit button)
-    // so the browser handles typing and Enter-to-submit natively. without this
-    // the submit button never gets focus and Enter falls through to the wasm.
     const root_focus = root_ptr.getFocus();
     if (root_focus.grandchild_id) |gid| {
         if (root_focus.children.get(gid)) |child| {
+            // browser-focus the focused overlay control (text input or submit button)
+            // so the browser handles typing and Enter-to-submit natively. without this
+            // the submit button never gets focus and Enter falls through to the wasm.
             switch (child.focus.kind) {
                 .text_input, .text_input_password => _focusInput(@intCast(gid)),
                 .custom => |custom| if (std.mem.eql(u8, custom, "submit")) _focusInput(@intCast(gid)),
                 else => {},
+            }
+
+            // keep the focused widget within the browser viewport. only fire on
+            // an actual focus change so we don't fight the user's manual
+            // scrolling on unrelated ticks.
+            if (gid != last_scrolled_focus_id) {
+                last_scrolled_focus_id = gid;
+                const r = child.rect;
+                _scrollToRect(@intCast(r.x), @intCast(r.y), @intCast(r.size.width), @intCast(r.size.height));
             }
         }
     }
@@ -163,6 +173,7 @@ extern fn _setOverlay(arg: [*]const u8, len: u32) void;
 extern fn _pushState(arg: [*]const u8, len: u32) void;
 extern fn _focusInput(focus_id: u32) void;
 extern fn _navigate(arg: [*]const u8, len: u32) void;
+extern fn _scrollToRect(x: u32, y: u32, width: u32, height: u32) void;
 
 /// js calls this first to get a wasm pointer it can write the page json into.
 export fn _alloc(len: u32) ?[*]u8 {
