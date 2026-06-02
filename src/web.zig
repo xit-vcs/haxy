@@ -471,7 +471,8 @@ pub fn generateHtml(allocator: std.mem.Allocator, root: *ui.Widget) ![]const u8 
                     try out.appendSlice(alloc, ">");
                 },
                 .a => |href| {
-                    try out.appendSlice(alloc, "<a class=\"clickable\" data-focus-id=\"");
+                    // tabindex=-1 keeps these out of the browser's tab order
+                    try out.appendSlice(alloc, "<a class=\"clickable\" tabindex=\"-1\" data-focus-id=\"");
                     try out.appendSlice(alloc, try std.fmt.bufPrint(&id_buf, "{d}", .{id}));
                     try out.appendSlice(alloc, "\" href=\"");
                     try appendEscapedHtml(alloc, out, href);

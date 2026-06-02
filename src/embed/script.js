@@ -189,8 +189,14 @@ WebAssembly.instantiateStreaming(fetch("/haxy.wasm"), importObject).then(async (
     document.addEventListener("focusin", (event) => {
         const t = event.target;
         if (!t || !t.dataset || !t.dataset.focusId) return;
-        wasmInstance.exports._onMouseClick(Number(t.dataset.focusId));
-        wasmInstance.exports._tick(minRows(), maxCols());
+        // sync the wasm focus to wherever the browser moved focus
+        wasmInstance.exports._setFocus(Number(t.dataset.focusId));
+        // a click's mousedown fires this focusin before the click event. ticking
+        // here would rebuild #grid and destroy the node before its click lands,
+        // swallowing the navigation and forcing a second click — so don't
+        // re-render for a grid element. overlay controls live outside #grid and
+        // survive the diff, so they still tick.
+        if (!grid.contains(t)) wasmInstance.exports._tick(minRows(), maxCols());
     });
 
     grid.addEventListener("click", (event) => {

@@ -151,6 +151,11 @@ fn onMouseClick(focus_id: usize) !void {
     try root_ptr.getFocus().setFocus(focus_id);
 }
 
+fn setFocus(focus_id: usize) !void {
+    const root_ptr = if (root) |*root_value| root_value else return error.NotStarted;
+    try root_ptr.getFocus().setFocus(focus_id);
+}
+
 fn consoleLog(arg: []const u8) void {
     _consoleLog(arg.ptr, @intCast(arg.len));
 }
@@ -213,6 +218,14 @@ export fn _onMouseClick(focus_id: u32) void {
     onMouseClick(focus_id) catch |err| {
         var buf: [256]u8 = undefined;
         const str = std.fmt.bufPrint(&buf, "onMouseClick: {}", .{err}) catch unreachable;
+        consoleLog(str);
+    };
+}
+
+export fn _setFocus(focus_id: u32) void {
+    setFocus(focus_id) catch |err| {
+        var buf: [256]u8 = undefined;
+        const str = std.fmt.bufPrint(&buf, "setFocus: {}", .{err}) catch unreachable;
         consoleLog(str);
     };
 }
