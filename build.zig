@@ -38,6 +38,14 @@ pub fn build(b: *std.Build) void {
         const wasm_step = b.step("wasm", "Generate the wasm");
         wasm_step.dependOn(&install_exe.step);
 
+        // windows can't follow symlinks, so copy the wasm file to the embed dir
+        if (.windows == @import("builtin").os.tag) {
+            const copy_wasm = b.addUpdateSourceFiles();
+            copy_wasm.addCopyFileToSource(exe.getEmittedBin(), "src/embed/haxy.wasm");
+            b.getInstallStep().dependOn(&copy_wasm.step);
+            break :blk copy_wasm;
+        }
+
         break :blk install_exe;
     };
 
@@ -78,7 +86,6 @@ pub fn build(b: *std.Build) void {
         const run_unit_tests = b.addRunArtifact(unit_tests);
         run_unit_tests.has_side_effects = true;
         const test_step = b.step("test", "Run unit tests");
-        test_step.dependOn(&install_main_exe.step);
         test_step.dependOn(&run_unit_tests.step);
     }
 
@@ -100,6 +107,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         exe.root_module.addImport("haxy", haxy);
+        exe.step.dependOn(&install_wasm_exe.step);
         b.installArtifact(exe);
 
         const run_cmd = b.addRunArtifact(exe);
