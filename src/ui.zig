@@ -36,7 +36,7 @@ pub const Page = union(PageKind) {
                 else => return error.UnexpectedRoute,
             },
             .repo => switch (route) {
-                .repo, .repo_settings, .repo_auth => |name| .{ .repo = try Repo.init(arena, session, name) },
+                .repo, .repo_commits, .repo_settings, .repo_auth => .{ .repo = try Repo.init(arena, session, route) },
                 else => return error.UnexpectedRoute,
             },
         };
@@ -63,6 +63,7 @@ pub const RoutablePage = union(enum) {
     user_settings: Array(evt.User.name_max_len),
     user_auth: Array(evt.User.name_max_len),
     repo: Array(repo_route_max_len),
+    repo_commits: Array(repo_route_max_len),
     repo_settings: Array(repo_route_max_len),
     repo_auth: Array(repo_route_max_len),
 
@@ -71,6 +72,7 @@ pub const RoutablePage = union(enum) {
     const user_segment = "/user/";
     const repo_segment = "/repo/";
     const files_seg = "files";
+    const commits_seg = "commits";
 
     // a repo route is "username/reponame", optionally followed by
     // "/files/<dir>" for a directory in the files tab
@@ -110,6 +112,26 @@ pub const RoutablePage = union(enum) {
         return .{ .repo = Array(repo_route_max_len).from(s) orelse return null };
     }
 
+    // the start oid of a `.repo_commits` route's stored string ("" = page 1,
+    // which the commits tab walks from HEAD).
+    pub fn repoCommitsStart(s: []const u8) []const u8 {
+        const marker = "/" ++ commits_seg ++ "/";
+        const i = std.mem.indexOf(u8, s, marker) orelse return "";
+        return s[i + marker.len ..];
+    }
+
+    // build a `.repo_commits` route for "owner/name" (identity) at `start_oid`
+    // ("" = the first page). always carries the `commits` marker so page 1
+    // ("owner/name/commits") doesn't collide with the files root.
+    pub fn repoCommitsRoute(identity: []const u8, start_oid: []const u8) ?RoutablePage {
+        var buf: [repo_route_max_len]u8 = undefined;
+        const s = if (start_oid.len == 0)
+            std.fmt.bufPrint(&buf, "{s}/" ++ commits_seg, .{identity}) catch return null
+        else
+            std.fmt.bufPrint(&buf, "{s}/" ++ commits_seg ++ "/{s}", .{ identity, start_oid }) catch return null;
+        return .{ .repo_commits = Array(repo_route_max_len).from(s) orelse return null };
+    }
+
     // an inline, owned array of data. keeping it in the route (rather than a
     // borrowed slice) makes RoutablePage a plain value: it can be copied, stored
     // in history, and serialized without any arena tracking.
@@ -138,7 +160,7 @@ pub const RoutablePage = union(enum) {
             .home_settings => "/settings",
             .home_auth => "/auth",
             .user, .user_settings, .user_auth => @compileError("user routes are dynamic; use urlAlloc"),
-            .repo, .repo_settings, .repo_auth => @compileError("repo routes are dynamic; use urlAlloc"),
+            .repo, .repo_commits, .repo_settings, .repo_auth => @compileError("repo routes are dynamic; use urlAlloc"),
         };
     }
 
@@ -148,6 +170,8 @@ pub const RoutablePage = union(enum) {
             .user_settings => |name| try std.fmt.allocPrint(arena.allocator(), user_segment ++ "{s}/settings", .{name.slice()}),
             .user_auth => |name| try std.fmt.allocPrint(arena.allocator(), user_segment ++ "{s}/auth", .{name.slice()}),
             .repo => |name| try std.fmt.allocPrint(arena.allocator(), repo_segment ++ "{s}", .{name.slice()}),
+            // the stored string already carries the "commits[/oid]" suffix.
+            .repo_commits => |name| try std.fmt.allocPrint(arena.allocator(), repo_segment ++ "{s}", .{name.slice()}),
             .repo_settings => |name| try std.fmt.allocPrint(arena.allocator(), repo_segment ++ "{s}/settings", .{name.slice()}),
             .repo_auth => |name| try std.fmt.allocPrint(arena.allocator(), repo_segment ++ "{s}/auth", .{name.slice()}),
             inline else => |_, tag| url(tag),
@@ -158,7 +182,7 @@ pub const RoutablePage = union(enum) {
         return switch (self) {
             .home_users, .home_repos, .home_settings, .home_auth => .home,
             .user, .user_settings, .user_auth => .user,
-            .repo, .repo_settings, .repo_auth => .repo,
+            .repo, .repo_commits, .repo_settings, .repo_auth => .repo,
         };
     }
 
@@ -202,6 +226,8 @@ pub const RoutablePage = union(enum) {
                 if (std.mem.eql(u8, sub, "auth")) return .{ .repo_auth = Array(repo_route_max_len).from(pair) orelse return null };
                 if (std.mem.eql(u8, sub, files_seg)) return repoFilesRoute(pair, ""); // trailing /files == root
                 if (std.mem.startsWith(u8, sub, files_seg ++ "/")) return repoFilesRoute(pair, sub[files_seg.len + 1 ..]);
+                if (std.mem.eql(u8, sub, commits_seg)) return repoCommitsRoute(pair, ""); // trailing /commits == page 1
+                if (std.mem.startsWith(u8, sub, commits_seg ++ "/")) return repoCommitsRoute(pair, sub[commits_seg.len + 1 ..]);
                 return null; // unknown sub-path
             }
             return repoFilesRoute(pair, "");
@@ -216,17 +242,38 @@ pub const RoutablePage = union(enum) {
             .user_settings => |a_name| std.mem.eql(u8, a_name.slice(), b.user_settings.slice()),
             .user_auth => |a_name| std.mem.eql(u8, a_name.slice(), b.user_auth.slice()),
             .repo => |a_name| std.mem.eql(u8, a_name.slice(), b.repo.slice()),
+            .repo_commits => |a_name| std.mem.eql(u8, a_name.slice(), b.repo_commits.slice()),
             .repo_settings => |a_name| std.mem.eql(u8, a_name.slice(), b.repo_settings.slice()),
             .repo_auth => |a_name| std.mem.eql(u8, a_name.slice(), b.repo_auth.slice()),
             else => true,
         };
     }
 
-    // true when `a` and `b` are both `.repo` files routes pointing at different
-    // directories. a repo directory change is a navigation (its own page);
-    // settings/auth tab switches are not, so they don't satisfy this.
-    pub fn repoDirChanged(a: RoutablePage, b: RoutablePage) bool {
-        return std.meta.activeTag(a) == .repo and std.meta.activeTag(b) == .repo and !a.eql(b);
+    // the content a repo route renders: which repo, plus the files directory and
+    // commits page. tab switches keep this fixed (the page already holds every
+    // tab's data); a files-directory or commits-page change alters it.
+    const RepoContent = struct { identity: []const u8, files_dir: []const u8, commits_start: []const u8 };
+
+    fn repoContent(r: RoutablePage) ?RepoContent {
+        const name = switch (r) {
+            .repo, .repo_commits, .repo_settings, .repo_auth => |n| n.slice(),
+            else => return null,
+        };
+        const rf = RepoFiles.parse(name) orelse return null;
+        return .{
+            .identity = rf.identity,
+            .files_dir = if (std.meta.activeTag(r) == .repo) rf.dir else "",
+            .commits_start = if (std.meta.activeTag(r) == .repo_commits) repoCommitsStart(name) else "",
+        };
+    }
+
+    // true when `a` and `b` are both repo routes that render different content
+    pub fn repoPageChanged(a: RoutablePage, b: RoutablePage) bool {
+        const ca = repoContent(a) orelse return false;
+        const cb = repoContent(b) orelse return false;
+        return !std.mem.eql(u8, ca.identity, cb.identity) or
+            !std.mem.eql(u8, ca.files_dir, cb.files_dir) or
+            !std.mem.eql(u8, ca.commits_start, cb.commits_start);
     }
 
     // serialize as { "kind": <tag>, "name"?: <user name> }. the default
@@ -242,7 +289,7 @@ pub const RoutablePage = union(enum) {
                 try jw.objectField("name");
                 try jw.write(name.slice());
             },
-            .repo, .repo_settings, .repo_auth => |name| {
+            .repo, .repo_commits, .repo_settings, .repo_auth => |name| {
                 try jw.objectField("name");
                 try jw.write(name.slice());
             },
@@ -270,6 +317,7 @@ pub const RoutablePage = union(enum) {
             .user_settings => .{ .user_settings = try parseName(evt.User.name_max_len, helper.name) },
             .user_auth => .{ .user_auth = try parseName(evt.User.name_max_len, helper.name) },
             .repo => .{ .repo = try parseName(repo_route_max_len, helper.name) },
+            .repo_commits => .{ .repo_commits = try parseName(repo_route_max_len, helper.name) },
             .repo_settings => .{ .repo_settings = try parseName(repo_route_max_len, helper.name) },
             .repo_auth => .{ .repo_auth = try parseName(repo_route_max_len, helper.name) },
         };
@@ -505,7 +553,7 @@ pub fn crossPageLink(root_focus: *Focus, focus_id: usize, current: RoutablePage)
     // a link to a different parent page always navigates; within the repo page,
     // a files-directory link navigates while settings/auth tab links stay
     // in-page (header-handled).
-    if (route.parent() != current.parent() or RoutablePage.repoDirChanged(route, current)) return route;
+    if (route.parent() != current.parent() or RoutablePage.repoPageChanged(route, current)) return route;
     return null;
 }
 
@@ -610,7 +658,7 @@ pub const Nav = struct {
         // — a different files directory (each directory is its own page, while
         // settings/auth tab switches stay in-page and are not pushed here).
         const cp = session.data.current_page;
-        if (cp.parent() != self.route.parent() or RoutablePage.repoDirChanged(cp, self.route)) {
+        if (cp.parent() != self.route.parent() or RoutablePage.repoPageChanged(cp, self.route)) {
             if (session.haxy_moment == null) return;
             const arena = try allocator.create(std.heap.ArenaAllocator);
             arena.* = std.heap.ArenaAllocator.init(allocator);
@@ -682,6 +730,7 @@ pub const Widget = union(enum) {
     user_header: User.Header.View,
     repo_header: Repo.Header.View,
     repo_files: Repo.Files.View,
+    repo_commits: Repo.Commits.View,
     home_users: Home.Users.View,
     home_repos: Home.Repos.View,
     auth_tab: Home.Header.AuthTab.View,

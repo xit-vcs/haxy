@@ -11,6 +11,7 @@ const Focus = xitui.focus.Focus;
 
 pub const Header = @import("./Repo/Header.zig");
 pub const Files = @import("./Repo/Files.zig");
+pub const Commits = @import("./Repo/Commits.zig");
 pub const Settings = @import("./Settings.zig");
 pub const Auth = @import("./Auth.zig");
 pub const Quit = @import("./Quit.zig");
@@ -20,12 +21,16 @@ const Array = ui.RoutablePage.Array(ui.RoutablePage.repo_route_max_len);
 header: Header,
 repo: evt.Repo,
 files: Files,
+commits: Commits,
 settings: Settings,
 auth: Auth,
 quit: Quit,
 // the full files route this page renders ("owner/name" or "owner/name/files/<dir>"),
 // mirrored into current_page when the files tab is selected.
 route_name: Array,
+// the commits route this page renders ("owner/name/commits[/<oid>]"), mirrored
+// when the commits tab is selected.
+commits_route_name: Array,
 // "owner/name" alone, mirrored when the settings/auth tab is selected.
 identity: Array,
 
@@ -34,14 +39,25 @@ const Self = @This();
 pub fn init(
     arena: *std.heap.ArenaAllocator,
     session: *ui.Session,
-    name: Array,
+    route: ui.RoutablePage,
 ) !Self {
     const DB = evt.AdminDB;
     const hash_kind = evt.admin_repo_opts.hash;
     const haxy_moment = session.haxy_moment orelse return error.NoMoment;
 
-    // the route is "owner/name" or "owner/name/files/<dir>".
+    // every repo route's stored string starts with "owner/name"; the files
+    // route additionally encodes a directory, the commits route a start oid.
+    const name = switch (route) {
+        .repo, .repo_commits, .repo_settings, .repo_auth => |n| n,
+        else => return error.UnexpectedRoute,
+    };
     const rf = ui.RoutablePage.RepoFiles.parse(name.slice()) orelse return error.NotFound;
+    const tag = std.meta.activeTag(route);
+
+    // page state lives in the route only for the tab it targets; the other tabs
+    // open at their root/first page.
+    const files_dir = if (tag == .repo) rf.dir else "";
+    const commits_start = if (tag == .repo_commits) ui.RoutablePage.repoCommitsStart(name.slice()) else "";
 
     const found = (try evt.Repo.readByOwnerAndName(DB, hash_kind, haxy_moment, arena, rf.owner, rf.name)) orelse return error.NotFound;
     const repo = found.repo;
@@ -50,15 +66,22 @@ pub fn init(
     // of the repo title.
     const owner = (try evt.User.readById(DB, hash_kind, haxy_moment, arena, repo.user_id)) orelse return error.NotFound;
 
+    // each tab mirror carries this page's route for that tab; tabs not targeted
+    // by the incoming route fall back to their root/first-page route.
+    const route_name = if (tag == .repo) name else (ui.RoutablePage.repoFilesRoute(rf.identity, "") orelse return error.NotFound).repo;
+    const commits_route_name = if (tag == .repo_commits) name else (ui.RoutablePage.repoCommitsRoute(rf.identity, "") orelse return error.NotFound).repo_commits;
+
     return .{
         .header = try Header.init(arena, repo.name, owner.name),
         .repo = repo,
         // the repo's event id is the on-disk repo directory name
-        .files = try Files.init(arena, session, &found.event_id, rf.identity, rf.dir),
+        .files = try Files.init(arena, session, &found.event_id, rf.identity, files_dir),
+        .commits = try Commits.init(arena, session, &found.event_id, rf.identity, commits_start),
         .settings = Settings.init(),
         .auth = Auth.init(),
         .quit = Quit.init(),
-        .route_name = name,
+        .route_name = route_name,
+        .commits_route_name = commits_route_name,
         .identity = Array.from(rf.identity) orelse return error.NotFound,
     };
 }
@@ -94,6 +117,13 @@ pub const View = struct {
                 var files_view = try Files.View.init(allocator, &data.files, session);
                 errdefer files_view.deinit(allocator);
                 try stack.children.put(allocator, files_view.getFocus().id, .{ .repo_files = files_view });
+            }
+
+            // commits — the current page of the commit log.
+            {
+                var commits_view = try Commits.View.init(allocator, &data.commits, session);
+                errdefer commits_view.deinit(allocator);
+                try stack.children.put(allocator, commits_view.getFocus().id, .{ .repo_commits = commits_view });
             }
 
             {
@@ -138,13 +168,14 @@ pub const View = struct {
         if (header.getSelectedIndex()) |index| {
             stack.getFocus().child_id = stack.children.keys()[index];
             switch (index) {
-                // settings/auth carry only "owner/name"; files carries this
-                // page's directory (route_name) so the url keeps the dir.
-                1 => self.session.data.current_page = .{ .repo_settings = self.data.identity },
-                2 => self.session.data.current_page = .{ .repo_auth = self.data.identity },
+                // files/commits carry this page's content route (directory / log
+                // page); settings/auth carry only "owner/name".
+                1 => self.session.data.current_page = .{ .repo_commits = self.data.commits_route_name },
+                2 => self.session.data.current_page = .{ .repo_settings = self.data.identity },
+                3 => self.session.data.current_page = .{ .repo_auth = self.data.identity },
                 // the quit tab is tty-only and not a route, so leave current_page
                 // alone (nothing to mirror into the url).
-                3 => {},
+                4 => {},
                 else => self.session.data.current_page = .{ .repo = self.data.route_name },
             }
         }
@@ -178,6 +209,7 @@ pub const View = struct {
                                 if (child.stack.getSelected()) |selected_widget| {
                                     const at_top = switch (selected_widget.*) {
                                         .repo_files => |*v| v.getSelectedIndex() == 0,
+                                        .repo_commits => |*v| v.getSelectedIndex() == 0,
                                         .home_settings => |*v| v.getSelectedIndex() == 0,
                                         .home_auth => |*v| v.getSelectedIndex() == 0,
                                         .quit => |*v| v.getSelectedIndex() == 0,

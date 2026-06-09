@@ -202,6 +202,15 @@ pub fn main(init: std.process.Init) !void {
 
             try repo_i.add(io, allocator, &.{ "README.md", "docs/dev/contribute.md" });
             _ = try repo_i.commit(io, allocator, .{ .message = "let there be light" });
+
+            // a batch of empty commits so the commits tab has more than one page
+            // to paginate through. stepped timestamps vary the date column.
+            const base_ts: u64 = 1_700_000_000; // 2023-11-14
+            var c: usize = 0;
+            while (c < 30) : (c += 1) {
+                const message = try std.fmt.allocPrint(arena.allocator(), "empty commit {d}", .{c + 1});
+                _ = try repo_i.commit(io, allocator, .{ .message = message, .allow_empty = true, .timestamp = base_ts + c * std.time.s_per_day });
+            }
         }
 
         break :blk try ui.Session.init(&session_arena, &repo, .{});

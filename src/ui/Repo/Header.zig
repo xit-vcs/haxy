@@ -90,6 +90,8 @@ pub const View = struct {
         const identity = try std.fmt.allocPrint(aa, "{s}/{s}", .{ data.owner_name, data.name });
         const files_route = ui.RoutablePage.repoFilesRoute(identity, "") orelse return error.RouteTooLong;
         const files_link = try std.fmt.allocPrint(aa, "a:{s}", .{try files_route.urlAlloc(session.page_arena)});
+        const commits_route = ui.RoutablePage.repoCommitsRoute(identity, "") orelse return error.RouteTooLong;
+        const commits_link = try std.fmt.allocPrint(aa, "a:{s}", .{try commits_route.urlAlloc(session.page_arena)});
         const settings_link = try std.fmt.allocPrint(aa, "a:/repo/{s}/{s}/settings", .{ data.owner_name, data.name });
         const auth_link = try std.fmt.allocPrint(aa, "a:/repo/{s}/{s}/auth", .{ data.owner_name, data.name });
 
@@ -104,6 +106,20 @@ pub const View = struct {
                 .widget = .{ .text_box = text_box },
                 .rect = null,
                 .min_size = .{ .width = "files".len + 2, .height = null },
+            });
+        }
+
+        // commits tab
+        {
+            var text_box = try wgt.TextBox(ui.Widget).init(allocator, "commits", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            errdefer text_box.deinit(allocator);
+            text_box.getFocus().focusable = true;
+            text_box.getFocus().kind = .{ .custom = commits_link };
+            try tab_ids.put(allocator, text_box.getFocus().id, {});
+            try box.children.put(allocator, text_box.getFocus().id, .{
+                .widget = .{ .text_box = text_box },
+                .rect = null,
+                .min_size = .{ .width = "commits".len + 2, .height = null },
             });
         }
 
@@ -165,8 +181,9 @@ pub const View = struct {
         // open on the tab named by the current route
         self.getFocus().child_id = self.tab_ids.keys()[
             switch (session.data.current_page) {
-                .repo_settings => 1,
-                .repo_auth => 2,
+                .repo_commits => 1,
+                .repo_settings => 2,
+                .repo_auth => 3,
                 else => 0,
             }
         ];
