@@ -59,10 +59,10 @@ git init
 echo "hello" > hello.txt
 git add hello.txt
 git commit -m "let there be light"
-git remote add origin http://localhost:8080/test
+git remote add origin http://localhost:8080/admin/test
 git push origin HEAD:master
 ```
 
-After that, you'll see your repo in `temp-try/server/repos/test`. It's MAGIC!
+After that, the repo will be in `temp-try/server/repos` at a directory named by its repo id.
 
 *"C'mon Alex! You always dreamt about going on a big adventure! Let this be our first!" -- Lunar: Silver Star Story*

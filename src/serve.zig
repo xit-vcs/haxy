@@ -3,6 +3,7 @@ const xit = @import("xit");
 const rp = xit.repo;
 const hash = xit.hash;
 const ui = @import("./ui.zig");
+const evt = @import("./event.zig");
 const web = @import("./web.zig");
 const serve_ssh_protocol = @import("./serve_ssh_protocol.zig");
 const serve_ssh = @import("./serve_ssh.zig");
@@ -12,6 +13,10 @@ pub const Options = struct {
     ssh_listen: []const u8 = "127.0.0.1:8022",
     wui_listen: []const u8 = "127.0.0.1:8000",
     data_dir: []const u8 = ".",
+    // test mode, used by the networking tests. it serves repos directly by
+    // their on-disk path instead of resolving them as <owner>/<repo> through
+    // the event store, giving the plain git-server behavior those tests rely on.
+    is_test: bool = false,
 };
 
 const ListenAddress = struct {
@@ -87,7 +92,7 @@ pub fn run(
     try err.print("serving HTTP on {s}, repo root {s}\n", .{ options.http_listen, repo_root_path });
     try err.flush();
 
-    runHttpListener(repo_kind, any_repo_opts, io, allocator, repo_root_path, &http_server, &tasks, err);
+    runHttpListener(repo_kind, any_repo_opts, io, allocator, repo_root_path, admin_repo_path, options.is_test, &http_server, &tasks, err);
 
     try err.print("serving SSH on {s}\n", .{options.ssh_listen});
     try err.flush();
@@ -95,6 +100,7 @@ pub fn run(
     const ssh_session_handler = serve_ssh.SessionHandler{
         .admin_repo_path = admin_repo_path,
         .repo_root_path = repo_root_path,
+        .is_test = options.is_test,
     };
     runSshListener(io, allocator, &host_key, &ssh_session_handler, &ssh_server, &tasks, err);
 
@@ -116,6 +122,8 @@ fn runHttpListener(
     io: std.Io,
     allocator: std.mem.Allocator,
     repo_root_path: []const u8,
+    admin_repo_path: []const u8,
+    is_test: bool,
     net_server: *std.Io.net.Server,
     tasks: *std.Io.Group,
     err: *std.Io.Writer,
@@ -124,6 +132,8 @@ fn runHttpListener(
         io: std.Io,
         allocator: std.mem.Allocator,
         repo_root_path: []const u8,
+        admin_repo_path: []const u8,
+        is_test: bool,
         net_server: *std.Io.net.Server,
         tasks: *std.Io.Group,
         err: *std.Io.Writer,
@@ -140,12 +150,14 @@ fn runHttpListener(
                     io: std.Io,
                     allocator: std.mem.Allocator,
                     repo_root_path: []const u8,
+                    admin_repo_path: []const u8,
+                    is_test: bool,
                     stream: std.Io.net.Stream,
                     err: *std.Io.Writer,
 
                     fn run(conn: @This()) void {
                         defer conn.stream.close(conn.io);
-                        handleHttpConnection(repo_kind, any_repo_opts, conn.io, conn.allocator, conn.repo_root_path, conn.stream, conn.err) catch |request_err| {
+                        handleHttpConnection(repo_kind, any_repo_opts, conn.io, conn.allocator, conn.repo_root_path, conn.admin_repo_path, conn.is_test, conn.stream, conn.err) catch |request_err| {
                             logError(conn.err, "connection failed: {s}\n", .{@errorName(request_err)});
                         };
                     }
@@ -155,6 +167,8 @@ fn runHttpListener(
                     .io = ctx.io,
                     .allocator = ctx.allocator,
                     .repo_root_path = ctx.repo_root_path,
+                    .admin_repo_path = ctx.admin_repo_path,
+                    .is_test = ctx.is_test,
                     .stream = stream,
                     .err = ctx.err,
                 }});
@@ -166,6 +180,8 @@ fn runHttpListener(
         .io = io,
         .allocator = allocator,
         .repo_root_path = repo_root_path,
+        .admin_repo_path = admin_repo_path,
+        .is_test = is_test,
         .net_server = net_server,
         .tasks = tasks,
         .err = err,
@@ -178,6 +194,8 @@ fn handleHttpConnection(
     io: std.Io,
     allocator: std.mem.Allocator,
     repo_root_path: []const u8,
+    admin_repo_path: []const u8,
+    is_test: bool,
     stream: std.Io.net.Stream,
     err: *std.Io.Writer,
 ) !void {
@@ -194,7 +212,7 @@ fn handleHttpConnection(
             else => |e| return e,
         };
 
-        handleHttpGitRequest(repo_kind, any_repo_opts, io, allocator, repo_root_path, &http_server, &request) catch |request_err| {
+        handleHttpGitRequest(repo_kind, any_repo_opts, io, allocator, repo_root_path, admin_repo_path, is_test, &http_server, &request) catch |request_err| {
             try err.print("request failed: {s}\n", .{@errorName(request_err)});
             try err.flush();
             if (http_server.reader.state == .received_head) {
@@ -213,6 +231,8 @@ fn handleHttpGitRequest(
     io: std.Io,
     allocator: std.mem.Allocator,
     repo_root_path: []const u8,
+    admin_repo_path: []const u8,
+    is_test: bool,
     http_server: *std.http.Server,
     request: *std.http.Server.Request,
 ) !void {
@@ -235,17 +255,6 @@ fn handleHttpGitRequest(
     const repo_rel = try decodeAndValidateRepoPath(allocator, repo_rel_encoded);
     defer allocator.free(repo_rel);
 
-    const repo_path = try std.fs.path.resolve(allocator, &.{ repo_root_path, repo_rel });
-    defer allocator.free(repo_path);
-
-    if (!isSubPath(repo_root_path, repo_path)) {
-        if (http_server.reader.state == .received_head) {
-            http_server.reader.state = .ready;
-        }
-        try writeSimpleResponse(http_server, 403, "Forbidden", "text/plain", "forbidden");
-        return;
-    }
-
     const request_method = normalizeMethod(request.head.method);
     const content_type = try allocator.dupe(u8, findHeader(request, "content-type") orelse "");
     defer allocator.free(content_type);
@@ -262,8 +271,29 @@ fn handleHttpGitRequest(
         http_server.reader.state = .ready;
     }
 
-    var body_reader = std.Io.Reader.fixed(body);
     const create_if_missing = isReceivePack(handler, suffix, uri.query);
+
+    // derive the on-disk repo path. normally resolve <owner>/<repo> through the
+    // event store and serve its event-id dir; in test mode serve the path directly
+    const repo_path = if (is_test) blk: {
+        const direct_path = try std.fs.path.resolve(allocator, &.{ repo_root_path, repo_rel });
+        if (!isSubPath(repo_root_path, direct_path)) {
+            allocator.free(direct_path);
+            try writeSimpleResponse(http_server, 403, "Forbidden", "text/plain", "forbidden");
+            return;
+        }
+        break :blk direct_path;
+    } else blk: {
+        const owner_repo = evt.parseOwnerRepoPath(repo_rel) orelse {
+            try writeSimpleResponse(http_server, 400, "Bad Request", "text/plain", "repo path must be <owner>/<repo>");
+            return;
+        };
+        const event_id_hex = (try evt.resolveOrCreateRepo(io, allocator, admin_repo_path, owner_repo.owner, owner_repo.name, create_if_missing)) orelse return error.RepoNotFound;
+        break :blk try std.fs.path.join(allocator, &.{ repo_root_path, &event_id_hex });
+    };
+    defer allocator.free(repo_path);
+
+    var body_reader = std.Io.Reader.fixed(body);
     const http_backend_options = xit.net_server_http_backend.Options{
         .request_method = request_method,
         .handler = handler,
@@ -375,30 +405,53 @@ fn openRepoAndServe(
     create_if_missing: bool,
     service: anytype,
 ) !void {
+    // serve the existing on-disk repo at its event-id directory
+    if (try serveIfExists(repo_kind, any_repo_opts, io, allocator, repo_path, service)) return;
+    if (!create_if_missing) return error.RepoNotFound;
+
+    // create the on-disk repo for the just-minted event and serve the push
     if (any_repo_opts.hash) |hash_kind| {
-        var repo = try openRepo(repo_kind, any_repo_opts.toRepoOptsWithHash(hash_kind), io, allocator, repo_path, create_if_missing);
+        var repo = try openRepo(repo_kind, any_repo_opts.toRepoOptsWithHash(hash_kind), io, allocator, repo_path, true);
+        defer repo.deinit(io, allocator);
+        try service.serve(repo_kind, any_repo_opts.toRepoOptsWithHash(hash_kind), &repo, io, allocator);
+    } else {
+        var repo = try openRepo(repo_kind, any_repo_opts.toRepoOpts(), io, allocator, repo_path, true);
+        defer repo.deinit(io, allocator);
+        try service.serve(repo_kind, any_repo_opts.toRepoOpts(), &repo, io, allocator);
+    }
+}
+
+// serve an existing repo at `repo_path`, or return false if none is there
+fn serveIfExists(
+    comptime repo_kind: rp.RepoKind,
+    comptime any_repo_opts: rp.AnyRepoOpts(repo_kind),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    repo_path: []const u8,
+    service: anytype,
+) !bool {
+    // a bare open() creates the directory while probing for the repo, so only
+    // attempt it when the path already exists
+    std.Io.Dir.accessAbsolute(io, repo_path, .{}) catch return false;
+
+    if (any_repo_opts.hash) |hash_kind| {
+        var repo = rp.Repo(repo_kind, any_repo_opts.toRepoOptsWithHash(hash_kind)).open(io, allocator, .{ .path = repo_path }) catch |open_err| switch (open_err) {
+            error.RepoNotFound => return false,
+            else => |e| return e,
+        };
         defer repo.deinit(io, allocator);
         try service.serve(repo_kind, any_repo_opts.toRepoOptsWithHash(hash_kind), &repo, io, allocator);
     } else {
         var any_repo = rp.AnyRepo(repo_kind, any_repo_opts).open(io, allocator, .{ .path = repo_path }) catch |open_err| switch (open_err) {
-            error.RepoNotFound => {
-                if (!create_if_missing) return open_err;
-
-                var repo = try openRepo(repo_kind, any_repo_opts.toRepoOpts(), io, allocator, repo_path, true);
-                defer repo.deinit(io, allocator);
-                try service.serve(repo_kind, any_repo_opts.toRepoOpts(), &repo, io, allocator);
-                return;
-            },
+            error.RepoNotFound => return false,
             else => |e| return e,
         };
         defer any_repo.deinit(io, allocator);
-
         switch (any_repo) {
-            inline else => |*repo| {
-                try service.serve(repo.self_repo_kind, repo.self_repo_opts, repo, io, allocator);
-            },
+            inline else => |*repo| try service.serve(repo.self_repo_kind, repo.self_repo_opts, repo, io, allocator),
         }
     }
+    return true;
 }
 
 fn openRepo(

@@ -16,6 +16,9 @@ const evt = @import("./event.zig");
 pub const SessionHandler = struct {
     admin_repo_path: []const u8,
     repo_root_path: []const u8,
+    // test mode serves repos directly by path instead of resolving them as
+    // <owner>/<repo> through the event store
+    is_test: bool,
 
     pub fn handleSession(self: *const SessionHandler, sess: *ssh.SessionCtx, request: ssh.Request) !void {
         std.debug.print("ssh session: kind={s} key={s}\n", .{ @tagName(request), sess.fingerprint });
@@ -169,42 +172,77 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, command:
     };
     defer parsed.deinit(allocator);
 
-    const repo_path = try resolveRepoPath(allocator, handler.repo_root_path, parsed.dir);
+    const create_if_missing = parsed.service == .receive_pack;
+    const any_repo_opts: rp.AnyRepoOpts(.xit) = .{};
+
+    // derive the on-disk repo path. normally resolve <owner>/<repo> through the
+    // event store (minting a repo event for a fresh push) and serve from its
+    // event-id directory; in test mode serve the path directly
+    const repo_path = if (handler.is_test) blk: {
+        const direct_path = try resolveRepoPath(allocator, handler.repo_root_path, parsed.dir);
+        if (!isSubPath(handler.repo_root_path, direct_path)) {
+            allocator.free(direct_path);
+            try writeError(sess, "forbidden path");
+            try sess.exit(1);
+            return;
+        }
+        break :blk direct_path;
+    } else blk: {
+        const owner_repo = evt.parseOwnerRepoPath(parsed.dir) orelse {
+            try writeError(sess, "repo path must be <owner>/<repo>");
+            try sess.exit(1);
+            return;
+        };
+        const event_id_hex = (try evt.resolveOrCreateRepo(io, allocator, handler.admin_repo_path, owner_repo.owner, owner_repo.name, create_if_missing)) orelse {
+            try writeError(sess, "repo not found");
+            try sess.exit(1);
+            return;
+        };
+        break :blk try std.fs.path.join(allocator, &.{ handler.repo_root_path, &event_id_hex });
+    };
     defer allocator.free(repo_path);
 
-    if (!isSubPath(handler.repo_root_path, repo_path)) {
-        try writeError(sess, "forbidden path");
+    if (try serveIfExists(repo_path, sess, io, allocator, parsed.service)) {
+        try sess.exit(0);
+        return;
+    }
+
+    if (!create_if_missing) {
+        try writeError(sess, "repo not found");
         try sess.exit(1);
         return;
     }
 
-    const create_if_missing = parsed.service == .receive_pack;
-    const any_repo_opts: rp.AnyRepoOpts(.xit) = .{};
+    // create the on-disk repo for the just-minted event and serve the push
+    var repo = try createRepo(any_repo_opts.toRepoOpts(), io, allocator, repo_path);
+    defer repo.deinit(io, allocator);
+    try servePack(repo.self_repo_opts, &repo, sess, io, allocator, parsed.service);
+    try sess.exit(0);
+}
 
+// serve an existing repo at `repo_path`, or return false if none is there
+fn serveIfExists(
+    repo_path: []const u8,
+    sess: *ssh.SessionCtx,
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    service: GitService,
+) !bool {
+    // a bare open() creates the directory while probing for the repo, so only
+    // attempt it when the path already exists
+    std.Io.Dir.accessAbsolute(io, repo_path, .{}) catch return false;
+
+    const any_repo_opts: rp.AnyRepoOpts(.xit) = .{};
     var any_repo = rp.AnyRepo(.xit, any_repo_opts).open(io, allocator, .{ .path = repo_path }) catch |err| switch (err) {
-        error.RepoNotFound => {
-            if (!create_if_missing) {
-                try writeError(sess, "repo not found");
-                try sess.exit(1);
-                return;
-            }
-            // nothing on disk to detect a hash from, so create with the
-            // default concrete options and serve that.
-            var repo = try createRepo(any_repo_opts.toRepoOpts(), io, allocator, repo_path);
-            defer repo.deinit(io, allocator);
-            try servePack(repo.self_repo_opts, &repo, sess, io, allocator, parsed.service);
-            try sess.exit(0);
-            return;
-        },
+        error.RepoNotFound => return false,
         else => |e| return e,
     };
     defer any_repo.deinit(io, allocator);
 
     switch (any_repo) {
-        inline else => |*repo| try servePack(repo.self_repo_opts, repo, sess, io, allocator, parsed.service),
+        inline else => |*repo| try servePack(repo.self_repo_opts, repo, sess, io, allocator, service),
     }
-
-    try sess.exit(0);
+    return true;
 }
 
 fn createRepo(

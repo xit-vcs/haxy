@@ -63,6 +63,7 @@ pub fn main(init: std.process.Init) !void {
             display_name: []const u8,
             email: []const u8,
         }{
+            .{ .name = "admin", .display_name = "Admin", .email = "admin@example.test" },
             .{ .name = "alice", .display_name = "Alice Tulley", .email = "alice@example.test" },
             .{ .name = "bob", .display_name = "Bob Smith", .email = "bob@example.test" },
             .{ .name = "carol", .display_name = "Carol Johnson", .email = "carol@example.test" },
@@ -258,7 +259,7 @@ pub fn main(init: std.process.Init) !void {
                     \\  echo "hello" > hello.txt
                     \\  git add hello.txt
                     \\  git commit -m "let there be light"
-                    \\  GIT_SSH_COMMAND='ssh -p 8022 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null' git push localhost:test HEAD:master
+                    \\  GIT_SSH_COMMAND='ssh -p 8022 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null' git push localhost:admin/test HEAD:master
                     \\
                     \\to quit, press enter.
                     \\

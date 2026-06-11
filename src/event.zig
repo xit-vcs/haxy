@@ -368,6 +368,72 @@ pub fn commitAndConsume(
     try consume(repo_opts, io, allocator, repo, ref);
 }
 
+// split a pushed "<owner>/<repo>" path into its two components, or null if it
+// isn't exactly two non-empty segments.
+pub fn parseOwnerRepoPath(path: []const u8) ?struct { owner: []const u8, name: []const u8 } {
+    var it = std.mem.splitScalar(u8, path, '/');
+    const owner = it.next() orelse return null;
+    const name = it.next() orelse return null;
+    if (it.next() != null) return null;
+    if (owner.len == 0 or name.len == 0) return null;
+
+    return .{ .owner = owner, .name = name };
+}
+
+// resolve a pushed `<owner>/<repo>` to the hex event id that names its on-disk
+// directory under the repos dir
+pub fn resolveOrCreateRepo(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    admin_repo_path: []const u8,
+    owner_name: []const u8,
+    repo_name: []const u8,
+    create_if_missing: bool,
+) !?[event_id_size * 2]u8 {
+    var repo = rp.Repo(.xit, admin_repo_opts).open(io, allocator, .{ .path = admin_repo_path }) catch |err| switch (err) {
+        error.RepoNotFound => return null,
+        else => |e| return e,
+    };
+    defer repo.deinit(io, allocator);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const moment = try currentMoment(admin_repo_opts, &repo);
+
+    // an already-registered repo reuses its event id, so a re-push (or a clone)
+    // lands in the same repo
+    if (try Repo.readByOwnerAndName(AdminDB, admin_repo_opts.hash, moment, &arena, owner_name, repo_name)) |found| {
+        return std.fmt.bytesToHex(found.event_id, .lower);
+    }
+
+    if (!create_if_missing) return null;
+
+    // the new repo is owned by the named user, read from the name index; an
+    // unknown owner can't own a repo, so the push is rejected
+    const name_to_user_id_cursor = try moment.getCursor(hash.hashInt(admin_repo_opts.hash, "name->user-id")) orelse return null;
+    const name_to_user_id = try AdminDB.HashMap(.read_only).init(name_to_user_id_cursor);
+    const owner_id_cursor = try name_to_user_id.getCursor(hash.hashInt(admin_repo_opts.hash, owner_name)) orelse return null;
+    var owner_user_id: [event_id_size]u8 = undefined;
+    _ = try owner_id_cursor.readBytes(&owner_user_id);
+
+    var id_bytes: [event_id_size]u8 = undefined;
+    io.random(&id_bytes);
+    const event_id_hex = std.fmt.bytesToHex(id_bytes, .lower);
+
+    try commitAndConsume(admin_repo_opts, io, allocator, &repo, events_ref, &[_]EventWithId{.{
+        .id = event_id_hex,
+        .event = .{ .repo = .{
+            .user_id = &owner_user_id,
+            .name = repo_name,
+            .description = "",
+            .enable_issue = true,
+        } },
+    }});
+
+    return event_id_hex;
+}
+
 //
 // reading from xitdb
 //

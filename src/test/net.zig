@@ -106,7 +106,7 @@ fn runServer(
     const ssh_listen_arg = std.fmt.comptimePrint("127.0.0.1:{}", .{ssh_port});
 
     const process = try std.process.spawn(io, .{
-        .argv = &.{ haxy_path, "serve", "--http-listen", http_listen_arg, "--ssh-listen", ssh_listen_arg, "--data-dir", temp_dir_name },
+        .argv = &.{ haxy_path, "serve", "--http-listen", http_listen_arg, "--ssh-listen", ssh_listen_arg, "--data-dir", temp_dir_name, "--test" },
         .stdin = .ignore,
         .stdout = .ignore,
         .stderr = .ignore,
