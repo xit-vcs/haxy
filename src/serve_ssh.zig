@@ -1,7 +1,3 @@
-//! haxy-side dispatcher for SSH sessions served by serve_ssh_protocol.
-//! routes shell + pty-req → StreamTerminal (TUI), exec git-upload-pack /
-//! git-receive-pack → repo.uploadPack / repo.receivePack (git).
-
 const std = @import("std");
 const xit = @import("xit");
 const rp = xit.repo;
@@ -12,6 +8,7 @@ const Size = xitui.layout.Size;
 const ui = @import("./ui.zig");
 const ssh = @import("./serve_ssh_protocol.zig");
 const evt = @import("./event.zig");
+const serve_common = @import("./serve_common.zig");
 
 pub const SessionHandler = struct {
     admin_repo_path: []const u8,
@@ -40,6 +37,52 @@ pub const SessionHandler = struct {
         }
     }
 };
+
+pub fn runListener(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    host_key: *const ssh.HostKey,
+    session_handler: *const SessionHandler,
+    net_server: *std.Io.net.Server,
+    tasks: *std.Io.Group,
+    err: *std.Io.Writer,
+) void {
+    const Context = struct {
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        host_key: *const ssh.HostKey,
+        session_handler: *const SessionHandler,
+        err: *std.Io.Writer,
+    };
+
+    const handle = struct {
+        fn h(ctx: Context, stream: std.Io.net.Stream) void {
+            defer stream.close(ctx.io);
+            var recv_buf: [4096]u8 = undefined;
+            var send_buf: [4096]u8 = undefined;
+            var stream_reader = stream.reader(ctx.io, &recv_buf);
+            var stream_writer = stream.writer(ctx.io, &send_buf);
+            ssh.handleConnection(
+                ctx.io,
+                ctx.allocator,
+                &stream_reader.interface,
+                &stream_writer.interface,
+                ctx.host_key,
+                ctx.session_handler,
+            ) catch |session_err| {
+                serve_common.logError(ctx.err, "ssh session failed: {s}\n", .{@errorName(session_err)});
+            };
+        }
+    }.h;
+
+    serve_common.runListener(io, net_server, tasks, err, "ssh", Context{
+        .io = io,
+        .allocator = allocator,
+        .host_key = host_key,
+        .session_handler = session_handler,
+        .err = err,
+    }, handle);
+}
 
 fn runTuiSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh.PtySize) !void {
     // runTui owns the terminal, whose deinit restores the client's screen and
@@ -165,40 +208,16 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, command:
     const allocator = sess.allocator;
     const io = sess.io;
 
-    const parsed = parseGitCommand(allocator, command) catch {
-        try writeError(sess, "unsupported command (expected git-upload-pack or git-receive-pack)");
-        try sess.exit(1);
-        return;
-    };
+    const parsed = parseGitCommand(allocator, command) catch return writeError(sess, "unsupported command (expected git-upload-pack or git-receive-pack)");
     defer parsed.deinit(allocator);
 
     const create_if_missing = parsed.service == .receive_pack;
     const any_repo_opts: rp.AnyRepoOpts(.xit) = .{};
 
-    // derive the on-disk repo path. normally resolve <owner>/<repo> through the
-    // event store (minting a repo event for a fresh push) and serve from its
-    // event-id directory; in test mode serve the path directly
-    const repo_path = if (handler.is_test) blk: {
-        const direct_path = try resolveRepoPath(allocator, handler.repo_root_path, parsed.dir);
-        if (!isSubPath(handler.repo_root_path, direct_path)) {
-            allocator.free(direct_path);
-            try writeError(sess, "forbidden path");
-            try sess.exit(1);
-            return;
-        }
-        break :blk direct_path;
-    } else blk: {
-        const owner_repo = evt.parseOwnerRepoPath(parsed.dir) orelse {
-            try writeError(sess, "repo path must be <owner>/<repo>");
-            try sess.exit(1);
-            return;
-        };
-        const event_id_hex = (try evt.resolveOrCreateRepo(io, allocator, handler.admin_repo_path, owner_repo.owner, owner_repo.name, create_if_missing)) orelse {
-            try writeError(sess, "repo not found");
-            try sess.exit(1);
-            return;
-        };
-        break :blk try std.fs.path.join(allocator, &.{ handler.repo_root_path, &event_id_hex });
+    const repo_path = switch (try serve_common.resolveRepoPath(io, allocator, handler.is_test, handler.repo_root_path, handler.admin_repo_path, parsed.dir, create_if_missing)) {
+        .ok => |p| p,
+        .invalid => return writeError(sess, "repo path must be <owner>/<repo>"),
+        .not_found => return writeError(sess, "repo not found"),
     };
     defer allocator.free(repo_path);
 
@@ -207,11 +226,7 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, command:
         return;
     }
 
-    if (!create_if_missing) {
-        try writeError(sess, "repo not found");
-        try sess.exit(1);
-        return;
-    }
+    if (!create_if_missing) return writeError(sess, "repo not found");
 
     // create the on-disk repo for the just-minted event and serve the push
     var repo = try createRepo(any_repo_opts.toRepoOpts(), io, allocator, repo_path);
@@ -301,21 +316,12 @@ fn parseGitCommand(allocator: std.mem.Allocator, command: []const u8) !ParsedGit
     return .{ .service = service, .dir = try allocator.dupe(u8, dir_token) };
 }
 
-fn resolveRepoPath(allocator: std.mem.Allocator, repo_root_path: []const u8, dir: []const u8) ![]const u8 {
-    if (std.fs.path.isAbsolute(dir)) return try std.fs.path.resolve(allocator, &.{dir});
-    return try std.fs.path.resolve(allocator, &.{ repo_root_path, dir });
-}
-
-fn isSubPath(parent: []const u8, child: []const u8) bool {
-    if (std.mem.eql(u8, parent, std.fs.path.sep_str)) return std.fs.path.isAbsolute(child);
-    if (!std.mem.startsWith(u8, child, parent)) return false;
-    return child.len == parent.len or child[parent.len] == std.fs.path.sep;
-}
-
+// write an error to the client and exit non-zero
 fn writeError(sess: *ssh.SessionCtx, msg: []const u8) !void {
     var buf: [256]u8 = undefined;
     const text = try std.fmt.bufPrint(&buf, "haxy ssh: {s}\n", .{msg});
     try sess.writeBytes(text);
+    try sess.exit(1);
 }
 
 test "parseGitCommand rejects malformed input" {
@@ -345,29 +351,5 @@ test "parseGitCommand happy paths" {
         defer parsed.deinit(allocator);
         try std.testing.expectEqual(GitService.upload_pack, parsed.service);
         try std.testing.expectEqualStrings("repo", parsed.dir);
-    }
-}
-
-test "isSubPath rejects prefix collisions and traversal" {
-    const sep = std.fs.path.sep_str;
-    const parent = sep ++ "srv" ++ sep ++ "git";
-
-    try std.testing.expect(isSubPath(parent, parent ++ sep ++ "repo"));
-    try std.testing.expect(isSubPath(parent, parent));
-
-    // common-prefix-but-not-subpath: "/srv/git" should NOT swallow
-    // "/srv/git2" or "/srv/gitignore" just because the bytes start the same.
-    try std.testing.expect(!isSubPath(parent, parent ++ "2"));
-    try std.testing.expect(!isSubPath(parent, parent ++ "ignore"));
-
-    // resolveRepoPath normalizes `..` first, so `/srv/git/../etc/passwd`
-    // becomes `/etc/passwd` — isSubPath then rejects it.
-    try std.testing.expect(!isSubPath(parent, sep ++ "etc" ++ sep ++ "passwd"));
-
-    const builtin = @import("builtin");
-
-    if (.windows != builtin.os.tag) {
-        try std.testing.expect(isSubPath(sep, sep ++ "anything"));
-        try std.testing.expect(isSubPath(sep, sep));
     }
 }
