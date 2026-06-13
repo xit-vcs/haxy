@@ -271,12 +271,25 @@ pub const SessionCtx = struct {
         }
     }
 
-    /// send bytes to the client as one or more CHANNEL_DATA packets,
-    /// respecting the peer's max-packet size. if the remote window is
-    /// exhausted, pump incoming SSH packets until a WINDOW_ADJUST arrives
-    /// (background packets are processed for their side effects — incoming
-    /// CHANNEL_DATA goes into incoming_buffer for a future SessionReader).
+    /// send bytes to the client's stdout (CHANNEL_DATA).
     pub fn writeBytes(self: *SessionCtx, bytes: []const u8) !void {
+        try self.writeChannel(bytes, false);
+    }
+
+    /// send bytes to the client's stderr (CHANNEL_EXTENDED_DATA). use this for
+    /// server messages on a git exec session, where stdout carries the pack
+    /// protocol and stray text breaks the client's pkt-line parser.
+    pub fn writeStderr(self: *SessionCtx, bytes: []const u8) !void {
+        try self.writeChannel(bytes, true);
+    }
+
+    /// ship bytes as one or more stdout CHANNEL_DATA (or stderr
+    /// CHANNEL_EXTENDED_DATA) packets, respecting the peer's max-packet size.
+    /// if the remote window is exhausted, pump incoming SSH packets until a
+    /// WINDOW_ADJUST arrives (background packets are processed for their side
+    /// effects — incoming CHANNEL_DATA goes into incoming_buffer for a future
+    /// SessionReader).
+    fn writeChannel(self: *SessionCtx, bytes: []const u8, extended: bool) !void {
         var rest = bytes;
         while (rest.len > 0) {
             while (self.channel.remote_window == 0) {
@@ -288,8 +301,9 @@ pub const SessionCtx = struct {
 
             var msg: std.ArrayList(u8) = .empty;
             defer msg.deinit(self.allocator);
-            try msg.append(self.allocator, SSH_MSG_CHANNEL_DATA);
+            try msg.append(self.allocator, if (extended) SSH_MSG_CHANNEL_EXTENDED_DATA else SSH_MSG_CHANNEL_DATA);
             try writeU32(&msg, self.allocator, self.channel.remote_id);
+            if (extended) try writeU32(&msg, self.allocator, SSH_EXTENDED_DATA_STDERR);
             try writeStringField(&msg, self.allocator, rest[0..chunk_len]);
             try self.sc_cipher.writePacket(self.io, self.allocator, self.writer, msg.items);
 
