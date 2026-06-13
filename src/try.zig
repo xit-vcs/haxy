@@ -3,6 +3,7 @@
 //! out safely.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const hx = @import("haxy");
 const srv = hx.serve;
 const evt = hx.event;
@@ -33,6 +34,26 @@ pub fn main(init: std.process.Init) !void {
     var temp_dir = try cwd.createDirPathOpen(io, temp_dir_name, .{});
     defer cwd.deleteTree(io, temp_dir_name) catch {};
     defer temp_dir.close(io);
+
+    // write the dev SSH private key so pushes can authenticate against the
+    // matching public key seeded on the admin account below
+    {
+        const priv_key_file = try temp_dir.createFile(io, "key", .{});
+        defer priv_key_file.close(io);
+        try priv_key_file.writeStreamingAll(io,
+            \\-----BEGIN OPENSSH PRIVATE KEY-----
+            \\b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+            \\QyNTUxOQAAACCniLPJiaooAWecvOCeAjoJwCSeWxzysvpTNkpYjF22JgAAAJA+7hikPu4Y
+            \\pAAAAAtzc2gtZWQyNTUxOQAAACCniLPJiaooAWecvOCeAjoJwCSeWxzysvpTNkpYjF22Jg
+            \\AAAEDVlopOMnKt/7by/IA8VZvQXUS/O6VLkixOqnnahUdPCKeIs8mJqigBZ5y84J4COgnA
+            \\JJ5bHPKy+lM2SliMXbYmAAAAC3JhZGFyQHJvYXJrAQI=
+            \\-----END OPENSSH PRIVATE KEY-----
+            \\
+        );
+        if (.windows != builtin.os.tag) {
+            try priv_key_file.setPermissions(io, @enumFromInt(0o600));
+        }
+    }
 
     const cwd_path = try std.process.currentPathAlloc(io, allocator);
     defer allocator.free(cwd_path);
@@ -142,6 +163,9 @@ pub fn main(init: std.process.Init) !void {
         var password_hash_buf: [evt.User.password_hash_max_len]u8 = undefined;
         const password_hash = try evt.User.hashPassword("password", &password_hash_buf, io);
 
+        // public key matching temp-try/key, given to admin so we can push as admin
+        const admin_ssh_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKeIs8mJqigBZ5y84J4COgnAJJ5bHPKy+lM2SliMXbYm radar@roark";
+
         var events_to_consume: [user_data.len + repo_data.len]evt.EventWithId = undefined;
         for (user_data, 0..) |u, i| {
             events_to_consume[i] = .{
@@ -152,6 +176,7 @@ pub fn main(init: std.process.Init) !void {
                         .display_name = u.display_name,
                         .email = u.email,
                         .password_hash = password_hash,
+                        .ssh_keys = if (i == 0) admin_ssh_key else "",
                     },
                 },
             };
@@ -243,8 +268,12 @@ pub fn main(init: std.process.Init) !void {
         var stderr_writer = std.Io.File.stderr().writer(io, &.{});
         const run_opts = hx.main.RunOpts{ .out = &stdout_writer.interface, .err = &stderr_writer.interface };
 
+        const key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "key" });
+        defer allocator.free(key_path);
+
         const Runnable = struct {
             io: std.Io,
+            key_path: []const u8,
 
             pub fn run(self: @This()) !void {
                 std.debug.print(
@@ -259,11 +288,11 @@ pub fn main(init: std.process.Init) !void {
                     \\  echo "hello" > hello.txt
                     \\  git add hello.txt
                     \\  git commit -m "let there be light"
-                    \\  GIT_SSH_COMMAND='ssh -p 8022 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null' git push localhost:admin/test HEAD:master
+                    \\  GIT_SSH_COMMAND='ssh -p 8022 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -i {s}' git push localhost:admin/test HEAD:master
                     \\
                     \\to quit, press enter.
                     \\
-                , .{});
+                , .{self.key_path});
                 // portable stdin read via std.Io — equivalent to the
                 // std.posix.read(STDIN_FILENO, ...) that doesn't compile
                 // on windows.
@@ -275,7 +304,7 @@ pub fn main(init: std.process.Init) !void {
 
         try srv.run(.xit, .{}, io, allocator, cwd_path, .{
             .data_dir = server_path,
-        }, run_opts.err, Runnable{ .io = io });
+        }, run_opts.err, Runnable{ .io = io, .key_path = key_path });
     } else {
         var null_writer = std.Io.Writer.Discarding.init(&.{});
         const run_opts = hx.main.RunOpts{ .out = &null_writer.writer, .err = &null_writer.writer };

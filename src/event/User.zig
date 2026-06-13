@@ -10,6 +10,8 @@ display_name: []const u8,
 email: []const u8,
 password_hash: []const u8,
 enable_ansi: bool = false,
+// newline-separated authorized_keys lines (one OpenSSH public key per line)
+ssh_keys: []const u8 = "",
 
 const Self = @This();
 
