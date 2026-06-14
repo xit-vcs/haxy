@@ -28,7 +28,7 @@ pub const View = struct {
     pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !View {
         const logged_in = session.data.user_id != null;
 
-        var box = wgt.Box(ui.Widget).init(.{ .border_style = null, .rounded_corners = true, .direction = .vert });
+        var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .rounded_corners = true, .direction = .vert });
         errdefer box.deinit(allocator);
         // when logged in, the toggle posts to a page-scoped /ansi path so the
         // server sends us back to this page's settings tab; logged out, the

@@ -39,7 +39,7 @@ pub const View = struct {
     const button_index: usize = 2;
 
     pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session, success_redirect_tab_id: usize) !View {
-        var box = wgt.Box(ui.Widget).init(.{ .border_style = null, .rounded_corners = true, .direction = .vert });
+        var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .rounded_corners = true, .direction = .vert });
         errdefer box.deinit(allocator);
         // marks this subtree as an HTML form scope for the web overlay
         box.getFocus().kind = .{ .custom = switch (session.data.current_page) {
@@ -50,7 +50,7 @@ pub const View = struct {
         var nav_ids: [3]usize = undefined;
 
         {
-            var username = wgt.TextInput(ui.Widget).init(.{ .label = " username ", .name = "username", .rounded_corners = true, .render_content = !wasm });
+            var username = try wgt.TextInput(ui.Widget).init(allocator, .{ .label = " username ", .name = "username", .rounded_corners = true, .render_content = !wasm });
             errdefer username.deinit(allocator);
             username.getFocus().focusable = true;
             nav_ids[username_index] = username.getFocus().id;
@@ -62,7 +62,7 @@ pub const View = struct {
         }
 
         {
-            var password = wgt.TextInput(ui.Widget).init(.{ .label = " password ", .password = true, .name = "password", .rounded_corners = true, .render_content = !wasm });
+            var password = try wgt.TextInput(ui.Widget).init(allocator, .{ .label = " password ", .password = true, .name = "password", .rounded_corners = true, .render_content = !wasm });
             errdefer password.deinit(allocator);
             password.getFocus().focusable = true;
             nav_ids[password_index] = password.getFocus().id;
@@ -119,6 +119,13 @@ pub const View = struct {
             " password (invalid) "
         else
             " password ";
+
+        // refresh our entries in the session's focus-id -> *TextInput map with
+        // this frame's current input addresses, so the web/wasm form handling
+        // can find them by focus id
+        const inputs_arena = self.session.arena.allocator();
+        try self.session.text_inputs.put(inputs_arena, username_input.getFocus().id, username_input);
+        try self.session.text_inputs.put(inputs_arena, password_input.getFocus().id, password_input);
 
         try self.center.build(allocator, constraint, root_focus);
     }

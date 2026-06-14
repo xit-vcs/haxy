@@ -392,7 +392,7 @@ fn renderIndexHtml(
 
     const content = try generateHtml(allocator, &root);
     defer allocator.free(content);
-    const overlay = try generateOverlay(allocator, &root);
+    const overlay = try generateOverlay(allocator, &root, &session);
     defer allocator.free(overlay);
 
     // serialize the snapshot so the wasm side can parse it back without
@@ -553,7 +553,7 @@ pub fn generateHtml(allocator: std.mem.Allocator, root: *ui.Widget) ![]const u8 
 // emits the form overlay — one <form> per "form:<url>" focus subtree in the
 // widget tree, each wrapping the text inputs and submit button inside it,
 // positioned absolutely over the matching grid cells.
-pub fn generateOverlay(allocator: std.mem.Allocator, root: *ui.Widget) ![]const u8 {
+pub fn generateOverlay(allocator: std.mem.Allocator, root: *ui.Widget, session: *ui.Session) ![]const u8 {
     const root_focus = root.getFocus();
 
     var out: std.ArrayList(u8) = .empty;
@@ -592,7 +592,7 @@ pub fn generateOverlay(allocator: std.mem.Allocator, root: *ui.Widget) ![]const 
             const r = root_child.rect;
             switch (root_child.focus.kind) {
                 .text_input, .text_input_password => {
-                    const ti: *wgt.TextInput(ui.Widget) = @fieldParentPtr("focus", root_child.focus);
+                    const ti = session.text_inputs.get(inner_id) orelse continue;
                     const inner_left = r.x + 1;
                     const inner_top = r.y + 1;
                     const inner_width = if (r.size.width > 2) r.size.width - 2 else 0;

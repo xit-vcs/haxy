@@ -83,7 +83,7 @@ fn tick(min_height: u32, max_width: u32) !void {
     // leaves the live <form> alone — crucial since wiping it mid-click
     // would detach the submit button before the browser can dispatch the
     // form submission.
-    const overlay = try web.generateOverlay(allocator, root_ptr);
+    const overlay = try web.generateOverlay(allocator, root_ptr, &session);
     defer allocator.free(overlay);
     setOverlay(overlay);
 
@@ -248,7 +248,7 @@ fn setTextInputValue(focus_id: u32, bytes: []const u8) !void {
         .text_input, .text_input_password => {},
         else => return error.NotATextInput,
     }
-    const ti: *wgt.TextInput(ui.Widget) = @fieldParentPtr("focus", child.focus);
+    const ti = session.text_inputs.get(focus_id) orelse return error.UnknownFocusId;
     try ti.setContent(allocator, bytes);
     // mirror the TTY behavior in Login.View.input: editing an input clears
     // the stale failure flag so the "(invalid)" label doesn't linger after

@@ -343,6 +343,9 @@ pub const Session = struct {
     io: ?std.Io = null,
     repos_dir: ?[]const u8 = null,
     pending: std.ArrayList(Action) = .empty, // actions queued by widgets this frame
+    // focus id -> the live TextInput, refreshed each frame by the views that own
+    // inputs. web/wasm form handling looks widgets up here by focus id.
+    text_inputs: std.AutoHashMapUnmanaged(usize, *wgt.TextInput(Widget)) = .empty,
     nav_back: bool = false, // set by input (escape) to request the native TUI pop a page; see Nav
     is_terminal: bool = false, // true on remote SSH and local TUI
     quit_requested: bool = false,
@@ -447,6 +450,11 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, session: *Session) !void {
 
     var terminal = try term.Terminal.init(io, allocator);
     defer terminal.deinit(io);
+
+    // set term as active so it will be properly cooked
+    // when a panic/segfault happens
+    term.setActive(&terminal);
+    defer term.setActive(null);
 
     var last_size = layout.Size{ .width = 0, .height = 0 };
     var last_grid = try Grid.init(allocator, last_size);
@@ -697,6 +705,10 @@ pub fn initRoot(allocator: std.mem.Allocator, page: *const Page, session: *Sessi
     var root = Widget{ .background = try AnsiBackground.init(allocator, page_widget, demon_art, session) };
     errdefer root.deinit(allocator);
 
+    // input-owning views build their TextInputs in init — so reset the
+    // focus-id -> *TextInput map here
+    session.text_inputs.clearRetainingCapacity();
+
     try root.build(allocator, .{
         .min_size = .{ .width = null, .height = 40 },
         .max_size = .{ .width = 80, .height = null },
@@ -775,7 +787,7 @@ pub const Widget = union(enum) {
 };
 
 pub const FlowBox = struct {
-    focus: Focus,
+    focus: *Focus,
     grid: ?Grid,
     text_boxes: std.ArrayList(wgt.TextBox(Widget)),
     // backs the per-item strings the text boxes borrow: each box's `content`
@@ -794,9 +806,9 @@ pub const FlowBox = struct {
         cell_height: usize = 3,
     };
 
-    pub fn init(allocator: std.mem.Allocator, options: Options) FlowBox {
+    pub fn init(allocator: std.mem.Allocator, options: Options) !FlowBox {
         return .{
-            .focus = Focus.init(.container),
+            .focus = try Focus.create(allocator, .container),
             .grid = null,
             .text_boxes = .empty,
             .arena = std.heap.ArenaAllocator.init(allocator),
@@ -806,7 +818,7 @@ pub const FlowBox = struct {
     }
 
     pub fn deinit(self: *FlowBox, allocator: std.mem.Allocator) void {
-        self.focus.deinit(allocator);
+        self.focus.destroy(allocator);
         if (self.grid) |*grid| {
             grid.deinit();
             self.grid = null;
@@ -918,7 +930,7 @@ pub const FlowBox = struct {
     }
 
     pub fn getFocus(self: *FlowBox) *Focus {
-        return &self.focus;
+        return self.focus;
     }
 
     pub fn cellRect(self: FlowBox, index: usize) ?layout.IRect {
@@ -944,9 +956,9 @@ pub const FlowBox = struct {
         scroll: wgt.Scroll(Widget),
 
         pub fn init(allocator: std.mem.Allocator, options: FlowBox.Options) !Scroll {
-            var layout_inner = FlowBox.init(allocator, options);
+            var layout_inner = try FlowBox.init(allocator, options);
             errdefer layout_inner.deinit(allocator);
-            var scroll = try wgt.Scroll(Widget).init(allocator, .{ .flow_box = layout_inner }, .vert);
+            var scroll = try wgt.Scroll(Widget).init(allocator, .{ .flow_box = layout_inner }, .{ .direction = .vert });
             errdefer scroll.deinit(allocator);
             return .{ .scroll = scroll };
         }
@@ -1050,18 +1062,18 @@ pub const FlowBox = struct {
 // used inside Box(horiz) with a min_size so the box reserves space for the
 // children that follow, pushing them to the right.
 pub const Spacer = struct {
-    focus: Focus,
+    focus: *Focus,
     grid: ?Grid,
 
-    pub fn init() Spacer {
+    pub fn init(allocator: std.mem.Allocator) !Spacer {
         return .{
-            .focus = Focus.init(.container),
+            .focus = try Focus.create(allocator, .container),
             .grid = null,
         };
     }
 
     pub fn deinit(self: *Spacer, allocator: std.mem.Allocator) void {
-        self.focus.deinit(allocator);
+        self.focus.destroy(allocator);
         if (self.grid) |*grid| {
             grid.deinit();
             self.grid = null;
@@ -1095,14 +1107,14 @@ pub const Spacer = struct {
     }
 
     pub fn getFocus(self: *Spacer) *Focus {
-        return &self.focus;
+        return self.focus;
     }
 };
 
 // a single-child wrapper that builds the child at its natural size and
 // positions its grid in the middle of the area granted by the parent
 pub const Center = struct {
-    focus: Focus,
+    focus: *Focus,
     grid: ?Grid,
     child: *Widget,
     direction: Direction,
@@ -1114,7 +1126,7 @@ pub const Center = struct {
         errdefer allocator.destroy(child);
         child.* = child_widget;
         return .{
-            .focus = Focus.init(.container),
+            .focus = try Focus.create(allocator, .container),
             .grid = null,
             .child = child,
             .direction = direction,
@@ -1122,7 +1134,7 @@ pub const Center = struct {
     }
 
     pub fn deinit(self: *Center, allocator: std.mem.Allocator) void {
-        self.focus.deinit(allocator);
+        self.focus.destroy(allocator);
         if (self.grid) |*grid| {
             grid.deinit();
             self.grid = null;
@@ -1187,26 +1199,26 @@ pub const Center = struct {
     }
 
     pub fn getFocus(self: *Center) *Focus {
-        return &self.focus;
+        return self.focus;
     }
 };
 
 // renders truecolor ANSI art
 pub const AnsiArt = struct {
-    focus: Focus,
+    focus: *Focus,
     grid: ?Grid,
     content: []const u8,
 
-    pub fn init(content: []const u8) AnsiArt {
+    pub fn init(allocator: std.mem.Allocator, content: []const u8) !AnsiArt {
         return .{
-            .focus = Focus.init(.container),
+            .focus = try Focus.create(allocator, .container),
             .grid = null,
             .content = content,
         };
     }
 
     pub fn deinit(self: *AnsiArt, allocator: std.mem.Allocator) void {
-        self.focus.deinit(allocator);
+        self.focus.destroy(allocator);
         if (self.grid) |*grid| {
             grid.deinit();
             self.grid = null;
@@ -1305,7 +1317,7 @@ pub const AnsiArt = struct {
     }
 
     pub fn getFocus(self: *AnsiArt) *Focus {
-        return &self.focus;
+        return self.focus;
     }
 
     fn applySgr(style: *Grid.Style, params: []const u8) void {
@@ -1362,7 +1374,11 @@ pub const AnsiBackground = struct {
             return e;
         };
         child.* = cw;
-        return .{ .grid = null, .child = child, .art = AnsiArt.init(art_content), .session = session };
+        errdefer {
+            child.deinit(allocator);
+            allocator.destroy(child);
+        }
+        return .{ .grid = null, .child = child, .art = try AnsiArt.init(allocator, art_content), .session = session };
     }
 
     pub fn deinit(self: *AnsiBackground, allocator: std.mem.Allocator) void {

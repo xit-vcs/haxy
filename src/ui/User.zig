@@ -88,7 +88,7 @@ pub const View = struct {
     const stack_index: usize = 1;
 
     pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !View {
-        var box = wgt.Box(ui.Widget).init(.{ .border_style = null, .rounded_corners = true, .direction = .vert });
+        var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .rounded_corners = true, .direction = .vert });
         errdefer box.deinit(allocator);
 
         // build the header first so we can grab the repos-tab id for the auth
@@ -102,7 +102,7 @@ pub const View = struct {
         }
 
         {
-            var stack = wgt.Stack(ui.Widget).init();
+            var stack = try wgt.Stack(ui.Widget).init(allocator);
             errdefer stack.deinit(allocator);
 
             // repos list — the default tab

@@ -27,11 +27,11 @@ pub const View = struct {
     button_id: usize,
 
     pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !View {
-        var box = wgt.Box(ui.Widget).init(.{ .border_style = null, .rounded_corners = true, .direction = .vert });
+        var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .rounded_corners = true, .direction = .vert });
         errdefer box.deinit(allocator);
 
         {
-            var prompt = wgt.Text(ui.Widget).init("are you sure?");
+            var prompt = try wgt.Text(ui.Widget).init(allocator, "are you sure?");
             errdefer prompt.deinit(allocator);
             try box.children.put(allocator, prompt.getFocus().id, .{
                 .widget = .{ .text = prompt },

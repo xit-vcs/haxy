@@ -97,7 +97,7 @@ pub const View = struct {
     data: *const Self,
 
     pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !View {
-        var box = wgt.Box(ui.Widget).init(.{ .border_style = null, .direction = .vert });
+        var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert });
         errdefer box.deinit(allocator);
 
         // labels and link kinds are borrowed by the rows, so they live in the
@@ -113,7 +113,7 @@ pub const View = struct {
         }
         if (box.children.count() > 0) box.getFocus().child_id = box.children.keys()[0];
 
-        var scroll = try wgt.Scroll(ui.Widget).init(allocator, .{ .box = box }, .vert);
+        var scroll = try wgt.Scroll(ui.Widget).init(allocator, .{ .box = box }, .{ .direction = .vert });
         errdefer scroll.deinit(allocator);
         return .{ .scroll = scroll, .data = data };
     }

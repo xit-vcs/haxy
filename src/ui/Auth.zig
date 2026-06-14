@@ -27,7 +27,7 @@ pub const View = struct {
     // inner views' focus ids change as login/logout swap; if we exposed those
     // directly, anything keyed off our id at one moment would mismatch the
     // focus tree the next frame.
-    focus: Focus,
+    focus: *Focus,
     login: Login.View,
     logout: Logout.View,
     session: *ui.Session,
@@ -38,7 +38,7 @@ pub const View = struct {
         var logout_view = try Logout.View.init(allocator, &data.logout, session, users_tab_id);
         errdefer logout_view.deinit(allocator);
         return .{
-            .focus = Focus.init(.container),
+            .focus = try Focus.create(allocator, .container),
             .login = login_view,
             .logout = logout_view,
             .session = session,
@@ -46,7 +46,7 @@ pub const View = struct {
     }
 
     pub fn deinit(self: *View, allocator: std.mem.Allocator) void {
-        self.focus.deinit(allocator);
+        self.focus.destroy(allocator);
         self.login.deinit(allocator);
         self.logout.deinit(allocator);
     }
@@ -87,7 +87,7 @@ pub const View = struct {
     }
 
     pub fn getFocus(self: *View) *Focus {
-        return &self.focus;
+        return self.focus;
     }
 
     pub fn getSelectedIndex(self: View) ?usize {

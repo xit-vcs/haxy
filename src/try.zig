@@ -11,6 +11,10 @@ const xit = hx.xit;
 const rp = xit.repo;
 const ui = hx.ui;
 
+// cook the terminal before a panic/segfault trace is printed, so the trace
+// isn't mangled by raw mode and the alternate buffer
+pub const std_options_debug_io = xit.xitui.terminal.crash_debug_io;
+
 pub fn main(init: std.process.Init) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();

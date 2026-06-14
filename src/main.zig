@@ -5,6 +5,10 @@ const rp = xit.repo;
 const cmd = @import("./command.zig");
 const srv = @import("./serve.zig");
 
+// cook the terminal before a panic/segfault trace is printed, so the trace
+// isn't mangled by raw mode and the alternate buffer
+pub const std_options_debug_io = xit.xitui.terminal.crash_debug_io;
+
 pub const RunOpts = struct {
     out: *std.Io.Writer,
     err: *std.Io.Writer,

@@ -28,7 +28,7 @@ pub const View = struct {
     tab_ids: std.AutoArrayHashMapUnmanaged(usize, void),
 
     pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !View {
-        var box = wgt.Box(ui.Widget).init(.{ .border_style = .hidden, .rounded_corners = true, .direction = .horiz });
+        var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = .hidden, .rounded_corners = true, .direction = .horiz });
         errdefer box.deinit(allocator);
 
         var tab_ids: std.AutoArrayHashMapUnmanaged(usize, void) = .empty;
@@ -49,7 +49,7 @@ pub const View = struct {
 
         // spacer
         {
-            var text = wgt.Text(ui.Widget).init(" ");
+            var text = try wgt.Text(ui.Widget).init(allocator, " ");
             errdefer text.deinit(allocator);
             try box.children.put(allocator, text.getFocus().id, .{
                 .widget = .{ .text = text },
@@ -65,7 +65,7 @@ pub const View = struct {
         ) |name, focus_name| {
             // spacer
             if (focus_name.len == 0) {
-                var spacer = ui.Spacer.init();
+                var spacer = try ui.Spacer.init(allocator);
                 errdefer spacer.deinit(allocator);
                 try box.children.put(allocator, spacer.getFocus().id, .{
                     .widget = .{ .spacer = spacer },
