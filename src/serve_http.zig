@@ -10,7 +10,6 @@ pub fn runListener(
     allocator: std.mem.Allocator,
     repo_root_path: []const u8,
     admin_repo_path: []const u8,
-    is_test: bool,
     net_server: *std.Io.net.Server,
     tasks: *std.Io.Group,
     err: *std.Io.Writer,
@@ -20,14 +19,13 @@ pub fn runListener(
         allocator: std.mem.Allocator,
         repo_root_path: []const u8,
         admin_repo_path: []const u8,
-        is_test: bool,
         err: *std.Io.Writer,
     };
 
     const handle = struct {
         fn h(ctx: Context, stream: std.Io.net.Stream) void {
             defer stream.close(ctx.io);
-            handleConnection(repo_kind, any_repo_opts, ctx.io, ctx.allocator, ctx.repo_root_path, ctx.admin_repo_path, ctx.is_test, stream, ctx.err) catch |request_err| {
+            handleConnection(repo_kind, any_repo_opts, ctx.io, ctx.allocator, ctx.repo_root_path, ctx.admin_repo_path, stream, ctx.err) catch |request_err| {
                 serve_common.logError(ctx.err, "connection failed: {s}\n", .{@errorName(request_err)});
             };
         }
@@ -38,7 +36,6 @@ pub fn runListener(
         .allocator = allocator,
         .repo_root_path = repo_root_path,
         .admin_repo_path = admin_repo_path,
-        .is_test = is_test,
         .err = err,
     }, handle);
 }
@@ -50,7 +47,6 @@ fn handleConnection(
     allocator: std.mem.Allocator,
     repo_root_path: []const u8,
     admin_repo_path: []const u8,
-    is_test: bool,
     stream: std.Io.net.Stream,
     err: *std.Io.Writer,
 ) !void {
@@ -67,7 +63,7 @@ fn handleConnection(
             else => |e| return e,
         };
 
-        handleGitRequest(repo_kind, any_repo_opts, io, allocator, repo_root_path, admin_repo_path, is_test, &http_server, &request) catch |request_err| {
+        handleGitRequest(repo_kind, any_repo_opts, io, allocator, repo_root_path, admin_repo_path, &http_server, &request) catch |request_err| {
             try err.print("request failed: {s}\n", .{@errorName(request_err)});
             try err.flush();
             if (http_server.reader.state == .received_head) {
@@ -87,7 +83,6 @@ fn handleGitRequest(
     allocator: std.mem.Allocator,
     repo_root_path: []const u8,
     admin_repo_path: []const u8,
-    is_test: bool,
     http_server: *std.http.Server,
     request: *std.http.Server.Request,
 ) !void {
@@ -116,14 +111,12 @@ fn handleGitRequest(
     const has_remote_user = findHeader(request, "authorization") != null;
     const protocol_version = protocolVersionFromHeader(findHeader(request, "git-protocol"));
 
-    const create_if_missing = isReceivePack(handler, suffix, uri.query);
-
-    // pushing over HTTP is disabled outside test mode; pushes go over SSH
-    if (create_if_missing and !is_test) {
+    // pushing over HTTP is not supported; pushes go over SSH
+    if (isReceivePack(handler, suffix, uri.query)) {
         if (http_server.reader.state == .received_head) {
             http_server.reader.state = .ready;
         }
-        try writeSimpleResponse(http_server, 403, "Forbidden", "text/plain", "push over HTTP is disabled");
+        try writeSimpleResponse(http_server, 403, "Forbidden", "text/plain", "push over HTTP is not supported");
         return;
     }
 
@@ -137,7 +130,7 @@ fn handleGitRequest(
         http_server.reader.state = .ready;
     }
 
-    const repo_path = switch (try serve_common.resolveRepoPath(io, allocator, is_test, repo_root_path, admin_repo_path, repo_rel, create_if_missing)) {
+    const repo_path = switch (try serve_common.resolveRepoPath(io, allocator, repo_root_path, admin_repo_path, repo_rel, false)) {
         .ok => |p| p,
         .invalid => return writeSimpleResponse(http_server, 400, "Bad Request", "text/plain", "repo path must be <owner>/<repo>"),
         .not_found => return error.RepoNotFound,
@@ -155,7 +148,7 @@ fn handleGitRequest(
         .protocol_version = protocol_version,
     };
 
-    try openRepoAndServe(repo_kind, any_repo_opts, io, allocator, repo_path, create_if_missing, GitService{
+    try openRepoAndServe(repo_kind, any_repo_opts, io, allocator, repo_path, GitService{
         .body_reader = &body_reader,
         .writer = http_server.out,
         .options = http_backend_options,
@@ -177,23 +170,12 @@ fn openRepoAndServe(
     io: std.Io,
     allocator: std.mem.Allocator,
     repo_path: []const u8,
-    create_if_missing: bool,
     service: anytype,
 ) !void {
-    // serve the existing on-disk repo at its event-id directory
+    // serve the existing on-disk repo at its event-id directory; HTTP only
+    // handles fetch/clone, so a missing repo is simply not found
     if (try serveIfExists(repo_kind, any_repo_opts, io, allocator, repo_path, service)) return;
-    if (!create_if_missing) return error.RepoNotFound;
-
-    // create the on-disk repo for the just-minted event and serve the push
-    if (any_repo_opts.hash) |hash_kind| {
-        var repo = try openRepo(repo_kind, any_repo_opts.toRepoOptsWithHash(hash_kind), io, allocator, repo_path, true);
-        defer repo.deinit(io, allocator);
-        try service.serve(repo_kind, any_repo_opts.toRepoOptsWithHash(hash_kind), &repo, io, allocator);
-    } else {
-        var repo = try openRepo(repo_kind, any_repo_opts.toRepoOpts(), io, allocator, repo_path, true);
-        defer repo.deinit(io, allocator);
-        try service.serve(repo_kind, any_repo_opts.toRepoOpts(), &repo, io, allocator);
-    }
+    return error.RepoNotFound;
 }
 
 // serve an existing repo at `repo_path`, or return false if none is there
@@ -227,28 +209,6 @@ fn serveIfExists(
         }
     }
     return true;
-}
-
-fn openRepo(
-    comptime repo_kind: rp.RepoKind,
-    comptime repo_opts: rp.RepoOpts(repo_kind),
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    repo_path: []const u8,
-    create_if_missing: bool,
-) !rp.Repo(repo_kind, repo_opts) {
-    return rp.Repo(repo_kind, repo_opts).open(io, allocator, .{ .path = repo_path }) catch |open_err| switch (open_err) {
-        error.RepoNotFound => {
-            if (!create_if_missing) return open_err;
-
-            var repo = try rp.Repo(repo_kind, repo_opts).init(io, allocator, .{ .path = repo_path });
-            errdefer repo.deinit(io, allocator);
-            try repo.addConfig(io, allocator, .{ .name = "http.receivepack", .value = "true" });
-            try repo.addConfig(io, allocator, .{ .name = "receive.denycurrentbranch", .value = "updateinstead" });
-            return repo;
-        },
-        else => |e| return e,
-    };
 }
 
 const GitService = struct {

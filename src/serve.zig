@@ -11,10 +11,6 @@ pub const Options = struct {
     ssh_listen: []const u8 = "127.0.0.1:8022",
     wui_listen: []const u8 = "127.0.0.1:8000",
     data_dir: []const u8 = ".",
-    // test mode, used by the networking tests. it serves repos directly by
-    // their on-disk path instead of resolving them as <owner>/<repo> through
-    // the event store, giving the plain git-server behavior those tests rely on.
-    is_test: bool = false,
 };
 
 const ListenAddress = struct {
@@ -90,7 +86,7 @@ pub fn run(
     try err.print("serving HTTP on {s}, repo root {s}\n", .{ options.http_listen, repo_root_path });
     try err.flush();
 
-    serve_http.runListener(repo_kind, any_repo_opts, io, allocator, repo_root_path, admin_repo_path, options.is_test, &http_server, &tasks, err);
+    serve_http.runListener(repo_kind, any_repo_opts, io, allocator, repo_root_path, admin_repo_path, &http_server, &tasks, err);
 
     try err.print("serving SSH on {s}\n", .{options.ssh_listen});
     try err.flush();
@@ -98,7 +94,6 @@ pub fn run(
     const ssh_session_handler = serve_ssh.SessionHandler{
         .admin_repo_path = admin_repo_path,
         .repo_root_path = repo_root_path,
-        .is_test = options.is_test,
         .err = err,
     };
     serve_ssh.runListener(io, allocator, &host_key, &ssh_session_handler, &ssh_server, &tasks, err);

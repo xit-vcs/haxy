@@ -9,24 +9,16 @@ pub const RepoPath = union(enum) {
     not_found, // unknown owner, or the repo doesn't exist and we aren't creating
 };
 
-// resolve a requested repo path to its on-disk directory. in test mode the path
-// is served directly; otherwise it's resolved as <owner>/<repo> through the
-// event store, minting a repo event for a fresh push.
+// resolve a requested repo path to its on-disk directory, parsed as
+// <owner>/<repo> through the event store, minting a repo event for a fresh push.
 pub fn resolveRepoPath(
     io: std.Io,
     allocator: std.mem.Allocator,
-    is_test: bool,
     repo_root_path: []const u8,
     admin_repo_path: []const u8,
     requested: []const u8,
     create_if_missing: bool,
 ) !RepoPath {
-    // the networking tests address repos by a trusted on-disk path (an absolute
-    // `requested` discards repo_root), so no traversal check is needed here
-    if (is_test) {
-        return .{ .ok = try std.fs.path.resolve(allocator, &.{ repo_root_path, requested }) };
-    }
-
     const owner_repo = evt.parseOwnerRepoPath(requested) orelse return .invalid;
     const event_id_hex = (try evt.resolveOrCreateRepo(io, allocator, admin_repo_path, owner_repo.owner, owner_repo.name, create_if_missing)) orelse return .not_found;
     return .{ .ok = try std.fs.path.join(allocator, &.{ repo_root_path, &event_id_hex }) };

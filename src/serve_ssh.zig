@@ -13,9 +13,6 @@ const serve_common = @import("./serve_common.zig");
 pub const SessionHandler = struct {
     admin_repo_path: []const u8,
     repo_root_path: []const u8,
-    // test mode serves repos directly by path instead of resolving them as
-    // <owner>/<repo> through the event store
-    is_test: bool,
     err: *std.Io.Writer,
 
     pub fn handleSession(self: *const SessionHandler, sess: *ssh.SessionCtx, request: ssh.Request) !void {
@@ -216,14 +213,14 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, command:
     const any_repo_opts: rp.AnyRepoOpts(.xit) = .{};
 
     // authenticate pushes: the authenticated key must be registered to the
-    // repo's owner. skipped in test mode, which serves repos directly by path.
-    if (create_if_missing and !handler.is_test) {
+    // repo's owner.
+    if (create_if_missing) {
         const owner_repo = evt.parseOwnerRepoPath(parsed.dir) orelse return writeError(sess, "repo path must be <owner>/<repo>");
         if (!try isKeyAuthorized(io, allocator, handler.admin_repo_path, owner_repo.owner, &sess.fingerprint))
             return writeError(sess, "unauthorized: this SSH key is not registered to the repo owner");
     }
 
-    const repo_path = switch (try serve_common.resolveRepoPath(io, allocator, handler.is_test, handler.repo_root_path, handler.admin_repo_path, parsed.dir, create_if_missing)) {
+    const repo_path = switch (try serve_common.resolveRepoPath(io, allocator, handler.repo_root_path, handler.admin_repo_path, parsed.dir, create_if_missing)) {
         .ok => |p| p,
         .invalid => return writeError(sess, "repo path must be <owner>/<repo>"),
         .not_found => return writeError(sess, "repo not found"),

@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const hx = @import("haxy");
 const xit = hx.xit;
+const evt = hx.event;
 const rp = xit.repo;
 const rf = xit.ref;
 const work = xit.workdir;
@@ -23,7 +24,6 @@ test "fetch small" {
 test "push small" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    try testPush(.xit, .{ .wire = .http }, io, allocator);
     if (.windows != builtin.os.tag) {
         try testPush(.xit, .{ .wire = .ssh }, io, allocator);
     }
@@ -32,7 +32,6 @@ test "push small" {
 test "push creates missing repo under serve" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    try testPushCreatesMissingRepo(.xit, .{ .wire = .http }, io, allocator);
     if (.windows != builtin.os.tag) {
         try testPushCreatesMissingRepo(.xit, .{ .wire = .ssh }, io, allocator);
     }
@@ -68,7 +67,6 @@ test "fetch large subprocess" {
 test "push large subprocess" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    try testPushLarge(.git, .{ .wire = .http }, true, io, allocator);
     if (.windows != builtin.os.tag) {
         try testPushLarge(.git, .{ .wire = .ssh }, true, io, allocator);
     }
@@ -97,6 +95,10 @@ fn runServer(
         }
     }
 
+    // seed the admin event store so the server can resolve <owner>/<repo> paths
+    // and authenticate pushes from the dev key above
+    try setupAdmin(io, allocator, temp_dir_name);
+
     const cwd_path = try std.process.currentPathAlloc(io, allocator);
     defer allocator.free(cwd_path);
     const haxy_path = try std.fs.path.join(allocator, &.{ cwd_path, "zig-out/bin/haxy" });
@@ -106,7 +108,7 @@ fn runServer(
     const ssh_listen_arg = std.fmt.comptimePrint("127.0.0.1:{}", .{ssh_port});
 
     const process = try std.process.spawn(io, .{
-        .argv = &.{ haxy_path, "serve", "--http-listen", http_listen_arg, "--ssh-listen", ssh_listen_arg, "--data-dir", temp_dir_name, "--test" },
+        .argv = &.{ haxy_path, "serve", "--http-listen", http_listen_arg, "--ssh-listen", ssh_listen_arg, "--data-dir", temp_dir_name },
         .stdin = .ignore,
         .stdout = .ignore,
         .stderr = .ignore,
@@ -148,10 +150,8 @@ fn testFetch(
     var server_process = try runServer(io, allocator, temp_dir_name);
     defer _ = server_process.kill(io);
 
-    const cwd_path = try std.process.currentPathAlloc(io, allocator);
-    defer allocator.free(cwd_path);
-
-    const server_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "repos", "server" });
+    // register the repo under admin and locate its on-disk directory
+    const server_path = (try repoOnDiskPath(io, allocator, temp_dir_name, "testrepo", true)).?;
     defer allocator.free(server_path);
 
     var server_repo = try rp.Repo(.xit, .{ .is_test = true }).init(io, allocator, .{ .path = server_path });
@@ -177,6 +177,9 @@ fn testFetch(
     // add a tag
     _ = try server_repo.addTag(io, allocator, .{ .name = "1.0.0", .message = "hi" });
 
+    const cwd_path = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(cwd_path);
+
     const client_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "client" });
     defer allocator.free(client_path);
 
@@ -185,20 +188,7 @@ fn testFetch(
 
     // add remote
     {
-        if (.windows == builtin.os.tag) {
-            std.mem.replaceScalar(u8, server_path, '\\', '/');
-        }
-        const separator = if (server_path[0] == '/') "" else "/";
-
-        const remote_url = switch (transport_def) {
-            //.file => try std.fmt.allocPrint(allocator, "file://{s}{s}", .{ separator, server_path }),
-            .file => try std.fmt.allocPrint(allocator, "../server", .{}), // relative file paths work too
-            .wire => |wire_kind| switch (wire_kind) {
-                .http => try std.fmt.allocPrint(allocator, "http://localhost:{}/server", .{http_port}),
-                .raw => try std.fmt.allocPrint(allocator, "git://localhost:{}/server", .{http_port}),
-                .ssh => try std.fmt.allocPrint(allocator, "ssh://localhost:{}{s}{s}", .{ ssh_port, separator, server_path }),
-            },
-        };
+        const remote_url = try remoteUrl(transport_def, allocator, "testrepo");
         defer allocator.free(remote_url);
 
         try client_repo.addRemote(io, allocator, .{ .name = "origin", .value = remote_url });
@@ -218,15 +208,7 @@ fn testFetch(
         .file => false,
         .wire => |wire_kind| .ssh == wire_kind,
     };
-    // haxy generates a fresh host key on every run, so don't try to record
-    // it. accept the unknown host and skip writing to known_hosts. the key
-    // identity flag picks the ed25519 key created in runServer.
-    const ssh_cmd_maybe: ?[]const u8 = if (is_ssh) blk: {
-        const priv_key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "key" });
-        defer allocator.free(priv_key_path);
-
-        break :blk try std.fmt.allocPrint(allocator, "ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o IdentityFile=\"{s}\"", .{priv_key_path});
-    } else null;
+    const ssh_cmd_maybe = try sshCommand(is_ssh, allocator, cwd_path, temp_dir_name);
     defer if (ssh_cmd_maybe) |ssh_cmd| allocator.free(ssh_cmd);
 
     try client_repo.fetch(
@@ -307,23 +289,16 @@ fn testPush(
     var server_process = try runServer(io, allocator, temp_dir_name);
     defer _ = server_process.kill(io);
 
-    const cwd_path = try std.process.currentPathAlloc(io, allocator);
-    defer allocator.free(cwd_path);
-
-    const server_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "repos", "server" });
+    // register the repo under admin and locate its on-disk directory
+    const server_path = (try repoOnDiskPath(io, allocator, temp_dir_name, "testrepo", true)).?;
     defer allocator.free(server_path);
 
     var server_repo = try rp.Repo(.xit, .{ .is_test = true }).init(io, allocator, .{ .path = server_path });
     defer server_repo.deinit(io, allocator);
 
     // add config
-    switch (transport_def) {
-        .file => try server_repo.addConfig(io, allocator, .{ .name = "core.bare", .value = "true" }),
-        .wire => {
-            try server_repo.addConfig(io, allocator, .{ .name = "core.bare", .value = "false" });
-            try server_repo.addConfig(io, allocator, .{ .name = "receive.denycurrentbranch", .value = "updateinstead" });
-        },
-    }
+    try server_repo.addConfig(io, allocator, .{ .name = "core.bare", .value = "false" });
+    try server_repo.addConfig(io, allocator, .{ .name = "receive.denycurrentbranch", .value = "updateinstead" });
     try server_repo.addConfig(io, allocator, .{ .name = "http.receivepack", .value = "true" });
 
     // export server repo
@@ -331,6 +306,9 @@ fn testPush(
         const export_file = try server_repo.core.repo_dir.createFile(io, "git-daemon-export-ok", .{});
         defer export_file.close(io);
     }
+
+    const cwd_path = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(cwd_path);
 
     const client_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "client" });
     defer allocator.free(client_path);
@@ -352,20 +330,7 @@ fn testPush(
 
     // add remote
     {
-        if (.windows == builtin.os.tag) {
-            std.mem.replaceScalar(u8, server_path, '\\', '/');
-        }
-        const separator = if (server_path[0] == '/') "" else "/";
-
-        const remote_url = switch (transport_def) {
-            //.file => try std.fmt.allocPrint(allocator, "file://{s}{s}", .{ separator, server_path }),
-            .file => try std.fmt.allocPrint(allocator, "../server", .{}), // relative file paths work too
-            .wire => |wire_kind| switch (wire_kind) {
-                .http => try std.fmt.allocPrint(allocator, "http://localhost:{}/server", .{http_port}),
-                .raw => try std.fmt.allocPrint(allocator, "git://localhost:{}/server", .{http_port}),
-                .ssh => try std.fmt.allocPrint(allocator, "ssh://localhost:{}{s}{s}", .{ ssh_port, separator, server_path }),
-            },
-        };
+        const remote_url = try remoteUrl(transport_def, allocator, "testrepo");
         defer allocator.free(remote_url);
 
         try client_repo.addRemote(io, allocator, .{ .name = "origin", .value = remote_url });
@@ -380,15 +345,7 @@ fn testPush(
         .file => false,
         .wire => |wire_kind| .ssh == wire_kind,
     };
-    // haxy generates a fresh host key on every run, so don't try to record
-    // it. accept the unknown host and skip writing to known_hosts. the key
-    // identity flag picks the ed25519 key created in runServer.
-    const ssh_cmd_maybe: ?[]const u8 = if (is_ssh) blk: {
-        const priv_key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "key" });
-        defer allocator.free(priv_key_path);
-
-        break :blk try std.fmt.allocPrint(allocator, "ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o IdentityFile=\"{s}\"", .{priv_key_path});
-    } else null;
+    const ssh_cmd_maybe = try sshCommand(is_ssh, allocator, cwd_path, temp_dir_name);
     defer if (ssh_cmd_maybe) |ssh_cmd| allocator.free(ssh_cmd);
 
     try client_repo.push(
@@ -483,37 +440,34 @@ fn testPush(
         } } },
     ));
 
-    // test denyNonFastForwards (only for wire transports, file transport bypasses receive-pack)
-    switch (transport_def) {
-        .file => {},
-        .wire => {
-            // set denyNonFastForwards on server
-            try server_repo.addConfig(io, allocator, .{ .name = "receive.denynonfastforwards", .value = "true" });
+    // test denyNonFastForwards
+    {
+        // set denyNonFastForwards on server
+        try server_repo.addConfig(io, allocator, .{ .name = "receive.denynonfastforwards", .value = "true" });
 
-            // save the server's current master ref
-            const oid_before_denied_push = (try server_repo.readRef(io, .{ .kind = .head, .name = "master" })).?;
+        // save the server's current master ref
+        const oid_before_denied_push = (try server_repo.readRef(io, .{ .kind = .head, .name = "master" })).?;
 
-            // force push should be rejected by server due to denyNonFastForwards
-            try client_repo.push(
-                io,
-                allocator,
-                "origin",
-                "master",
-                true,
-                .{ .wire = .{ .ssh = .{
-                    .command = ssh_cmd_maybe,
-                } } },
-            );
+        // force push should be rejected by server due to denyNonFastForwards
+        try client_repo.push(
+            io,
+            allocator,
+            "origin",
+            "master",
+            true,
+            .{ .wire = .{ .ssh = .{
+                .command = ssh_cmd_maybe,
+            } } },
+        );
 
-            // verify the server ref was not updated (push was denied)
-            {
-                const oid_master = (try server_repo.readRef(io, .{ .kind = .head, .name = "master" })).?;
-                try std.testing.expectEqualStrings(&oid_before_denied_push, &oid_master);
-            }
+        // verify the server ref was not updated (push was denied)
+        {
+            const oid_master = (try server_repo.readRef(io, .{ .kind = .head, .name = "master" })).?;
+            try std.testing.expectEqualStrings(&oid_before_denied_push, &oid_master);
+        }
 
-            // remove denyNonFastForwards from server
-            try server_repo.removeConfig(io, allocator, .{ .name = "receive.denynonfastforwards" });
-        },
+        // remove denyNonFastForwards from server
+        try server_repo.removeConfig(io, allocator, .{ .name = "receive.denynonfastforwards" });
     }
 
     // force push
@@ -574,9 +528,6 @@ fn testPushCreatesMissingRepo(
     const cwd_path = try std.process.currentPathAlloc(io, allocator);
     defer allocator.free(cwd_path);
 
-    const server_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "repos", "server" });
-    defer allocator.free(server_path);
-
     const client_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "client" });
     defer allocator.free(client_path);
 
@@ -593,20 +544,10 @@ fn testPushCreatesMissingRepo(
 
     _ = try client_repo.addTag(io, allocator, .{ .name = "1.0.0", .message = "hi" });
 
+    // the repo is not pre-registered; the push should mint the repo event under
+    // admin and create the repo on disk
     {
-        if (.windows == builtin.os.tag) {
-            std.mem.replaceScalar(u8, server_path, '\\', '/');
-        }
-        const separator = if (server_path[0] == '/') "" else "/";
-
-        const remote_url = switch (transport_def) {
-            .file => unreachable,
-            .wire => |wire_kind| switch (wire_kind) {
-                .http => try std.fmt.allocPrint(allocator, "http://localhost:{}/server", .{http_port}),
-                .raw => unreachable,
-                .ssh => try std.fmt.allocPrint(allocator, "ssh://localhost:{}{s}{s}", .{ ssh_port, separator, server_path }),
-            },
-        };
+        const remote_url = try remoteUrl(transport_def, allocator, "testrepo");
         defer allocator.free(remote_url);
 
         try client_repo.addRemote(io, allocator, .{ .name = "origin", .value = remote_url });
@@ -617,15 +558,7 @@ fn testPushCreatesMissingRepo(
         .file => false,
         .wire => |wire_kind| .ssh == wire_kind,
     };
-    // haxy generates a fresh host key on every run, so don't try to record
-    // it. accept the unknown host and skip writing to known_hosts. the key
-    // identity flag picks the ed25519 key created in runServer.
-    const ssh_cmd_maybe: ?[]const u8 = if (is_ssh) blk: {
-        const priv_key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "key" });
-        defer allocator.free(priv_key_path);
-
-        break :blk try std.fmt.allocPrint(allocator, "ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o IdentityFile=\"{s}\"", .{priv_key_path});
-    } else null;
+    const ssh_cmd_maybe = try sshCommand(is_ssh, allocator, cwd_path, temp_dir_name);
     defer if (ssh_cmd_maybe) |ssh_cmd| allocator.free(ssh_cmd);
 
     try client_repo.push(
@@ -638,6 +571,10 @@ fn testPushCreatesMissingRepo(
             .command = ssh_cmd_maybe,
         } } },
     );
+
+    // the push registered admin/server; resolve its on-disk directory
+    const server_path = (try repoOnDiskPath(io, allocator, temp_dir_name, "testrepo", false)).?;
+    defer allocator.free(server_path);
 
     var server_repo = try rp.Repo(.xit, .{ .is_test = true }).open(io, allocator, .{ .path = server_path });
     defer server_repo.deinit(io, allocator);
@@ -678,7 +615,8 @@ fn testClone(
     const temp_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name });
     defer allocator.free(temp_path);
 
-    const server_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "repos", "server" });
+    // register the repo under admin and locate its on-disk directory
+    const server_path = (try repoOnDiskPath(io, allocator, temp_dir_name, "testrepo", true)).?;
     defer allocator.free(server_path);
 
     // init server repo with default branch name as main
@@ -723,22 +661,7 @@ fn testClone(
     defer allocator.free(client_path);
 
     // get remote url
-    const remote_url = blk: {
-        if (.windows == builtin.os.tag) {
-            std.mem.replaceScalar(u8, server_path, '\\', '/');
-        }
-        const separator = if (server_path[0] == '/') "" else "/";
-
-        break :blk switch (transport_def) {
-            //.file => try std.fmt.allocPrint(allocator, "file://{s}{s}", .{ separator, server_path }),
-            .file => try std.fmt.allocPrint(allocator, "server", .{}), // relative file paths work too
-            .wire => |wire_kind| switch (wire_kind) {
-                .http => try std.fmt.allocPrint(allocator, "http://localhost:{}/server", .{http_port}),
-                .raw => try std.fmt.allocPrint(allocator, "git://localhost:{}/server", .{http_port}),
-                .ssh => try std.fmt.allocPrint(allocator, "ssh://localhost:{}{s}{s}", .{ ssh_port, separator, server_path }),
-            },
-        };
-    };
+    const remote_url = try remoteUrl(transport_def, allocator, "testrepo");
     defer allocator.free(remote_url);
 
     const is_ssh = switch (transport_def) {
@@ -749,7 +672,7 @@ fn testClone(
     if (shell_out_to_git) {
         const priv_key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "key" });
         defer allocator.free(priv_key_path);
-        const ssh_config_arg = try std.fmt.allocPrint(allocator, "core.sshCommand=ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o IdentityFile={s}", .{priv_key_path});
+        const ssh_config_arg = try std.fmt.allocPrint(allocator, "core.sshCommand=ssh -p {} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o IdentityFile={s}", .{ ssh_port, priv_key_path });
         defer allocator.free(ssh_config_arg);
 
         {
@@ -912,12 +835,7 @@ fn testClone(
             goodbye_txt.close(io);
         }
     } else {
-        const ssh_cmd_maybe: ?[]const u8 = if (is_ssh) blk: {
-            const priv_key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "key" });
-            defer allocator.free(priv_key_path);
-
-            break :blk try std.fmt.allocPrint(allocator, "ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o IdentityFile=\"{s}\"", .{priv_key_path});
-        } else null;
+        const ssh_cmd_maybe = try sshCommand(is_ssh, allocator, cwd_path, temp_dir_name);
         defer if (ssh_cmd_maybe) |ssh_cmd| allocator.free(ssh_cmd);
 
         // clone repo
@@ -971,7 +889,8 @@ fn testFetchLarge(
     const cwd_path = try std.process.currentPathAlloc(io, allocator);
     defer allocator.free(cwd_path);
 
-    const server_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "repos", "server" });
+    // register the repo under admin and locate its on-disk directory
+    const server_path = (try repoOnDiskPath(io, allocator, temp_dir_name, "testrepo", true)).?;
     defer allocator.free(server_path);
 
     var server_repo = try rp.Repo(.xit, .{ .is_test = true }).init(io, allocator, .{ .path = server_path });
@@ -1014,20 +933,7 @@ fn testFetchLarge(
 
     // add remote
     {
-        if (.windows == builtin.os.tag) {
-            std.mem.replaceScalar(u8, server_path, '\\', '/');
-        }
-        const separator = if (server_path[0] == '/') "" else "/";
-
-        const remote_url = switch (transport_def) {
-            //.file => try std.fmt.allocPrint(allocator, "file://{s}{s}", .{ separator, server_path }),
-            .file => try std.fmt.allocPrint(allocator, "../server", .{}), // relative file paths work too
-            .wire => |wire_kind| switch (wire_kind) {
-                .http => try std.fmt.allocPrint(allocator, "http://localhost:{}/server", .{http_port}),
-                .raw => try std.fmt.allocPrint(allocator, "git://localhost:{}/server", .{http_port}),
-                .ssh => try std.fmt.allocPrint(allocator, "ssh://localhost:{}{s}{s}", .{ ssh_port, separator, server_path }),
-            },
-        };
+        const remote_url = try remoteUrl(transport_def, allocator, "testrepo");
         defer allocator.free(remote_url);
 
         try client_repo.addRemote(io, allocator, .{ .name = "origin", .value = remote_url });
@@ -1042,7 +948,7 @@ fn testFetchLarge(
     if (shell_out_to_git) {
         const priv_key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "key" });
         defer allocator.free(priv_key_path);
-        const ssh_config_arg = try std.fmt.allocPrint(allocator, "core.sshCommand=ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o IdentityFile={s}", .{priv_key_path});
+        const ssh_config_arg = try std.fmt.allocPrint(allocator, "core.sshCommand=ssh -p {} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o IdentityFile={s}", .{ ssh_port, priv_key_path });
         defer allocator.free(ssh_config_arg);
 
         {
@@ -1105,15 +1011,7 @@ fn testFetchLarge(
             "+refs/heads/master:refs/heads/master",
         };
 
-        const ssh_cmd_maybe: ?[]const u8 = if (is_ssh) blk: {
-            const known_hosts_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "known_hosts" });
-            defer allocator.free(known_hosts_path);
-
-            const priv_key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "key" });
-            defer allocator.free(priv_key_path);
-
-            break :blk try std.fmt.allocPrint(allocator, "ssh -o UserKnownHostsFile=\"{s}\" -o IdentityFile=\"{s}\"", .{ known_hosts_path, priv_key_path });
-        } else null;
+        const ssh_cmd_maybe = try sshCommand(is_ssh, allocator, cwd_path, temp_dir_name);
         defer if (ssh_cmd_maybe) |ssh_cmd| allocator.free(ssh_cmd);
 
         try client_repo.fetch(
@@ -1163,20 +1061,16 @@ fn testPushLarge(
     const cwd_path = try std.process.currentPathAlloc(io, allocator);
     defer allocator.free(cwd_path);
 
-    const server_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "repos", "server" });
+    // register the repo under admin and locate its on-disk directory
+    const server_path = (try repoOnDiskPath(io, allocator, temp_dir_name, "testrepo", true)).?;
     defer allocator.free(server_path);
 
     var server_repo = try rp.Repo(.xit, .{ .is_test = true }).init(io, allocator, .{ .path = server_path });
     defer server_repo.deinit(io, allocator);
 
     // add config
-    switch (transport_def) {
-        .file => try server_repo.addConfig(io, allocator, .{ .name = "core.bare", .value = "true" }),
-        .wire => {
-            try server_repo.addConfig(io, allocator, .{ .name = "core.bare", .value = "false" });
-            try server_repo.addConfig(io, allocator, .{ .name = "receive.denycurrentbranch", .value = "updateinstead" });
-        },
-    }
+    try server_repo.addConfig(io, allocator, .{ .name = "core.bare", .value = "false" });
+    try server_repo.addConfig(io, allocator, .{ .name = "receive.denycurrentbranch", .value = "updateinstead" });
     try server_repo.addConfig(io, allocator, .{ .name = "http.receivepack", .value = "true" });
 
     // export server repo
@@ -1243,20 +1137,7 @@ fn testPushLarge(
 
     // add remote
     {
-        if (.windows == builtin.os.tag) {
-            std.mem.replaceScalar(u8, server_path, '\\', '/');
-        }
-        const separator = if (server_path[0] == '/') "" else "/";
-
-        const remote_url = switch (transport_def) {
-            //.file => try std.fmt.allocPrint(allocator, "file://{s}{s}", .{ separator, server_path }),
-            .file => try std.fmt.allocPrint(allocator, "../server", .{}), // relative file paths work too
-            .wire => |wire_kind| switch (wire_kind) {
-                .http => try std.fmt.allocPrint(allocator, "http://localhost:{}/server", .{http_port}),
-                .raw => try std.fmt.allocPrint(allocator, "git://localhost:{}/server", .{http_port}),
-                .ssh => try std.fmt.allocPrint(allocator, "ssh://localhost:{}{s}{s}", .{ ssh_port, separator, server_path }),
-            },
-        };
+        const remote_url = try remoteUrl(transport_def, allocator, "testrepo");
         defer allocator.free(remote_url);
 
         try client_repo.addRemote(io, allocator, .{ .name = "origin", .value = remote_url });
@@ -1271,7 +1152,7 @@ fn testPushLarge(
     if (shell_out_to_git) {
         const priv_key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "key" });
         defer allocator.free(priv_key_path);
-        const ssh_config_arg = try std.fmt.allocPrint(allocator, "core.sshCommand=ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o IdentityFile={s}", .{priv_key_path});
+        const ssh_config_arg = try std.fmt.allocPrint(allocator, "core.sshCommand=ssh -p {} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o IdentityFile={s}", .{ ssh_port, priv_key_path });
         defer allocator.free(ssh_config_arg);
 
         // shell out to git so it will send delta objects
@@ -1290,15 +1171,7 @@ fn testPushLarge(
             return error.GitCommandFailed;
         }
     } else {
-        const ssh_cmd_maybe: ?[]const u8 = if (is_ssh) blk: {
-            const known_hosts_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "known_hosts" });
-            defer allocator.free(known_hosts_path);
-
-            const priv_key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "key" });
-            defer allocator.free(priv_key_path);
-
-            break :blk try std.fmt.allocPrint(allocator, "ssh -o UserKnownHostsFile=\"{s}\" -o IdentityFile=\"{s}\"", .{ known_hosts_path, priv_key_path });
-        } else null;
+        const ssh_cmd_maybe = try sshCommand(is_ssh, allocator, cwd_path, temp_dir_name);
         defer if (ssh_cmd_maybe) |ssh_cmd| allocator.free(ssh_cmd);
 
         try client_repo.push(
@@ -1311,11 +1184,6 @@ fn testPushLarge(
                 .command = ssh_cmd_maybe,
             } } },
         );
-
-        if (transport_def == .file) {
-            // update the working dir
-            try server_repo.restore(io, allocator, ".");
-        }
     }
 
     // make sure push was successful
@@ -1323,7 +1191,7 @@ fn testPushLarge(
         const oid_master = (try server_repo.readRef(io, .{ .kind = .head, .name = "master" })).?;
         try std.testing.expectEqualStrings(&commit2, &oid_master);
 
-        const hello_txt = try temp_dir.openFile(io, "repos/server/hello.txt", .{});
+        const hello_txt = try server_repo.core.work_dir.openFile(io, "hello.txt", .{});
         defer hello_txt.close(io);
     }
 }
@@ -1344,4 +1212,91 @@ fn copyDir(io: std.Io, src_dir: std.Io.Dir, dest_dir: std.Io.Dir) !void {
             else => {},
         }
     }
+}
+
+// the dev SSH public key matching the private key written by runServer
+const admin_ssh_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKeIs8mJqigBZ5y84J4COgnAJJ5bHPKy+lM2SliMXbYm radar@roark";
+
+// create the admin event repo with a user holding the dev SSH public key
+fn setupAdmin(io: std.Io, allocator: std.mem.Allocator, data_dir_name: []const u8) !void {
+    const cwd_path = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(cwd_path);
+
+    const admin_repo_path = try std.fs.path.join(allocator, &.{ cwd_path, data_dir_name, "admin" });
+    defer allocator.free(admin_repo_path);
+
+    var repo = try rp.Repo(.xit, evt.admin_repo_opts).init(io, allocator, .{ .path = admin_repo_path });
+    defer repo.deinit(io, allocator);
+
+    try repo.addConfig(io, allocator, .{ .name = "user.name", .value = "haxy" });
+    try repo.addConfig(io, allocator, .{ .name = "user.email", .value = "admin@haxy" });
+
+    var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
+    const user_id = evt.EventWithId.randomId(prng.random());
+
+    var password_hash_buf: [evt.User.password_hash_max_len]u8 = undefined;
+    const password_hash = try evt.User.hashPassword("password", &password_hash_buf, io);
+
+    try evt.commitAndConsume(evt.admin_repo_opts, io, allocator, &repo, evt.events_ref, &[_]evt.EventWithId{.{
+        .id = std.fmt.bytesToHex(user_id, .lower),
+        .event = .{ .user = .{
+            .name = "admin",
+            .display_name = "Admin",
+            .email = "admin@example.test",
+            .password_hash = password_hash,
+            .ssh_keys = admin_ssh_key,
+        } },
+    }});
+}
+
+// resolve admin/<repo_name> to its on-disk directory under <data_dir>/repos via
+// the event store
+fn repoOnDiskPath(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    data_dir_name: []const u8,
+    repo_name: []const u8,
+    create: bool,
+) !?[]u8 {
+    const cwd_path = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(cwd_path);
+
+    const admin_repo_path = try std.fs.path.join(allocator, &.{ cwd_path, data_dir_name, "admin" });
+    defer allocator.free(admin_repo_path);
+
+    const event_id_hex = (try evt.resolveOrCreateRepo(io, allocator, admin_repo_path, "admin", repo_name, create)) orelse return null;
+    return try std.fs.path.join(allocator, &.{ cwd_path, data_dir_name, "repos", &event_id_hex });
+}
+
+// build the remote URL addressing admin/<repo_name> over the given transport
+fn remoteUrl(
+    comptime transport_def: net.TransportDefinition,
+    allocator: std.mem.Allocator,
+    repo_name: []const u8,
+) ![]u8 {
+    return switch (transport_def) {
+        .file => unreachable,
+        .wire => |wire_kind| switch (wire_kind) {
+            .http => try std.fmt.allocPrint(allocator, "http://localhost:{}/admin/{s}", .{ http_port, repo_name }),
+            .raw => try std.fmt.allocPrint(allocator, "git://localhost:{}/admin/{s}", .{ http_port, repo_name }),
+            .ssh => try std.fmt.allocPrint(allocator, "git@localhost:admin/{s}", .{repo_name}),
+        },
+    };
+}
+
+// the ssh command the haxy git client should invoke, or null when not using
+// ssh. haxy generates a fresh host key on every run, so accept the unknown host
+// and skip writing to known_hosts.
+fn sshCommand(
+    is_ssh: bool,
+    allocator: std.mem.Allocator,
+    cwd_path: []const u8,
+    temp_dir_name: []const u8,
+) !?[]u8 {
+    if (!is_ssh) return null;
+
+    const priv_key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "key" });
+    defer allocator.free(priv_key_path);
+
+    return try std.fmt.allocPrint(allocator, "ssh -p {} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o IdentityFile=\"{s}\"", .{ ssh_port, priv_key_path });
 }
