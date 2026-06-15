@@ -347,6 +347,11 @@ pub const Session = struct {
     // inputs. web/wasm form handling looks widgets up here by focus id.
     text_inputs: std.AutoHashMapUnmanaged(usize, *wgt.TextInput(Widget)) = .empty,
     nav_back: bool = false, // set by input (escape) to request the native TUI pop a page; see Nav
+    // a requested forward navigation. set this (via navigate) to move to a new
+    // page; Nav.sync builds it and then copies it into current_page, clearing
+    // this back to null. setting current_page directly only updates the url and
+    // does not navigate.
+    next_page: ?RoutablePage = null,
     is_terminal: bool = false, // true on remote SSH and local TUI
     quit_requested: bool = false,
 
@@ -436,11 +441,9 @@ pub const Session = struct {
         }
     }
 
-    // record the requested page. `route` may borrow a name slice from the
-    // current page's widget tree, which stays alive until Nav.sync runs (this
-    // frame); sync re-anchors the name into the new page's arena.
+    // request a forward navigation to `route`; Nav.sync builds it next
     fn navigate(self: *Session, route: RoutablePage) !void {
-        self.data.current_page = route;
+        self.next_page = route;
     }
 };
 
@@ -662,18 +665,19 @@ pub const Nav = struct {
             return;
         }
 
-        // forward navigation: a different parent page, or — within the repo page
-        // — a different files directory (each directory is its own page, while
-        // settings/auth tab switches stay in-page and are not pushed here).
-        const cp = session.data.current_page;
-        if (cp.parent() != self.route.parent() or RoutablePage.repoPageChanged(cp, self.route)) {
+        // forward navigation: navigate() set next_page to the page to move to (a
+        // cross-page link or tab change crossing pages)
+        if (session.next_page) |route| {
+            session.next_page = null;
             if (session.haxy_moment == null) return;
+            // the page we navigated to becomes the current page
+            session.data.current_page = route;
+
             const arena = try allocator.create(std.heap.ArenaAllocator);
             arena.* = std.heap.ArenaAllocator.init(allocator);
             errdefer freeArena(allocator, arena);
 
             session.page_arena = arena;
-            const route = session.data.current_page;
 
             const page = try arena.allocator().create(Page);
             page.* = try Page.init(arena, session, route);
