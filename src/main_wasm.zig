@@ -61,16 +61,16 @@ fn tick(min_height: u32, max_width: u32) !void {
         .max_size = .{ .width = max_width, .height = null },
     }, root_ptr.getFocus());
 
-    // mirror the page Header settled on into the browser URL. _pushState
-    // is idempotent on the JS side (it bails when pathname already matches)
-    // so the first tick after _init is a no-op even though we always send
-    // something through.
+    // mirror the page Header settled on into the browser URL. these are
+    // passive same-page changes, like moving down the commits list, so we
+    // replace the URL in place rather than pushing a history entry. real
+    // cross-page navigations go through _navigate.
     const current_page = session.data.current_page;
     const should_push = if (last_pushed_page_maybe) |lp| !lp.eql(current_page) else true;
     if (should_push) {
         last_pushed_page_maybe = current_page;
         const url = try current_page.urlAlloc(&page_arena);
-        _pushState(url.ptr, @intCast(url.len));
+        _replaceState(url.ptr, @intCast(url.len));
     }
 
     const html = try web.generateHtml(allocator, root_ptr);
@@ -175,7 +175,7 @@ fn navigate(arg: []const u8) void {
 extern fn _consoleLog(arg: [*]const u8, len: u32) void;
 extern fn _setHtml(arg: [*]const u8, len: u32) void;
 extern fn _setOverlay(arg: [*]const u8, len: u32) void;
-extern fn _pushState(arg: [*]const u8, len: u32) void;
+extern fn _replaceState(arg: [*]const u8, len: u32) void;
 extern fn _focusInput(focus_id: u32) void;
 extern fn _navigate(arg: [*]const u8, len: u32) void;
 extern fn _scrollToRect(x: u32, y: u32, width: u32, height: u32) void;

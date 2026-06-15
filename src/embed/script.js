@@ -63,14 +63,13 @@ const importObject = {
             // restore focus across the swap.
             grid.innerHTML = html;
         },
-        _pushState: function (ptr, len) {
+        _replaceState: function (ptr, len) {
             const url = readWasmString(ptr, len);
-            // idempotent: wasm tells us its current page every tick after a
-            // change, but we don't want to add history entries for a URL
-            // the browser is already on (e.g., right after the page loaded
-            // from a server-side render of the same route).
+            // passive same-page URL changes. replaceState changes the URL
+            // without adding a history entry, so the back button isn't
+            // cluttered with unnecessary entries.
             if (window.location.pathname !== url) {
-                history.pushState({}, "", url);
+                history.replaceState({}, "", url);
             }
         },
         _setOverlay: function (ptr, len) {
