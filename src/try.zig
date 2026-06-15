@@ -233,13 +233,39 @@ pub fn main(init: std.process.Init) !void {
             try repo_i.add(io, allocator, &.{ "README.md", "docs/dev/contribute.md" });
             _ = try repo_i.commit(io, allocator, .{ .message = "let there be light" });
 
-            // a batch of empty commits so the commits tab has more than one page
-            // to paginate through. stepped timestamps vary the date column.
+            // a batch of commits so the commits tab has more than one page to
+            // paginate through. each rewrites a few files with scattered line
+            // edits, so every commit is a multi-file diff with several separate
+            // hunks to look at. stepped timestamps vary the date column.
             const base_ts: u64 = 1_700_000_000; // 2023-11-14
+            const edit_files = [_][]const u8{ "src/alpha.txt", "src/beta.txt", "src/gamma.txt" };
             var c: usize = 0;
             while (c < 30) : (c += 1) {
-                const message = try std.fmt.allocPrint(arena.allocator(), "empty commit {d}", .{c + 1});
-                _ = try repo_i.commit(io, allocator, .{ .message = message, .allow_empty = true, .timestamp = base_ts + c * std.time.s_per_day });
+                {
+                    var repo_dir = try cwd.openDir(io, repo_path, .{});
+                    defer repo_dir.close(io);
+                    try repo_dir.createDirPath(io, "src");
+                    for (edit_files, 0..) |path, fi| {
+                        const file = try repo_dir.createFile(io, path, .{});
+                        defer file.close(io);
+                        var writer = std.Io.Writer.Allocating.init(allocator);
+                        defer writer.deinit();
+                        // every 8th line (offset per file) encodes the commit
+                        // number; the rest stay constant. the changed lines sit
+                        // far enough apart that diff renders each as its own hunk.
+                        for (0..40) |line| {
+                            if ((line + fi) % 8 == 0) {
+                                try writer.writer.print("line {d}: rev {d}\n", .{ line, c });
+                            } else {
+                                try writer.writer.print("line {d}\n", .{line});
+                            }
+                        }
+                        try file.writeStreamingAll(io, writer.written());
+                    }
+                }
+                try repo_i.add(io, allocator, &edit_files);
+                const message = try std.fmt.allocPrint(arena.allocator(), "scattered edits {d}", .{c + 1});
+                _ = try repo_i.commit(io, allocator, .{ .message = message, .timestamp = base_ts + c * std.time.s_per_day });
             }
         }
 
