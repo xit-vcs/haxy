@@ -315,7 +315,7 @@ pub const View = struct {
                     break :blk2 try wgt.Scroll(ui.Widget).init(allocator, .{ .box = diff_inner }, .{ .direction = .both });
                 };
                 errdefer diff_scroll.deinit(allocator);
-                var outer = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = .single, .direction = .vert });
+                var outer = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = .hidden, .direction = .vert });
                 errdefer outer.deinit(allocator);
                 try outer.children.put(allocator, diff_scroll.getFocus().id, .{ .widget = .{ .scroll = diff_scroll }, .rect = null, .min_size = null });
                 break :blk outer;
