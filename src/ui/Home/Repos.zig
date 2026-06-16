@@ -89,27 +89,22 @@ pub const View = struct {
         // a leading "previous" row off the first window, one row per repo, then
         // a trailing "next" row when more remain. each window row navigates to the
         // adjacent window (full reload on web, Nav rebuild on the TUI).
-        const lead: usize = if (data.after > 0) 1 else 0;
-        const trail: usize = if (data.next_after != null) 1 else 0;
-        const lines = try aa.alloc([]const u8, lead + data.repos.len + trail);
-        const links = try aa.alloc([]const u8, lead + data.repos.len + trail);
-        if (data.after > 0) {
-            lines[0] = "← previous";
-            links[0] = try std.fmt.allocPrint(aa, "a:/repos?after={d}", .{data.after -| page_size});
-        }
+        var items: std.ArrayList(ui.FlowBox.Item) = .empty;
+        if (data.after > 0)
+            try items.append(aa, .{ .text = "← previous", .link = try std.fmt.allocPrint(aa, "a:/repos?after={d}", .{data.after -| page_size}) });
         for (data.repos, 0..) |repo, i| {
-            lines[lead + i] = try std.fmt.allocPrint(aa, "{s} - {s}", .{ repo.name, repo.description });
             // clicking a repo opens its page; the "a:" prefix makes the web
             // renderer emit an <a href="/repo/alice/foo"> anchor. skip the link
             // when the owner is unknown so it isn't a dead route.
             const owner = data.owner_names[i];
-            links[lead + i] = if (owner.len > 0) try std.fmt.allocPrint(aa, "a:/repo/{s}/{s}", .{ owner, repo.name }) else "";
+            try items.append(aa, .{
+                .text = try std.fmt.allocPrint(aa, "{s} - {s}", .{ repo.name, repo.description }),
+                .link = if (owner.len > 0) try std.fmt.allocPrint(aa, "a:/repo/{s}/{s}", .{ owner, repo.name }) else "",
+            });
         }
-        if (data.next_after) |next_after| {
-            lines[lead + data.repos.len] = "next →";
-            links[lead + data.repos.len] = try std.fmt.allocPrint(aa, "a:/repos?after={d}", .{next_after});
-        }
-        try self.list.setItems(allocator, lines, links);
+        if (data.next_after) |next_after|
+            try items.append(aa, .{ .text = "next →", .link = try std.fmt.allocPrint(aa, "a:/repos?after={d}", .{next_after}) });
+        try self.list.setItems(allocator, items.items);
 
         return self;
     }

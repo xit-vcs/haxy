@@ -83,25 +83,19 @@ pub const View = struct {
         // a leading "previous" row off the first window, one row per user, then
         // a trailing "next" row when more remain. each window row navigates to the
         // adjacent window (full reload on web, Nav rebuild on the TUI).
-        const lead: usize = if (data.after > 0) 1 else 0;
-        const trail: usize = if (data.next_after != null) 1 else 0;
-        const lines = try aa.alloc([]const u8, lead + data.users.len + trail);
-        const links = try aa.alloc([]const u8, lead + data.users.len + trail);
-        if (data.after > 0) {
-            lines[0] = "← previous";
-            links[0] = try std.fmt.allocPrint(aa, "a:/users?after={d}", .{data.after -| page_size});
-        }
-        for (data.users, 0..) |user, i| {
-            lines[lead + i] = try std.fmt.allocPrint(aa, "{s} ({s})", .{ user.name, user.display_name });
+        var items: std.ArrayList(ui.FlowBox.Item) = .empty;
+        if (data.after > 0)
+            try items.append(aa, .{ .text = "← previous", .link = try std.fmt.allocPrint(aa, "a:/users?after={d}", .{data.after -| page_size}) });
+        for (data.users) |user|
             // clicking a user opens their page; the "a:" prefix makes the web
             // renderer emit an <a href="/user/foo"> anchor.
-            links[lead + i] = try std.fmt.allocPrint(aa, "a:/user/{s}", .{user.name});
-        }
-        if (data.next_after) |next_after| {
-            lines[lead + data.users.len] = "next →";
-            links[lead + data.users.len] = try std.fmt.allocPrint(aa, "a:/users?after={d}", .{next_after});
-        }
-        try self.list.setItems(allocator, lines, links);
+            try items.append(aa, .{
+                .text = try std.fmt.allocPrint(aa, "{s} ({s})", .{ user.name, user.display_name }),
+                .link = try std.fmt.allocPrint(aa, "a:/user/{s}", .{user.name}),
+            });
+        if (data.next_after) |next_after|
+            try items.append(aa, .{ .text = "next →", .link = try std.fmt.allocPrint(aa, "a:/users?after={d}", .{next_after}) });
+        try self.list.setItems(allocator, items.items);
 
         return self;
     }

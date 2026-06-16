@@ -915,12 +915,14 @@ pub const FlowBox = struct {
         self.arena.deinit();
     }
 
-    // `links`, when given, is parallel to `items`: a non-empty entry sets that
-    // item's focus kind to `.{ .custom = link }` (e.g. "a:/user/foo"), which the
-    // web renderer turns into an anchor. pass null when items aren't links.
+    // one flow item: its display text plus an optional link. a non-empty `link`
+    // sets the item's focus kind such as `.{ .custom = "a:/user/foo" }`, which
+    // the web renderer turns into an anchor.
+    pub const Item = struct { text: []const u8, link: []const u8 = "" };
+
     // both the item text and the link are copied into the arena, so the caller's
     // slices needn't outlive this call.
-    pub fn setItems(self: *FlowBox, allocator: std.mem.Allocator, items: []const []const u8, links: ?[]const []const u8) !void {
+    pub fn setItems(self: *FlowBox, allocator: std.mem.Allocator, items: []const Item) !void {
         for (self.text_boxes.items) |*tb| tb.deinit(allocator);
         self.text_boxes.clearAndFree(allocator);
 
@@ -932,17 +934,15 @@ pub const FlowBox = struct {
         self.focus.clear();
         self.focus.child_id = null;
 
-        for (items, 0..) |item, i| {
-            const line = try aa.dupe(u8, item);
+        for (items) |item| {
+            const line = try aa.dupe(u8, item.text);
 
             var text_box = try wgt.TextBox(Widget).init(allocator, line, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .word });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().focusable = true;
 
-            if (links) |link_items| {
-                if (i < link_items.len and link_items[i].len > 0) {
-                    text_box.getFocus().kind = .{ .custom = try aa.dupe(u8, link_items[i]) };
-                }
+            if (item.link.len > 0) {
+                text_box.getFocus().kind = .{ .custom = try aa.dupe(u8, item.link) };
             }
 
             try self.text_boxes.append(allocator, text_box);
@@ -1054,10 +1054,10 @@ pub const FlowBox = struct {
             self.scroll.deinit(allocator);
         }
 
-        pub fn setItems(self: *Scroll, allocator: std.mem.Allocator, items: []const []const u8, links: ?[]const []const u8) !void {
+        pub fn setItems(self: *Scroll, allocator: std.mem.Allocator, items: []const Item) !void {
             self.scroll.x = 0;
             self.scroll.y = 0;
-            try self.inner().setItems(allocator, items, links);
+            try self.inner().setItems(allocator, items);
         }
 
         pub fn build(self: *Scroll, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {

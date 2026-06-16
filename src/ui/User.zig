@@ -114,15 +114,15 @@ pub const View = struct {
                 defer arena.deinit();
                 const aa = arena.allocator();
 
-                const lines = try aa.alloc([]const u8, data.repos.len);
-                const links = try aa.alloc([]const u8, data.repos.len);
-                for (data.repos, 0..) |repo, i| {
-                    lines[i] = try std.fmt.allocPrint(aa, "{s} - {s}", .{ repo.name, repo.description });
+                var items: std.ArrayList(ui.FlowBox.Item) = .empty;
+                for (data.repos) |repo|
                     // clicking a repo opens its page; the "a:" prefix makes the web
                     // renderer emit an <a href="/repo/alice/foo"> anchor.
-                    links[i] = try std.fmt.allocPrint(aa, "a:/repo/{s}/{s}", .{ data.user.name, repo.name });
-                }
-                try list.setItems(allocator, lines, links);
+                    try items.append(aa, .{
+                        .text = try std.fmt.allocPrint(aa, "{s} - {s}", .{ repo.name, repo.description }),
+                        .link = try std.fmt.allocPrint(aa, "a:/repo/{s}/{s}", .{ data.user.name, repo.name }),
+                    });
+                try list.setItems(allocator, items.items);
 
                 try stack.children.put(allocator, list.getFocus().id, .{ .flow_box_scroll = list });
             }
