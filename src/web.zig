@@ -539,7 +539,7 @@ fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: 
 
     // emit this panel's grid as rows of text, coalescing adjacent cells that
     // share a focus id and colors into one tag (a clickable span, a link, or a
-    // plain colored span). cells covered by a child scroll are left blank.
+    // plain colored span). cells under a child scroll keep only their background.
     for (0..grid.size.height) |y| {
         var cur_id: ?usize = null;
         var cur_fg: ?Grid.Color = null;
@@ -547,8 +547,11 @@ fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: 
         var open_tag: ?CellTag = null;
         var first = true;
         for (0..grid.size.width) |x| {
-            // a cell covered by a child scroll's viewport is drawn by that
-            // scroll's own div; leave a blank here so the layout stays aligned.
+            const cell = grid.cells.items[try grid.cells.at(.{ y, x })];
+            // a cell covered by a child scroll's viewport is drawn by that scroll's
+            // own div, so blank its glyph and make it non-clickable here — but keep
+            // its background, so the backdrop still shows through the scroll's
+            // transparent div instead of a bare hole.
             const covered_by_scroll = blk: {
                 for (direct.items) |id| {
                     const r = (focus.children.get(id) orelse continue).rect;
@@ -556,19 +559,10 @@ fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: 
                 }
                 break :blk false;
             };
-            if (covered_by_scroll) {
-                if (open_tag) |t| try output.appendSlice(allocator, t.closeTag());
-                open_tag = null;
-                cur_id = null;
-                first = true;
-                try output.append(allocator, ' ');
-                continue;
-            }
-
-            const cell = grid.cells.items[try grid.cells.at(.{ y, x })];
-            // the focusable cell at (x, y) among this panel's own focusables (skipping any
-            // that belong to a child scroll, whose cells are drawn in their own panel).
-            const cell_id = blk: {
+            // the focusable cell at (x, y) among this panel's own focusables (skipping
+            // any that belong to a child scroll, whose cells are drawn in their own
+            // panel); none for a covered cell.
+            const cell_id = if (covered_by_scroll) null else blk: {
                 var iter = focus.children.iterator();
                 while (iter.next()) |entry| {
                     const child = entry.value_ptr.*;
@@ -581,7 +575,7 @@ fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: 
                 }
                 break :blk null;
             };
-            const fg = cell.style.fg;
+            const fg = if (covered_by_scroll) null else cell.style.fg;
             const bg = cell.style.bg;
 
             if (first or cell_id != cur_id or !colorEql(fg, cur_fg) or !colorEql(bg, cur_bg)) {
@@ -610,7 +604,7 @@ fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: 
                 first = false;
             }
 
-            try appendEscapedHtml(allocator, output, cell.rune orelse " ");
+            try appendEscapedHtml(allocator, output, if (covered_by_scroll) " " else (cell.rune orelse " "));
         }
         if (open_tag) |t| try output.appendSlice(allocator, t.closeTag());
         try output.append(allocator, '\n');

@@ -426,7 +426,7 @@ pub const Session = struct {
         login_failure: ?Home.Auth.Login.Failure = null,
         current_page: RoutablePage = .default,
         // whether to render the ANSI art backdrop
-        enable_ansi: bool = false,
+        enable_ansi: bool = true,
     };
 
     // a user-initiated state change. widgets enqueue these on the session during
@@ -1599,31 +1599,16 @@ pub const AnsiBackground = struct {
         return true;
     }
 
-    // a single representative color for an art cell
-    fn artCellColor(style: Grid.Style) ?Grid.Color {
-        const f = style.fg orelse return style.bg;
-        const b = style.bg orelse return f;
-        return .{
-            .r = @intCast((@as(u16, f.r) + b.r) / 2),
-            .g = @intCast((@as(u16, f.g) + b.g) / 2),
-            .b = @intCast((@as(u16, f.b) + b.b) / 2),
-        };
-    }
-
-    // behind a visible glyph the art color is dimmed to this fraction of its
-    // brightness so light terminal text stays legible on top of it
-    const glyph_bg_brightness = 45; // percent
-
-    // a glyph sitting over the art also gets its foreground pinned to this color
-    // (unless it set its own), so the text stays legible
-    const glyph_fg_over_art = Grid.Color{ .r = 235, .g = 235, .b = 235 };
+    // the art is dimmed to this fraction of its brightness so foreground text
+    // stays legible over it
+    const art_brightness = 45; // percent
 
     fn dimColor(color: ?Grid.Color) ?Grid.Color {
         const c = color orelse return null;
         return .{
-            .r = @intCast(@as(u16, c.r) * glyph_bg_brightness / 100),
-            .g = @intCast(@as(u16, c.g) * glyph_bg_brightness / 100),
-            .b = @intCast(@as(u16, c.b) * glyph_bg_brightness / 100),
+            .r = @intCast(@as(u16, c.r) * art_brightness / 100),
+            .g = @intCast(@as(u16, c.g) * art_brightness / 100),
+            .b = @intCast(@as(u16, c.b) * art_brightness / 100),
         };
     }
 
@@ -1665,13 +1650,17 @@ pub const AnsiBackground = struct {
                     if (src.rune == null) continue;
                     const idx = out.cells.at(.{ y, anchor_x + x }) catch continue;
                     const dst = &out.cells.items[idx];
+                    // composite the dimmed art behind every cell so it shows
+                    // through the whole UI: a blank cell becomes the art, while a
+                    // cell with a glyph keeps the glyph but takes the dimmed art as
+                    // its background (replacing whatever background it had, which
+                    // would otherwise obscure the art).
                     if (cellIsBlank(dst.*)) {
                         dst.* = src;
-                        dst.style.fg = sgrSafe(dst.style.fg);
-                        dst.style.bg = sgrSafe(dst.style.bg);
-                    } else if (dst.style.bg == null) {
-                        dst.style.bg = sgrSafe(dimColor(artCellColor(src.style)));
-                        if (dst.style.fg == null) dst.style.fg = glyph_fg_over_art;
+                        dst.style.fg = sgrSafe(dimColor(dst.style.fg));
+                        dst.style.bg = sgrSafe(dimColor(dst.style.bg));
+                    } else {
+                        dst.style.bg = sgrSafe(dimColor(src.style.bg orelse src.style.fg));
                     }
                 }
             }
