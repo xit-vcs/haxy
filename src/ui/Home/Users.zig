@@ -10,14 +10,11 @@ const inp = xitui.input;
 const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
 
-// how many users a page shows before the "load more" row appears.
-pub const page_size = 20;
+pub const page_size = 20; // how many users one window shows
 
 users: []const evt.User.Safe,
-// the window start this page was built with, mirrored into the url.
-after: usize,
-// the `after` for the "load more" link, or null when this is the last page.
-next_after: ?usize,
+after: usize, // the window start this page was built with, mirrored into the url
+next_after: ?usize, // the `after` for the "next" row, or null when this is the last window
 
 const Self = @This();
 
@@ -83,21 +80,26 @@ pub const View = struct {
         defer arena.deinit();
         const aa = arena.allocator();
 
-        // one row per user, plus a trailing "load more" row when more remain.
-        const extra: usize = if (data.next_after != null) 1 else 0;
-        const lines = try aa.alloc([]const u8, data.users.len + extra);
-        const links = try aa.alloc([]const u8, data.users.len + extra);
+        // a leading "previous" row off the first window, one row per user, then
+        // a trailing "next" row when more remain. each window row navigates to the
+        // adjacent window (full reload on web, Nav rebuild on the TUI).
+        const lead: usize = if (data.after > 0) 1 else 0;
+        const trail: usize = if (data.next_after != null) 1 else 0;
+        const lines = try aa.alloc([]const u8, lead + data.users.len + trail);
+        const links = try aa.alloc([]const u8, lead + data.users.len + trail);
+        if (data.after > 0) {
+            lines[0] = "← previous";
+            links[0] = try std.fmt.allocPrint(aa, "a:/users?after={d}", .{data.after -| page_size});
+        }
         for (data.users, 0..) |user, i| {
-            lines[i] = try std.fmt.allocPrint(aa, "{s} ({s})", .{ user.name, user.display_name });
+            lines[lead + i] = try std.fmt.allocPrint(aa, "{s} ({s})", .{ user.name, user.display_name });
             // clicking a user opens their page; the "a:" prefix makes the web
             // renderer emit an <a href="/user/foo"> anchor.
-            links[i] = try std.fmt.allocPrint(aa, "a:/user/{s}", .{user.name});
+            links[lead + i] = try std.fmt.allocPrint(aa, "a:/user/{s}", .{user.name});
         }
         if (data.next_after) |next_after| {
-            // the load-more row navigates to the next window (full reload on web,
-            // Nav rebuild on the TUI), exactly like the commits "load more".
-            lines[data.users.len] = "load more";
-            links[data.users.len] = try std.fmt.allocPrint(aa, "a:/users?after={d}", .{next_after});
+            lines[lead + data.users.len] = "next →";
+            links[lead + data.users.len] = try std.fmt.allocPrint(aa, "a:/users?after={d}", .{next_after});
         }
         try self.list.setItems(allocator, lines, links);
 

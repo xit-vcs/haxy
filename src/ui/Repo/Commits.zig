@@ -14,7 +14,8 @@ const Focus = xitui.focus.Focus;
 
 // how many commits a page shows before a "next" link appears.
 const page_size = 20;
-// how many diff hunks a commit shows per page; "load more" reveals another page.
+// how many diff hunks one window of a commit's diff shows; "next"/"previous"
+// move to the adjacent window.
 const diff_page = 10;
 
 pub const Hunk = struct {
@@ -29,9 +30,10 @@ pub const Commit = struct {
     date: []const u8, // "YYYY-MM-DD"
     message: []const u8, // first line only
     hunks: []const Hunk,
-    // how many hunks `hunks` covers; the resume cursor for "load more".
-    shown_hunks: usize,
-    // true when the diff was truncated at the budget and more hunks remain.
+    // the hunk index this window starts at (0 = the first window).
+    window_start: usize,
+    // whether hunks exist before this window / after it.
+    has_prev: bool,
     has_more: bool,
 };
 
@@ -49,8 +51,8 @@ pub fn init(
     event_id: *const [evt.event_id_size]u8,
     identity: []const u8,
     start_oid: []const u8,
-    // how many hunks the selected commit (the first one, == start_oid) shows;
-    // 0 means the default page. raised by "load more" via the url.
+    // the hunk index the selected commit's (the first one, == start_oid) diff
+    // window starts at; 0 is the first window. moved by "next"/"previous".
     after: usize,
 ) !Self {
     const aa = arena.allocator();
@@ -105,7 +107,8 @@ pub fn init(
                 .date = try formatDate(aa, md.timestamp),
                 .message = try aa.dupe(u8, firstLine(md.message orelse "")),
                 .hunks = &.{},
-                .shown_hunks = 0,
+                .window_start = 0,
+                .has_prev = false,
                 .has_more = false,
             };
             count += 1;
@@ -117,13 +120,14 @@ pub fn init(
     // renders from the snapshot), so gate it out of the wasm build.
     if (!builtin.cpu.arch.isWasm()) {
         for (buf[0..count], oids[0..count], 0..) |*commit, oid, i| {
-            // the selected commit (the first, == start_oid) shows `after` hunks
-            // when the url asks; the rest show one default page.
-            const max_hunks = if (i == 0 and after > 0) after else diff_page;
-            const rendered = renderCommitDiff(io, gpa, aa, &repo, oid, max_hunks) catch
-                RenderedDiff{ .hunks = &.{}, .shown_hunks = 0, .has_more = false };
+            // the selected commit (the first, == start_oid) shows the window the
+            // url asks for; the rest show their first window.
+            const start = if (i == 0) after else 0;
+            const rendered = renderCommitDiff(io, gpa, aa, &repo, oid, start, diff_page) catch
+                RenderedDiff{ .hunks = &.{}, .has_prev = false, .has_more = false };
             commit.hunks = rendered.hunks;
-            commit.shown_hunks = rendered.shown_hunks;
+            commit.window_start = start;
+            commit.has_prev = rendered.has_prev;
             commit.has_more = rendered.has_more;
         }
     }
@@ -137,25 +141,26 @@ pub fn init(
 
 const RenderedDiff = struct {
     hunks: []const Hunk,
-    shown_hunks: usize,
+    has_prev: bool,
     has_more: bool,
 };
 
-// render a commit's diff against its first parent into `arena`-owned hunks,
-// emitting at most `max_hunks` hunks (has_more is set when more remain)
+// render the window [start, start+len) of a commit's diff against its first
+// parent into `arena`-owned hunks. has_prev/has_more flag adjacent windows.
 fn renderCommitDiff(
     io: std.Io,
     gpa: std.mem.Allocator,
     arena: std.mem.Allocator,
     repo: *rp.Repo(.xit, .{}),
     oid: [xit.hash.hexLen(.sha1)]u8,
-    max_hunks: usize,
+    start: usize,
+    len: usize,
 ) !RenderedDiff {
-    const empty = RenderedDiff{ .hunks = &.{}, .shown_hunks = 0, .has_more = false };
+    const empty = RenderedDiff{ .hunks = &.{}, .has_prev = false, .has_more = false };
 
     // load the commit so we can diff it against its first parent.
-    var start = [_][xit.hash.hexLen(.sha1)]u8{oid};
-    var commit_iter = repo.log(io, gpa, start[0..1]) catch return empty;
+    var start_oids = [_][xit.hash.hexLen(.sha1)]u8{oid};
+    var commit_iter = repo.log(io, gpa, start_oids[0..1]) catch return empty;
     defer commit_iter.deinit();
     const commit_object = (commit_iter.next(gpa) catch return empty) orelse return empty;
     defer commit_object.deinit();
@@ -168,6 +173,7 @@ fn renderCommitDiff(
     var file_iter = repo.filePairs(io, gpa, .{ .tree = .{ .tree_diff = &tree_diff } }) catch return empty;
 
     var hunks: std.ArrayList(Hunk) = .empty;
+    var index: usize = 0; // running hunk index across all files
     var has_more = false;
 
     file_loop: while (file_iter.next() catch null) |pair_val| {
@@ -183,7 +189,10 @@ fn renderCommitDiff(
             var hunk = hunk_val;
             defer hunk.deinit(gpa);
 
-            if (hunks.items.len >= max_hunks) {
+            const i = index;
+            index += 1;
+            if (i < start) continue; // before this window
+            if (hunks.items.len >= len) {
                 has_more = true;
                 break :file_loop;
             }
@@ -197,8 +206,7 @@ fn renderCommitDiff(
         }
     }
 
-    const shown = hunks.items.len;
-    return .{ .hunks = try hunks.toOwnedSlice(arena), .shown_hunks = shown, .has_more = has_more };
+    return .{ .hunks = try hunks.toOwnedSlice(arena), .has_prev = start > 0, .has_more = has_more };
 }
 
 // append a hunk's header and its edit lines, each prefixed with a right-aligned
@@ -299,7 +307,7 @@ pub const View = struct {
                     try addRow(allocator, &list_box, commit.message, "");
                 }
                 if (data.next_start) |next| {
-                    try addRow(allocator, &list_box, "next", try commitsLink(session.page_arena, data.identity, next, 0));
+                    try addRow(allocator, &list_box, "next →", try commitsLink(session.page_arena, data.identity, next, 0));
                 }
                 if (list_box.children.count() > 0) list_box.getFocus().child_id = list_box.children.keys()[0];
                 break :blk try wgt.Scroll(ui.Widget).init(allocator, .{ .box = list_box }, .{ .direction = .vert });
@@ -366,12 +374,12 @@ pub const View = struct {
         try box.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
     }
 
-    // the focusable "load more" row. it's a navigation link to this commit's
-    // route with a larger `after`, so activating it (the host follows the "a:"
-    // link) reloads the page showing more hunks — the same on the TUI and web.
-    fn addLoadMore(self: *View, allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), oid: []const u8, next_after: usize) !void {
-        const link = try commitsLink(self.session.page_arena, self.data.identity, oid, next_after);
-        var tb = try wgt.TextBox(ui.Widget).init(allocator, "load more", .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .none });
+    // a focusable window-navigation row ("previous"/"next"). it's a link to this
+    // commit's route at `target_after`, so activating it (the host follows the
+    // "a:" link) reloads the page on the adjacent window — same on TUI and web.
+    fn addNavLink(self: *View, allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8, oid: []const u8, target_after: usize) !void {
+        const link = try commitsLink(self.session.page_arena, self.data.identity, oid, target_after);
+        var tb = try wgt.TextBox(ui.Widget).init(allocator, label, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .none });
         errdefer tb.deinit(allocator);
         tb.getFocus().focusable = true;
         tb.getFocus().kind = .{ .custom = link };
@@ -428,8 +436,9 @@ pub const View = struct {
         if (root_focus.grandchild_id) |g| {
             if (self.box.getFocus().children.contains(g)) {
                 if (self.selectedCommitIndex()) |sel| {
-                    // selection moves reset the diff expansion (after = 0).
-                    if (ui.RoutablePage.repoCommitsRoute(self.data.identity, self.data.commits[sel].oid, 0)) |route|
+                    // mirror the commit's current diff window so the url stays
+                    // linkable (0 for any commit but the windowed start one).
+                    if (ui.RoutablePage.repoCommitsRoute(self.data.identity, self.data.commits[sel].oid, self.data.commits[sel].window_start)) |route|
                         self.session.data.current_page = route;
                 }
             }
@@ -499,12 +508,14 @@ pub const View = struct {
         inner.children.clearAndFree(allocator);
         inner.getFocus().child_id = null;
 
+        // a "previous" row at the top and a "next" row at the bottom reload the
+        // page on the adjacent diff window.
+        if (commit.has_prev) try self.addNavLink(allocator, inner, "← previous", commit.oid, commit.window_start -| diff_page);
         for (commit.hunks) |hunk| {
             if (hunk.path) |path| try self.addPathBox(allocator, inner, path);
             try self.addHunkBox(allocator, inner, hunk.lines);
         }
-        // the load-more link reloads showing one more page of this commit's hunks.
-        if (commit.has_more) try self.addLoadMore(allocator, inner, commit.oid, commit.shown_hunks + diff_page);
+        if (commit.has_more) try self.addNavLink(allocator, inner, "next →", commit.oid, commit.window_start + diff_page);
 
         const sc = self.diffScroll();
         sc.x = 0;
@@ -556,8 +567,8 @@ pub const View = struct {
             .arrow_down => try self.moveDiff(root_focus, 1),
             .page_up => try self.pageDiff(root_focus, -page_rows),
             .page_down => try self.pageDiff(root_focus, page_rows),
-            // Enter / a click on the "load more" row follow its "a:" link in the
-            // host (it reloads the page with more hunks), so they don't reach here.
+            // Enter / a click on a "previous"/"next" row follow its "a:" link in
+            // the host (it reloads the adjacent window), so they don't reach here.
             .mouse => |mouse| switch (mouse.action) {
                 .scroll => |dir| try self.moveDiff(root_focus, if (dir == .up) -1 else 1),
                 else => {},

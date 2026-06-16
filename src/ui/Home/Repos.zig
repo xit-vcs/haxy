@@ -10,15 +10,12 @@ const inp = xitui.input;
 const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
 
-// how many repos a page shows before the "load more" row appears.
-pub const page_size = 20;
+pub const page_size = 20; // how many repos one window shows
 
 repos: []const evt.Repo,
 owner_names: []const []const u8,
-// the window start this page was built with, mirrored into the url.
-after: usize,
-// the `after` for the "load more" link, or null when this is the last page.
-next_after: ?usize,
+after: usize, // the window start this page was built with, mirrored into the url
+next_after: ?usize, // the `after` for the "next" row, or null when this is the last window
 
 const Self = @This();
 
@@ -89,23 +86,28 @@ pub const View = struct {
         defer arena.deinit();
         const aa = arena.allocator();
 
-        // one row per repo, plus a trailing "load more" row when more remain.
-        const extra: usize = if (data.next_after != null) 1 else 0;
-        const lines = try aa.alloc([]const u8, data.repos.len + extra);
-        const links = try aa.alloc([]const u8, data.repos.len + extra);
+        // a leading "previous" row off the first window, one row per repo, then
+        // a trailing "next" row when more remain. each window row navigates to the
+        // adjacent window (full reload on web, Nav rebuild on the TUI).
+        const lead: usize = if (data.after > 0) 1 else 0;
+        const trail: usize = if (data.next_after != null) 1 else 0;
+        const lines = try aa.alloc([]const u8, lead + data.repos.len + trail);
+        const links = try aa.alloc([]const u8, lead + data.repos.len + trail);
+        if (data.after > 0) {
+            lines[0] = "← previous";
+            links[0] = try std.fmt.allocPrint(aa, "a:/repos?after={d}", .{data.after -| page_size});
+        }
         for (data.repos, 0..) |repo, i| {
-            lines[i] = try std.fmt.allocPrint(aa, "{s} - {s}", .{ repo.name, repo.description });
+            lines[lead + i] = try std.fmt.allocPrint(aa, "{s} - {s}", .{ repo.name, repo.description });
             // clicking a repo opens its page; the "a:" prefix makes the web
             // renderer emit an <a href="/repo/alice/foo"> anchor. skip the link
             // when the owner is unknown so it isn't a dead route.
             const owner = data.owner_names[i];
-            links[i] = if (owner.len > 0) try std.fmt.allocPrint(aa, "a:/repo/{s}/{s}", .{ owner, repo.name }) else "";
+            links[lead + i] = if (owner.len > 0) try std.fmt.allocPrint(aa, "a:/repo/{s}/{s}", .{ owner, repo.name }) else "";
         }
         if (data.next_after) |next_after| {
-            // the load-more row navigates to the next window (full reload on web,
-            // Nav rebuild on the TUI), exactly like the commits "load more".
-            lines[data.repos.len] = "load more";
-            links[data.repos.len] = try std.fmt.allocPrint(aa, "a:/repos?after={d}", .{next_after});
+            lines[lead + data.repos.len] = "next →";
+            links[lead + data.repos.len] = try std.fmt.allocPrint(aa, "a:/repos?after={d}", .{next_after});
         }
         try self.list.setItems(allocator, lines, links);
 
