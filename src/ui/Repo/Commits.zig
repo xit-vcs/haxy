@@ -310,7 +310,7 @@ pub const View = struct {
                     try addRow(allocator, &list_box, "next →", try commitsLink(session.page_arena, data.identity, next, 0));
                 }
                 if (list_box.children.count() > 0) list_box.getFocus().child_id = list_box.children.keys()[0];
-                break :blk try wgt.Scroll(ui.Widget).init(allocator, .{ .box = list_box }, .{ .direction = .vert });
+                break :blk try wgt.Scroll(ui.Widget).init(allocator, .{ .box = list_box }, .{ .direction = .vert, .web_native = !session.is_terminal });
             };
             errdefer list_scroll.deinit(allocator);
             try box.children.put(allocator, list_scroll.getFocus().id, .{ .widget = .{ .scroll = list_scroll }, .rect = null, .min_size = .{ .width = list_max_width, .height = null }, .max_size = .{ .width = list_max_width, .height = null } });
@@ -322,7 +322,7 @@ pub const View = struct {
                 var diff_scroll = blk2: {
                     var diff_inner = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert });
                     errdefer diff_inner.deinit(allocator);
-                    break :blk2 try wgt.Scroll(ui.Widget).init(allocator, .{ .box = diff_inner }, .{ .direction = .both });
+                    break :blk2 try wgt.Scroll(ui.Widget).init(allocator, .{ .box = diff_inner }, .{ .direction = .both, .web_native = !session.is_terminal });
                 };
                 errdefer diff_scroll.deinit(allocator);
                 var outer = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = .hidden, .direction = .vert });
@@ -472,13 +472,10 @@ pub const View = struct {
         const both_panes_fit = if (constraint.max_size.width) |w| w >= list_max_width + diff_min_width else true;
         self.box.children.values()[list_index].max_size = if (both_panes_fit) .{ .width = list_max_width, .height = null } else null;
 
-        // web browsers provide scrolling, so let every widget grow to
-        // its natural size instead of clipping inside the diff scroll
-        const build_constraint = if (self.session.is_terminal) constraint else layout.Constraint{
-            .min_size = .{ .width = null, .height = null },
-            .max_size = .{ .width = null, .height = null },
-        };
-        try self.box.build(allocator, build_constraint, root_focus);
+        // the web bounds the layout to the browser viewport like the terminal;
+        // each Scroll's web-native mode hands its full content to a real
+        // scrollable element, so we no longer build unbounded here.
+        try self.box.build(allocator, constraint, root_focus);
 
         // if the diff pane is selected but focus is still elsewhere in this view,
         // the pane was too narrow to lay out when focus crossed over. it's laid
@@ -517,9 +514,13 @@ pub const View = struct {
         }
         if (commit.has_more) try self.addNavLink(allocator, inner, "next →", commit.oid, commit.window_start + diff_page);
 
+        // reset the scroll to the top for the newly-shown commit: directly on the
+        // terminal (the wasm offset), and via a version bump on the web (so the
+        // renderer's scroll id changes and JS drops the preserved position).
         const sc = self.diffScroll();
         sc.x = 0;
         sc.y = 0;
+        sc.getFocus().version +%= 1;
     }
 
     pub fn input(self: *View, allocator: std.mem.Allocator, key: inp.Key, root_focus: *Focus) !void {
@@ -536,7 +537,13 @@ pub const View = struct {
         // jump a fixed amount. right/Enter cross into the diff pane. Enter/clicks
         // on the "next" row become navigation in the host before reaching here.
         switch (key) {
-            .arrow_right, .enter => try self.focusDiff(root_focus),
+            .enter => if (self.selectedCommitIndex() != null)
+                try self.focusDiff(root_focus)
+            else if (self.data.next_start) |next| {
+                if (ui.RoutablePage.repoCommitsRoute(self.data.identity, next, 0)) |route|
+                    try self.session.navigate(route);
+            },
+            .arrow_right => try self.focusDiff(root_focus),
             .arrow_down => try self.moveSelection(root_focus, 1),
             .arrow_up => try self.moveSelection(root_focus, -1),
             .page_down => try self.moveSelection(root_focus, page_rows),
@@ -577,12 +584,11 @@ pub const View = struct {
         }
     }
 
-    // move focus one hunk in `dir` (+1 down, -1 up). if the adjacent hunk is
-    // already visible, just move focus to it — don't scroll. only when it isn't
-    // visible yet do we scroll one line toward it (and focus it once it appears),
-    // so scrolling never skips past an on-screen hunk. when nothing fits to
-    // scroll (e.g. the web, where the browser scrolls the page), the clamp keeps
-    // the offset put and focus simply steps to the adjacent hunk.
+    // move focus one hunk in `dir` (+1 down, -1 up). on the web the browser owns
+    // scrolling, so just step focus to the adjacent hunk and let scrollToFocus
+    // bring it into view. on the terminal, if the adjacent hunk is already
+    // visible just move focus; otherwise scroll one line toward it (focusing it
+    // once it appears) so scrolling never skips past an on-screen hunk.
     fn moveDiff(self: *View, root_focus: *Focus, dir: isize) !void {
         const inner = self.diffInner();
         const keys = inner.children.keys();
@@ -590,6 +596,11 @@ pub const View = struct {
         const cur: usize = if (root_focus.grandchild_id) |g| (inner.children.getIndex(g) orelse 0) else 0;
         const target = @as(isize, @intCast(cur)) + dir;
         const in_range = target >= 0 and target < @as(isize, @intCast(keys.len));
+
+        if (!self.session.is_terminal) {
+            if (in_range) try root_focus.setFocus(keys[@intCast(target)]);
+            return;
+        }
 
         if (in_range and self.hunkVisible(@intCast(target))) {
             try root_focus.setFocus(keys[@intCast(target)]);
@@ -604,8 +615,18 @@ pub const View = struct {
     }
 
     // page a fixed number of lines, then focus the leading visible hunk
-    // (bottom-most when paging down, top-most when paging up).
+    // (bottom-most when paging down, top-most when paging up). on the web the
+    // browser scrolls, so jump focus by a page's worth of hunks instead.
     fn pageDiff(self: *View, root_focus: *Focus, delta: isize) !void {
+        if (!self.session.is_terminal) {
+            const inner = self.diffInner();
+            const keys = inner.children.keys();
+            if (keys.len == 0) return;
+            const cur: isize = if (root_focus.grandchild_id) |g| @intCast(inner.children.getIndex(g) orelse 0) else 0;
+            const target: usize = @intCast(std.math.clamp(cur + delta, 0, @as(isize, @intCast(keys.len - 1))));
+            try root_focus.setFocus(keys[target]);
+            return;
+        }
         const sc = self.diffScroll();
         sc.y += delta;
         self.clampDiffScroll();

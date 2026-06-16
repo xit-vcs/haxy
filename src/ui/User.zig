@@ -107,7 +107,7 @@ pub const View = struct {
 
             // repos list — the default tab
             {
-                var list = try ui.FlowBox.Scroll.init(allocator, .{});
+                var list = try ui.FlowBox.Scroll.init(allocator, .{}, !session.is_terminal);
                 errdefer list.deinit(allocator);
 
                 var arena = std.heap.ArenaAllocator.init(allocator);

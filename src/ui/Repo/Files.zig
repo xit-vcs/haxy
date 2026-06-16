@@ -113,7 +113,7 @@ pub const View = struct {
         }
         if (box.children.count() > 0) box.getFocus().child_id = box.children.keys()[0];
 
-        var scroll = try wgt.Scroll(ui.Widget).init(allocator, .{ .box = box }, .{ .direction = .vert });
+        var scroll = try wgt.Scroll(ui.Widget).init(allocator, .{ .box = box }, .{ .direction = .vert, .web_native = !session.is_terminal });
         errdefer scroll.deinit(allocator);
         return .{ .scroll = scroll, .data = data };
     }

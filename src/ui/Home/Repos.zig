@@ -70,9 +70,9 @@ pub const View = struct {
     list: ui.FlowBox.Scroll,
     data: *const Self,
 
-    pub fn init(allocator: std.mem.Allocator, data: *const Self) !View {
+    pub fn init(allocator: std.mem.Allocator, data: *const Self, web_native: bool) !View {
         var self = blk: {
-            var list = try ui.FlowBox.Scroll.init(allocator, .{});
+            var list = try ui.FlowBox.Scroll.init(allocator, .{}, web_native);
             errdefer list.deinit(allocator);
 
             break :blk View{

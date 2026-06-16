@@ -503,8 +503,9 @@ pub const Session = struct {
         }
     }
 
-    // request a forward navigation to `route`; Nav.sync builds it next
-    fn navigate(self: *Session, route: RoutablePage) !void {
+    // request a forward navigation to `route`; the host consumes next_page
+    // (Nav.sync on the terminal, the wasm tick on the web).
+    pub fn navigate(self: *Session, route: RoutablePage) !void {
         self.next_page = route;
     }
 };
@@ -1042,10 +1043,10 @@ pub const FlowBox = struct {
     pub const Scroll = struct {
         scroll: wgt.Scroll(Widget),
 
-        pub fn init(allocator: std.mem.Allocator, options: FlowBox.Options) !Scroll {
+        pub fn init(allocator: std.mem.Allocator, options: FlowBox.Options, web_native: bool) !Scroll {
             var layout_inner = try FlowBox.init(allocator, options);
             errdefer layout_inner.deinit(allocator);
-            var scroll = try wgt.Scroll(Widget).init(allocator, .{ .flow_box = layout_inner }, .{ .direction = .vert });
+            var scroll = try wgt.Scroll(Widget).init(allocator, .{ .flow_box = layout_inner }, .{ .direction = .vert, .web_native = web_native });
             errdefer scroll.deinit(allocator);
             return .{ .scroll = scroll };
         }

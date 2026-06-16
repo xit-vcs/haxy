@@ -445,12 +445,49 @@ fn logError(err: *std.Io.Writer, comptime fmt: []const u8, args: anytype) void {
     err.flush() catch {};
 }
 
-// emits the TUI grid cells as static HTML
+// emits the TUI grid cells as static HTML. each web-native Scroll becomes its
+// own absolutely-positioned, natively-scrollable <div> holding its full content,
+// rendered recursively so nested scrolls work.
 pub fn generateHtml(allocator: std.mem.Allocator, root: *ui.Widget) ![]const u8 {
     const grid = root.getGrid() orelse return error.MissingGrid;
-    const root_focus = root.getFocus();
 
-    const Tag = union(enum) {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    try renderPanel(allocator, &out, root.getFocus(), grid);
+    return try out.toOwnedSlice(allocator);
+}
+
+// render one panel — a focus subtree and its content grid — as HTML, recursing
+// once per web-native Scroll inside it. the root panel is the whole page; each
+// Scroll becomes a nested, natively-scrollable div holding its full content.
+// emits the panel's grid cells as text, leaving holes where child scrolls sit,
+// then the child scroll divs over those holes.
+fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: *Focus, grid: Grid) !void {
+    // `direct` is this panel's scroll children, each drawn as an overlaid div.
+    // `excluded` is every focus id that belongs to a scroll (the scroll nodes
+    // plus their descendants, which the focus tree flattens into this panel's
+    // children): the cell hit-test below skips them so this panel doesn't claim
+    // cells that are really rendered inside a child scroll's own panel.
+    // (scrolls aren't nested in practice, so every scroll child is direct here.)
+    var direct: std.ArrayList(usize) = .empty;
+    defer direct.deinit(allocator);
+    var excluded: std.AutoHashMapUnmanaged(usize, void) = .empty;
+    defer excluded.deinit(allocator);
+    {
+        var it = focus.children.iterator();
+        while (it.next()) |e| {
+            if (e.value_ptr.focus.scroll == null) continue;
+            try direct.append(allocator, e.key_ptr.*);
+            try excluded.put(allocator, e.key_ptr.*, {});
+            var mit = e.value_ptr.focus.children.iterator();
+            while (mit.next()) |m| try excluded.put(allocator, m.key_ptr.*, {});
+        }
+    }
+
+    // the HTML element a run of cells is wrapped in, chosen from the cell's
+    // focusable kind
+    const CellTag = union(enum) {
         span, // clickable focusable cell
         a: []const u8, // clickable focusable link
         plain, // non-focusable, colored
@@ -500,29 +537,61 @@ pub fn generateHtml(allocator: std.mem.Allocator, root: *ui.Widget) ![]const u8 
         }
     };
 
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-
+    // emit this panel's grid as rows of text, coalescing adjacent cells that
+    // share a focus id and colors into one tag (a clickable span, a link, or a
+    // plain colored span). cells covered by a child scroll are left blank.
     for (0..grid.size.height) |y| {
         var cur_id: ?usize = null;
         var cur_fg: ?Grid.Color = null;
         var cur_bg: ?Grid.Color = null;
-        var open_tag: ?Tag = null;
+        var open_tag: ?CellTag = null;
         var first = true;
         for (0..grid.size.width) |x| {
+            // a cell covered by a child scroll's viewport is drawn by that
+            // scroll's own div; leave a blank here so the layout stays aligned.
+            const covered_by_scroll = blk: {
+                for (direct.items) |id| {
+                    const r = (focus.children.get(id) orelse continue).rect;
+                    if (x >= r.x and y >= r.y and x < r.x + r.size.width and y < r.y + r.size.height) break :blk true;
+                }
+                break :blk false;
+            };
+            if (covered_by_scroll) {
+                if (open_tag) |t| try output.appendSlice(allocator, t.closeTag());
+                open_tag = null;
+                cur_id = null;
+                first = true;
+                try output.append(allocator, ' ');
+                continue;
+            }
+
             const cell = grid.cells.items[try grid.cells.at(.{ y, x })];
-            const cell_id = cellFocusId(root_focus, x, y);
+            // the focusable cell at (x, y) among this panel's own focusables (skipping any
+            // that belong to a child scroll, whose cells are drawn in their own panel).
+            const cell_id = blk: {
+                var iter = focus.children.iterator();
+                while (iter.next()) |entry| {
+                    const child = entry.value_ptr.*;
+                    if (!child.focus.focusable) continue;
+                    if (excluded.contains(entry.key_ptr.*)) continue;
+                    const r = child.rect;
+                    if (x >= r.x and y >= r.y and x < r.x + r.size.width and y < r.y + r.size.height) {
+                        break :blk entry.key_ptr.*;
+                    }
+                }
+                break :blk null;
+            };
             const fg = cell.style.fg;
             const bg = cell.style.bg;
 
             if (first or cell_id != cur_id or !colorEql(fg, cur_fg) or !colorEql(bg, cur_bg)) {
-                if (open_tag) |t| try out.appendSlice(allocator, t.closeTag());
+                if (open_tag) |t| try output.appendSlice(allocator, t.closeTag());
 
-                var new_tag: ?Tag = null;
+                var new_tag: ?CellTag = null;
                 if (cell_id) |id| {
-                    if (root_focus.children.get(id)) |child| {
+                    if (focus.children.get(id)) |child| {
                         new_tag = switch (child.focus.kind) {
-                            .custom => |custom| Tag.init(custom),
+                            .custom => |custom| CellTag.init(custom),
                             else => .span,
                         };
                     }
@@ -531,7 +600,7 @@ pub fn generateHtml(allocator: std.mem.Allocator, root: *ui.Widget) ![]const u8 
 
                 if (new_tag) |t| {
                     var style_buf: [64]u8 = undefined;
-                    try t.writeOpenTag(allocator, &out, cell_id orelse 0, styleAttr(&style_buf, fg, bg));
+                    try t.writeOpenTag(allocator, output, cell_id orelse 0, styleAttr(&style_buf, fg, bg));
                 }
 
                 open_tag = new_tag;
@@ -541,13 +610,34 @@ pub fn generateHtml(allocator: std.mem.Allocator, root: *ui.Widget) ![]const u8 
                 first = false;
             }
 
-            try appendEscapedHtml(allocator, &out, cell.rune orelse " ");
+            try appendEscapedHtml(allocator, output, cell.rune orelse " ");
         }
-        if (open_tag) |t| try out.appendSlice(allocator, t.closeTag());
-        try out.append(allocator, '\n');
+        if (open_tag) |t| try output.appendSlice(allocator, t.closeTag());
+        try output.append(allocator, '\n');
     }
 
-    return try out.toOwnedSlice(allocator);
+    // each child scroll becomes a natively-scrollable div positioned over its
+    // viewport, holding its full content rendered recursively.
+    for (direct.items) |id| {
+        const child = focus.children.get(id) orelse continue;
+        const info = child.focus.scroll orelse continue;
+        const r = child.rect;
+        // overflow only on the axes the widget scrolls; `auto` shows a bar only
+        // when that axis actually overflows. the other axis is clipped (hidden),
+        // matching how the terminal Scroll handles its non-scrolling axis.
+        const overflow = switch (info.direction) {
+            .vert => "overflow-x:hidden;overflow-y:auto",
+            .horiz => "overflow-x:auto;overflow-y:hidden",
+            .both => "overflow:auto",
+        };
+        // the id carries a content version so JS preserves the native scroll
+        // position across re-renders of the same content but resets it (to the
+        // top) when the content is replaced — e.g. selecting a different commit.
+        var buf: [160]u8 = undefined;
+        try output.appendSlice(allocator, try std.fmt.bufPrint(&buf, "<div class=\"scroll\" data-scroll-id=\"{d}-{d}\" style=\"left:{d}ch;top:{d}em;width:{d}ch;height:{d}em;{s}\">", .{ id, child.focus.version, r.x, r.y, r.size.width, r.size.height, overflow }));
+        try renderPanel(allocator, output, child.focus, info.content);
+        try output.appendSlice(allocator, "</div>");
+    }
 }
 
 // emits the form overlay — one <form> per "form:<url>" focus subtree in the
@@ -665,19 +755,6 @@ fn styleAttr(buf: []u8, fg: ?Grid.Color, bg: ?Grid.Color) []const u8 {
     buf[i] = '"';
     i += 1;
     return buf[0..i];
-}
-
-fn cellFocusId(focus: *Focus, x: usize, y: usize) ?usize {
-    var iter = focus.children.iterator();
-    while (iter.next()) |entry| {
-        const child = entry.value_ptr.*;
-        if (!child.focus.focusable) continue;
-        const r = child.rect;
-        if (x >= r.x and y >= r.y and x < r.x + r.size.width and y < r.y + r.size.height) {
-            return entry.key_ptr.*;
-        }
-    }
-    return null;
 }
 
 fn appendEscapedHtml(allocator: std.mem.Allocator, out: *std.ArrayList(u8), input: []const u8) !void {

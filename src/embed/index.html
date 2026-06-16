@@ -7,9 +7,12 @@
           html {
             background-color: rgba(0, 50, 70, 1.0);
             color: rgba(200, 200, 200, 1.0);
-            /* always reserve the vertical scrollbar's space so the usable width
-               is constant whether or not it's showing */
-            scrollbar-gutter: stable;
+          }
+
+          /* no body margin because it could push content past the viewport and
+             add a window scrollbar */
+          body {
+            margin: 0;
           }
 
           @font-face {
@@ -26,6 +29,22 @@
 
           #grid {
             white-space: pre;
+            /* positioning context for the top-level .scroll divs */
+            position: relative;
+          }
+
+          /* each web-native Scroll widget: a box positioned over its viewport
+             (left/top/width/height and per-axis overflow come inline, the latter
+             from the widget's scroll direction) */
+          .scroll {
+            position: absolute;
+            /* scrollbars are hidden; panes scroll via wheel/trackpad and via
+               scrollIntoView on keyboard focus, so a visible bar would only
+               cover content. (Firefox / WebKit respectively.) */
+            scrollbar-width: none;
+          }
+          .scroll::-webkit-scrollbar {
+            display: none;
           }
 
           /* render each colored cell-run as an inline-block to prevent

@@ -57,11 +57,20 @@ const importObject = {
             const html = readWasmString(ptr, len);
             if (html === currentHtml) return;
             currentHtml = html;
-            // the grid only holds non-focusable TUI cell spans now; the
-            // form (inputs + submit button) lives in #overlay and is
-            // never touched by this wipe, so we don't need to save and
-            // restore focus across the swap.
+            // each web-native Scroll renders as a .scroll div; replacing
+            // innerHTML recreates them and would reset their scroll position
+            // every tick, so snapshot scrollTop/Left by their stable id and
+            // restore it after the swap. (mouse-wheel scrolling happens with no
+            // tick, so it isn't affected.)
+            const positions = {};
+            for (const el of grid.querySelectorAll(".scroll[data-scroll-id]")) {
+                positions[el.dataset.scrollId] = { top: el.scrollTop, left: el.scrollLeft };
+            }
             grid.innerHTML = html;
+            for (const el of grid.querySelectorAll(".scroll[data-scroll-id]")) {
+                const p = positions[el.dataset.scrollId];
+                if (p) { el.scrollTop = p.top; el.scrollLeft = p.left; }
+            }
         },
         _replaceState: function (ptr, len) {
             const url = readWasmString(ptr, len);
@@ -94,21 +103,33 @@ const importObject = {
             // can't render it client-side without server data).
             window.location.assign(readWasmString(ptr, len));
         },
-        _scrollToRect: function (x, y, w, h) {
-            // the rect arrives in grid cells; map it to document coordinates
-            // via the measured cell size and the grid origin, then scroll the
-            // minimum needed to bring the widget fully into view
-            if (!cellHeight) measureCell();
-            const gridTop = grid.getBoundingClientRect().top + window.scrollY;
-            const top = gridTop + y * cellHeight;
-            const bottom = top + h * cellHeight;
-            const viewTop = window.scrollY;
-            const viewBottom = viewTop + document.documentElement.clientHeight;
-            if (top < viewTop) {
-                window.scrollTo({ top });
-            } else if (bottom > viewBottom) {
-                window.scrollTo({ top: bottom - document.documentElement.clientHeight });
+        _scrollToFocus: function (id) {
+            // bring the focused widget into view within its own .scroll div. it's
+            // several spans (one per row) sharing this id, in top-to-bottom order,
+            // so the first gives its top/left edge and the last its bottom.
+            const els = grid.querySelectorAll(`[data-focus-id="${id}"]`);
+            if (els.length === 0) return;
+            const container = els[0].closest(".scroll");
+            if (!container) return;
+
+            const c = container.getBoundingClientRect();
+            const first = els[0].getBoundingClientRect();
+            const last = els[els.length - 1].getBoundingClientRect();
+            const top = first.top - c.top + container.scrollTop;
+            const bottom = last.bottom - c.top + container.scrollTop;
+            const left = first.left - c.left + container.scrollLeft;
+
+            // vertical is the priority axis: fit the widget, preferring its top
+            // when it's taller than the viewport.
+            if (top < container.scrollTop || bottom - top > container.clientHeight) {
+                container.scrollTop = top;
+            } else if (bottom > container.scrollTop + container.clientHeight) {
+                container.scrollTop = bottom - container.clientHeight;
             }
+            // horizontal: only reveal the row's start, never chase the right edge,
+            // so moving down through varying-width rows doesn't yank the view
+            // sideways. (a hidden-overflow x axis stays at 0, so this no-ops.)
+            if (left < container.scrollLeft) container.scrollLeft = left;
         },
     },
 };

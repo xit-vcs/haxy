@@ -54,11 +54,11 @@ fn tick(min_height: u32, max_width: u32) !void {
     session.applyPending();
 
     try root_ptr.build(allocator, .{
-        // min_height lets the TUI fill the viewport when its content is
-        // short; max height stays null so taller content extends downward
-        // and the browser scrolls.
+        // bind the UI to the browser viewport (cols x rows) like the terminal:
+        // min == max height fills it exactly, and each Scroll clips to its
+        // viewport while handing its full content to a native-scrollable element.
         .min_size = .{ .width = null, .height = min_height },
-        .max_size = .{ .width = max_width, .height = null },
+        .max_size = .{ .width = max_width, .height = min_height },
     }, root_ptr.getFocus());
 
     // mirror the page Header settled on into the browser URL. these are
@@ -99,13 +99,12 @@ fn tick(min_height: u32, max_width: u32) !void {
                 else => {},
             }
 
-            // keep the focused widget within the browser viewport. only fire on
-            // an actual focus change so we don't fight the user's manual
-            // scrolling on unrelated ticks.
+            // keep the focused widget visible within its own scrollable element.
+            // only fire on an actual focus change so we don't fight the user's
+            // manual scrolling on unrelated ticks.
             if (gid != last_scrolled_focus_id) {
                 last_scrolled_focus_id = gid;
-                const r = child.rect;
-                _scrollToRect(@intCast(r.x), @intCast(r.y), @intCast(r.size.width), @intCast(r.size.height));
+                _scrollToFocus(@intCast(gid));
             }
         }
     }
@@ -178,7 +177,7 @@ extern fn _setOverlay(arg: [*]const u8, len: u32) void;
 extern fn _replaceState(arg: [*]const u8, len: u32) void;
 extern fn _focusInput(focus_id: u32) void;
 extern fn _navigate(arg: [*]const u8, len: u32) void;
-extern fn _scrollToRect(x: u32, y: u32, width: u32, height: u32) void;
+extern fn _scrollToFocus(focus_id: u32) void;
 
 /// js calls this first to get a wasm pointer it can write the page json into.
 export fn _alloc(len: u32) ?[*]u8 {
