@@ -279,9 +279,7 @@ pub fn main(init: std.process.Init) !void {
                             const start = writer.written().len;
                             if ((line + fi + c) % 8 == 0) {
                                 const tag = words[(line + fi + c * 3) % words.len];
-                                try writer.writer.print("line {d}: rev {d} {s}", .{ line, c, tag });
-                            } else {
-                                try writer.writer.print("line {d}", .{line});
+                                try writer.writer.print("rev {d} {s}", .{ c, tag });
                             }
                             const target = 40 + (line * 17 + fi * 23) % 70;
                             var w = line + fi;
@@ -289,7 +287,10 @@ pub fn main(init: std.process.Init) !void {
                                 const word = words[w % words.len];
                                 const len = writer.written().len - start;
                                 if (len >= target or len + 1 + word.len > 120) break;
-                                try writer.writer.print(" {s}", .{word});
+                                if (len == 0)
+                                    try writer.writer.print("{s}", .{word})
+                                else
+                                    try writer.writer.print(" {s}", .{word});
                             }
                             try writer.writer.writeByte('\n');
                         }

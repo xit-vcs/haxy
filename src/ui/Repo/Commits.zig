@@ -18,6 +18,7 @@ const page_size = 20;
 const diff_page = 10;
 
 pub const Hunk = struct {
+    path: ?[]const u8 = null, // the file this hunk belongs to
     lines: []const []const u8,
 };
 
@@ -176,8 +177,8 @@ fn renderCommitDiff(
         var hunk_iter = df.HunkIterator(.xit, .{}).init(gpa, &pair.a, &pair.b) catch continue;
         defer hunk_iter.deinit(gpa);
 
-        // the file header rides on the first of this file's hunks we actually show.
-        var file_header_emitted = false;
+        // the path label rides on the first of this file's hunks we actually show.
+        var path_attached = false;
         while (try hunk_iter.next(gpa)) |hunk_val| {
             var hunk = hunk_val;
             defer hunk.deinit(gpa);
@@ -187,14 +188,12 @@ fn renderCommitDiff(
                 break :file_loop;
             }
             var lines: std.ArrayList([]const u8) = .empty;
-            if (!file_header_emitted) {
-                for (hunk_iter.header_lines.items) |hl| {
-                    try lines.append(arena, try arena.dupe(u8, hl));
-                }
-                file_header_emitted = true;
-            }
             try appendHunkLines(arena, &lines, &hunk_iter, &hunk);
-            try hunks.append(arena, .{ .lines = try lines.toOwnedSlice(arena) });
+            try hunks.append(arena, .{
+                .path = if (path_attached) null else try arena.dupe(u8, pair.path),
+                .lines = try lines.toOwnedSlice(arena),
+            });
+            path_attached = true;
         }
     }
 
@@ -202,17 +201,24 @@ fn renderCommitDiff(
     return .{ .hunks = try hunks.toOwnedSlice(arena), .shown_hunks = shown, .has_more = has_more };
 }
 
-// append a hunk's header and its edit lines
+// append a hunk's header and its edit lines, each prefixed with a right-aligned
+// line number in a column wide enough for the hunk's largest number, then a space
 fn appendHunkLines(
     arena: std.mem.Allocator,
     lines: *std.ArrayList([]const u8),
     hunk_iter: *df.HunkIterator(.xit, .{}),
     hunk: *df.Hunk(.xit, .{}),
 ) !void {
-    const o = hunk.offsets();
-    try lines.append(arena, try std.fmt.allocPrint(arena, "@@ -{d},{d} +{d},{d} @@", .{
-        o.del_start, o.del_count, o.ins_start, o.ins_count,
-    }));
+    var max_num: usize = 1;
+    for (hunk.edits.items) |edit| {
+        const n = editLineNum(edit) + 1;
+        if (n > max_num) max_num = n;
+    }
+    const width = std.fmt.count("{d}", .{max_num});
+    // a run of spaces sliced to each line's leading pad.
+    const indent = try arena.alloc(u8, width);
+    @memset(indent, ' ');
+
     for (hunk.edits.items) |edit| {
         const text = switch (edit) {
             .eql => |e| try hunk_iter.line_iter_b.get(e.new_line.num),
@@ -228,8 +234,21 @@ fn appendHunkLines(
             .ins => '+',
             .del => '-',
         };
-        try lines.append(arena, try std.fmt.allocPrint(arena, "{c}{s}", .{ prefix, text }));
+        const num_str = try std.fmt.allocPrint(arena, "{d}", .{editLineNum(edit) + 1});
+        try lines.append(arena, try std.fmt.allocPrint(arena, "{s}{s} {c}{s}", .{
+            indent[0 .. width - num_str.len], num_str, prefix, text,
+        }));
     }
+}
+
+// the line number to show for an edit: the new-side number for kept and inserted
+// lines, the old-side number for deletions (0-based in the diff machinery).
+fn editLineNum(edit: df.Edit) usize {
+    return switch (edit) {
+        .eql => |e| e.new_line.num,
+        .ins => |e| e.new_line.num,
+        .del => |e| e.old_line.num,
+    };
 }
 
 // "YYYY-MM-DD" for a unix timestamp.
@@ -333,6 +352,15 @@ pub const View = struct {
         if (lines.len == 0) return;
         const text = try std.mem.join(self.session.page_arena.allocator(), "\n", lines);
         var tb = try wgt.TextBox(ui.Widget).init(allocator, text, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .none });
+        errdefer tb.deinit(allocator);
+        tb.getFocus().focusable = true;
+        try box.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
+    }
+
+    // a focusable file-path label shown above the first hunk of each file.
+    fn addPathBox(self: *View, allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), path: []const u8) !void {
+        _ = self;
+        var tb = try wgt.TextBox(ui.Widget).init(allocator, path, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .none });
         errdefer tb.deinit(allocator);
         tb.getFocus().focusable = true;
         try box.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
@@ -471,7 +499,10 @@ pub const View = struct {
         inner.children.clearAndFree(allocator);
         inner.getFocus().child_id = null;
 
-        for (commit.hunks) |hunk| try self.addHunkBox(allocator, inner, hunk.lines);
+        for (commit.hunks) |hunk| {
+            if (hunk.path) |path| try self.addPathBox(allocator, inner, path);
+            try self.addHunkBox(allocator, inner, hunk.lines);
+        }
         // the load-more link reloads showing one more page of this commit's hunks.
         if (commit.has_more) try self.addLoadMore(allocator, inner, commit.oid, commit.shown_hunks + diff_page);
 
