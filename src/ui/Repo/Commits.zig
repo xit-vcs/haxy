@@ -275,15 +275,12 @@ pub const View = struct {
 
     const list_index: usize = 0;
     const diff_index: usize = 1;
-    // min widths for the two panes
-    const list_width: usize = 40;
-    const diff_width: usize = 40;
+    const list_max_width: usize = 40;
+    const diff_min_width: usize = 40;
     // how many rows a page up/down jumps, and the scroll-wheel step.
     const page_rows = 10;
 
     pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !View {
-        const aa = session.page_arena.allocator();
-
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
         errdefer box.deinit(allocator);
 
@@ -293,8 +290,7 @@ pub const View = struct {
                 var list_box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert });
                 errdefer list_box.deinit(allocator);
                 for (data.commits) |commit| {
-                    const label = try std.fmt.allocPrint(aa, "{s}  {s}", .{ commit.date, commit.message });
-                    try addRow(allocator, &list_box, label, "");
+                    try addRow(allocator, &list_box, commit.message, "");
                 }
                 if (data.next_start) |next| {
                     try addRow(allocator, &list_box, "next", try commitsPageLink(session.page_arena, data.identity, next));
@@ -303,7 +299,7 @@ pub const View = struct {
                 break :blk try wgt.Scroll(ui.Widget).init(allocator, .{ .box = list_box }, .{ .direction = .vert });
             };
             errdefer list_scroll.deinit(allocator);
-            try box.children.put(allocator, list_scroll.getFocus().id, .{ .widget = .{ .scroll = list_scroll }, .rect = null, .min_size = .{ .width = list_width, .height = null } });
+            try box.children.put(allocator, list_scroll.getFocus().id, .{ .widget = .{ .scroll = list_scroll }, .rect = null, .min_size = .{ .width = list_max_width, .height = null }, .max_size = .{ .width = list_max_width, .height = null } });
         }
 
         // the diff pane — a frame around a scroll of the hunks
@@ -321,7 +317,7 @@ pub const View = struct {
                 break :blk outer;
             };
             errdefer diff_outer.deinit(allocator);
-            try box.children.put(allocator, diff_outer.getFocus().id, .{ .widget = .{ .box = diff_outer }, .rect = null, .min_size = .{ .width = diff_width, .height = null } });
+            try box.children.put(allocator, diff_outer.getFocus().id, .{ .widget = .{ .box = diff_outer }, .rect = null, .min_size = .{ .width = diff_min_width, .height = null } });
         }
 
         box.getFocus().child_id = box.children.keys()[list_index];
@@ -338,11 +334,11 @@ pub const View = struct {
     }
 
     fn addRow(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8, link: []const u8) !void {
-        var row = try wgt.TextBox(ui.Widget).init(allocator, label, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .none });
+        var row = try wgt.TextBox(ui.Widget).init(allocator, label, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .word });
         errdefer row.deinit(allocator);
         row.getFocus().focusable = true;
         if (link.len != 0) row.getFocus().kind = .{ .custom = link };
-        try box.children.put(allocator, row.getFocus().id, .{ .widget = .{ .text_box = row }, .rect = null, .min_size = null });
+        try box.children.put(allocator, row.getFocus().id, .{ .widget = .{ .text_box = row }, .rect = null, .min_size = null, .max_size = .{ .width = null, .height = 5 } });
     }
 
     // one hunk as a focusable multi-line text box. its lines sit flush (the
@@ -447,6 +443,12 @@ pub const View = struct {
                 else => {},
             }
         }
+
+        // cap the list at list_max_width only while the diff pane fits beside it.
+        // the box drops the diff when the width can't hold both minimums, so when
+        // it's that narrow we lift the cap and let the list fill the whole width.
+        const both_panes_fit = if (constraint.max_size.width) |w| w >= list_max_width + diff_min_width else true;
+        self.box.children.values()[list_index].max_size = if (both_panes_fit) .{ .width = list_max_width, .height = null } else null;
 
         // web browsers provide scrolling, so let every widget grow to
         // its natural size instead of clipping inside the diff scroll

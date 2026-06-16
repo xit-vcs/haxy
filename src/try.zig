@@ -241,10 +241,20 @@ pub fn main(init: std.process.Init) !void {
             const edit_files = [_][]const u8{ "src/alpha.txt", "src/beta.txt", "src/gamma.txt" };
             // cycled through to pad each line into prose-like content.
             const words = [_][]const u8{
-                "lorem",  "ipsum",  "dolor",   "sit",     "amet",    "consectetur",
-                "quantum", "vector", "matrix",  "buffer",  "kernel",  "socket",
-                "falcon",  "otter",  "badger",  "walrus",  "ferret",  "marmot",
-                "scatter", "gather", "encode",  "decode",  "render",  "commit",
+                "lorem",   "ipsum",  "dolor",  "sit",    "amet",   "consectetur",
+                "quantum", "vector", "matrix", "buffer", "kernel", "socket",
+                "falcon",  "otter",  "badger", "walrus", "ferret", "marmot",
+                "scatter", "gather", "encode", "decode", "render", "commit",
+            };
+            // commit subjects, cycled then padded to a varying length.
+            const subjects = [_][]const u8{
+                "fix off-by-one in scatter loop",
+                "encode and decode buffers",
+                "tune kernel socket timeouts",
+                "render matrix vector product",
+                "gather falcon and otter stats",
+                "refactor badger walrus module",
+                "drop dead ferret marmot branch",
             };
             var c: usize = 0;
             while (c < 30) : (c += 1) {
@@ -257,15 +267,19 @@ pub fn main(init: std.process.Init) !void {
                         defer file.close(io);
                         var writer = std.Io.Writer.Allocating.init(allocator);
                         defer writer.deinit();
-                        // every 8th line (offset per file) encodes the commit
-                        // number; the rest stay constant. the changed lines sit
-                        // far enough apart that diff renders each as its own hunk.
-                        // each line is padded with cycled words to a per-line
-                        // length, capped at 120 characters.
+                        // every 8th line is edited by this commit; the stride
+                        // offset shifts with c so consecutive commits touch
+                        // different lines, and the edited text carries a
+                        // c-dependent word, so each commit's diff is a distinct
+                        // scatter of hunks. untouched lines stay byte-identical
+                        // across commits (their padding ignores c) so they don't
+                        // all change every commit. each line is padded with
+                        // cycled words to a per-line length, capped at 120.
                         for (0..40) |line| {
                             const start = writer.written().len;
-                            if ((line + fi) % 8 == 0) {
-                                try writer.writer.print("line {d}: rev {d}", .{ line, c });
+                            if ((line + fi + c) % 8 == 0) {
+                                const tag = words[(line + fi + c * 3) % words.len];
+                                try writer.writer.print("line {d}: rev {d} {s}", .{ line, c, tag });
                             } else {
                                 try writer.writer.print("line {d}", .{line});
                             }
@@ -283,7 +297,20 @@ pub fn main(init: std.process.Init) !void {
                     }
                 }
                 try repo_i.add(io, allocator, &edit_files);
-                const message = try std.fmt.allocPrint(arena.allocator(), "scattered edits {d}", .{c + 1});
+                // a cycling subject padded to a c-varying length so the commit
+                // list shows messages of different widths, capped at 120.
+                var msg_writer = std.Io.Writer.Allocating.init(allocator);
+                defer msg_writer.deinit();
+                try msg_writer.writer.print("{s}", .{subjects[c % subjects.len]});
+                const msg_target = 16 + (c * 41) % 96;
+                var mw = c;
+                while (true) : (mw += 1) {
+                    const word = words[mw % words.len];
+                    const len = msg_writer.written().len;
+                    if (len >= msg_target or len + 1 + word.len > 120) break;
+                    try msg_writer.writer.print(" {s}", .{word});
+                }
+                const message = try arena.allocator().dupe(u8, msg_writer.written());
                 _ = try repo_i.commit(io, allocator, .{ .message = message, .timestamp = base_ts + c * std.time.s_per_day });
             }
         }
