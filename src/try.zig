@@ -202,27 +202,26 @@ pub fn main(init: std.process.Init) !void {
         // commit the seed events and consume them into the database
         try evt.commitAndConsume(evt.admin_repo_opts, io, allocator, &repo, evt.events_ref, &events_to_consume);
 
-        // create the actual repos on disk, named by their hex-encoded event id
-        for (repo_data, 0..) |r, i| {
-            const repo_id = std.fmt.bytesToHex(repo_event_ids[i], .lower);
-            const repo_path = try std.fs.path.join(arena.allocator(), &.{ cwd_path, temp_dir_name, "server", "repos", &repo_id });
+        // every repo gets the same generated history, so build it once into a
+        // template repo and copy that to each repo's location below rather than
+        // redoing the expensive commit work for every repo.
+        const template_path = try std.fs.path.join(arena.allocator(), &.{ cwd_path, temp_dir_name, "template" });
+        {
+            var template_repo = try rp.Repo(.xit, .{}).init(io, allocator, .{ .path = template_path });
+            defer template_repo.deinit(io, allocator);
 
-            var repo_i = try rp.Repo(.xit, .{}).init(io, allocator, .{ .path = repo_path });
-            defer repo_i.deinit(io, allocator);
+            try template_repo.addConfig(io, allocator, .{ .name = "user.name", .value = "haxy" });
+            try template_repo.addConfig(io, allocator, .{ .name = "user.email", .value = "admin@haxy" });
 
-            try repo_i.addConfig(io, allocator, .{ .name = "user.name", .value = "haxy" });
-            try repo_i.addConfig(io, allocator, .{ .name = "user.email", .value = "admin@haxy" });
-
-            // write the repo's name and description into a README, plus a
-            // nested doc so the file tree has a directory to descend into
+            // a README plus a nested doc so the file tree has a directory to
+            // descend into
             {
-                var repo_dir = try cwd.openDir(io, repo_path, .{});
+                var repo_dir = try cwd.openDir(io, template_path, .{});
                 defer repo_dir.close(io);
 
                 const readme = try repo_dir.createFile(io, "README.md", .{});
                 defer readme.close(io);
-                const readme_content = try std.fmt.allocPrint(arena.allocator(), "# {s}\n\n{s}\n", .{ r.name, r.description });
-                try readme.writeStreamingAll(io, readme_content);
+                try readme.writeStreamingAll(io, "# Sample Repo\n\nA repository seeded with test data.\n");
 
                 try repo_dir.createDirPath(io, "docs/dev");
                 const doc = try repo_dir.createFile(io, "docs/dev/contribute.md", .{});
@@ -230,8 +229,8 @@ pub fn main(init: std.process.Init) !void {
                 try doc.writeStreamingAll(io, "To contribute, please make a pull request");
             }
 
-            try repo_i.add(io, allocator, &.{ "README.md", "docs/dev/contribute.md" });
-            _ = try repo_i.commit(io, allocator, .{ .message = "let there be light" });
+            try template_repo.add(io, allocator, &.{ "README.md", "docs/dev/contribute.md" });
+            _ = try template_repo.commit(io, allocator, .{ .message = "let there be light" });
 
             // a batch of commits so the commits tab has more than one page to
             // paginate through. each rewrites a few files with scattered line
@@ -259,7 +258,7 @@ pub fn main(init: std.process.Init) !void {
             var c: usize = 0;
             while (c < 30) : (c += 1) {
                 {
-                    var repo_dir = try cwd.openDir(io, repo_path, .{});
+                    var repo_dir = try cwd.openDir(io, template_path, .{});
                     defer repo_dir.close(io);
                     try repo_dir.createDirPath(io, "src");
                     for (edit_files, 0..) |path, fi| {
@@ -297,7 +296,7 @@ pub fn main(init: std.process.Init) !void {
                         try file.writeStreamingAll(io, writer.written());
                     }
                 }
-                try repo_i.add(io, allocator, &edit_files);
+                try template_repo.add(io, allocator, &edit_files);
                 // a cycling subject padded to a c-varying length so the commit
                 // list shows messages of different widths, capped at 120.
                 var msg_writer = std.Io.Writer.Allocating.init(allocator);
@@ -312,7 +311,23 @@ pub fn main(init: std.process.Init) !void {
                     try msg_writer.writer.print(" {s}", .{word});
                 }
                 const message = try arena.allocator().dupe(u8, msg_writer.written());
-                _ = try repo_i.commit(io, allocator, .{ .message = message, .timestamp = base_ts + c * std.time.s_per_day });
+                _ = try template_repo.commit(io, allocator, .{ .message = message, .timestamp = base_ts + c * std.time.s_per_day });
+            }
+        }
+
+        // copy the template to each repo's on-disk location, named by its
+        // hex-encoded event id. the template repo is deinitialized above, so its
+        // db file is fully written before we copy it.
+        {
+            var template_dir = try cwd.openDir(io, template_path, .{ .iterate = true });
+            defer template_dir.close(io);
+
+            for (repo_event_ids) |id_bytes| {
+                const repo_id = std.fmt.bytesToHex(id_bytes, .lower);
+                const repo_path = try std.fs.path.join(arena.allocator(), &.{ cwd_path, temp_dir_name, "server", "repos", &repo_id });
+                var dest_dir = try cwd.createDirPathOpen(io, repo_path, .{});
+                defer dest_dir.close(io);
+                try copyDir(io, template_dir, dest_dir);
             }
         }
 
@@ -403,5 +418,24 @@ pub fn main(init: std.process.Init) !void {
         try srv.run(.xit, .{}, io, allocator, cwd_path, .{
             .data_dir = server_path,
         }, run_opts.err, Runnable{ .io = io, .allocator = allocator, .session = &session });
+    }
+}
+
+// recursively copy the contents of src_dir into dest_dir
+fn copyDir(io: std.Io, src_dir: std.Io.Dir, dest_dir: std.Io.Dir) !void {
+    var iter = src_dir.iterate();
+    while (try iter.next(io)) |entry| {
+        switch (entry.kind) {
+            .file => try src_dir.copyFile(entry.name, dest_dir, entry.name, io, .{}),
+            .directory => {
+                try dest_dir.createDirPath(io, entry.name);
+                var dest_entry_dir = try dest_dir.openDir(io, entry.name, .{ .access_sub_paths = true, .iterate = true, .follow_symlinks = false });
+                defer dest_entry_dir.close(io);
+                var src_entry_dir = try src_dir.openDir(io, entry.name, .{ .access_sub_paths = true, .iterate = true, .follow_symlinks = false });
+                defer src_entry_dir.close(io);
+                try copyDir(io, src_entry_dir, dest_entry_dir);
+            },
+            else => {},
+        }
     }
 }
