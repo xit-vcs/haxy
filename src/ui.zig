@@ -42,7 +42,7 @@ pub const Page = union(PageKind) {
                 else => return error.UnexpectedRoute,
             },
             .repo => switch (route) {
-                .repo, .repo_commits, .repo_settings, .repo_auth => .{ .repo = try Repo.init(arena, session, route) },
+                .repo, .repo_commits, .repo_refs, .repo_settings, .repo_auth => .{ .repo = try Repo.init(arena, session, route) },
                 else => return error.UnexpectedRoute,
             },
         };
@@ -70,10 +70,13 @@ pub const RoutablePage = union(enum) {
     user_auth: Array(evt.User.name_max_len),
     repo: Array(repo_route_max_len),
     repo_commits: struct { name: Array(repo_route_max_len), after: usize = 0 },
+    repo_refs: struct { name: Array(repo_route_max_len), kind: RefKind = .branch, after: usize = 0 },
     repo_settings: Array(repo_route_max_len),
     repo_auth: Array(repo_route_max_len),
 
     pub const default: RoutablePage = .{ .home_users = 0 };
+
+    pub const RefKind = enum { branch, tag };
 
     const user_segment = "/user/";
     const repo_segment = "/repo/";
@@ -138,6 +141,12 @@ pub const RoutablePage = union(enum) {
         return .{ .repo_commits = .{ .name = Array(repo_route_max_len).from(s) orelse return null, .after = after } };
     }
 
+    // build a `.repo_refs` route for "owner/name" (identity) paginating `kind`'s
+    // column to `after` (0 = the first window, the other column always at 0).
+    pub fn repoRefsRoute(identity: []const u8, kind: RefKind, after: usize) ?RoutablePage {
+        return .{ .repo_refs = .{ .name = Array(repo_route_max_len).from(identity) orelse return null, .kind = kind, .after = after } };
+    }
+
     // an inline, owned array of data. keeping it in the route (rather than a
     // borrowed slice) makes RoutablePage a plain value: it can be copied, stored
     // in history, and serialized without any arena tracking.
@@ -166,7 +175,7 @@ pub const RoutablePage = union(enum) {
             .home_settings => "/settings",
             .home_auth => "/auth",
             .user, .user_settings, .user_auth => @compileError("user routes are dynamic; use urlAlloc"),
-            .repo, .repo_commits, .repo_settings, .repo_auth => @compileError("repo routes are dynamic; use urlAlloc"),
+            .repo, .repo_commits, .repo_refs, .repo_settings, .repo_auth => @compileError("repo routes are dynamic; use urlAlloc"),
         };
     }
 
@@ -182,6 +191,10 @@ pub const RoutablePage = union(enum) {
                 try std.fmt.allocPrint(arena.allocator(), repo_segment ++ "{s}", .{c.name.slice()})
             else
                 try std.fmt.allocPrint(arena.allocator(), repo_segment ++ "{s}?after={d}", .{ c.name.slice(), c.after }),
+            .repo_refs => |r| if (r.after == 0)
+                try std.fmt.allocPrint(arena.allocator(), repo_segment ++ "{s}/refs", .{r.name.slice()})
+            else
+                try std.fmt.allocPrint(arena.allocator(), repo_segment ++ "{s}/refs?kind={s}&after={d}", .{ r.name.slice(), @tagName(r.kind), r.after }),
             .repo_settings => |name| try std.fmt.allocPrint(arena.allocator(), repo_segment ++ "{s}/settings", .{name.slice()}),
             .repo_auth => |name| try std.fmt.allocPrint(arena.allocator(), repo_segment ++ "{s}/auth", .{name.slice()}),
             inline else => |_, tag| url(tag),
@@ -192,7 +205,7 @@ pub const RoutablePage = union(enum) {
         return switch (self) {
             .home_users, .home_repos, .home_settings, .home_auth => .home,
             .user, .user_settings, .user_auth => .user,
-            .repo, .repo_commits, .repo_settings, .repo_auth => .repo,
+            .repo, .repo_commits, .repo_refs, .repo_settings, .repo_auth => .repo,
         };
     }
 
@@ -234,6 +247,11 @@ pub const RoutablePage = union(enum) {
             const pair = rest[0 .. user_slash + 1 + repo_name.len]; // "username/reponame"
             if (repo_slash) |s| {
                 const sub = after_user[s + 1 ..];
+                if (std.mem.eql(u8, sub, "refs")) return .{ .repo_refs = .{
+                    .name = Array(repo_route_max_len).from(pair) orelse return null,
+                    .kind = refsKind(query),
+                    .after = after,
+                } };
                 if (std.mem.eql(u8, sub, "settings")) return .{ .repo_settings = Array(repo_route_max_len).from(pair) orelse return null };
                 if (std.mem.eql(u8, sub, "auth")) return .{ .repo_auth = Array(repo_route_max_len).from(pair) orelse return null };
                 if (std.mem.eql(u8, sub, files_seg)) return repoFilesRoute(pair, ""); // trailing /files == root
@@ -245,6 +263,18 @@ pub const RoutablePage = union(enum) {
             return repoFilesRoute(pair, "");
         }
         return null;
+    }
+
+    // the refs column a "kind=" query param names; absent or unrecognized reads
+    // as the branches column.
+    fn refsKind(query: ?[]const u8) RefKind {
+        const qs = query orelse return .branch;
+        var it = std.mem.splitScalar(u8, qs, '&');
+        while (it.next()) |pair| {
+            const eq = std.mem.indexOfScalar(u8, pair, '=') orelse continue;
+            if (std.mem.eql(u8, pair[0..eq], "kind") and std.mem.eql(u8, pair[eq + 1 ..], "tag")) return .tag;
+        }
+        return .branch;
     }
 
     // read a "key=<uint>" value from a raw "a=1&b=2" query string.
@@ -269,6 +299,7 @@ pub const RoutablePage = union(enum) {
             .user_auth => |a_name| std.mem.eql(u8, a_name.slice(), b.user_auth.slice()),
             .repo => |a_name| std.mem.eql(u8, a_name.slice(), b.repo.slice()),
             .repo_commits => |a_c| std.mem.eql(u8, a_c.name.slice(), b.repo_commits.name.slice()) and a_c.after == b.repo_commits.after,
+            .repo_refs => |a_r| std.mem.eql(u8, a_r.name.slice(), b.repo_refs.name.slice()) and a_r.kind == b.repo_refs.kind and a_r.after == b.repo_refs.after,
             .repo_settings => |a_name| std.mem.eql(u8, a_name.slice(), b.repo_settings.slice()),
             .repo_auth => |a_name| std.mem.eql(u8, a_name.slice(), b.repo_auth.slice()),
             else => true,
@@ -278,15 +309,23 @@ pub const RoutablePage = union(enum) {
     // the content a repo route renders: which repo, plus the files directory and
     // commits page. tab switches keep this fixed (the page already holds every
     // tab's data); a files-directory or commits-page change alters it.
-    const RepoContent = struct { identity: []const u8, files_dir: []const u8, commits_start: []const u8, commits_after: usize };
+    const RepoContent = struct { identity: []const u8, files_dir: []const u8, commits_start: []const u8, commits_after: usize, refs_kind: RefKind, refs_after: usize };
 
     fn repoContent(r: RoutablePage) ?RepoContent {
         const name = switch (r) {
             .repo, .repo_settings, .repo_auth => |n| n.slice(),
             .repo_commits => |c| c.name.slice(),
+            .repo_refs => |r2| r2.name.slice(),
             else => return null,
         };
         const rf = RepoFiles.parse(name) orelse return null;
+        // a 0 offset means no refs pagination, so canonicalize the column to
+        // branch then — otherwise the base /refs route would look like a content
+        // change relative to the same page mirrored with kind=tag.
+        const refs_after = switch (r) {
+            .repo_refs => |r2| r2.after,
+            else => 0,
+        };
         return .{
             .identity = rf.identity,
             .files_dir = if (std.meta.activeTag(r) == .repo) rf.dir else "",
@@ -295,6 +334,11 @@ pub const RoutablePage = union(enum) {
                 .repo_commits => |c| c.after,
                 else => 0,
             },
+            .refs_kind = switch (r) {
+                .repo_refs => |r2| if (refs_after == 0) .branch else r2.kind,
+                else => .branch,
+            },
+            .refs_after = refs_after,
         };
     }
 
@@ -305,7 +349,9 @@ pub const RoutablePage = union(enum) {
         return !std.mem.eql(u8, ca.identity, cb.identity) or
             !std.mem.eql(u8, ca.files_dir, cb.files_dir) or
             !std.mem.eql(u8, ca.commits_start, cb.commits_start) or
-            ca.commits_after != cb.commits_after;
+            ca.commits_after != cb.commits_after or
+            ca.refs_kind != cb.refs_kind or
+            ca.refs_after != cb.refs_after;
     }
 
     // true when `a` and `b` are the same home list tab paginated to a different
@@ -348,6 +394,16 @@ pub const RoutablePage = union(enum) {
                 try jw.objectField("after");
                 try jw.write(c.after);
             },
+            .repo_refs => |r| {
+                try jw.objectField("name");
+                try jw.write(r.name.slice());
+                // "kind" already holds the union tag, so the paginated column
+                // travels under a distinct field.
+                try jw.objectField("ref_kind");
+                try jw.write(@tagName(r.kind));
+                try jw.objectField("after");
+                try jw.write(r.after);
+            },
             .home_users, .home_repos => |after| {
                 try jw.objectField("after");
                 try jw.write(after);
@@ -358,7 +414,7 @@ pub const RoutablePage = union(enum) {
     }
 
     pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !RoutablePage {
-        const Helper = struct { kind: std.meta.Tag(RoutablePage), name: ?[]const u8 = null, after: usize = 0 };
+        const Helper = struct { kind: std.meta.Tag(RoutablePage), name: ?[]const u8 = null, after: usize = 0, ref_kind: ?[]const u8 = null };
         const helper = try std.json.innerParse(Helper, allocator, source, options);
         const parseName = struct {
             // errors must stay within std.json's ParseError set; ValueTooLong
@@ -377,6 +433,11 @@ pub const RoutablePage = union(enum) {
             .user_auth => .{ .user_auth = try parseName(evt.User.name_max_len, helper.name) },
             .repo => .{ .repo = try parseName(repo_route_max_len, helper.name) },
             .repo_commits => .{ .repo_commits = .{ .name = try parseName(repo_route_max_len, helper.name), .after = helper.after } },
+            .repo_refs => .{ .repo_refs = .{
+                .name = try parseName(repo_route_max_len, helper.name),
+                .kind = if (helper.ref_kind) |k| (if (std.mem.eql(u8, k, "tag")) .tag else .branch) else .branch,
+                .after = helper.after,
+            } },
             .repo_settings => .{ .repo_settings = try parseName(repo_route_max_len, helper.name) },
             .repo_auth => .{ .repo_auth = try parseName(repo_route_max_len, helper.name) },
         };
@@ -830,6 +891,7 @@ pub const Widget = union(enum) {
     repo_header: Repo.Header.View,
     repo_files: Repo.Files.View,
     repo_commits: Repo.Commits.View,
+    repo_refs: Repo.Refs.View,
     home_users: Home.Users.View,
     home_repos: Home.Repos.View,
     auth_tab: Home.Header.AuthTab.View,

@@ -12,6 +12,7 @@ const Focus = xitui.focus.Focus;
 pub const Header = @import("./Repo/Header.zig");
 pub const Files = @import("./Repo/Files.zig");
 pub const Commits = @import("./Repo/Commits.zig");
+pub const Refs = @import("./Repo/Refs.zig");
 pub const Settings = @import("./Settings.zig");
 pub const Auth = @import("./Auth.zig");
 pub const Quit = @import("./Quit.zig");
@@ -22,6 +23,7 @@ header: Header,
 repo: evt.Repo,
 files: Files,
 commits: Commits,
+refs: Refs,
 settings: Settings,
 auth: Auth,
 quit: Quit,
@@ -50,6 +52,7 @@ pub fn init(
     const name_str: []const u8 = switch (route) {
         .repo, .repo_settings, .repo_auth => |n| n.slice(),
         .repo_commits => |c| c.name.slice(),
+        .repo_refs => |r| r.name.slice(),
         else => return error.UnexpectedRoute,
     };
     const rf = ui.RoutablePage.RepoFiles.parse(name_str) orelse return error.NotFound;
@@ -62,6 +65,16 @@ pub fn init(
     // how many diff hunks the commits view's selected commit shows ("load more").
     const commits_after: usize = switch (route) {
         .repo_commits => |c| c.after,
+        else => 0,
+    };
+    // the refs tab paginates one column at a time: this offset applies to
+    // `refs_kind`'s column, the other stays at its first window.
+    const refs_kind: ui.RoutablePage.RefKind = switch (route) {
+        .repo_refs => |r| r.kind,
+        else => .branch,
+    };
+    const refs_after: usize = switch (route) {
+        .repo_refs => |r| r.after,
         else => 0,
     };
 
@@ -83,6 +96,7 @@ pub fn init(
         // the repo's event id is the on-disk repo directory name
         .files = try Files.init(arena, session, &found.event_id, rf.identity, files_dir),
         .commits = try Commits.init(arena, session, &found.event_id, rf.identity, commits_start, commits_after),
+        .refs = try Refs.init(arena, session, &found.event_id, rf.identity, refs_kind, refs_after),
         .settings = Settings.init(),
         .auth = Auth.init(),
         .quit = Quit.init(),
@@ -132,6 +146,13 @@ pub const View = struct {
                 try stack.children.put(allocator, commits_view.getFocus().id, .{ .repo_commits = commits_view });
             }
 
+            // refs — the repo's branches and tags.
+            {
+                var refs_view = try Refs.View.init(allocator, &data.refs, session);
+                errdefer refs_view.deinit(allocator);
+                try stack.children.put(allocator, refs_view.getFocus().id, .{ .repo_refs = refs_view });
+            }
+
             {
                 var settings_view = try Settings.View.init(allocator, &data.settings, session);
                 errdefer settings_view.deinit(allocator);
@@ -177,6 +198,8 @@ pub const View = struct {
                 // files/commits carry this page's content route (directory / log
                 // page); settings/auth carry only "owner/name".
                 .repo_commits => self.session.data.current_page = .{ .repo_commits = .{ .name = self.data.commits_route_name } },
+                // the refs tab mirrors this page's paginated column + offset.
+                .repo_refs => self.session.data.current_page = .{ .repo_refs = .{ .name = self.data.identity, .kind = self.data.refs.kind, .after = self.data.refs.after } },
                 .home_settings => self.session.data.current_page = .{ .repo_settings = self.data.identity },
                 .home_auth => self.session.data.current_page = .{ .repo_auth = self.data.identity },
                 // the quit tab is tty-only and not a route, so leave current_page
@@ -217,6 +240,7 @@ pub const View = struct {
                                     const at_top = switch (selected_widget.*) {
                                         .repo_files => |*v| v.getSelectedIndex() == 0,
                                         .repo_commits => |*v| v.getSelectedIndex() == 0,
+                                        .repo_refs => |*v| v.getSelectedIndex() == 0,
                                         .home_settings => |*v| v.getSelectedIndex() == 0,
                                         .home_auth => |*v| v.getSelectedIndex() == 0,
                                         .quit => |*v| v.getSelectedIndex() == 0,
