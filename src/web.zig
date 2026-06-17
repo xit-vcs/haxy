@@ -493,8 +493,15 @@ fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: 
         plain, // non-focusable, colored
 
         const a_prefix = "a:";
+        // an "in-page" anchor: rendered as a real <a href> so it works with js
+        // disabled, but crossPageLink ignores it, so with wasm the click just
+        // moves focus rather than navigating.
+        const inpage_prefix = "ai:";
 
         fn init(str: []const u8) @This() {
+            if (std.mem.startsWith(u8, str, inpage_prefix)) {
+                return .{ .a = str[inpage_prefix.len..] };
+            }
             if (std.mem.startsWith(u8, str, a_prefix)) {
                 return .{ .a = str[a_prefix.len..] };
             }

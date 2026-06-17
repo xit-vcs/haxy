@@ -302,7 +302,10 @@ pub const View = struct {
                 var list_box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert });
                 errdefer list_box.deinit(allocator);
                 for (data.commits) |commit| {
-                    try addRow(allocator, &list_box, commit.message, "");
+                    // an in-page "ai:" anchor so a commit row is clickable with
+                    // js off (the browser follows it, rooting the list there);
+                    // with wasm the click just selects it and swaps the diff pane.
+                    try addRow(allocator, &list_box, commit.message, try commitRowLink(session.page_arena, data.identity, commit.oid));
                 }
                 if (data.next_start) |next| {
                     try addRow(allocator, &list_box, "next →", try commitsLink(session.page_arena, data.identity, next, 0));
@@ -766,4 +769,13 @@ fn commitsLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, start
     const route = ui.RoutablePage.repoCommitsRoute(identity, start_oid, after) orelse return error.RouteTooLong;
     const url = try route.urlAlloc(page_arena);
     return std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{url});
+}
+
+// the in-page "ai:" anchor for selecting `oid` in `identity`'s commit list. it
+// points at the same route as commitsLink but the "ai:" prefix keeps wasm clicks
+// in-page (crossPageLink ignores it); the href is only followed with js off.
+fn commitRowLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, oid: []const u8) ![]const u8 {
+    const route = ui.RoutablePage.repoCommitsRoute(identity, oid, 0) orelse return error.RouteTooLong;
+    const url = try route.urlAlloc(page_arena);
+    return std.fmt.allocPrint(page_arena.allocator(), "ai:{s}", .{url});
 }
