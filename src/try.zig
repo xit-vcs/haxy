@@ -232,19 +232,16 @@ pub fn main(init: std.process.Init) !void {
             try template_repo.add(io, allocator, &.{ "README.md", "docs/dev/contribute.md" });
             _ = try template_repo.commit(io, allocator, .{ .message = "let there be light" });
 
+            // tag every commit in creation order as v1, v2, and so on
+            var tag_num: usize = 1;
+            try addNextTag(&template_repo, io, allocator, &tag_num);
+
             // a batch of commits so the commits tab has more than one page to
             // paginate through. each rewrites a few files with scattered line
             // edits, so every commit is a multi-file diff with several separate
             // hunks to look at. stepped timestamps vary the date column.
             const base_ts: u64 = 1_700_000_000; // 2023-11-14
             const edit_files = [_][]const u8{ "src/alpha.txt", "src/beta.txt", "src/gamma.txt" };
-            // cycled through to pad each line into prose-like content.
-            const words = [_][]const u8{
-                "lorem",   "ipsum",  "dolor",  "sit",    "amet",   "consectetur",
-                "quantum", "vector", "matrix", "buffer", "kernel", "socket",
-                "falcon",  "otter",  "badger", "walrus", "ferret", "marmot",
-                "scatter", "gather", "encode", "decode", "render", "commit",
-            };
             // commit subjects, cycled then padded to a varying length.
             const subjects = [_][]const u8{
                 "fix off-by-one in scatter loop",
@@ -262,38 +259,7 @@ pub fn main(init: std.process.Init) !void {
                     defer repo_dir.close(io);
                     try repo_dir.createDirPath(io, "src");
                     for (edit_files, 0..) |path, fi| {
-                        const file = try repo_dir.createFile(io, path, .{});
-                        defer file.close(io);
-                        var writer = std.Io.Writer.Allocating.init(allocator);
-                        defer writer.deinit();
-                        // every 8th line is edited by this commit; the stride
-                        // offset shifts with c so consecutive commits touch
-                        // different lines, and the edited text carries a
-                        // c-dependent word, so each commit's diff is a distinct
-                        // scatter of hunks. untouched lines stay byte-identical
-                        // across commits (their padding ignores c) so they don't
-                        // all change every commit. each line is padded with
-                        // cycled words to a per-line length, capped at 120.
-                        for (0..40) |line| {
-                            const start = writer.written().len;
-                            if ((line + fi + c) % 8 == 0) {
-                                const tag = words[(line + fi + c * 3) % words.len];
-                                try writer.writer.print("rev {d} {s}", .{ c, tag });
-                            }
-                            const target = 40 + (line * 17 + fi * 23) % 70;
-                            var w = line + fi;
-                            while (true) : (w += 1) {
-                                const word = words[w % words.len];
-                                const len = writer.written().len - start;
-                                if (len >= target or len + 1 + word.len > 120) break;
-                                if (len == 0)
-                                    try writer.writer.print("{s}", .{word})
-                                else
-                                    try writer.writer.print(" {s}", .{word});
-                            }
-                            try writer.writer.writeByte('\n');
-                        }
-                        try file.writeStreamingAll(io, writer.written());
+                        try writeScatterFile(io, allocator, repo_dir, path, fi, c);
                     }
                 }
                 try template_repo.add(io, allocator, &edit_files);
@@ -305,13 +271,50 @@ pub fn main(init: std.process.Init) !void {
                 const msg_target = 16 + (c * 41) % 96;
                 var mw = c;
                 while (true) : (mw += 1) {
-                    const word = words[mw % words.len];
+                    const word = scatter_words[mw % scatter_words.len];
                     const len = msg_writer.written().len;
                     if (len >= msg_target or len + 1 + word.len > 120) break;
                     try msg_writer.writer.print(" {s}", .{word});
                 }
                 const message = try arena.allocator().dupe(u8, msg_writer.written());
                 _ = try template_repo.commit(io, allocator, .{ .message = message, .timestamp = base_ts + c * std.time.s_per_day });
+                try addNextTag(&template_repo, io, allocator, &tag_num);
+            }
+
+            // two more branches forked off master, each adding a single commit
+            // that makes a scattered edit to one file. tag each new commit too,
+            // and switch back to master after each so the next branch also
+            // forks from master and the template ends up back on master.
+            const branch_data = [_]struct {
+                name: []const u8,
+                file: []const u8,
+                fi: usize,
+                message: []const u8,
+                rev: usize,
+            }{
+                .{ .name = "extra", .file = "src/alpha.txt", .fi = 0, .message = "scatter alpha on the extra branch", .rev = 30 },
+                .{ .name = "feature", .file = "src/beta.txt", .fi = 1, .message = "scatter beta on the feature branch", .rev = 31 },
+            };
+            for (branch_data) |b| {
+                try template_repo.addBranch(io, .{ .name = b.name });
+                {
+                    var to_branch = try template_repo.switchDir(io, allocator, .{ .target = .{ .ref = .{ .kind = .head, .name = b.name } } });
+                    defer to_branch.deinit();
+                }
+
+                {
+                    var repo_dir = try cwd.openDir(io, template_path, .{});
+                    defer repo_dir.close(io);
+                    try writeScatterFile(io, allocator, repo_dir, b.file, b.fi, b.rev);
+                }
+                try template_repo.add(io, allocator, &.{b.file});
+                _ = try template_repo.commit(io, allocator, .{ .message = b.message, .timestamp = base_ts + b.rev * std.time.s_per_day });
+                try addNextTag(&template_repo, io, allocator, &tag_num);
+
+                {
+                    var to_master = try template_repo.switchDir(io, allocator, .{ .target = .{ .ref = .{ .kind = .head, .name = "master" } } });
+                    defer to_master.deinit();
+                }
             }
         }
 
@@ -419,6 +422,54 @@ pub fn main(init: std.process.Init) !void {
             .data_dir = server_path,
         }, run_opts.err, Runnable{ .io = io, .allocator = allocator, .session = &session });
     }
+}
+
+// words cycled through to pad generated lines into prose-like content
+const scatter_words = [_][]const u8{
+    "lorem",   "ipsum",  "dolor",  "sit",    "amet",   "consectetur",
+    "quantum", "vector", "matrix", "buffer", "kernel", "socket",
+    "falcon",  "otter",  "badger", "walrus", "ferret", "marmot",
+    "scatter", "gather", "encode", "decode", "render", "commit",
+};
+
+// write `path` as 40 lines of mostly-stable filler. revision `c` and file
+// index `fi` shift which lines change and the words used, so each (c, fi)
+// yields a distinct multi-hunk diff against the previous revision. untouched
+// lines stay byte-identical across revisions, so a bump in `c` is a scatter of
+// small hunks rather than a full rewrite.
+fn writeScatterFile(io: std.Io, allocator: std.mem.Allocator, repo_dir: std.Io.Dir, path: []const u8, fi: usize, c: usize) !void {
+    const file = try repo_dir.createFile(io, path, .{});
+    defer file.close(io);
+    var writer = std.Io.Writer.Allocating.init(allocator);
+    defer writer.deinit();
+    for (0..40) |line| {
+        const start = writer.written().len;
+        if ((line + fi + c) % 8 == 0) {
+            const tag = scatter_words[(line + fi + c * 3) % scatter_words.len];
+            try writer.writer.print("rev {d} {s}", .{ c, tag });
+        }
+        const target = 40 + (line * 17 + fi * 23) % 70;
+        var w = line + fi;
+        while (true) : (w += 1) {
+            const word = scatter_words[w % scatter_words.len];
+            const len = writer.written().len - start;
+            if (len >= target or len + 1 + word.len > 120) break;
+            if (len == 0)
+                try writer.writer.print("{s}", .{word})
+            else
+                try writer.writer.print(" {s}", .{word});
+        }
+        try writer.writer.writeByte('\n');
+    }
+    try file.writeStreamingAll(io, writer.written());
+}
+
+// tag the current HEAD as the next sequential version: v1, v2, and so on
+fn addNextTag(repo: *rp.Repo(.xit, .{}), io: std.Io, allocator: std.mem.Allocator, n: *usize) !void {
+    var buf: [16]u8 = undefined;
+    const name = try std.fmt.bufPrint(&buf, "v{d}", .{n.*});
+    _ = try repo.addTag(io, allocator, .{ .name = name });
+    n.* += 1;
 }
 
 // recursively copy the contents of src_dir into dest_dir
