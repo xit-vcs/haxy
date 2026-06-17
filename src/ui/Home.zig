@@ -119,16 +119,17 @@ pub const View = struct {
         const header = &self.box.children.values()[header_index].widget.home_header;
         const stack = &self.box.children.values()[stack_index].widget.stack;
 
-        // each header tab maps 1:1 to a stack child by position
+        // each header tab maps 1:1 to a stack child by position; mirror the
+        // selected child's page into the url, keyed by its kind
         if (header.getSelectedIndex()) |index| {
             stack.getFocus().child_id = stack.children.keys()[index];
-            switch (index) {
+            switch (std.meta.activeTag(stack.children.values()[index])) {
                 // mirror each list tab's built pagination window so the url stays
                 // consistent with what's shown (and so a build doesn't reset it).
-                0 => self.session.data.current_page = .{ .home_users = self.data.users.after },
-                1 => self.session.data.current_page = .{ .home_repos = self.data.repos.after },
-                2 => self.session.data.current_page = .home_settings,
-                3 => self.session.data.current_page = .home_auth,
+                .home_users => self.session.data.current_page = .{ .home_users = self.data.users.after },
+                .home_repos => self.session.data.current_page = .{ .home_repos = self.data.repos.after },
+                .home_settings => self.session.data.current_page = .home_settings,
+                .home_auth => self.session.data.current_page = .home_auth,
                 // the quit tab is tty-only and not a route, so leave current_page
                 // alone (nothing to mirror into the url).
                 else => {},

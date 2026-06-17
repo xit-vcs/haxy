@@ -58,6 +58,16 @@ pub const View = struct {
             });
         }
 
+        // the tab matching the current page is focused initially; matching by
+        // link (rather than position) keeps this robust to tab changes.
+        const current_link: []const u8 = switch (session.data.current_page) {
+            .home_repos => "a:/repos",
+            .home_settings => "a:/settings",
+            .home_auth => "a:/auth",
+            else => "a:/users",
+        };
+        var selected_tab: ?usize = null;
+
         // tabs
         for (
             [_][]const u8{ "users", "repos", "", "settings", "" },
@@ -78,6 +88,7 @@ pub const View = struct {
                 var auth_tab = try AuthTab.View.init(allocator, &data.auth_tab, session);
                 errdefer auth_tab.deinit(allocator);
                 try tab_ids.put(allocator, auth_tab.getFocus().id, {});
+                if (std.mem.eql(u8, focus_name, current_link)) selected_tab = auth_tab.getFocus().id;
                 try box.children.put(allocator, auth_tab.getFocus().id, .{
                     .widget = .{ .auth_tab = auth_tab },
                     .rect = null,
@@ -91,6 +102,7 @@ pub const View = struct {
                 text_box.getFocus().focusable = true;
                 text_box.getFocus().kind = .{ .custom = focus_name };
                 try tab_ids.put(allocator, text_box.getFocus().id, {});
+                if (std.mem.eql(u8, focus_name, current_link)) selected_tab = text_box.getFocus().id;
                 try box.children.put(allocator, text_box.getFocus().id, .{
                     .widget = .{ .text_box = text_box },
                     .rect = null,
@@ -115,16 +127,7 @@ pub const View = struct {
         }
 
         var self = View{ .box = box, .data = data, .tab_ids = tab_ids };
-        // initial selected tab
-        self.getFocus().child_id = self.tab_ids.keys()[
-            switch (session.data.current_page) {
-                .home_users => 0,
-                .home_repos => 1,
-                .home_settings => 2,
-                .home_auth => 3,
-                else => 0,
-            }
-        ];
+        self.getFocus().child_id = selected_tab orelse self.tab_ids.keys()[0];
         return self;
     }
 

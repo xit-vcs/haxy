@@ -169,12 +169,13 @@ pub const View = struct {
         if (header.getSelectedIndex()) |index| {
             stack.getFocus().child_id = stack.children.keys()[index];
             const name = self.data.route_name;
-            switch (index) {
-                1 => self.session.data.current_page = .{ .user_settings = name },
-                2 => self.session.data.current_page = .{ .user_auth = name },
+            switch (std.meta.activeTag(stack.children.values()[index])) {
+                .home_settings => self.session.data.current_page = .{ .user_settings = name },
+                .home_auth => self.session.data.current_page = .{ .user_auth = name },
                 // the quit tab is tty-only and not a route, so leave current_page
                 // alone (nothing to mirror into the url).
-                3 => {},
+                .quit => {},
+                // the repos list (the default tab)
                 else => self.session.data.current_page = .{ .user = name },
             }
         }

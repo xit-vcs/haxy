@@ -10,9 +10,6 @@ const Focus = xitui.focus.Focus;
 
 const Self = @This();
 
-const label_on = "turn off ANSI art";
-const label_off = "turn on ANSI art";
-
 pub fn init() Self {
     return .{};
 }
@@ -23,32 +20,55 @@ pub const View = struct {
     session: *ui.Session,
     button_id: usize,
 
+    // the box holds the toggle button and the logged-out message; build() shows
+    // exactly one of them based on whether a user is logged in.
     const button_index: usize = 0;
+    const message_index: usize = 1;
 
     pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !View {
-        const logged_in = session.data.user_id != null;
-
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .rounded_corners = true, .direction = .vert });
         errdefer box.deinit(allocator);
-        // when logged in, the toggle posts to a page-scoped /ansi path so the
-        // server sends us back to this page's settings tab; logged out, the
-        // empty action blocks the POST and the input goes to the TUI instead.
-        box.getFocus().kind = .{ .custom = if (!logged_in) "form:" else switch (session.data.current_page) {
-            .user, .user_settings, .user_auth => |name| try std.fmt.allocPrint(session.page_arena.allocator(), "form:/user/{s}/ansi", .{name.slice()}),
-            else => "form:/ansi",
-        } };
+        // on the web the toggle is an overlay form posting to a page-scoped /ansi
+        // path; only mark it a form when logged in so a logged-out page stays
+        // blank (the web rebuilds per request, so this is correct there; the tty
+        // ignores the form kind and toggles in-process via input).
+        if (session.data.user_id != null) {
+            box.getFocus().kind = .{ .custom = switch (session.data.current_page) {
+                .user, .user_settings, .user_auth => |name| try std.fmt.allocPrint(session.page_arena.allocator(), "form:/user/{s}/ansi", .{name.slice()}),
+                else => "form:/ansi",
+            } };
+        }
 
         var button_id: usize = undefined;
         {
-            var button = try wgt.TextBox(ui.Widget).init(allocator, labelFor(session), .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            var button = try wgt.TextBox(ui.Widget).init(allocator, ansiLabel(session), .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer button.deinit(allocator);
-            button.getFocus().focusable = true;
             // the renderer distinguishes plain clickables from buttons that
             // should POST to a server route by this kind.
             button.getFocus().kind = .{ .custom = "submit" };
             button_id = button.getFocus().id;
             try box.children.put(allocator, button.getFocus().id, .{
                 .widget = .{ .text_box = button },
+                .rect = null,
+                .min_size = null,
+            });
+        }
+
+        // the logged-out message (shown in place of the toggle)
+        {
+            const logged_out_message =
+                \\you must be logged in to see settings :(
+                \\
+                \\instead, here's an emoticon from the early 2000s:
+                \\<('o'<) ^( '-' )^ (>'o')>
+                \\
+                \\hope it helps.
+            ;
+
+            var message = try wgt.TextBox(ui.Widget).init(allocator, logged_out_message, .{ .border_style = null, .rounded_corners = false, .wrap_kind = .word });
+            errdefer message.deinit(allocator);
+            try box.children.put(allocator, message.getFocus().id, .{
+                .widget = .{ .text_box = message },
                 .rect = null,
                 .min_size = null,
             });
@@ -69,16 +89,23 @@ pub const View = struct {
     }
 
     pub fn build(self: *View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
+        // show the toggle when logged in, else the message. decided per-frame
+        // since the tty doesn't rebuild the page on login. a zero max height
+        // hides the inactive one (it builds to nothing).
+        const logged_in = self.session.data.user_id != null;
         const box = &self.center.child.box;
-        if (box.children.values().len > 0) {
-            const button = &box.children.values()[button_index].widget.text_box;
-            button.box.children.values()[0].widget.text.content = labelFor(self.session);
-        }
+        const button = &box.children.values()[button_index].widget.text_box;
+        if (logged_in) button.box.children.values()[0].widget.text.content = ansiLabel(self.session);
+        button.getFocus().focusable = logged_in;
+        const hidden = layout.MaybeSize{ .width = null, .height = 0 };
+        box.children.values()[button_index].max_size = if (logged_in) null else hidden;
+        box.children.values()[message_index].max_size = if (logged_in) hidden else null;
         try self.center.build(allocator, constraint, root_focus);
     }
 
     pub fn input(self: *View, allocator: std.mem.Allocator, key: inp.Key, root_focus: *Focus) !void {
         _ = allocator;
+        if (self.session.data.user_id == null) return; // blank/disabled when logged out
         switch (key) {
             .enter => try self.toggle(),
             .mouse => |mouse| {
@@ -120,6 +147,8 @@ pub const View = struct {
     }
 };
 
-fn labelFor(session: *const ui.Session) []const u8 {
+fn ansiLabel(session: *const ui.Session) []const u8 {
+    const label_on = "turn off ANSI art";
+    const label_off = "turn on ANSI art";
     return if (session.data.enable_ansi) label_on else label_off;
 }

@@ -95,6 +95,16 @@ pub const View = struct {
         const settings_link = try std.fmt.allocPrint(aa, "a:/repo/{s}/{s}/settings", .{ data.owner_name, data.name });
         const auth_link = try std.fmt.allocPrint(aa, "a:/repo/{s}/{s}/auth", .{ data.owner_name, data.name });
 
+        // the tab matching the current page is focused initially; matching by
+        // link (rather than position) keeps this robust to tab changes.
+        const current_link: []const u8 = switch (session.data.current_page) {
+            .repo_commits => commits_link,
+            .repo_settings => settings_link,
+            .repo_auth => auth_link,
+            else => files_link,
+        };
+        var selected_tab: ?usize = null;
+
         // files tab
         {
             var text_box = try wgt.TextBox(ui.Widget).init(allocator, "files", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
@@ -102,6 +112,7 @@ pub const View = struct {
             text_box.getFocus().focusable = true;
             text_box.getFocus().kind = .{ .custom = files_link };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
+            if (std.mem.eql(u8, files_link, current_link)) selected_tab = text_box.getFocus().id;
             try box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
@@ -116,6 +127,7 @@ pub const View = struct {
             text_box.getFocus().focusable = true;
             text_box.getFocus().kind = .{ .custom = commits_link };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
+            if (std.mem.eql(u8, commits_link, current_link)) selected_tab = text_box.getFocus().id;
             try box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
@@ -141,6 +153,7 @@ pub const View = struct {
             text_box.getFocus().focusable = true;
             text_box.getFocus().kind = .{ .custom = settings_link };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
+            if (std.mem.eql(u8, settings_link, current_link)) selected_tab = text_box.getFocus().id;
             try box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
@@ -155,6 +168,7 @@ pub const View = struct {
             errdefer auth_tab.deinit(allocator);
             auth_tab.text_box.getFocus().kind = .{ .custom = auth_link };
             try tab_ids.put(allocator, auth_tab.getFocus().id, {});
+            if (std.mem.eql(u8, auth_link, current_link)) selected_tab = auth_tab.getFocus().id;
             try box.children.put(allocator, auth_tab.getFocus().id, .{
                 .widget = .{ .auth_tab = auth_tab },
                 .rect = null,
@@ -178,15 +192,7 @@ pub const View = struct {
         }
 
         var self = View{ .box = box, .data = data, .tab_ids = tab_ids };
-        // open on the tab named by the current route
-        self.getFocus().child_id = self.tab_ids.keys()[
-            switch (session.data.current_page) {
-                .repo_commits => 1,
-                .repo_settings => 2,
-                .repo_auth => 3,
-                else => 0,
-            }
-        ];
+        self.getFocus().child_id = selected_tab orelse self.tab_ids.keys()[0];
         return self;
     }
 
