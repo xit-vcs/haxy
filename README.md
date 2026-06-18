@@ -34,6 +34,13 @@ Haxy will provide a text user interface (TUI) over SSH, so you can browse the Ha
 
 Additionally, Haxy will provide a web UI for a more typical experience in a web browser. To avoid having separate UI codebases, the web UI will simply render the TUI in your browser. This sounds frightening but it can be done in an accessible way that is usable for screen readers and mobile devices. See [an early look](https://www.youtube.com/watch?v=08AnxqnhTcs) at how the web UI will work.
 
+Here's what it looks like so far in the terminal and on the web:
+
+<p align="center">
+<a href="https://raw.githubusercontent.com/xit-vcs/haxy/refs/heads/master/screenshots/terminal.avif"><img src="screenshots/terminal.avif" width="49%" /></a>
+<a href="https://raw.githubusercontent.com/xit-vcs/haxy/refs/heads/master/screenshots/web.avif"><img src="screenshots/web.avif" width="49%" /></a>
+</p>
+
 ## Why not Radicle?
 
 The main difference between Haxy's design and [Radicle](https://radicle.dev/) is that Haxy is not peer-to-peer. While a p2p architecture can be useful in free speech contexts, it can lead to a significant amount of complexity and make it more difficult to have a consistently good experience. Haxy is *federated* in the sense that anyone can run a Haxy instance, and your projects can be easily moved between them. I believe that is pragmatically the kind of decentralization that people want, and it significantly simplifies the implementation.
