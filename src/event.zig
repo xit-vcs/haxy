@@ -482,6 +482,10 @@ pub fn read(
                         }
                     },
                     .bool => @field(event, field.name) = try readBool(DB, hash_kind, map, field.name),
+                    .int => |int_info| switch (int_info.signedness) {
+                        .unsigned => @field(event, field.name) = @intCast(try readUint(DB, hash_kind, map, field.name)),
+                        .signed => @field(event, field.name) = @intCast(try readInt(DB, hash_kind, map, field.name)),
+                    },
                     else => @compileError("unsupported read field type: " ++ @typeName(field.type)),
                 }
             }
@@ -501,6 +505,26 @@ fn readBytes(
 ) ![]const u8 {
     const cursor = try map.getCursor(hash.hashInt(hash_kind, field_name)) orelse return error.NotFound;
     return try cursor.readBytesAlloc(allocator, null);
+}
+
+fn readUint(
+    comptime DB: type,
+    comptime hash_kind: hash.HashKind,
+    map: DB.HashMap(.read_only),
+    field_name: []const u8,
+) !u64 {
+    const cursor = try map.getCursor(hash.hashInt(hash_kind, field_name)) orelse return error.NotFound;
+    return try cursor.readUint();
+}
+
+fn readInt(
+    comptime DB: type,
+    comptime hash_kind: hash.HashKind,
+    map: DB.HashMap(.read_only),
+    field_name: []const u8,
+) !i64 {
+    const cursor = try map.getCursor(hash.hashInt(hash_kind, field_name)) orelse return error.NotFound;
+    return try cursor.readInt();
 }
 
 fn readBool(

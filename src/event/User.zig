@@ -10,12 +10,24 @@ display_name: []const u8,
 email: []const u8,
 password_hash: []const u8,
 enable_ansi: bool = true,
-// newline-separated authorized_keys lines (one OpenSSH public key per line)
-ssh_keys: []const u8 = "",
+ssh_keys: []const u8 = "", // newline-separated authorized_keys lines (one OpenSSH public key per line)
+created_ts: u64 = 0, // the commit timestamp of the event that first created this user
 
 const Self = @This();
 
 pub const name_max_len = 32;
+
+// `created_ts` comes from the commit timestamp, not the event
+// payload, so it must not appear in the JSON we output
+pub fn jsonStringify(self: @This(), jw: anytype) !void {
+    try jw.beginObject();
+    inline for (std.meta.fields(@This())) |field| {
+        if (comptime std.mem.eql(u8, field.name, "created_ts")) continue;
+        try jw.objectField(field.name);
+        try jw.write(@field(self, field.name));
+    }
+    try jw.endObject();
+}
 
 // the subset of a user that's safe to hand to clients
 pub const Safe = struct {
@@ -47,31 +59,36 @@ pub fn consume(
     if (event_maybe) |event| {
         if (event.name.len > name_max_len) return error.NameTooLong;
 
+        var event_to_write = event;
+
         // if this event_id already maps to a user with a different name,
         // drop the stale name->id entry first
         const existing_cursor_maybe = try event_id_to_user.getCursor(user_key);
         if (existing_cursor_maybe) |existing_cursor| {
             const existing_user = try DB.HashMap(.read_only).init(existing_cursor);
             const existing_event = try evt.read(@This(), DB, hash_kind, arena, existing_user);
+            // updates preserve the original creation timestamp
+            event_to_write.created_ts = existing_event.created_ts;
             if (!std.mem.eql(u8, existing_event.name, event.name)) {
                 _ = try name_to_user_id.remove(hash.hashInt(hash_kind, existing_event.name));
             }
+        } else {
+            // first time we've seen this user: stamp it with the commit timestamp
+            event_to_write.created_ts = created_ts;
         }
 
         const user_cursor = try event_id_to_user.putCursor(user_key);
         const user = try DB.HashMap(.read_write).init(user_cursor);
-        try evt.upsert(@This(), DB, hash_kind, user, event);
+        try evt.upsert(@This(), DB, hash_kind, user, event_to_write);
 
         try name_to_user_id.put(hash.hashInt(hash_kind, event.name), .{ .bytes = event_id });
 
-        // first time we've seen this user: record its creation timestamp and add it
-        // to the ordered map the users view paginates through
+        // first time we've seen this user: add it to the ordered map the users
+        // view paginates through
         if (existing_cursor_maybe == null) {
-            try user.put(hash.hashInt(hash_kind, "created-ts"), .{ .uint = created_ts });
-
             const timestamp_to_user_id_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, "timestamp->user-id"));
             const timestamp_to_user_id = try DB.SortedMap(.read_write).init(timestamp_to_user_id_cursor);
-            const order_key = evt.orderKey(created_ts, event_id);
+            const order_key = evt.orderKey(event_to_write.created_ts, event_id);
             try timestamp_to_user_id.put(&order_key, .{ .bytes = event_id });
         }
     } else {
@@ -82,13 +99,10 @@ pub fn consume(
             _ = try name_to_user_id.remove(hash.hashInt(hash_kind, existing_event.name));
 
             // drop it from the ordered map using its recorded creation timestamp
-            if (try existing_user.getCursor(hash.hashInt(hash_kind, "created-ts"))) |created_ts_cursor| {
-                const stored_ts = try created_ts_cursor.readUint();
-                const timestamp_to_user_id_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, "timestamp->user-id"));
-                const timestamp_to_user_id = try DB.SortedMap(.read_write).init(timestamp_to_user_id_cursor);
-                const order_key = evt.orderKey(stored_ts, event_id);
-                _ = try timestamp_to_user_id.remove(&order_key);
-            }
+            const timestamp_to_user_id_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, "timestamp->user-id"));
+            const timestamp_to_user_id = try DB.SortedMap(.read_write).init(timestamp_to_user_id_cursor);
+            const order_key = evt.orderKey(existing_event.created_ts, event_id);
+            _ = try timestamp_to_user_id.remove(&order_key);
         }
 
         if (!try event_id_to_user.remove(user_key)) return error.EventNotFound;
