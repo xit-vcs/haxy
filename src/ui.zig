@@ -555,14 +555,18 @@ pub const Session = struct {
         repo: *rp.Repo(.xit, evt.admin_repo_opts),
     ) !void {
         defer self.pending.clearRetainingCapacity();
+        var wrote = false;
         for (self.pending.items) |action| {
             self.apply(action);
             switch (action) {
                 .toggle_ansi => if (self.data.user_id) |user_id| {
                     try evt.User.toggleAnsi(evt.admin_repo_opts, io, allocator, repo, user_id);
+                    wrote = true;
                 },
             }
         }
+        // reload the moment so a later read off it sees what we just applied
+        if (wrote) self.haxy_moment = try evt.currentMoment(evt.admin_repo_opts, repo);
     }
 
     // request a forward navigation to `route`; the host consumes next_page
