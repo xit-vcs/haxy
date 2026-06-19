@@ -20,46 +20,50 @@ pub const View = struct {
     session: *ui.Session,
     button_id: usize,
 
-    // the box holds the toggle button and the logged-out message; build() shows
-    // exactly one of them based on whether a user is logged in.
-    const button_index: usize = 0;
-    const message_index: usize = 1;
+    // the stack switches between two whole views; build() selects one based on
+    // whether a user is logged in. the logged-in view holds the settings
+    // controls (currently just the ANSI toggle, but it will grow).
+    const logged_in_index: usize = 0;
+    const logged_out_index: usize = 1;
 
     pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !View {
-        var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .rounded_corners = true, .direction = .vert });
-        errdefer box.deinit(allocator);
-        // on the web the toggle is an overlay form posting to a page-scoped /ansi
-        // path; only mark it a form when logged in so a logged-out page stays
-        // blank (the web rebuilds per request, so this is correct there; the tty
-        // ignores the form kind and toggles in-process via input).
-        if (session.data.user_id != null) {
+        var stack = try wgt.Stack(ui.Widget).init(allocator);
+        errdefer stack.deinit(allocator);
+
+        var button_id: usize = undefined;
+        // the logged-in view: the controls shown to a signed-in user.
+        {
+            var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert });
+            errdefer box.deinit(allocator);
+
+            // on the web each control posts to a page-scoped form
             box.getFocus().kind = .{ .custom = switch (session.data.current_page) {
                 .user, .user_settings, .user_auth => |name| try std.fmt.allocPrint(session.page_arena.allocator(), "form:/user/{s}/ansi", .{name.slice()}),
                 else => "form:/ansi",
             } };
+
+            {
+                var button = try wgt.TextBox(ui.Widget).init(allocator, ansiLabel(session), .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+                errdefer button.deinit(allocator);
+                // the renderer distinguishes plain clickables from buttons that
+                // should POST to a server route by this kind.
+                button.getFocus().kind = .{ .custom = "submit" };
+                button.getFocus().focusable = true;
+                button_id = button.getFocus().id;
+                try box.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = null });
+            }
+
+            box.getFocus().child_id = button_id;
+            try stack.children.put(allocator, box.getFocus().id, .{ .box = box });
         }
 
-        var button_id: usize = undefined;
-        {
-            var button = try wgt.TextBox(ui.Widget).init(allocator, ansiLabel(session), .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
-            errdefer button.deinit(allocator);
-            // the renderer distinguishes plain clickables from buttons that
-            // should POST to a server route by this kind.
-            button.getFocus().kind = .{ .custom = "submit" };
-            button_id = button.getFocus().id;
-            try box.children.put(allocator, button.getFocus().id, .{
-                .widget = .{ .text_box = button },
-                .rect = null,
-                .min_size = null,
-            });
-        }
-
-        // the logged-out message (shown in place of the toggle)
+        // the logged-out view: shown when no user is signed in.
         {
             const logged_out_message =
-                \\you must be logged in to see settings :(
+                \\you must be logged in to see settings.
                 \\
-                \\instead, here's an emoticon from the early 2000s:
+                \\here's an emoticon from the early 2000s instead:
+                \\
                 \\<('o'<) ^( '-' )^ (>'o')>
                 \\
                 \\hope it helps.
@@ -67,17 +71,11 @@ pub const View = struct {
 
             var message = try wgt.TextBox(ui.Widget).init(allocator, logged_out_message, .{ .border_style = null, .rounded_corners = false, .wrap_kind = .word });
             errdefer message.deinit(allocator);
-            try box.children.put(allocator, message.getFocus().id, .{
-                .widget = .{ .text_box = message },
-                .rect = null,
-                .min_size = null,
-            });
+            try stack.children.put(allocator, message.getFocus().id, .{ .text_box = message });
         }
 
-        box.getFocus().child_id = button_id;
-
         return .{
-            .center = try ui.Center.init(allocator, .{ .box = box }, .both),
+            .center = try ui.Center.init(allocator, .{ .stack = stack }, .both),
             .data = data,
             .session = session,
             .button_id = button_id,
@@ -89,17 +87,16 @@ pub const View = struct {
     }
 
     pub fn build(self: *View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
-        // show the toggle when logged in, else the message. decided per-frame
-        // since the tty doesn't rebuild the page on login. a zero max height
-        // hides the inactive one (it builds to nothing).
+        // select the logged-in view when logged in, else the logged-out view.
+        // decided per-frame since the tty doesn't rebuild the page on login.
         const logged_in = self.session.data.user_id != null;
-        const box = &self.center.child.box;
-        const button = &box.children.values()[button_index].widget.text_box;
-        if (logged_in) button.box.children.values()[0].widget.text.content = ansiLabel(self.session);
-        button.getFocus().focusable = logged_in;
-        const hidden = layout.MaybeSize{ .width = null, .height = 0 };
-        box.children.values()[button_index].max_size = if (logged_in) null else hidden;
-        box.children.values()[message_index].max_size = if (logged_in) hidden else null;
+        const stack = &self.center.child.stack;
+        if (logged_in) {
+            const box = &stack.children.values()[logged_in_index].box;
+            const button = &box.children.values()[0].widget.text_box;
+            button.box.children.values()[0].widget.text.content = ansiLabel(self.session);
+        }
+        stack.getFocus().child_id = stack.children.keys()[if (logged_in) logged_in_index else logged_out_index];
         try self.center.build(allocator, constraint, root_focus);
     }
 
@@ -124,7 +121,6 @@ pub const View = struct {
         }
     }
 
-    // enqueue the toggle; the host drains it (applying + persisting) this frame.
     fn toggle(self: *View) !void {
         try self.session.push(.toggle_ansi);
     }
