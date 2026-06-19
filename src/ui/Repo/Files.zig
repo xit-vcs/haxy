@@ -70,20 +70,20 @@ pub fn init(
         if (!gop.found_existing) gop.value_ptr.* = is_dir else if (is_dir) gop.value_ptr.* = true;
     }
 
-    // sort directories first, then alphabetically, and dupe into the page arena.
-    const Pair = struct { name: []const u8, is_dir: bool };
-    var pairs = try gpa.alloc(Pair, children.count());
-    defer gpa.free(pairs);
-    for (children.keys(), children.values(), 0..) |name, is_dir, i| pairs[i] = .{ .name = name, .is_dir = is_dir };
-    std.mem.sort(Pair, pairs, {}, struct {
-        fn lessThan(_: void, a: Pair, b: Pair) bool {
-            if (a.is_dir != b.is_dir) return a.is_dir;
-            return std.mem.lessThan(u8, a.name, b.name);
+    // committed paths come out sorted (tree objects are written in sorted
+    // order), so the deduped children are already in name order. just group
+    // directories before files, keeping that order within each group, and dupe
+    // into the page arena.
+    const entries = try aa.alloc(Entry, children.count());
+    var i: usize = 0;
+    for ([_]bool{ true, false }) |want_dir| {
+        for (children.keys(), children.values()) |name, is_dir| {
+            if (is_dir == want_dir) {
+                entries[i] = .{ .name = try aa.dupe(u8, name), .is_dir = is_dir };
+                i += 1;
+            }
         }
-    }.lessThan);
-
-    const entries = try aa.alloc(Entry, pairs.len);
-    for (pairs, 0..) |pair, i| entries[i] = .{ .name = try aa.dupe(u8, pair.name), .is_dir = pair.is_dir };
+    }
 
     return .{ .identity = empty.identity, .dir = empty.dir, .entries = entries };
 }
