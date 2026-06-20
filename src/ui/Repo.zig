@@ -34,6 +34,9 @@ route_name: Array,
 // the commits route this page renders ("owner/name/commits[/<oid>]"), mirrored
 // when the commits tab is selected.
 commits_route_name: Array,
+// the diff window (?after=N) of that commits route; mirrored alongside the name
+// so the url keeps the query param even when focus isn't in the commits view.
+commits_after: usize,
 // "owner/name" alone, mirrored when the settings/auth tab is selected.
 identity: Array,
 
@@ -125,6 +128,7 @@ pub fn init(
         .quit = Quit.init(),
         .route_name = route_name,
         .commits_route_name = commits_route_name,
+        .commits_after = commits_after,
         .identity = Array.from(rf.identity) orelse return error.NotFound,
     };
 }
@@ -220,7 +224,7 @@ pub const View = struct {
             switch (std.meta.activeTag(stack.children.values()[index])) {
                 // files/commits carry this page's content route (directory / log
                 // page); settings/auth carry only "owner/name".
-                .repo_commits => self.session.data.current_page = .{ .repo_commits = .{ .name = self.data.commits_route_name } },
+                .repo_commits => self.session.data.current_page = .{ .repo_commits = .{ .name = self.data.commits_route_name, .after = self.data.commits_after } },
                 // the refs tab mirrors this page's paginated column + offset.
                 .repo_refs => self.session.data.current_page = .{ .repo_refs = .{ .name = self.data.identity, .kind = self.data.refs.kind, .after = self.data.refs.after } },
                 .home_settings => self.session.data.current_page = .{ .repo_settings = self.data.identity },
