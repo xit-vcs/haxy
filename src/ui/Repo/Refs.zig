@@ -183,7 +183,8 @@ pub const View = struct {
                 // window-navigation rows bracket the names: "← previous" off the
                 // first window, "next →" when more remain. each is a full reload.
                 if (after > 0) try addRow(allocator, &rows, "← previous", try windowLink(session.page_arena, identity, kind, after -| page_size));
-                for (names) |name| try addRow(allocator, &rows, name, null);
+                // each ref name links to the files tab at that ref's root.
+                for (names) |name| try addRow(allocator, &rows, name, try refLink(session.page_arena, identity, kind, name));
                 if (next_after) |na| try addRow(allocator, &rows, "next →", try windowLink(session.page_arena, identity, kind, na));
 
                 if (rows.children.count() > 0) rows.getFocus().child_id = rows.children.keys()[0];
@@ -363,4 +364,19 @@ fn windowLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, kind: 
     const route = ui.RoutablePage.repoRefsRoute(identity, kind, after) orelse return error.RouteTooLong;
     const url = try route.urlAlloc(page_arena);
     return std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{url});
+}
+
+// the "a:" link to the files tab at ref `name` (a branch or tag) within
+// `identity` ("owner/name"), at its root directory. the name is percent-encoded
+// since it can contain a '/'.
+fn refLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, kind: ui.RoutablePage.RefKind, name: []const u8) ![]const u8 {
+    const aa = page_arena.allocator();
+    const ref_or_oid: ui.RoutablePage.RefOrOid = switch (kind) {
+        .branch => .branch,
+        .tag => .tag,
+    };
+    const value = try ui.ResolvedRefOrOid.urlEncode(aa, name);
+    const route = ui.RoutablePage.repoFilesRoute(identity, ref_or_oid, value, "") orelse return error.RouteTooLong;
+    const url = try route.urlAlloc(page_arena);
+    return std.fmt.allocPrint(aa, "a:{s}", .{url});
 }

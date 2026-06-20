@@ -429,6 +429,17 @@ pub const View = struct {
         try box.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
     }
 
+    // a focusable row for the top of the diff pane linking to the files tab at
+    // this commit's tree, so its files are always viewable as of this object.
+    fn addViewFilesLink(self: *View, allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), oid: []const u8) !void {
+        const link = try filesObjectLink(self.session.page_arena, self.data.identity, oid);
+        var tb = try wgt.TextBox(ui.Widget).init(allocator, "view files at this commit", .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .none });
+        errdefer tb.deinit(allocator);
+        tb.getFocus().focusable = true;
+        tb.getFocus().kind = .{ .custom = link };
+        try box.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
+    }
+
     pub fn deinit(self: *View, allocator: std.mem.Allocator) void {
         self.box.deinit(allocator);
     }
@@ -553,8 +564,11 @@ pub const View = struct {
         inner.children.clearAndFree(allocator);
         inner.getFocus().child_id = null;
 
-        // a "previous" row at the top and a "next" row at the bottom reload the
-        // page on the adjacent diff window.
+        // the first row always links to viewing the repo's files at this commit.
+        try self.addViewFilesLink(allocator, inner, commit.oid);
+
+        // a "previous" row and a "next" row at the bottom reload the page on the
+        // adjacent diff window.
         if (commit.has_prev) try self.addNavLink(allocator, inner, "← previous", commit.oid, commit.window_start -| diff_page);
         for (commit.hunks) |hunk| {
             if (hunk.path) |path| try self.addPathBox(allocator, inner, path);
@@ -814,6 +828,14 @@ pub const View = struct {
 // `identity`, showing the selected commit's first `after` hunks (0 = default).
 fn commitsLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, oid: []const u8, after: usize) ![]const u8 {
     const route = ui.RoutablePage.repoCommitsRoute(identity, .object, oid, after) orelse return error.RouteTooLong;
+    const url = try route.urlAlloc(page_arena);
+    return std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{url});
+}
+
+// the "a:" link to the files tab at commit `oid` (an object ref), at its root
+// directory, within `identity` ("owner/name").
+fn filesObjectLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, oid: []const u8) ![]const u8 {
+    const route = ui.RoutablePage.repoFilesRoute(identity, .object, oid, "") orelse return error.RouteTooLong;
     const url = try route.urlAlloc(page_arena);
     return std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{url});
 }

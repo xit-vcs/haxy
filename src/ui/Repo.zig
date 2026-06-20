@@ -59,15 +59,24 @@ pub fn init(
     const rf = ui.RoutablePage.RepoFiles.parse(name_str) orelse return error.NotFound;
     const tag = std.meta.activeTag(route);
 
-    // page state lives in the route only for the tab it targets; the other tabs
-    // open at their root/first page. a null ref kind means the files tab opens at
-    // the default branch (Files.init resolves it).
-    const files_ref_kind = if (tag == .repo) rf.ref_kind else null;
-    const files_ref_value = if (tag == .repo) rf.ref_value else "";
-    const files_dir = if (tag == .repo) rf.dir else "";
-    // a null commits ref means the commits tab opens at the default branch
-    // (Commits.init resolves it).
+    // the files and commits tabs share one ref/oid: whichever the incoming route
+    // names (it rides on the route's target tab), or the default branch when
+    // neither tab is targeted. building both views at it keeps switching tabs
+    // (even by key, without a reload) on the same ref. a null ref means the
+    // default branch (Files/Commits.init resolve it). the directory and the diff
+    // window only apply to their own tab.
     const commits_ref = if (tag == .repo_commits) ui.RoutablePage.repoCommitsRef(name_str) else ui.RoutablePage.CommitsRef{ .ref_or_oid = null, .value = "" };
+    const requested_ref_or_oid: ?ui.RoutablePage.RefOrOid = switch (tag) {
+        .repo => rf.ref_kind,
+        .repo_commits => commits_ref.ref_or_oid,
+        else => null,
+    };
+    const requested_ref_value: []const u8 = switch (tag) {
+        .repo => rf.ref_value,
+        .repo_commits => commits_ref.value,
+        else => "",
+    };
+    const files_dir = if (tag == .repo) rf.dir else "";
     // how many diff hunks the commits view's selected commit shows ("load more").
     const commits_after: usize = switch (route) {
         .repo_commits => |c| c.after,
@@ -91,11 +100,12 @@ pub fn init(
     // of the repo title.
     const owner = (try evt.User.readById(DB, hash_kind, haxy_moment, arena, repo.user_id)) orelse return error.NotFound;
 
-    // build files and commits first so their resolved refs (the default branch
+    // build files and commits first so their resolved ref (the default branch
     // when the route named none) can canonicalize each tab's mirror url to the
-    // explicit ref it's viewing rather than leaving it bare.
-    const files = try Files.init(arena, session, &found.event_id, rf.identity, files_ref_kind, files_ref_value, files_dir);
-    const commits = try Commits.init(arena, session, &found.event_id, rf.identity, commits_ref.ref_or_oid, commits_ref.value, commits_after);
+    // explicit ref it's viewing rather than leaving it bare. both resolve the
+    // same requested ref, so they end up viewing the same one.
+    const files = try Files.init(arena, session, &found.event_id, rf.identity, requested_ref_or_oid, requested_ref_value, files_dir);
+    const commits = try Commits.init(arena, session, &found.event_id, rf.identity, requested_ref_or_oid, requested_ref_value, commits_after);
 
     // each tab mirror carries this page's route for that tab; tabs not targeted
     // by the incoming route fall back to their root/first-page route.
@@ -103,7 +113,9 @@ pub fn init(
     const commits_route_name = (ui.RoutablePage.repoCommitsRoute(rf.identity, commits.ref_or_oid, commits.ref_or_oid_value, commits_after) orelse return error.NotFound).repo_commits.name;
 
     return .{
-        .header = try Header.init(arena, repo.name, owner.name),
+        // files and commits resolve the same ref, so either's serves the header,
+        // which points both tabs at it.
+        .header = try Header.init(arena, repo.name, owner.name, files.ref_or_oid, files.ref_or_oid_value),
         .repo = repo,
         .files = files,
         .commits = commits,

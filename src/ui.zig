@@ -599,7 +599,7 @@ pub const ResolvedRefOrOid = struct {
     }
 
     // percent-encode a ref name for use as a single url path segment.
-    fn urlEncode(aa: std.mem.Allocator, raw: []const u8) ![]const u8 {
+    pub fn urlEncode(aa: std.mem.Allocator, raw: []const u8) ![]const u8 {
         var out: std.Io.Writer.Allocating = .init(aa);
         try std.Uri.Component.percentEncode(&out.writer, raw, isUnreserved);
         return out.written();

@@ -10,19 +10,27 @@ const Focus = xitui.focus.Focus;
 
 pub const AuthTab = @import("./../AuthTab.zig");
 
+const RefOrOid = ui.RoutablePage.RefOrOid;
+
 name: []const u8,
 owner_name: []const u8,
 title: ui.Title,
 auth_tab: AuthTab,
+// the ref/oid this page is viewing, so the files and commits tabs both link to
+// it (switching tabs keeps the same ref). the value is url-encoded.
+ref_or_oid: RefOrOid,
+ref_or_oid_value: []const u8,
 
 const Self = @This();
 
-pub fn init(arena: *std.heap.ArenaAllocator, name: []const u8, owner_name: []const u8) !Self {
+pub fn init(arena: *std.heap.ArenaAllocator, name: []const u8, owner_name: []const u8, ref_or_oid: RefOrOid, ref_or_oid_value: []const u8) !Self {
     return .{
         .name = name,
         .owner_name = owner_name,
         .title = try ui.Title.init(arena, name),
         .auth_tab = AuthTab.init(),
+        .ref_or_oid = ref_or_oid,
+        .ref_or_oid_value = ref_or_oid_value,
     };
 }
 
@@ -88,9 +96,11 @@ pub const View = struct {
         // the global settings or auth pages. the files tab routes through the
         // shared helper so the /repo/.../files url format lives in one place.
         const identity = try std.fmt.allocPrint(aa, "{s}/{s}", .{ data.owner_name, data.name });
-        const files_route = ui.RoutablePage.repoFilesRoute(identity, null, "", "") orelse return error.RouteTooLong;
+        // both tabs link to the ref/oid this page is viewing, so switching tabs
+        // keeps the same ref (the files tab opens at its root directory).
+        const files_route = ui.RoutablePage.repoFilesRoute(identity, data.ref_or_oid, data.ref_or_oid_value, "") orelse return error.RouteTooLong;
         const files_link = try std.fmt.allocPrint(aa, "a:{s}", .{try files_route.urlAlloc(session.page_arena)});
-        const commits_route = ui.RoutablePage.repoCommitsRoute(identity, null, "", 0) orelse return error.RouteTooLong;
+        const commits_route = ui.RoutablePage.repoCommitsRoute(identity, data.ref_or_oid, data.ref_or_oid_value, 0) orelse return error.RouteTooLong;
         const commits_link = try std.fmt.allocPrint(aa, "a:{s}", .{try commits_route.urlAlloc(session.page_arena)});
         const refs_link = try std.fmt.allocPrint(aa, "a:/repo/{s}/{s}/refs", .{ data.owner_name, data.name });
         const settings_link = try std.fmt.allocPrint(aa, "a:/repo/{s}/{s}/settings", .{ data.owner_name, data.name });
