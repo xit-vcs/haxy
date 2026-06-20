@@ -90,20 +90,21 @@ pub fn init(
     // of the repo title.
     const owner = (try evt.User.readById(DB, hash_kind, haxy_moment, arena, repo.user_id)) orelse return error.NotFound;
 
-    // build commits first so its resolved ref (the default branch when the route
-    // named none) can canonicalize the commits-tab mirror url.
+    // build files and commits first so their resolved refs (the default branch
+    // when the route named none) can canonicalize each tab's mirror url to the
+    // explicit ref it's viewing rather than leaving it bare.
+    const files = try Files.init(arena, session, &found.event_id, rf.identity, files_ref_kind, files_ref_value, files_dir);
     const commits = try Commits.init(arena, session, &found.event_id, rf.identity, commits_ref.ref_or_oid, commits_ref.value, commits_after);
 
     // each tab mirror carries this page's route for that tab; tabs not targeted
     // by the incoming route fall back to their root/first-page route.
-    const route_name = (ui.RoutablePage.repoFilesRoute(rf.identity, files_ref_kind, files_ref_value, files_dir) orelse return error.NotFound).repo;
+    const route_name = (ui.RoutablePage.repoFilesRoute(rf.identity, files.ref_or_oid, files.ref_or_oid_value, files.dir) orelse return error.NotFound).repo;
     const commits_route_name = (ui.RoutablePage.repoCommitsRoute(rf.identity, commits.ref_or_oid, commits.ref_or_oid_value, commits_after) orelse return error.NotFound).repo_commits.name;
 
     return .{
         .header = try Header.init(arena, repo.name, owner.name),
         .repo = repo,
-        // the repo's event id is the on-disk repo directory name
-        .files = try Files.init(arena, session, &found.event_id, rf.identity, files_ref_kind, files_ref_value, files_dir),
+        .files = files,
         .commits = commits,
         .refs = try Refs.init(arena, session, &found.event_id, rf.identity, refs_kind, refs_after),
         .settings = Settings.init(),
