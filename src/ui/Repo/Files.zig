@@ -3,12 +3,19 @@ const evt = @import("../../event.zig");
 const ui = @import("../../ui.zig");
 const xit = @import("xit");
 const rp = xit.repo;
+const tr = xit.tree;
+const rf = xit.ref;
+const hash = xit.hash;
 const xitui = xit.xitui;
 const wgt = xitui.widget;
 const layout = xitui.layout;
 const inp = xitui.input;
 const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
+
+const RefKindOrOid = ui.RoutablePage.RefKindOrOid;
+// the hex-oid length for the default repo options the on-disk repos use.
+const hex_len = hash.hexLen((rp.RepoOpts(.xit){}).hash);
 
 // one entry in the directory currently being viewed.
 pub const Entry = struct {
@@ -18,6 +25,10 @@ pub const Entry = struct {
 
 // "owner/name", so the view can build /repo/owner/name/files/... links.
 identity: []const u8,
+// the resolved ref this listing is read at (the default branch when the route
+// didn't name one), so the view's directory links stay pinned to it.
+ref_kind: RefKindOrOid,
+ref_value: []const u8,
 // the directory being viewed, relative to the repo root ("" at the root).
 dir: []const u8,
 entries: []const Entry,
@@ -29,15 +40,17 @@ pub fn init(
     session: *ui.Session,
     event_id: *const [evt.event_id_size]u8,
     identity: []const u8,
+    req_kind: ?RefKindOrOid,
+    req_value: []const u8,
     dir: []const u8,
 ) !Self {
     const aa = arena.allocator();
-    const empty: Self = .{ .identity = try aa.dupe(u8, identity), .dir = try aa.dupe(u8, dir), .entries = &.{} };
 
-    // no filesystem (wasm) or nowhere to look: empty listing. the wasm path
-    // never calls init anyway — it rebuilds from the serialized snapshot.
-    const io = session.io orelse return empty;
-    const repos_dir = session.repos_dir orelse return empty;
+    // no filesystem (wasm) or nowhere to look: empty listing pinned to whatever
+    // ref the route asked for. the wasm path never calls init anyway — it
+    // rebuilds from the serialized snapshot.
+    const io = session.io orelse return emptyResult(aa, identity, req_kind orelse .branch, req_value, dir);
+    const repos_dir = session.repos_dir orelse return emptyResult(aa, identity, req_kind orelse .branch, req_value, dir);
 
     // the repo's working copy lives at <repos_dir>/<hex event id>.
     const hex = std.fmt.bytesToHex(event_id.*, .lower);
@@ -47,10 +60,50 @@ pub fn init(
     // (transient; freed before init returns); the listing is built into the
     // page arena so it outlives them.
     const gpa = arena.child_allocator;
-    var repo = rp.Repo(.xit, .{}).open(io, gpa, .{ .path = repo_path }) catch return empty;
+    var repo = rp.Repo(.xit, .{}).open(io, gpa, .{ .path = repo_path }) catch return emptyResult(aa, identity, req_kind orelse .branch, req_value, dir);
     defer repo.deinit(io, gpa);
-    var status = repo.status(io, gpa) catch return empty;
-    defer status.deinit(gpa);
+
+    // resolve the effective ref: the one named in the route, else HEAD's branch.
+    // ref_value is duped immediately so it outlives the stack buffer head() fills.
+    var eff_kind: RefKindOrOid = req_kind orelse .branch;
+    var eff_value: []const u8 = req_value;
+    if (req_kind == null) {
+        var head_buf: [rf.MAX_REF_CONTENT_SIZE]u8 = undefined;
+        if (repo.head(io, &head_buf)) |head| switch (head) {
+            .ref => |ref| {
+                eff_kind = .branch;
+                eff_value = try aa.dupe(u8, ref.name);
+            },
+            .oid => |oid| {
+                eff_kind = .oid;
+                eff_value = try aa.dupe(u8, oid);
+            },
+        } else |_| {}
+    }
+
+    // resolve the ref to the commit oid whose tree we list. a ref the route
+    // named explicitly that doesn't resolve is a bad url (NotFound -> 404); the
+    // default-branch path instead falls through to an empty listing below.
+    const explicit = req_kind != null;
+    var oid: [hex_len]u8 = undefined;
+    switch (eff_kind) {
+        .oid => {
+            if (eff_value.len != hex_len) return unresolved(aa, identity, explicit, eff_kind, eff_value, dir);
+            @memcpy(&oid, eff_value);
+        },
+        .branch, .tag => {
+            const ref_kind: rf.RefKind = if (eff_kind == .branch) .head else .tag;
+            oid = (repo.readRef(io, .{ .kind = ref_kind, .name = eff_value }) catch null) orelse
+                return unresolved(aa, identity, explicit, eff_kind, eff_value, dir);
+        },
+    }
+
+    // read the tree at that commit. building the read-only state mirrors what
+    // repo.status does internally, but for an arbitrary commit rather than HEAD.
+    var moment = repo.core.latestMoment() catch return emptyResult(aa, identity, eff_kind, eff_value, dir);
+    const state = rp.Repo(.xit, .{}).State(.read_only){ .core = &repo.core, .extra = .{ .moment = &moment } };
+    var tree = tr.Tree(.xit, .{}).init(state, io, gpa, &oid) catch return emptyResult(aa, identity, eff_kind, eff_value, dir);
+    defer tree.deinit();
 
     // collect the immediate children of `dir`. each committed path is a full
     // file path; a child is a directory when more path follows its first
@@ -58,7 +111,7 @@ pub fn init(
     var children: std.StringArrayHashMapUnmanaged(bool) = .empty; // name -> is_dir
     defer children.deinit(gpa);
     const prefix_len = if (dir.len == 0) 0 else dir.len + 1; // skip "dir/"
-    for (status.head_tree.entries.keys()) |path| {
+    for (tree.entries.keys()) |path| {
         if (dir.len != 0) {
             if (!std.mem.startsWith(u8, path, dir) or path.len <= dir.len or path[dir.len] != '/') continue;
         }
@@ -69,6 +122,10 @@ pub fn init(
         const gop = try children.getOrPut(gpa, name);
         if (!gop.found_existing) gop.value_ptr.* = is_dir else if (is_dir) gop.value_ptr.* = true;
     }
+
+    // trees hold no empty directories, so a non-root `dir` with no children
+    // doesn't exist in this ref — a bad url (404).
+    if (dir.len != 0 and children.count() == 0) return error.NotFound;
 
     // committed paths come out sorted (tree objects are written in sorted
     // order), so the deduped children are already in name order. just group
@@ -85,7 +142,31 @@ pub fn init(
         }
     }
 
-    return .{ .identity = empty.identity, .dir = empty.dir, .entries = entries };
+    return .{
+        .identity = try aa.dupe(u8, identity),
+        .ref_kind = eff_kind,
+        .ref_value = try aa.dupe(u8, eff_value),
+        .dir = try aa.dupe(u8, dir),
+        .entries = entries,
+    };
+}
+
+// a ref that didn't resolve: a 404 when the route named it explicitly, else an
+// empty listing (e.g. resolving an empty repo's default branch).
+fn unresolved(aa: std.mem.Allocator, identity: []const u8, explicit: bool, ref_kind: RefKindOrOid, ref_value: []const u8, dir: []const u8) !Self {
+    if (explicit) return error.NotFound;
+    return emptyResult(aa, identity, ref_kind, ref_value, dir);
+}
+
+// an empty listing pinned to a ref, for the wasm / no-repo / unresolved paths.
+fn emptyResult(aa: std.mem.Allocator, identity: []const u8, ref_kind: RefKindOrOid, ref_value: []const u8, dir: []const u8) !Self {
+    return .{
+        .identity = try aa.dupe(u8, identity),
+        .ref_kind = ref_kind,
+        .ref_value = try aa.dupe(u8, ref_value),
+        .dir = try aa.dupe(u8, dir),
+        .entries = &.{},
+    };
 }
 
 pub const View = struct {
@@ -104,11 +185,11 @@ pub const View = struct {
         // page arena (as long as this page's widget tree).
         const aa = session.page_arena.allocator();
         if (data.dir.len != 0) {
-            try addRow(allocator, &box, "..", try dirLink(session.page_arena, data.identity, parentDir(data.dir)));
+            try addRow(allocator, &box, "..", try dirLink(session.page_arena, data, parentDir(data.dir)));
         }
         for (data.entries) |entry| {
             const label = if (entry.is_dir) try std.fmt.allocPrint(aa, "{s}/", .{entry.name}) else entry.name;
-            const link = if (entry.is_dir) try dirLink(session.page_arena, data.identity, try childDir(aa, data.dir, entry.name)) else "";
+            const link = if (entry.is_dir) try dirLink(session.page_arena, data, try childDir(aa, data.dir, entry.name)) else "";
             try addRow(allocator, &box, label, link);
         }
         if (box.children.count() > 0) box.getFocus().child_id = box.children.keys()[0];
@@ -197,9 +278,9 @@ pub const View = struct {
     }
 };
 
-// the "a:" link for the files route at `dir` within `identity` ("owner/name").
-fn dirLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, dir: []const u8) ![]const u8 {
-    const route = ui.RoutablePage.repoFilesRoute(identity, dir) orelse return error.RouteTooLong;
+// the "a:" link for the files route at `dir`, pinned to the listing's ref.
+fn dirLink(page_arena: *std.heap.ArenaAllocator, data: *const Self, dir: []const u8) ![]const u8 {
+    const route = ui.RoutablePage.repoFilesRoute(data.identity, data.ref_kind, data.ref_value, dir) orelse return error.RouteTooLong;
     const url = try route.urlAlloc(page_arena);
     return std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{url});
 }

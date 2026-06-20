@@ -59,7 +59,10 @@ pub fn init(
     const tag = std.meta.activeTag(route);
 
     // page state lives in the route only for the tab it targets; the other tabs
-    // open at their root/first page.
+    // open at their root/first page. a null ref kind means the files tab opens at
+    // the default branch (Files.init resolves it).
+    const files_ref_kind = if (tag == .repo) rf.ref_kind else null;
+    const files_ref_value = if (tag == .repo) rf.ref_value else "";
     const files_dir = if (tag == .repo) rf.dir else "";
     const commits_start = if (tag == .repo_commits) ui.RoutablePage.repoCommitsStart(name_str) else "";
     // how many diff hunks the commits view's selected commit shows ("load more").
@@ -87,14 +90,14 @@ pub fn init(
 
     // each tab mirror carries this page's route for that tab; tabs not targeted
     // by the incoming route fall back to their root/first-page route.
-    const route_name = (ui.RoutablePage.repoFilesRoute(rf.identity, files_dir) orelse return error.NotFound).repo;
+    const route_name = (ui.RoutablePage.repoFilesRoute(rf.identity, files_ref_kind, files_ref_value, files_dir) orelse return error.NotFound).repo;
     const commits_route_name = if (tag == .repo_commits) route.repo_commits.name else (ui.RoutablePage.repoCommitsRoute(rf.identity, "", 0) orelse return error.NotFound).repo_commits.name;
 
     return .{
         .header = try Header.init(arena, repo.name, owner.name),
         .repo = repo,
         // the repo's event id is the on-disk repo directory name
-        .files = try Files.init(arena, session, &found.event_id, rf.identity, files_dir),
+        .files = try Files.init(arena, session, &found.event_id, rf.identity, files_ref_kind, files_ref_value, files_dir),
         .commits = try Commits.init(arena, session, &found.event_id, rf.identity, commits_start, commits_after),
         .refs = try Refs.init(arena, session, &found.event_id, rf.identity, refs_kind, refs_after),
         .settings = Settings.init(),
