@@ -361,33 +361,36 @@ pub const RoutablePage = union(enum) {
     // tab's data); a files-directory or commits-page change alters it.
     const RepoContent = struct { identity: []const u8, files_ref_kind: ?RefKindOrOid, files_ref_value: []const u8, files_dir: []const u8, commits_start: []const u8, commits_after: usize, refs_kind: RefKind, refs_after: usize };
 
-    fn repoContent(r: RoutablePage) ?RepoContent {
-        const name = switch (r) {
-            .repo, .repo_settings, .repo_auth => |n| n.slice(),
-            .repo_commits => |c| c.name.slice(),
-            .repo_refs => |r2| r2.name.slice(),
+    // `r` is borrowed by pointer: the returned slices point into its inline
+    // route string, so it must outlive the RepoContent (passing by value would
+    // leave them dangling into a freed copy).
+    fn repoContent(r: *const RoutablePage) ?RepoContent {
+        const name = switch (r.*) {
+            .repo, .repo_settings, .repo_auth => |*n| n.slice(),
+            .repo_commits => |*c| c.name.slice(),
+            .repo_refs => |*r2| r2.name.slice(),
             else => return null,
         };
         const rf = RepoFiles.parse(name) orelse return null;
         // a 0 offset means no refs pagination, so canonicalize the column to
         // branch then — otherwise the base /refs route would look like a content
         // change relative to the same page mirrored with kind=tag.
-        const refs_after = switch (r) {
+        const refs_after = switch (r.*) {
             .repo_refs => |r2| r2.after,
             else => 0,
         };
-        const is_files = std.meta.activeTag(r) == .repo;
+        const is_files = std.meta.activeTag(r.*) == .repo;
         return .{
             .identity = rf.identity,
             .files_ref_kind = if (is_files) rf.ref_kind else null,
             .files_ref_value = if (is_files) rf.ref_value else "",
             .files_dir = if (is_files) rf.dir else "",
-            .commits_start = if (std.meta.activeTag(r) == .repo_commits) repoCommitsStart(name) else "",
-            .commits_after = switch (r) {
+            .commits_start = if (std.meta.activeTag(r.*) == .repo_commits) repoCommitsStart(name) else "",
+            .commits_after = switch (r.*) {
                 .repo_commits => |c| c.after,
                 else => 0,
             },
-            .refs_kind = switch (r) {
+            .refs_kind = switch (r.*) {
                 .repo_refs => |r2| if (refs_after == 0) .branch else r2.kind,
                 else => .branch,
             },
@@ -397,8 +400,8 @@ pub const RoutablePage = union(enum) {
 
     // true when `a` and `b` are both repo routes that render different content
     pub fn repoPageChanged(a: RoutablePage, b: RoutablePage) bool {
-        const ca = repoContent(a) orelse return false;
-        const cb = repoContent(b) orelse return false;
+        const ca = repoContent(&a) orelse return false;
+        const cb = repoContent(&b) orelse return false;
         return !std.mem.eql(u8, ca.identity, cb.identity) or
             ca.files_ref_kind != cb.files_ref_kind or
             !std.mem.eql(u8, ca.files_ref_value, cb.files_ref_value) or
