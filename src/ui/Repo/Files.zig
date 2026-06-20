@@ -11,6 +11,8 @@ const inp = xitui.input;
 const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
 
+const SubHeader = @import("SubHeader.zig");
+
 const RefOrOid = ui.RoutablePage.RefOrOid;
 
 // one entry in the directory currently being viewed.
@@ -28,6 +30,8 @@ ref_or_oid_value: []const u8,
 // the directory being viewed, relative to the repo root ("" at the root).
 dir: []const u8,
 entries: []const Entry,
+// the "viewing <ref> <value>" banner shown above the listing.
+sub_header: SubHeader,
 
 const Self = @This();
 
@@ -117,6 +121,7 @@ pub fn init(
         .ref_or_oid_value = resolved.value,
         .dir = try aa.dupe(u8, dir),
         .entries = entries,
+        .sub_header = try SubHeader.init(aa, resolved.ref_or_oid, resolved.value),
     };
 }
 
@@ -128,37 +133,59 @@ fn emptyResult(aa: std.mem.Allocator, identity: []const u8, ref_or_oid: RefOrOid
         .ref_or_oid_value = try aa.dupe(u8, ref_or_oid_value),
         .dir = try aa.dupe(u8, dir),
         .entries = &.{},
+        .sub_header = try SubHeader.init(aa, ref_or_oid, ref_or_oid_value),
     };
 }
 
 pub const View = struct {
-    // a vertical list: one focusable row per entry. each subdirectory row is an
-    // `a:` link to its /repo/.../files/<path> route, so following it (click or
-    // Enter) navigates through the host's link handling, like the Users/Repos
-    // lists. files are unlinked. a ".." row at the top links to the parent.
-    scroll: wgt.Scroll(ui.Widget), // wraps a vertical Box of rows
+    // a vertical stack: the "viewing <ref>" banner on top, then a list with one
+    // focusable row per entry. each subdirectory row is an `a:` link to its
+    // /repo/.../files/<path> route, so following it (click or Enter) navigates
+    // through the host's link handling, like the Users/Repos lists. files are
+    // unlinked. a ".." row at the top links to the parent.
+    box: wgt.Box(ui.Widget), // vert: [sub_header_index] = banner, [scroll_index] = list scroll
     data: *const Self,
 
+    const sub_header_index: usize = 0;
+    const scroll_index: usize = 1;
+
     pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !View {
-        var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert });
-        errdefer box.deinit(allocator);
+        var outer = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert });
+        errdefer outer.deinit(allocator);
 
-        // labels and link kinds are borrowed by the rows, so they live in the
-        // page arena (as long as this page's widget tree).
-        const aa = session.page_arena.allocator();
-        if (data.dir.len != 0) {
-            try addRow(allocator, &box, "..", try dirLink(session.page_arena, data, parentDir(data.dir)));
+        // the ref banner at the top.
+        {
+            var sub_header = try SubHeader.View.init(allocator, &data.sub_header, session);
+            errdefer sub_header.deinit(allocator);
+            try outer.children.put(allocator, sub_header.getFocus().id, .{ .widget = .{ .repo_sub_header = sub_header }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
         }
-        for (data.entries) |entry| {
-            const label = if (entry.is_dir) try std.fmt.allocPrint(aa, "{s}/", .{entry.name}) else entry.name;
-            const link = if (entry.is_dir) try dirLink(session.page_arena, data, try childDir(aa, data.dir, entry.name)) else "";
-            try addRow(allocator, &box, label, link);
-        }
-        if (box.children.count() > 0) box.getFocus().child_id = box.children.keys()[0];
 
-        var scroll = try wgt.Scroll(ui.Widget).init(allocator, .{ .box = box }, .{ .direction = .vert, .web_native = !session.is_terminal });
-        errdefer scroll.deinit(allocator);
-        return .{ .scroll = scroll, .data = data };
+        // the directory listing.
+        {
+            var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert });
+            errdefer box.deinit(allocator);
+
+            // labels and link kinds are borrowed by the rows, so they live in the
+            // page arena (as long as this page's widget tree).
+            const aa = session.page_arena.allocator();
+            if (data.dir.len != 0) {
+                try addRow(allocator, &box, "..", try dirLink(session.page_arena, data, parentDir(data.dir)));
+            }
+            for (data.entries) |entry| {
+                const label = if (entry.is_dir) try std.fmt.allocPrint(aa, "{s}/", .{entry.name}) else entry.name;
+                const link = if (entry.is_dir) try dirLink(session.page_arena, data, try childDir(aa, data.dir, entry.name)) else "";
+                try addRow(allocator, &box, label, link);
+            }
+            if (box.children.count() > 0) box.getFocus().child_id = box.children.keys()[0];
+
+            var scroll = try wgt.Scroll(ui.Widget).init(allocator, .{ .box = box }, .{ .direction = .vert, .web_native = !session.is_terminal });
+            errdefer scroll.deinit(allocator);
+            try outer.children.put(allocator, scroll.getFocus().id, .{ .widget = .{ .scroll = scroll }, .rect = null, .min_size = null });
+        }
+
+        // focus lives on the list; the banner isn't focusable.
+        outer.getFocus().child_id = outer.children.keys()[scroll_index];
+        return .{ .box = outer, .data = data };
     }
 
     fn addRow(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8, link: []const u8) !void {
@@ -170,11 +197,15 @@ pub const View = struct {
     }
 
     pub fn deinit(self: *View, allocator: std.mem.Allocator) void {
-        self.scroll.deinit(allocator);
+        self.box.deinit(allocator);
+    }
+
+    fn scrollWidget(self: *View) *wgt.Scroll(ui.Widget) {
+        return &self.box.children.values()[scroll_index].widget.scroll;
     }
 
     fn innerBox(self: *View) *wgt.Box(ui.Widget) {
-        return &self.scroll.child.box;
+        return &self.scrollWidget().child.box;
     }
 
     pub fn build(self: *View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
@@ -191,7 +222,7 @@ pub const View = struct {
         // clear the incoming min_size so rows size to their content rather than
         // stretching to fill the page height; max_size still bounds the scroll
         // viewport so a long listing clips and scrolls.
-        try self.scroll.build(allocator, .{
+        try self.box.build(allocator, .{
             .min_size = .{ .width = null, .height = null },
             .max_size = constraint.max_size,
         }, root_focus);
@@ -218,23 +249,23 @@ pub const View = struct {
         if (delta > 0 and cur + 1 >= keys.len) return;
         const next = if (delta < 0) cur - 1 else cur + 1;
         try root_focus.setFocus(keys[next]);
-        if (box.children.values()[next].rect) |rect| self.scroll.scrollToRect(rect);
+        if (box.children.values()[next].rect) |rect| self.scrollWidget().scrollToRect(rect);
     }
 
     pub fn clearGrid(self: *View) void {
-        self.scroll.clearGrid();
+        self.box.clearGrid();
     }
 
     pub fn getGrid(self: View) ?Grid {
-        return self.scroll.getGrid();
+        return self.box.getGrid();
     }
 
     pub fn getFocus(self: *View) *Focus {
-        return self.scroll.getFocus();
+        return self.box.getFocus();
     }
 
-    pub fn getSelectedIndex(self: View) ?usize {
-        const box = &self.scroll.child.box;
+    pub fn getSelectedIndex(self: *View) ?usize {
+        const box = self.innerBox();
         const child_id = box.focus.child_id orelse return null;
         return box.children.getIndex(child_id);
     }

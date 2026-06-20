@@ -12,6 +12,8 @@ const inp = xitui.input;
 const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
 
+const SubHeader = @import("SubHeader.zig");
+
 const RefOrOid = ui.RoutablePage.RefOrOid;
 const hex_len = ui.ResolvedRefOrOid.hex_len;
 
@@ -49,6 +51,8 @@ ref_or_oid_value: []const u8,
 commits: []const Commit,
 // the first oid of the next page, or null when this is the last page.
 next_start: ?[]const u8,
+// the "viewing <ref> <value>" banner shown above the log.
+sub_header: SubHeader,
 
 const Self = @This();
 
@@ -143,6 +147,7 @@ pub fn init(
         .ref_or_oid_value = resolved.value,
         .commits = try aa.dupe(Commit, buf[0..count]),
         .next_start = next_start,
+        .sub_header = try SubHeader.init(aa, resolved.ref_or_oid, resolved.value),
     };
 }
 
@@ -154,6 +159,7 @@ fn emptyResult(aa: std.mem.Allocator, identity: []const u8, ref_or_oid: RefOrOid
         .ref_or_oid_value = try aa.dupe(u8, value),
         .commits = &.{},
         .next_start = null,
+        .sub_header = try SubHeader.init(aa, ref_or_oid, value),
     };
 }
 
@@ -297,20 +303,34 @@ fn firstLine(message: []const u8) []const u8 {
 }
 
 pub const View = struct {
-    // a horizontal split: the commit list on the left and a diff pane on the
-    // right showing the selected commit's diff
-    box: wgt.Box(ui.Widget), // horiz: [list_index] = list scroll, [diff_index] = diff pane
+    // a vertical stack: the "viewing <ref>" banner on top, then a horizontal
+    // split with the commit list on the left and a diff pane on the right
+    // showing the selected commit's diff.
+    box: wgt.Box(ui.Widget), // vert: [sub_header_index] = banner, [content_index] = split
     data: *const Self,
     session: *ui.Session,
     // the commit whose diff the pane currently shows (index into data.commits).
     diffed_index: ?usize,
 
+    const sub_header_index: usize = 0;
+    const content_index: usize = 1;
+    // indices within the content box (the horizontal split).
     const list_index: usize = 0;
     const diff_index: usize = 1;
     const list_max_width: usize = 40;
     const diff_min_width: usize = 40;
 
     pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !View {
+        var outer = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert });
+        errdefer outer.deinit(allocator);
+
+        // the ref banner at the top.
+        {
+            var sub_header = try SubHeader.View.init(allocator, &data.sub_header, session);
+            errdefer sub_header.deinit(allocator);
+            try outer.children.put(allocator, sub_header.getFocus().id, .{ .widget = .{ .repo_sub_header = sub_header }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
+        }
+
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
         errdefer box.deinit(allocator);
 
@@ -344,19 +364,23 @@ pub const View = struct {
                     break :blk2 try wgt.Scroll(ui.Widget).init(allocator, .{ .box = diff_inner }, .{ .direction = .both, .web_native = !session.is_terminal });
                 };
                 errdefer diff_scroll.deinit(allocator);
-                var outer = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = .hidden, .direction = .vert });
-                errdefer outer.deinit(allocator);
-                try outer.children.put(allocator, diff_scroll.getFocus().id, .{ .widget = .{ .scroll = diff_scroll }, .rect = null, .min_size = null });
-                break :blk outer;
+                var frame = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = .hidden, .direction = .vert });
+                errdefer frame.deinit(allocator);
+                try frame.children.put(allocator, diff_scroll.getFocus().id, .{ .widget = .{ .scroll = diff_scroll }, .rect = null, .min_size = null });
+                break :blk frame;
             };
             errdefer diff_outer.deinit(allocator);
             try box.children.put(allocator, diff_outer.getFocus().id, .{ .widget = .{ .box = diff_outer }, .rect = null, .min_size = .{ .width = diff_min_width, .height = null } });
         }
 
         box.getFocus().child_id = box.children.keys()[list_index];
+        try outer.children.put(allocator, box.getFocus().id, .{ .widget = .{ .box = box }, .rect = null, .min_size = null });
+
+        // focus lives in the split; the banner isn't focusable.
+        outer.getFocus().child_id = outer.children.keys()[content_index];
 
         return .{
-            .box = box,
+            .box = outer,
             .data = data,
             .session = session,
             .diffed_index = null,
@@ -409,8 +433,12 @@ pub const View = struct {
         self.box.deinit(allocator);
     }
 
+    fn contentBox(self: *View) *wgt.Box(ui.Widget) {
+        return &self.box.children.values()[content_index].widget.box;
+    }
+
     fn listScroll(self: *View) *wgt.Scroll(ui.Widget) {
-        return &self.box.children.values()[list_index].widget.scroll;
+        return &self.contentBox().children.values()[list_index].widget.scroll;
     }
 
     fn listBox(self: *View) *wgt.Box(ui.Widget) {
@@ -418,7 +446,7 @@ pub const View = struct {
     }
 
     fn diffOuter(self: *View) *wgt.Box(ui.Widget) {
-        return &self.box.children.values()[diff_index].widget.box;
+        return &self.contentBox().children.values()[diff_index].widget.box;
     }
 
     fn diffScroll(self: *View) *wgt.Scroll(ui.Widget) {
@@ -430,8 +458,9 @@ pub const View = struct {
     }
 
     fn diffActive(self: *View) bool {
-        const cid = self.box.getFocus().child_id orelse return false;
-        return self.box.children.getIndex(cid) == diff_index;
+        const content = self.contentBox();
+        const cid = content.getFocus().child_id orelse return false;
+        return content.children.getIndex(cid) == diff_index;
     }
 
     // the selected commit's index, or null when the "next" row is selected.
@@ -489,7 +518,7 @@ pub const View = struct {
         // the box drops the diff when the width can't hold both minimums, so when
         // it's that narrow we lift the cap and let the list fill the whole width.
         const both_panes_fit = if (constraint.max_size.width) |w| w >= list_max_width + diff_min_width else true;
-        self.box.children.values()[list_index].max_size = if (both_panes_fit) .{ .width = list_max_width, .height = null } else null;
+        self.contentBox().children.values()[list_index].max_size = if (both_panes_fit) .{ .width = list_max_width, .height = null } else null;
 
         // the web bounds the layout to the browser viewport like the terminal;
         // each Scroll's web-native mode hands its full content to a real
@@ -730,7 +759,7 @@ pub const View = struct {
         // the diff pane wasn't laid out last build (too narrow to show beside
         // the list), so its hunks aren't in the focus tree yet. select the pane
         // at the box level, and the hunk will be focused after the next build.
-        self.box.getFocus().child_id = self.diffOuter().getFocus().id;
+        self.contentBox().getFocus().child_id = self.diffOuter().getFocus().id;
     }
 
     fn focusList(self: *View, root_focus: *Focus) !void {

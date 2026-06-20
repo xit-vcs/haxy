@@ -1,6 +1,7 @@
 const std = @import("std");
 const ui = @import("../ui.zig");
 const Commits = @import("../ui/Repo/Commits.zig");
+const SubHeader = @import("../ui/Repo/SubHeader.zig");
 
 // the "next" row at the bottom of the commits list must be recognized as a
 // cross-page link (so a click navigates), exactly like the diff pane's "next".
@@ -21,6 +22,7 @@ test "commits list next row is a cross-page link" {
             .{ .oid = oid0, .date = "2024-01-01", .message = "first", .hunks = &.{}, .window_start = 0, .has_prev = false, .has_more = false },
         },
         .next_start = next_oid,
+        .sub_header = try SubHeader.init(arena.allocator(), .object, oid0),
     };
 
     var session = ui.Session{ .arena = &arena, .page_arena = &arena, .is_terminal = true };
@@ -35,8 +37,11 @@ test "commits list next row is a cross-page link" {
         .max_size = .{ .width = 120, .height = 60 },
     }, root_focus);
 
-    // the "next" row is the last child of the list box.
-    const lb = &view.box.children.values()[0].widget.scroll.child.box;
+    // the "next" row is the last child of the list box: the view's outer box
+    // holds the sub-header then the list/diff split, whose first child is the
+    // list scroll.
+    const content = &view.box.children.values()[1].widget.box;
+    const lb = &content.children.values()[0].widget.scroll.child.box;
     const next_id = lb.children.keys()[lb.children.count() - 1];
 
     const route = ui.crossPageLink(root_focus, next_id, session.data.current_page);

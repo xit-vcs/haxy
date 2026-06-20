@@ -10,6 +10,7 @@ const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
 
 pub const Header = @import("./Repo/Header.zig");
+pub const SubHeader = @import("./Repo/SubHeader.zig");
 pub const Files = @import("./Repo/Files.zig");
 pub const Commits = @import("./Repo/Commits.zig");
 pub const Refs = @import("./Repo/Refs.zig");
