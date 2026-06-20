@@ -374,74 +374,14 @@ pub const RoutablePage = union(enum) {
         };
     }
 
-    // the content a repo route renders: which repo, plus the files directory and
-    // commits page. tab switches keep this fixed (the page already holds every
-    // tab's data); a files-directory or commits-page change alters it.
-    const RepoContent = struct {
-        identity: []const u8,
-        ref_or_oid: ?RefOrOid,
-        ref_or_oid_value: []const u8,
-        files_dir: []const u8,
-        commits_ref_or_oid: ?RefOrOid,
-        commits_ref_or_oid_value: []const u8,
-        commits_after: usize,
-        refs_kind: RefKind,
-        refs_after: usize,
-    };
-
-    // `r` is borrowed by pointer: the returned slices point into its inline
-    // route string, so it must outlive the RepoContent (passing by value would
-    // leave them dangling into a freed copy).
-    fn repoContent(r: *const RoutablePage) ?RepoContent {
-        const name = switch (r.*) {
-            .repo, .repo_settings, .repo_auth => |*n| n.slice(),
-            .repo_commits => |*c| c.name.slice(),
-            .repo_refs => |*r2| r2.name.slice(),
-            else => return null,
-        };
-        const files = RepoFiles.parse(name) orelse return null;
-        // a 0 offset means no refs pagination, so canonicalize the column to
-        // branch then — otherwise the base /refs route would look like a content
-        // change relative to the same page mirrored with kind=tag.
-        const refs_after = switch (r.*) {
-            .repo_refs => |r2| r2.after,
-            else => 0,
-        };
-        const is_files = std.meta.activeTag(r.*) == .repo;
-        const is_commits = std.meta.activeTag(r.*) == .repo_commits;
-        const commits_ref = if (is_commits) repoCommitsRef(name) else CommitsRef{ .ref_or_oid = null, .value = "" };
-        return .{
-            .identity = files.identity,
-            .ref_or_oid = if (is_files) files.ref_kind else null,
-            .ref_or_oid_value = if (is_files) files.ref_value else "",
-            .files_dir = if (is_files) files.dir else "",
-            .commits_ref_or_oid = commits_ref.ref_or_oid,
-            .commits_ref_or_oid_value = commits_ref.value,
-            .commits_after = switch (r.*) {
-                .repo_commits => |c| c.after,
-                else => 0,
-            },
-            .refs_kind = switch (r.*) {
-                .repo_refs => |r2| if (refs_after == 0) .branch else r2.kind,
-                else => .branch,
-            },
-            .refs_after = refs_after,
-        };
-    }
-
-    // true when `a` and `b` are both repo routes that render different content
+    // true when following a link from `b` to `a` (both repo routes) should reload
+    // rather than stay in page
     pub fn repoPageChanged(a: RoutablePage, b: RoutablePage) bool {
-        const ca = repoContent(&a) orelse return false;
-        const cb = repoContent(&b) orelse return false;
-        return !std.mem.eql(u8, ca.identity, cb.identity) or
-            ca.ref_or_oid != cb.ref_or_oid or
-            !std.mem.eql(u8, ca.ref_or_oid_value, cb.ref_or_oid_value) or
-            !std.mem.eql(u8, ca.files_dir, cb.files_dir) or
-            ca.commits_ref_or_oid != cb.commits_ref_or_oid or
-            !std.mem.eql(u8, ca.commits_ref_or_oid_value, cb.commits_ref_or_oid_value) or
-            ca.commits_after != cb.commits_after or
-            ca.refs_kind != cb.refs_kind or
-            ca.refs_after != cb.refs_after;
+        if (a.parent() != .repo or b.parent() != .repo) return false;
+        if (std.meta.activeTag(a) == .repo_refs and std.meta.activeTag(b) == .repo_refs and
+            a.repo_refs.after == 0 and b.repo_refs.after == 0)
+            return !std.mem.eql(u8, a.repo_refs.name.slice(), b.repo_refs.name.slice());
+        return !a.eql(b);
     }
 
     // true when `a` and `b` are the same home list tab paginated to a different
