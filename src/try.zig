@@ -224,7 +224,54 @@ pub fn main(init: std.process.Init) !void {
 
                 const readme = try repo_dir.createFile(io, "README.md", .{});
                 defer readme.close(io);
-                try readme.writeStreamingAll(io, "# Sample Repo\n\nA repository seeded with test data.\n");
+                try readme.writeStreamingAll(io,
+                    \\# Sample Repo
+                    \\
+                    \\A repository seeded with test data for exercising the UI.
+                    \\
+                    \\## Features
+                    \\
+                    \\- Fast and lightweight
+                    \\- Zero configuration required
+                    \\- Works out of the box
+                    \\
+                    \\## Installation
+                    \\
+                    \\Clone the repository and build it from source:
+                    \\
+                    \\```sh
+                    \\git clone https://example.test/sample-repo.git
+                    \\cd sample-repo
+                    \\make install
+                    \\```
+                    \\
+                    \\## Usage
+                    \\
+                    \\Run the program with the `--help` flag to see all available
+                    \\options:
+                    \\
+                    \\```sh
+                    \\sample-repo --help
+                    \\```
+                    \\
+                    \\| Option      | Description                    |
+                    \\| ----------- | ------------------------------ |
+                    \\| `--verbose` | Print extra diagnostic output  |
+                    \\| `--quiet`   | Suppress all non-error output  |
+                    \\| `--version` | Print the version and exit     |
+                    \\
+                    \\## Contributing
+                    \\
+                    \\Contributions are welcome! Please open an issue to discuss
+                    \\any significant changes before submitting a pull request.
+                    \\See the docs under `docs/dev` for more details.
+                    \\
+                    \\## License
+                    \\
+                    \\Released under the MIT License. See `LICENSE` for the full
+                    \\text.
+                    \\
+                );
 
                 try repo_dir.createDirPath(io, "docs/dev");
                 const doc = try repo_dir.createFile(io, "docs/dev/contribute.md", .{});
