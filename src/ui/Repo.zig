@@ -31,6 +31,9 @@ quit: Quit,
 // the full files route this page renders ("owner/name" or "owner/name/files/<dir>"),
 // mirrored into current_page when the files tab is selected.
 route_name: Array,
+// the content window (?after=N) of that files route; mirrored alongside the name
+// so the url keeps the query param even when focus isn't in the files view.
+files_after: usize,
 // the commits route this page renders ("owner/name/commits[/<oid>]"), mirrored
 // when the commits tab is selected.
 commits_route_name: Array,
@@ -54,7 +57,8 @@ pub fn init(
     // every repo route's stored string starts with "owner/name"; the files and
     // commits routes additionally encode a ref/oid (files also a directory).
     const name_str: []const u8 = switch (route) {
-        .repo, .repo_settings, .repo_auth => |n| n.slice(),
+        .repo_files => |f| f.name.slice(),
+        .repo_settings, .repo_auth => |n| n.slice(),
         .repo_commits => |c| c.name.slice(),
         .repo_refs => |r| r.name.slice(),
         else => return error.UnexpectedRoute,
@@ -70,16 +74,21 @@ pub fn init(
     // window only apply to their own tab.
     const commits_ref = if (tag == .repo_commits) ui.RoutablePage.repoCommitsRef(name_str) else ui.RoutablePage.CommitsRef{ .ref_or_oid = null, .value = "" };
     const requested_ref_or_oid: ?ui.RoutablePage.RefOrOid = switch (tag) {
-        .repo => rf.ref_kind,
+        .repo_files => rf.ref_kind,
         .repo_commits => commits_ref.ref_or_oid,
         else => null,
     };
     const requested_ref_value: []const u8 = switch (tag) {
-        .repo => rf.ref_value,
+        .repo_files => rf.ref_value,
         .repo_commits => commits_ref.value,
         else => "",
     };
-    const files_dir = if (tag == .repo) rf.dir else "";
+    const files_dir = if (tag == .repo_files) rf.dir else "";
+    // the line offset the files view's selected file content window starts at.
+    const files_after: usize = switch (route) {
+        .repo_files => |f| f.after,
+        else => 0,
+    };
     // how many diff hunks the commits view's selected commit shows ("load more").
     const commits_after: usize = switch (route) {
         .repo_commits => |c| c.after,
@@ -107,7 +116,7 @@ pub fn init(
     // when the route named none) can canonicalize each tab's mirror url to the
     // explicit ref it's viewing rather than leaving it bare. both resolve the
     // same requested ref, so they end up viewing the same one.
-    const files = try Files.init(arena, session, &found.event_id, rf.identity, requested_ref_or_oid, requested_ref_value, files_dir);
+    const files = try Files.init(arena, session, &found.event_id, rf.identity, requested_ref_or_oid, requested_ref_value, files_dir, files_after);
     const commits = try Commits.init(arena, session, &found.event_id, rf.identity, requested_ref_or_oid, requested_ref_value, commits_after);
 
     // each tab mirror carries this page's route for that tab; tabs not targeted
@@ -115,7 +124,10 @@ pub fn init(
     // mirror carries the selected file (when the route named one) so the url
     // keeps it before focus enters the view.
     const files_path = if (files.selected_file) |f| try Files.childDir(arena.allocator(), files.dir, f) else files.dir;
-    const route_name = (ui.RoutablePage.repoFilesRoute(rf.identity, files.ref_or_oid, files.ref_or_oid_value, files_path) orelse return error.NotFound).repo;
+    // the content window offset only applies to a selected file, so the bare
+    // directory route drops it.
+    const files_route_after = if (files.selected_file != null) files_after else 0;
+    const route_name = (ui.RoutablePage.repoFilesRoute(rf.identity, files.ref_or_oid, files.ref_or_oid_value, files_path, files_route_after) orelse return error.NotFound).repo_files.name;
     const commits_route_name = (ui.RoutablePage.repoCommitsRoute(rf.identity, commits.ref_or_oid, commits.ref_or_oid_value, commits_after) orelse return error.NotFound).repo_commits.name;
 
     return .{
@@ -130,6 +142,7 @@ pub fn init(
         .auth = Auth.init(),
         .quit = Quit.init(),
         .route_name = route_name,
+        .files_after = files_route_after,
         .commits_route_name = commits_route_name,
         .commits_after = commits_after,
         .identity = Array.from(rf.identity) orelse return error.NotFound,
@@ -236,7 +249,7 @@ pub const View = struct {
                 // alone (nothing to mirror into the url).
                 .quit => {},
                 // the files tab (this page's directory route)
-                else => self.session.data.current_page = .{ .repo = self.data.route_name },
+                else => self.session.data.current_page = .{ .repo_files = .{ .name = self.data.route_name, .after = self.data.files_after } },
             }
         }
         try self.box.build(allocator, constraint, root_focus);

@@ -16,16 +16,38 @@ const SubHeader = @import("SubHeader.zig");
 
 const RefOrOid = ui.RoutablePage.RefOrOid;
 
+// how many lines of a file's content one window shows before a "next" link.
+const file_page = 2000;
+
+// the most directory entries (files + dirs) we read from a tree and display.
+// each file's content is also loaded (windowed), so an unbounded directory could
+// add up to a lot of memory; entries past this limit are ignored.
+//
+// TODO: this caps what we keep, but `tr.Tree.init` still flattens the entire
+// repo tree (every path) into memory before we ever apply the cap. read the
+// directory level-by-level instead, using `obj.Object` to load one tree object
+// at a time: initCommit -> root tree, then descend each `dir` segment, reading
+// only the immediate entries of the target tree (and applying max_entries
+// there). that bounds the work to O(depth) tree objects rather than the whole
+// repo. it's doable entirely in haxy (no xit change) — `obj.Object(...).init`
+// on a tree oid already returns just that tree's immediate children.
+const max_entries = 100;
+
 // one entry in the directory currently being viewed.
 pub const Entry = struct {
     name: []const u8,
     is_dir: bool,
-    // a file's contents split into lines (each without its trailing newline);
-    // empty for directories and for binary or empty files.
+    // a file's content window split into lines (each without its trailing
+    // newline); empty for directories and for binary or empty files.
     lines: []const []const u8 = &.{},
     // true when xit's line iterator flagged the file as binary, so the detail
     // pane shows a placeholder rather than its bytes.
     is_binary: bool = false,
+    // the line index this window starts at (0 = the first window). non-zero only
+    // for the route's selected file, paginated by the url's `after`.
+    window_start: usize = 0,
+    // whether more lines exist after this window.
+    has_more: bool = false,
 };
 
 // "owner/name", so the view can build /repo/owner/name/files/... links.
@@ -54,6 +76,8 @@ pub fn init(
     requested_ref_or_oid: ?RefOrOid,
     requested_value: []const u8,
     path: []const u8,
+    // the line offset the selected file's content window starts at (0 = first).
+    after: usize,
 ) !Self {
     const aa = arena.allocator();
 
@@ -113,6 +137,8 @@ pub fn init(
         const slash = std.mem.indexOfScalar(u8, rel, '/');
         const name = if (slash) |s| rel[0..s] else rel;
         const is_dir = slash != null;
+        // stop taking new entries once we hit the cap; the rest are ignored.
+        if (children.count() >= max_entries and !children.contains(name)) continue;
         const gop = try children.getOrPut(gpa, name);
         if (!gop.found_existing) gop.value_ptr.* = is_dir else if (is_dir) gop.value_ptr.* = true;
     }
@@ -135,10 +161,16 @@ pub fn init(
             if (!is_dir) {
                 const file_path = try childDir(aa, dir, name);
                 if (tree.entries.get(file_path)) |tree_entry| {
-                    const content = readFileContent(state, io, gpa, aa, file_path, tree_entry) catch
-                        FileContent{ .lines = &.{}, .is_binary = false };
+                    // only the route's selected file paginates; the rest show
+                    // their first window (for the in-page detail when selected).
+                    const is_selected = if (selected_file) |sf| std.mem.eql(u8, sf, name) else false;
+                    const window_start = if (is_selected) after else 0;
+                    const content = readFileContent(state, io, gpa, aa, file_path, tree_entry, window_start) catch
+                        FileContent{ .lines = &.{} };
                     entry.lines = content.lines;
                     entry.is_binary = content.is_binary;
+                    entry.window_start = window_start;
+                    entry.has_more = content.has_more;
                 }
             }
             entries[i] = entry;
@@ -159,12 +191,14 @@ pub fn init(
 
 const FileContent = struct {
     lines: []const []const u8,
-    is_binary: bool,
+    is_binary: bool = false,
+    has_more: bool = false,
 };
 
-// read a committed file's contents at `tree_entry` into `arena`-owned lines.
-// xit's line iterator flags binary files (its source becomes `.binary`), in
-// which case we report no lines and let the view show a placeholder.
+// read the window [start, start+file_page) of a committed file's contents at
+// `tree_entry` into `arena`-owned lines, flagging whether more follow. xit's
+// line iterator flags binary files (its source becomes `.binary`), in which case
+// we report no lines and let the view show a placeholder.
 fn readFileContent(
     state: rp.Repo(.xit, .{}).State(.read_only),
     io: std.Io,
@@ -172,21 +206,28 @@ fn readFileContent(
     arena: std.mem.Allocator,
     path: []const u8,
     tree_entry: tr.TreeEntry((rp.RepoOpts(.xit){}).hash),
+    start: usize,
 ) !FileContent {
     var line_iter = try df.LineIterator(.xit, .{}).initFromTree(state, io, gpa, path, tree_entry);
     defer line_iter.deinit();
     if (line_iter.source == .binary) return .{ .lines = &.{}, .is_binary = true };
 
-    // init reads through the file to validate it (and buffer it in memory),
-    // leaving the cursor at the end, so rewind before reading the lines out.
-    try line_iter.reset();
+    // init reads through the file to validate it (and buffer it in memory), so
+    // the line count is known and a window can be sliced out of the buffer.
+    const total = line_iter.count();
+    const end = @min(start + file_page, total);
 
     var lines: std.ArrayList([]const u8) = .empty;
-    while (try line_iter.next()) |line| {
+    var i = start;
+    while (i < end) : (i += 1) {
+        const line = try line_iter.get(i);
         defer line_iter.free(line);
         try lines.append(arena, try arena.dupe(u8, line));
     }
-    return .{ .lines = try lines.toOwnedSlice(arena), .is_binary = false };
+    return .{
+        .lines = try lines.toOwnedSlice(arena),
+        .has_more = end < total,
+    };
 }
 
 // an empty listing pinned to a ref, for the wasm / no-repo / unresolved paths.
@@ -220,6 +261,9 @@ pub const View = struct {
     // indices within the content box (the horizontal split).
     const list_index: usize = 0;
     const detail_index: usize = 1;
+    // indices within the detail pane frame (nav box above the content scroll).
+    const detail_nav_index: usize = 0;
+    const detail_scroll_index: usize = 1;
     const list_max_width: usize = 40;
     const detail_min_width: usize = 40;
 
@@ -270,23 +314,33 @@ pub const View = struct {
             try box.children.put(allocator, list_scroll.getFocus().id, .{ .widget = .{ .scroll = list_scroll }, .rect = null, .min_size = .{ .width = list_max_width, .height = null }, .max_size = .{ .width = list_max_width, .height = null } });
         }
 
-        // the detail pane on the right — a frame around a scroll of the contents.
+        // the detail pane on the right — a "next" nav box above a scroll of the
+        // selected file's content window. both are repopulated per selection by
+        // populateDetail.
         {
             var detail_outer = blk: {
-                var detail_scroll = blk2: {
-                    var detail_inner = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert });
-                    errdefer detail_inner.deinit(allocator);
-                    break :blk2 try wgt.Scroll(ui.Widget).init(allocator, .{ .box = detail_inner }, .{ .direction = .both, .web_native = !session.is_terminal });
-                };
-                errdefer detail_scroll.deinit(allocator);
                 var frame = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = .hidden, .direction = .vert });
                 errdefer frame.deinit(allocator);
-                // the frame's selected child is its scroll, so the focus chain
-                // reaches the content box (populateDetail points the scroll's
-                // inner box at it). this lets focus recovery descend into the
-                // detail pane after it's laid out beside a too-narrow list.
-                frame.getFocus().child_id = detail_scroll.getFocus().id;
-                try frame.children.put(allocator, detail_scroll.getFocus().id, .{ .widget = .{ .scroll = detail_scroll }, .rect = null, .min_size = null });
+
+                {
+                    var nav_box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
+                    errdefer nav_box.deinit(allocator);
+                    try frame.children.put(allocator, nav_box.getFocus().id, .{ .widget = .{ .box = nav_box }, .rect = null, .min_size = null });
+                }
+                {
+                    var detail_scroll = blk2: {
+                        var detail_inner = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert });
+                        errdefer detail_inner.deinit(allocator);
+                        break :blk2 try wgt.Scroll(ui.Widget).init(allocator, .{ .box = detail_inner }, .{ .direction = .both, .web_native = !session.is_terminal });
+                    };
+                    errdefer detail_scroll.deinit(allocator);
+                    // entering the detail pane lands on the content scroll (focus
+                    // recovery descends the frame's selected child); populateDetail
+                    // points the scroll's inner box at the content. the nav links
+                    // above are reached by scrolling to the top, then up.
+                    frame.getFocus().child_id = detail_scroll.getFocus().id;
+                    try frame.children.put(allocator, detail_scroll.getFocus().id, .{ .widget = .{ .scroll = detail_scroll }, .rect = null, .min_size = null });
+                }
                 break :blk frame;
             };
             errdefer detail_outer.deinit(allocator);
@@ -340,8 +394,12 @@ pub const View = struct {
         return &self.contentBox().children.values()[detail_index].widget.box;
     }
 
+    fn navBox(self: *View) *wgt.Box(ui.Widget) {
+        return &self.detailOuter().children.values()[detail_nav_index].widget.box;
+    }
+
     fn detailScroll(self: *View) *wgt.Scroll(ui.Widget) {
-        return &self.detailOuter().children.values()[0].widget.scroll;
+        return &self.detailOuter().children.values()[detail_scroll_index].widget.scroll;
     }
 
     fn detailInner(self: *View) *wgt.Box(ui.Widget) {
@@ -381,20 +439,25 @@ pub const View = struct {
 
         // mirror the selected file into the url so it updates as the selection
         // moves, but only while focus is inside this view (so landing on the tab
-        // keeps the page's base route). a file selection carries the file path; a
-        // directory / ".." row (or no selection) stays at the directory. the path
-        // is joined in a stack buffer since build runs every frame on the web.
+        // keeps the page's base route). a file selection carries the file path and
+        // its content window offset; a directory / ".." row (or no selection)
+        // stays at the directory with no offset. the path is joined in a stack
+        // buffer since build runs every frame on the web.
         if (root_focus.grandchild_id) |g| {
             if (self.box.getFocus().children.contains(g)) {
                 var buf: [ui.RoutablePage.repo_route_max_len]u8 = undefined;
-                const sel_path = if (self.selectedEntry()) |entry| blk: {
-                    if (entry.is_dir) break :blk self.data.dir;
-                    break :blk if (self.data.dir.len == 0)
-                        entry.name
-                    else
-                        std.fmt.bufPrint(&buf, "{s}/{s}", .{ self.data.dir, entry.name }) catch self.data.dir;
-                } else self.data.dir;
-                if (ui.RoutablePage.repoFilesRoute(self.data.identity, self.data.ref_or_oid, self.data.ref_or_oid_value, sel_path)) |route|
+                var sel_path = self.data.dir;
+                var sel_after: usize = 0;
+                if (self.selectedEntry()) |entry| {
+                    if (!entry.is_dir) {
+                        sel_path = if (self.data.dir.len == 0)
+                            entry.name
+                        else
+                            std.fmt.bufPrint(&buf, "{s}/{s}", .{ self.data.dir, entry.name }) catch self.data.dir;
+                        sel_after = entry.window_start;
+                    }
+                }
+                if (ui.RoutablePage.repoFilesRoute(self.data.identity, self.data.ref_or_oid, self.data.ref_or_oid_value, sel_path, sel_after)) |route|
                     self.session.data.current_page = route;
             }
         }
@@ -416,6 +479,15 @@ pub const View = struct {
         for (inner.children.keys(), inner.children.values()) |id, *child| {
             switch (child.widget) {
                 .text_box => |*tb| tb.options.border_style = if (inner.getFocus().child_id == id) .single else .hidden,
+                else => {},
+            }
+        }
+
+        // same for the "next" link above the content.
+        const nav = self.navBox();
+        for (nav.children.keys(), nav.children.values()) |id, *child| {
+            switch (child.widget) {
+                .text_box => |*tb| tb.options.border_style = if (nav.getFocus().child_id == id) .single else .hidden,
                 else => {},
             }
         }
@@ -443,8 +515,12 @@ pub const View = struct {
     }
 
     fn populateDetail(self: *View, allocator: std.mem.Allocator) !void {
+        const nav = self.navBox();
         const inner = self.detailInner();
 
+        for (nav.children.values()) |*child| child.widget.deinit(allocator);
+        nav.children.clearAndFree(allocator);
+        nav.getFocus().child_id = null;
         for (inner.children.values()) |*child| child.widget.deinit(allocator);
         inner.children.clearAndFree(allocator);
         inner.getFocus().child_id = null;
@@ -453,15 +529,19 @@ pub const View = struct {
         // the pane empty.
         if (self.selectedEntry()) |entry| {
             if (!entry.is_dir) {
+                // the "next" window link sits above the scroll, so it stays put
+                // while the content scrolls.
+                if (entry.has_more) try self.addNavLink(allocator, nav, "next lines →", entry, entry.window_start + file_page);
                 if (entry.is_binary) {
                     try self.addContentBox(allocator, inner, "(binary file)");
                 } else {
-                    const text = try std.mem.join(self.session.page_arena.allocator(), "\n", entry.lines);
+                    const text = try numberedContent(self.session.page_arena.allocator(), entry.lines, entry.window_start);
                     try self.addContentBox(allocator, inner, text);
                 }
             }
         }
-        // point the pane at its content box so focus recovery can land here.
+        // point each box at its first child so focus can descend into it.
+        if (nav.children.count() > 0) nav.getFocus().child_id = nav.children.keys()[0];
         if (inner.children.count() > 0) inner.getFocus().child_id = inner.children.keys()[0];
 
         // reset the scroll to the top for the newly-shown file: directly on the
@@ -471,6 +551,21 @@ pub const View = struct {
         sc.x = 0;
         sc.y = 0;
         sc.getFocus().version +%= 1;
+    }
+
+    // a focusable "next" link above the content. it's an `a:` link to the
+    // selected file at `target_after`, so activating it (the host follows the
+    // link) reloads the page on the next window.
+    fn addNavLink(self: *View, allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8, entry: Entry, target_after: usize) !void {
+        const page_arena = self.session.page_arena;
+        const path = try childDir(page_arena.allocator(), self.data.dir, entry.name);
+        const route = ui.RoutablePage.repoFilesRoute(self.data.identity, self.data.ref_or_oid, self.data.ref_or_oid_value, path, target_after) orelse return error.RouteTooLong;
+        const link = try std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{try route.urlAlloc(page_arena)});
+        var tb = try wgt.TextBox(ui.Widget).init(allocator, label, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .none });
+        errdefer tb.deinit(allocator);
+        tb.getFocus().focusable = true;
+        tb.getFocus().kind = .{ .custom = link };
+        try box.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
     }
 
     pub fn input(self: *View, allocator: std.mem.Allocator, key: inp.Key, root_focus: *Focus) !void {
@@ -503,49 +598,71 @@ pub const View = struct {
         }
     }
 
+    // whether focus is on the content box (vs. a "previous"/"next" nav link).
+    fn focusOnContent(self: *View, root_focus: *Focus) bool {
+        const g = root_focus.grandchild_id orelse return false;
+        return self.detailInner().children.contains(g);
+    }
+
     fn detailInput(self: *View, key: inp.Key, root_focus: *Focus) !void {
         const sc = self.detailScroll();
-        // on the web each Scroll is a native scrollable element, so vertical
-        // scrolling is handled by the browser; the terminal scrolls the content
-        // by moving the offset. left scrolls horizontally, then returns to the
-        // list once flush left.
+        const on_content = self.focusOnContent(root_focus);
+        // the "next" link sits above the content scroll. on the link, left returns
+        // to the file list and down drops into the content. in the content, the
+        // terminal scrolls by offset and reaching the top then pressing up crosses
+        // back up to the link; on the web vertical scrolling is the browser's job
+        // so up just crosses to the link.
         switch (key) {
             .arrow_left => {
-                if (sc.x > 0) {
-                    sc.x -= 1;
-                    self.clampDetailScroll();
-                } else try self.focusList(root_focus);
+                if (on_content) {
+                    if (sc.x > 0) {
+                        sc.x -= 1;
+                        self.clampDetailScroll();
+                    } else try self.focusList(root_focus);
+                } else if (!self.moveNav(root_focus, -1)) {
+                    try self.focusList(root_focus);
+                }
             },
             .arrow_right => {
-                sc.x += 1;
-                self.clampDetailScroll();
+                if (on_content) {
+                    sc.x += 1;
+                    self.clampDetailScroll();
+                } else _ = self.moveNav(root_focus, 1);
             },
-            .arrow_up => if (self.session.is_terminal) {
-                sc.y -= 1;
-                self.clampDetailScroll();
+            .arrow_up => {
+                if (on_content) {
+                    if (self.session.is_terminal and sc.y > 0) {
+                        sc.y -= 1;
+                        self.clampDetailScroll();
+                    } else self.focusNav(root_focus); // cross up to the links
+                }
             },
-            .arrow_down => if (self.session.is_terminal) {
-                sc.y += 1;
-                self.clampDetailScroll();
+            .arrow_down => {
+                if (on_content) {
+                    if (self.session.is_terminal) {
+                        sc.y += 1;
+                        self.clampDetailScroll();
+                    }
+                } else self.focusContent(root_focus); // links -> content
             },
-            .page_up => if (self.session.is_terminal) {
+            .page_up => if (on_content and self.session.is_terminal) {
                 sc.y -= 10;
                 self.clampDetailScroll();
             },
-            .page_down => if (self.session.is_terminal) {
+            .page_down => if (on_content and self.session.is_terminal) {
                 sc.y += 10;
                 self.clampDetailScroll();
             },
-            .home => if (self.session.is_terminal) {
+            .home => if (on_content and self.session.is_terminal) {
                 sc.y = 0;
                 self.clampDetailScroll();
             },
-            .end => if (self.session.is_terminal) {
+            .end => if (on_content and self.session.is_terminal) {
                 sc.y = std.math.maxInt(isize);
                 self.clampDetailScroll();
             },
             .mouse => |mouse| switch (mouse.action) {
-                .scroll => |dir| if (self.session.is_terminal) {
+                .scroll => |dir| if (on_content and self.session.is_terminal) {
                     sc.y += if (dir == .up) -5 else 5;
                     self.clampDetailScroll();
                 },
@@ -553,6 +670,33 @@ pub const View = struct {
             },
             else => {},
         }
+    }
+
+    // focus the first (left-most) nav link; a no-op when there are none, leaving
+    // focus on the content.
+    fn focusNav(self: *View, root_focus: *Focus) void {
+        const nav = self.navBox();
+        if (nav.children.count() == 0) return;
+        root_focus.setFocus(nav.children.keys()[0]);
+    }
+
+    fn focusContent(self: *View, root_focus: *Focus) void {
+        const inner = self.detailInner();
+        const id = inner.getFocus().child_id orelse (if (inner.children.count() > 0) inner.children.keys()[0] else return);
+        root_focus.setFocus(id);
+    }
+
+    // move focus `delta` rows within the nav box; returns false (without moving)
+    // when that would step off either end.
+    fn moveNav(self: *View, root_focus: *Focus, delta: isize) bool {
+        const nav = self.navBox();
+        const keys = nav.children.keys();
+        const cur_id = nav.getFocus().child_id orelse return false;
+        const cur: isize = @intCast(nav.children.getIndex(cur_id) orelse return false);
+        const target = cur + delta;
+        if (target < 0 or target >= @as(isize, @intCast(keys.len))) return false;
+        root_focus.setFocus(keys[@intCast(target)]);
+        return true;
     }
 
     // keep the detail scroll within its content, using the last build's grids.
@@ -570,12 +714,19 @@ pub const View = struct {
         sc.x = std.math.clamp(sc.x, 0, max_x);
     }
 
-    // enter the detail pane. a directory or ".." row has no content, so there's
-    // nothing to enter. setFocus handles the too-narrow case where the pane isn't
-    // laid out yet (it gets selected, then focused after the next build).
+    // enter the detail pane, landing on the "next" link when there is one (so
+    // right-arrow reaches it), else on the content. a directory or ".." row has
+    // neither, so there's nothing to enter. selecting the frame's child (then
+    // focusing the frame) also handles the too-narrow case where the pane isn't
+    // laid out yet — focus lands inside it after the next build.
     fn focusDetail(self: *View, root_focus: *Focus) !void {
-        if (self.detailInner().children.count() == 0) return;
-        root_focus.setFocus(self.detailOuter().getFocus().id);
+        const frame = self.detailOuter();
+        if (self.navBox().children.count() > 0) {
+            frame.getFocus().child_id = self.navBox().getFocus().id;
+        } else if (self.detailInner().children.count() > 0) {
+            frame.getFocus().child_id = self.detailScroll().getFocus().id;
+        } else return;
+        root_focus.setFocus(frame.getFocus().id);
     }
 
     // return to the list.
@@ -619,6 +770,28 @@ pub const View = struct {
     }
 };
 
+// join `lines` into one string, each prefixed with its 1-based file line number
+// (right-aligned in a column wide enough for the last number, then a space),
+// like the diffs view. `start` is the window's 0-based first line, so numbers
+// continue across paginated windows.
+fn numberedContent(arena: std.mem.Allocator, lines: []const []const u8, start: usize) ![]const u8 {
+    if (lines.len == 0) return "";
+    const width = std.fmt.count("{d}", .{start + lines.len});
+    const indent = try arena.alloc(u8, width);
+    @memset(indent, ' ');
+
+    var out: std.ArrayList(u8) = .empty;
+    for (lines, 0..) |line, i| {
+        if (i != 0) try out.append(arena, '\n');
+        const num_str = try std.fmt.allocPrint(arena, "{d}", .{start + i + 1});
+        try out.appendSlice(arena, indent[0 .. width - num_str.len]);
+        try out.appendSlice(arena, num_str);
+        try out.append(arena, ' ');
+        try out.appendSlice(arena, line);
+    }
+    return out.toOwnedSlice(arena);
+}
+
 // the index of the "README"/"README.md" file entry (case-insensitive), or null
 // if none. used to pick the default selection at the repo root.
 fn readmeIndex(entries: []const Entry) ?usize {
@@ -641,7 +814,7 @@ fn selectedFileIndex(data: *const Self) ?usize {
 
 // the "a:" link for the files route at `dir`, pinned to the listing's ref.
 fn dirLink(page_arena: *std.heap.ArenaAllocator, data: *const Self, dir: []const u8) ![]const u8 {
-    const route = ui.RoutablePage.repoFilesRoute(data.identity, data.ref_or_oid, data.ref_or_oid_value, dir) orelse return error.RouteTooLong;
+    const route = ui.RoutablePage.repoFilesRoute(data.identity, data.ref_or_oid, data.ref_or_oid_value, dir, 0) orelse return error.RouteTooLong;
     const url = try route.urlAlloc(page_arena);
     return std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{url});
 }

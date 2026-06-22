@@ -376,7 +376,7 @@ fn refLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, kind: ui.
         .tag => .tag,
     };
     const value = try ui.ResolvedRefOrOid.urlEncode(aa, name);
-    const route = ui.RoutablePage.repoFilesRoute(identity, ref_or_oid, value, "") orelse return error.RouteTooLong;
+    const route = ui.RoutablePage.repoFilesRoute(identity, ref_or_oid, value, "", 0) orelse return error.RouteTooLong;
     const url = try route.urlAlloc(page_arena);
     return std.fmt.allocPrint(aa, "a:{s}", .{url});
 }

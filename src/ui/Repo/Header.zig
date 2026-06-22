@@ -98,7 +98,7 @@ pub const View = struct {
         const identity = try std.fmt.allocPrint(aa, "{s}/{s}", .{ data.owner_name, data.name });
         // both tabs link to the ref/oid this page is viewing, so switching tabs
         // keeps the same ref (the files tab opens at its root directory).
-        const files_route = ui.RoutablePage.repoFilesRoute(identity, data.ref_or_oid, data.ref_or_oid_value, "") orelse return error.RouteTooLong;
+        const files_route = ui.RoutablePage.repoFilesRoute(identity, data.ref_or_oid, data.ref_or_oid_value, "", 0) orelse return error.RouteTooLong;
         const files_link = try std.fmt.allocPrint(aa, "a:{s}", .{try files_route.urlAlloc(session.page_arena)});
         const commits_route = ui.RoutablePage.repoCommitsRoute(identity, data.ref_or_oid, data.ref_or_oid_value, 0) orelse return error.RouteTooLong;
         const commits_link = try std.fmt.allocPrint(aa, "a:{s}", .{try commits_route.urlAlloc(session.page_arena)});

@@ -829,7 +829,7 @@ fn commitsLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, oid: 
 // the "a:" link to the files tab at commit `oid` (an object ref), at its root
 // directory, within `identity` ("owner/name").
 fn filesObjectLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, oid: []const u8) ![]const u8 {
-    const route = ui.RoutablePage.repoFilesRoute(identity, .object, oid, "") orelse return error.RouteTooLong;
+    const route = ui.RoutablePage.repoFilesRoute(identity, .object, oid, "", 0) orelse return error.RouteTooLong;
     const url = try route.urlAlloc(page_arena);
     return std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{url});
 }

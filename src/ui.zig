@@ -46,7 +46,7 @@ pub const Page = union(PageKind) {
                 else => return error.UnexpectedRoute,
             },
             .repo => switch (route) {
-                .repo, .repo_commits, .repo_refs, .repo_settings, .repo_auth => .{ .repo = try Repo.init(arena, session, route) },
+                .repo_files, .repo_commits, .repo_refs, .repo_settings, .repo_auth => .{ .repo = try Repo.init(arena, session, route) },
                 else => return error.UnexpectedRoute,
             },
         };
@@ -72,7 +72,7 @@ pub const RoutablePage = union(enum) {
     user: struct { name: Array(evt.User.name_max_len), after: usize = 0 },
     user_settings: Array(evt.User.name_max_len),
     user_auth: Array(evt.User.name_max_len),
-    repo: Array(repo_route_max_len),
+    repo_files: struct { name: Array(repo_route_max_len), after: usize = 0 },
     repo_commits: struct { name: Array(repo_route_max_len), after: usize = 0 },
     repo_refs: struct { name: Array(repo_route_max_len), kind: RefKind = .branch, after: usize = 0 },
     repo_settings: Array(repo_route_max_len),
@@ -103,7 +103,7 @@ pub const RoutablePage = union(enum) {
     // mean the files root of the repo's default branch.
     pub const repo_route_max_len = 1024;
 
-    // the parts of a `.repo` files route. all slices point into the route's
+    // the parts of a `.repo_files` route. all slices point into the route's
     // stored string. ref_kind is null (and ref_value/dir empty) for the bare
     // default-branch root; dir is "" at a ref's root.
     pub const RepoFiles = struct {
@@ -114,7 +114,7 @@ pub const RoutablePage = union(enum) {
         ref_value: []const u8,
         dir: []const u8,
 
-        // parse a `.repo` route's stored string ("owner/name" or
+        // parse a `.repo_files` route's stored string ("owner/name" or
         // "owner/name/files/<refkind>/<refvalue>[/<dir>]").
         pub fn parse(s: []const u8) ?RepoFiles {
             const s1 = std.mem.indexOfScalar(u8, s, '/') orelse return null;
@@ -150,17 +150,19 @@ pub const RoutablePage = union(enum) {
         }
     };
 
-    // build a `.repo` files route for "owner/name" (identity) at `dir` ("" = the
-    // ref's root) pinned to `ref_kind`/`ref_value`. a null ref_kind yields the
-    // bare default-branch root. null if the result doesn't fit the inline name.
-    pub fn repoFilesRoute(identity: []const u8, ref_kind: ?RefOrOid, ref_value: []const u8, dir: []const u8) ?RoutablePage {
-        const kind = ref_kind orelse return .{ .repo = Array(repo_route_max_len).from(identity) orelse return null };
+    // build a `.repo_files` route for "owner/name" (identity) at `dir` ("" = the
+    // ref's root) pinned to `ref_kind`/`ref_value`, showing the file content
+    // window starting at line `after` (0 = the first window, dropped from the
+    // url). a null ref_kind yields the bare default-branch root. null if the
+    // result doesn't fit the inline name.
+    pub fn repoFilesRoute(identity: []const u8, ref_kind: ?RefOrOid, ref_value: []const u8, dir: []const u8, after: usize) ?RoutablePage {
+        const kind = ref_kind orelse return .{ .repo_files = .{ .name = Array(repo_route_max_len).from(identity) orelse return null, .after = after } };
         var buf: [repo_route_max_len]u8 = undefined;
         const s = if (dir.len == 0)
             std.fmt.bufPrint(&buf, "{s}/" ++ files_seg ++ "/{s}/{s}", .{ identity, @tagName(kind), ref_value }) catch return null
         else
             std.fmt.bufPrint(&buf, "{s}/" ++ files_seg ++ "/{s}/{s}/{s}", .{ identity, @tagName(kind), ref_value, dir }) catch return null;
-        return .{ .repo = Array(repo_route_max_len).from(s) orelse return null };
+        return .{ .repo_files = .{ .name = Array(repo_route_max_len).from(s) orelse return null, .after = after } };
     }
 
     // the ref/oid a `.repo_commits` route's stored string walks from. kind is
@@ -225,7 +227,7 @@ pub const RoutablePage = union(enum) {
             .home_settings => "/settings",
             .home_auth => "/auth",
             .user, .user_settings, .user_auth => @compileError("user routes are dynamic; use urlAlloc"),
-            .repo, .repo_commits, .repo_refs, .repo_settings, .repo_auth => @compileError("repo routes are dynamic; use urlAlloc"),
+            .repo_files, .repo_commits, .repo_refs, .repo_settings, .repo_auth => @compileError("repo routes are dynamic; use urlAlloc"),
         };
     }
 
@@ -239,7 +241,10 @@ pub const RoutablePage = union(enum) {
                 try std.fmt.allocPrint(arena.allocator(), user_segment ++ "{s}?after={d}", .{ u.name.slice(), u.after }),
             .user_settings => |name| try std.fmt.allocPrint(arena.allocator(), user_segment ++ "{s}/settings", .{name.slice()}),
             .user_auth => |name| try std.fmt.allocPrint(arena.allocator(), user_segment ++ "{s}/auth", .{name.slice()}),
-            .repo => |name| try std.fmt.allocPrint(arena.allocator(), repo_segment ++ "{s}", .{name.slice()}),
+            .repo_files => |f| if (f.after == 0)
+                try std.fmt.allocPrint(arena.allocator(), repo_segment ++ "{s}", .{f.name.slice()})
+            else
+                try std.fmt.allocPrint(arena.allocator(), repo_segment ++ "{s}?after={d}", .{ f.name.slice(), f.after }),
             .repo_commits => |c| if (c.after == 0)
                 try std.fmt.allocPrint(arena.allocator(), repo_segment ++ "{s}", .{c.name.slice()})
             else
@@ -258,7 +263,7 @@ pub const RoutablePage = union(enum) {
         return switch (self) {
             .home_users, .home_repos, .home_settings, .home_auth => .home,
             .user, .user_settings, .user_auth => .user,
-            .repo, .repo_commits, .repo_refs, .repo_settings, .repo_auth => .repo,
+            .repo_files, .repo_commits, .repo_refs, .repo_settings, .repo_auth => .repo,
         };
     }
 
@@ -307,7 +312,7 @@ pub const RoutablePage = union(enum) {
                 } };
                 if (std.mem.eql(u8, sub, "settings")) return .{ .repo_settings = Array(repo_route_max_len).from(pair) orelse return null };
                 if (std.mem.eql(u8, sub, "auth")) return .{ .repo_auth = Array(repo_route_max_len).from(pair) orelse return null };
-                if (std.mem.eql(u8, sub, files_seg)) return repoFilesRoute(pair, null, "", ""); // trailing /files == default-branch root
+                if (std.mem.eql(u8, sub, files_seg)) return repoFilesRoute(pair, null, "", "", after); // trailing /files == default-branch root
                 if (std.mem.startsWith(u8, sub, files_seg ++ "/")) {
                     // "files/<refkind>/<refvalue>[/<dir>]"
                     const ref_part = sub[files_seg.len + 1 ..];
@@ -318,7 +323,7 @@ pub const RoutablePage = union(enum) {
                     const value = if (k2) |i| after_kind[0..i] else after_kind;
                     if (value.len == 0) return null;
                     const dir = if (k2) |i| after_kind[i + 1 ..] else "";
-                    return repoFilesRoute(pair, kind, value, dir);
+                    return repoFilesRoute(pair, kind, value, dir, after);
                 }
                 if (std.mem.eql(u8, sub, commits_seg)) return repoCommitsRoute(pair, null, "", after); // trailing /commits == default branch
                 if (std.mem.startsWith(u8, sub, commits_seg ++ "/")) {
@@ -332,7 +337,7 @@ pub const RoutablePage = union(enum) {
                 }
                 return null; // unknown sub-path
             }
-            return repoFilesRoute(pair, null, "", "");
+            return repoFilesRoute(pair, null, "", "", after);
         }
         return null;
     }
@@ -369,7 +374,7 @@ pub const RoutablePage = union(enum) {
             .user => |a_u| std.mem.eql(u8, a_u.name.slice(), b.user.name.slice()) and a_u.after == b.user.after,
             .user_settings => |a_name| std.mem.eql(u8, a_name.slice(), b.user_settings.slice()),
             .user_auth => |a_name| std.mem.eql(u8, a_name.slice(), b.user_auth.slice()),
-            .repo => |a_name| std.mem.eql(u8, a_name.slice(), b.repo.slice()),
+            .repo_files => |a_f| std.mem.eql(u8, a_f.name.slice(), b.repo_files.name.slice()) and a_f.after == b.repo_files.after,
             .repo_commits => |a_c| std.mem.eql(u8, a_c.name.slice(), b.repo_commits.name.slice()) and a_c.after == b.repo_commits.after,
             .repo_refs => |a_r| std.mem.eql(u8, a_r.name.slice(), b.repo_refs.name.slice()) and a_r.kind == b.repo_refs.kind and a_r.after == b.repo_refs.after,
             .repo_settings => |a_name| std.mem.eql(u8, a_name.slice(), b.repo_settings.slice()),
@@ -437,9 +442,15 @@ pub const RoutablePage = union(enum) {
                 try jw.objectField("name");
                 try jw.write(name.slice());
             },
-            .repo, .repo_settings, .repo_auth => |name| {
+            .repo_settings, .repo_auth => |name| {
                 try jw.objectField("name");
                 try jw.write(name.slice());
+            },
+            .repo_files => |f| {
+                try jw.objectField("name");
+                try jw.write(f.name.slice());
+                try jw.objectField("after");
+                try jw.write(f.after);
             },
             .repo_commits => |c| {
                 try jw.objectField("name");
@@ -484,7 +495,7 @@ pub const RoutablePage = union(enum) {
             .user => .{ .user = .{ .name = try parseName(evt.User.name_max_len, helper.name), .after = helper.after } },
             .user_settings => .{ .user_settings = try parseName(evt.User.name_max_len, helper.name) },
             .user_auth => .{ .user_auth = try parseName(evt.User.name_max_len, helper.name) },
-            .repo => .{ .repo = try parseName(repo_route_max_len, helper.name) },
+            .repo_files => .{ .repo_files = .{ .name = try parseName(repo_route_max_len, helper.name), .after = helper.after } },
             .repo_commits => .{ .repo_commits = .{ .name = try parseName(repo_route_max_len, helper.name), .after = helper.after } },
             .repo_refs => .{ .repo_refs = .{
                 .name = try parseName(repo_route_max_len, helper.name),
