@@ -690,18 +690,19 @@ pub const Session = struct {
         repo: *rp.Repo(.xit, evt.admin_repo_opts),
     ) !void {
         defer self.pending.clearRetainingCapacity();
-        var wrote = false;
         for (self.pending.items) |action| {
             self.apply(action);
             switch (action) {
                 .toggle_ansi => if (self.data.user_id) |user_id| {
                     try evt.User.toggleAnsi(evt.admin_repo_opts, io, allocator, repo, user_id);
-                    wrote = true;
                 },
             }
         }
-        // reload the moment so a later read off it sees what we just applied
-        if (wrote) self.haxy_moment = try evt.currentMoment(evt.admin_repo_opts, repo);
+    }
+
+    // reload the moment from the admin repo
+    pub fn reloadMoment(self: *Self, repo: *rp.Repo(.xit, evt.admin_repo_opts)) !void {
+        self.haxy_moment = try evt.currentMoment(evt.admin_repo_opts, repo);
     }
 
     // request a forward navigation to `route`; the host consumes next_page
@@ -711,7 +712,7 @@ pub const Session = struct {
     }
 };
 
-pub fn run(io: std.Io, allocator: std.mem.Allocator, session: *Session) !void {
+pub fn run(io: std.Io, allocator: std.mem.Allocator, session: *Session, repo: *rp.Repo(.xit, evt.admin_repo_opts)) !void {
     var nav = try Nav.init(allocator, session);
     defer nav.deinit(allocator);
 
@@ -748,6 +749,10 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, session: *Session) !void {
 
         // local run has no repo to persist to, so just apply in-memory
         session.applyPending();
+
+        // pick up data written by other handles so the next navigation
+        // builds its page from a current moment
+        try session.reloadMoment(repo);
 
         // reconcile navigation: forward to a new page, or back on escape.
         try nav.sync(allocator, session);

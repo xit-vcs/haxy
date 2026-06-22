@@ -461,16 +461,17 @@ pub fn main(init: std.process.Init) !void {
             io: std.Io,
             allocator: std.mem.Allocator,
             session: *ui.Session,
+            repo: *Repo,
 
             pub fn run(self: @This()) !void {
                 // launch the TUI
-                try hx.ui.run(self.io, self.allocator, self.session);
+                try hx.ui.run(self.io, self.allocator, self.session, self.repo);
             }
         };
 
         try srv.run(.xit, .{}, io, allocator, cwd_path, .{
             .data_dir = server_path,
-        }, run_opts.err, Runnable{ .io = io, .allocator = allocator, .session = &session });
+        }, run_opts.err, Runnable{ .io = io, .allocator = allocator, .session = &session, .repo = &repo });
     }
 }
 

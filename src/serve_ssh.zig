@@ -175,6 +175,10 @@ fn runTui(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh.PtySiz
 
         try ui_session.applyAndWritePending(io, allocator, &repo);
 
+        // pick up data written by other handles so the next navigation
+        // builds its page from a current moment
+        try ui_session.reloadMoment(&repo);
+
         // reconcile navigation: forward to a new page, or back on escape
         try nav.sync(allocator, &ui_session);
 
