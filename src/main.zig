@@ -15,11 +15,7 @@ pub const RunOpts = struct {
 };
 
 pub fn main(init: std.process.Init) !u8 {
-    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
-    const allocator = if (builtin.mode == .Debug) debug_allocator.allocator() else std.heap.smp_allocator;
-    defer if (builtin.mode == .Debug) {
-        _ = debug_allocator.deinit();
-    };
+    const allocator = std.heap.smp_allocator;
 
     var threaded = std.Io.Threaded.init(allocator, .{
         .environ = init.minimal.environ,

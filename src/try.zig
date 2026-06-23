@@ -16,9 +16,7 @@ const ui = hx.ui;
 pub const std_options_debug_io = xit.xitui.terminal.crash_debug_io;
 
 pub fn main(init: std.process.Init) !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    const allocator = std.heap.smp_allocator;
 
     var threaded = std.Io.Threaded.init(allocator, .{
         .environ = init.minimal.environ,
