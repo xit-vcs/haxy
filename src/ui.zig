@@ -236,9 +236,9 @@ pub const RoutablePage = union(enum) {
             .home_users => |after| if (after == 0) @as([]const u8, "/users") else try std.fmt.allocPrint(arena.allocator(), "/users?after={d}", .{after}),
             .home_repos => |after| if (after == 0) @as([]const u8, "/repos") else try std.fmt.allocPrint(arena.allocator(), "/repos?after={d}", .{after}),
             .user_repos => |u| if (u.after == 0)
-                try std.fmt.allocPrint(arena.allocator(), user_segment ++ "{s}", .{u.name.slice()})
+                try std.fmt.allocPrint(arena.allocator(), user_segment ++ "{s}/repos", .{u.name.slice()})
             else
-                try std.fmt.allocPrint(arena.allocator(), user_segment ++ "{s}?after={d}", .{ u.name.slice(), u.after }),
+                try std.fmt.allocPrint(arena.allocator(), user_segment ++ "{s}/repos?after={d}", .{ u.name.slice(), u.after }),
             .user_settings => |name| try std.fmt.allocPrint(arena.allocator(), user_segment ++ "{s}/settings", .{name.slice()}),
             .user_auth => |name| try std.fmt.allocPrint(arena.allocator(), user_segment ++ "{s}/auth", .{name.slice()}),
             .repo_files => |f| if (f.after == 0)
@@ -275,7 +275,7 @@ pub const RoutablePage = union(enum) {
         if (std.mem.eql(u8, path, "/repos")) return .{ .home_repos = after };
         if (std.mem.eql(u8, path, "/settings")) return .home_settings;
         if (std.mem.eql(u8, path, "/auth")) return .home_auth;
-        // /user/<name>[/settings|/auth]
+        // /user/<name>[/repos|/settings|/auth]
         if (std.mem.startsWith(u8, path, user_segment)) {
             const rest = path[user_segment.len..];
             const slash = std.mem.indexOfScalar(u8, rest, '/');
@@ -284,6 +284,7 @@ pub const RoutablePage = union(enum) {
             const parsed = Array(evt.User.name_max_len).from(name) orelse return null; // name too long
             if (slash) |s| {
                 const sub = rest[s + 1 ..];
+                if (std.mem.eql(u8, sub, "repos")) return .{ .user_repos = .{ .name = parsed, .after = after } };
                 if (std.mem.eql(u8, sub, "settings")) return .{ .user_settings = parsed };
                 if (std.mem.eql(u8, sub, "auth")) return .{ .user_auth = parsed };
                 return null; // unknown sub-path
