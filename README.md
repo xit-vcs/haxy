@@ -9,7 +9,7 @@
 ░██    ░██ ░██      ░██  ░██   ░██    ░██
                                                  </code></p>
 
-You're looking at Haxy, a new git forge. This is a work in progress...there's not much here yet besides hopes and dreams. We're about to do for git forges what Bill Hicks did for comedy, Earth Crisis did for hardcore music, and Marvin Heemeyer did for exterior remodeling. I'm not sure what any of that means but it sounded cool. The point is, strap yourselves in...we're gonna Leeroy Jenkins our way through this!
+You're looking at Haxy, a new git forge. This is a work in progress. We're about to do for git forges what Bill Hicks did for comedy, Earth Crisis did for hardcore music, and Marvin Heemeyer did for exterior remodeling. I'm not sure what any of that means but it sounded cool. The point is, strap yourselves in...we're gonna Leeroy Jenkins our way through this!
 
 Haxy isn't usable yet, but you can follow the devlogs starting with [the first one](https://www.youtube.com/watch?v=m7BOY1OCH_Q).
 
@@ -32,7 +32,7 @@ Haxy repos will have a special branch where events will be stored. Any time proj
 
 Haxy will provide a text user interface (TUI) over SSH, so you can browse the Haxy instance entirely from your terminal. These are sometimes called SSH apps. One big advantage they have is that you are automatically authenticated with your SSH key, so creating an account on a Haxy instance and associating it with your SSH public key can be done instantly.
 
-Additionally, Haxy will provide a web UI for a more typical experience in a web browser. To avoid having separate UI codebases, the web UI will simply render the TUI in your browser. This sounds frightening but it can be done in an accessible way that is usable for screen readers and mobile devices. See [an early look](https://www.youtube.com/watch?v=08AnxqnhTcs) at how the web UI will work.
+Additionally, Haxy will provide a web UI for a more typical experience in a web browser. To avoid having separate UI codebases, the web UI will simply render the TUI in your browser. This sounds frightening but it can be done in an accessible way that is usable for screen readers and mobile devices. See [an early look](https://www.youtube.com/watch?v=47e0rzLF1oc) at how the web UI will work.
 
 Here's what it looks like so far in the terminal and on the web:
 
