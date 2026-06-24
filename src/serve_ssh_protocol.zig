@@ -403,13 +403,18 @@ pub const SessionCtx = struct {
         try writeU32(&close, self.allocator, self.channel.remote_id);
         try self.sc_cipher.writePacket(self.io, self.allocator, self.writer, close.items);
 
-        // wait for the peer's CLOSE (or EOF) before letting the caller close
-        // the socket. closing while the peer still has data in flight makes
-        // Linux send RST instead of FIN, which surfaces as "Connection reset
-        // by peer" on the client and can truncate the last sideband bytes.
+        // read and discard until the peer closes (TCP FIN) before letting the
+        // caller close the socket. a git client, after our CHANNEL_CLOSE, still
+        // sends its own CHANNEL_CLOSE and SSH_MSG_DISCONNECT before closing; if
+        // we close with those unread, Linux sends RST instead of FIN, which the
+        // client reports as "Connection reset by peer" and treats as a failed
+        // push even though the ref updated. draining to EOF leaves nothing
+        // unread, so we send a clean FIN. we're tearing down, so the packet
+        // contents don't matter — just get them off the socket.
         var drain_packets: u32 = 0;
-        while (!self.incoming_eof and drain_packets < max_exit_drain_packets) : (drain_packets += 1) {
-            self.processOneBackgroundPacket() catch break;
+        while (drain_packets < max_exit_drain_packets) : (drain_packets += 1) {
+            const packet = self.cs_cipher.readPacket(self.allocator, self.reader) catch break;
+            self.allocator.free(packet);
         }
     }
 };
