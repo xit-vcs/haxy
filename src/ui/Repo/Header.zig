@@ -93,18 +93,21 @@ pub const View = struct {
 
         // every tab link is repo-scoped so selecting one stays on this page —
         // switching its stack and updating the url — instead of navigating to
-        // the global settings or auth pages. the files tab routes through the
-        // shared helper so the /repo/.../files url format lives in one place.
+        // the global settings or auth pages. the "ai:" prefix makes each an
+        // in-page anchor: crossPageLink ignores it so a wasm click just switches
+        // tabs (the page already holds every tab's content), while the href is
+        // still followed with js off. the files tab routes through the shared
+        // helper so the /repo/.../files url format lives in one place.
         const identity = try std.fmt.allocPrint(aa, "{s}/{s}", .{ data.owner_name, data.name });
         // both tabs link to the ref/oid this page is viewing, so switching tabs
         // keeps the same ref (the files tab opens at its root directory).
         const files_route = ui.RoutablePage.repoFilesRoute(identity, data.ref_or_oid, data.ref_or_oid_value, "", 0) orelse return error.RouteTooLong;
-        const files_link = try std.fmt.allocPrint(aa, "a:{s}", .{try files_route.urlAlloc(session.page_arena)});
+        const files_link = try std.fmt.allocPrint(aa, "ai:{s}", .{try files_route.urlAlloc(session.page_arena)});
         const commits_route = ui.RoutablePage.repoCommitsRoute(identity, data.ref_or_oid, data.ref_or_oid_value, 0) orelse return error.RouteTooLong;
-        const commits_link = try std.fmt.allocPrint(aa, "a:{s}", .{try commits_route.urlAlloc(session.page_arena)});
-        const refs_link = try std.fmt.allocPrint(aa, "a:/repo/{s}/{s}/refs", .{ data.owner_name, data.name });
-        const settings_link = try std.fmt.allocPrint(aa, "a:/repo/{s}/{s}/settings", .{ data.owner_name, data.name });
-        const auth_link = try std.fmt.allocPrint(aa, "a:/repo/{s}/{s}/auth", .{ data.owner_name, data.name });
+        const commits_link = try std.fmt.allocPrint(aa, "ai:{s}", .{try commits_route.urlAlloc(session.page_arena)});
+        const refs_link = try std.fmt.allocPrint(aa, "ai:/repo/{s}/{s}/refs", .{ data.owner_name, data.name });
+        const settings_link = try std.fmt.allocPrint(aa, "ai:/repo/{s}/{s}/settings", .{ data.owner_name, data.name });
+        const auth_link = try std.fmt.allocPrint(aa, "ai:/repo/{s}/{s}/auth", .{ data.owner_name, data.name });
 
         // the tab matching the current page is focused initially; matching by
         // link (rather than position) keeps this robust to tab changes.
@@ -188,8 +191,8 @@ pub const View = struct {
             });
         }
 
-        // auth tab (login / logout). AuthTab defaults to the global a:/auth link;
-        // repoint its instance at this repo's auth route so it stays local too.
+        // auth tab (login / logout). AuthTab defaults to the global ai:/auth
+        // link; repoint its instance at this repo's auth route so it stays local.
         {
             var auth_tab = try AuthTab.View.init(allocator, &data.auth_tab, session);
             errdefer auth_tab.deinit(allocator);

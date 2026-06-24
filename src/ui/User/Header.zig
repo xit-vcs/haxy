@@ -64,12 +64,15 @@ pub const View = struct {
 
         // every tab link is user-scoped so selecting one stays on this page —
         // switching its stack and updating the url — instead of navigating to
-        // the global settings or auth pages. allocated in the page arena so the
-        // focus kinds that borrow them live as long as this page's widget tree.
+        // the global settings or auth pages. the "ai:" prefix makes each an
+        // in-page anchor: crossPageLink ignores it so a wasm click just switches
+        // tabs (the page already holds every tab's content), while the href is
+        // still followed with js off. allocated in the page arena so the focus
+        // kinds that borrow them live as long as this page's widget tree.
         const aa = session.page_arena.allocator();
-        const repos_link = try std.fmt.allocPrint(aa, "a:/user/{s}", .{data.name});
-        const settings_link = try std.fmt.allocPrint(aa, "a:/user/{s}/settings", .{data.name});
-        const auth_link = try std.fmt.allocPrint(aa, "a:/user/{s}/auth", .{data.name});
+        const repos_link = try std.fmt.allocPrint(aa, "ai:/user/{s}", .{data.name});
+        const settings_link = try std.fmt.allocPrint(aa, "ai:/user/{s}/settings", .{data.name});
+        const auth_link = try std.fmt.allocPrint(aa, "ai:/user/{s}/auth", .{data.name});
 
         // the tab matching the current page is focused initially; matching by
         // link (rather than position) keeps this robust to tab changes.
@@ -121,8 +124,8 @@ pub const View = struct {
             });
         }
 
-        // auth tab (login / logout). AuthTab defaults to the global a:/auth link;
-        // repoint its instance at this user's auth route so it stays local too.
+        // auth tab (login / logout). AuthTab defaults to the global ai:/auth
+        // link; repoint its instance at this user's auth route so it stays local.
         {
             var auth_tab = try AuthTab.View.init(allocator, &data.auth_tab, session);
             errdefer auth_tab.deinit(allocator);

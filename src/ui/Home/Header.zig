@@ -61,17 +61,17 @@ pub const View = struct {
         // the tab matching the current page is focused initially; matching by
         // link (rather than position) keeps this robust to tab changes.
         const current_link: []const u8 = switch (session.data.current_page) {
-            .home_repos => "a:/repos",
-            .home_settings => "a:/settings",
-            .home_auth => "a:/auth",
-            else => "a:/users",
+            .home_repos => "ai:/repos",
+            .home_settings => "ai:/settings",
+            .home_auth => "ai:/auth",
+            else => "ai:/users",
         };
         var selected_tab: ?usize = null;
 
         // tabs
         for (
             [_][]const u8{ "users", "repos", "", "settings", "" },
-            [_][]const u8{ "a:/users", "a:/repos", "", "a:/settings", "a:/auth" },
+            [_][]const u8{ "ai:/users", "ai:/repos", "", "ai:/settings", "ai:/auth" },
         ) |name, focus_name| {
             // spacer
             if (focus_name.len == 0) {
@@ -84,7 +84,7 @@ pub const View = struct {
                 });
             }
             // auth
-            else if (std.mem.eql(u8, "a:/auth", focus_name)) {
+            else if (std.mem.eql(u8, "ai:/auth", focus_name)) {
                 var auth_tab = try AuthTab.View.init(allocator, &data.auth_tab, session);
                 errdefer auth_tab.deinit(allocator);
                 try tab_ids.put(allocator, auth_tab.getFocus().id, {});
