@@ -1005,7 +1005,7 @@ pub fn initRoot(allocator: std.mem.Allocator, page: *const Page, session: *Sessi
 
     try root.build(allocator, .{
         .min_size = .{ .width = null, .height = 40 },
-        .max_size = .{ .width = 80, .height = null },
+        .max_size = .{ .width = 100, .height = null },
     }, root.getFocus());
 
     return root;
