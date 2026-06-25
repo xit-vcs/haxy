@@ -245,11 +245,7 @@ fn emptyResult(aa: std.mem.Allocator, identity: []const u8, ref_or_oid: RefOrOid
 pub const View = struct {
     // a vertical stack: the "viewing <ref>" banner on top, then a horizontal
     // split with the file/directory list on the left and a detail pane on the
-    // right showing the selected file's contents. each subdirectory row is an
-    // `a:` link to its /repo/.../files/<path> route, so following it (click or
-    // Enter) navigates through the host's link handling; a ".." row at the top
-    // links to the parent. file rows aren't links — selecting one shows its
-    // contents in the detail pane in-page, like the commits view's diff pane.
+    // right showing the selected file's contents.
     box: wgt.Box(ui.Widget), // vert: [sub_header_index] = banner, [content_index] = split
     data: *const Self,
     session: *ui.Session,
@@ -294,8 +290,12 @@ pub const View = struct {
                     try addRow(allocator, &list_box, "..", try dirLink(session.page_arena, data, parentDir(data.dir)));
                 }
                 for (data.entries) |entry| {
+                    const path = try childDir(aa, data.dir, entry.name);
                     const label = if (entry.is_dir) try std.fmt.allocPrint(aa, "{s}/", .{entry.name}) else entry.name;
-                    const link = if (entry.is_dir) try dirLink(session.page_arena, data, try childDir(aa, data.dir, entry.name)) else "";
+                    const link = if (entry.is_dir)
+                        try dirLink(session.page_arena, data, path)
+                    else
+                        try fileLink(session.page_arena, data, path);
                     try addRow(allocator, &list_box, label, link);
                 }
                 // select the file the route named, else prefer a README so its
@@ -841,11 +841,18 @@ fn selectedFileIndex(data: *const Self) ?usize {
     return null;
 }
 
-// the "a:" link for the files route at `dir`, pinned to the listing's ref.
-fn dirLink(page_arena: *std.heap.ArenaAllocator, data: *const Self, dir: []const u8) ![]const u8 {
-    const route = ui.RoutablePage.repoFilesRoute(data.identity, data.ref_or_oid, data.ref_or_oid_value, dir, 0) orelse return error.RouteTooLong;
-    const url = try route.urlAlloc(page_arena);
-    return std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{url});
+// an "a:" link to the files route at `path`, pinned to the listing's ref, so
+// following it navigates to that directory's listing.
+fn dirLink(page_arena: *std.heap.ArenaAllocator, data: *const Self, path: []const u8) ![]const u8 {
+    const route = ui.RoutablePage.repoFilesRoute(data.identity, data.ref_or_oid, data.ref_or_oid_value, path, 0) orelse return error.RouteTooLong;
+    return std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{try route.urlAlloc(page_arena)});
+}
+
+// an "ai:" link to the file's route: crossPageLink ignores it, so a wasm click
+// selects the row in place and shows its contents in the detail pane.
+fn fileLink(page_arena: *std.heap.ArenaAllocator, data: *const Self, path: []const u8) ![]const u8 {
+    const route = ui.RoutablePage.repoFilesRoute(data.identity, data.ref_or_oid, data.ref_or_oid_value, path, 0) orelse return error.RouteTooLong;
+    return std.fmt.allocPrint(page_arena.allocator(), "ai:{s}", .{try route.urlAlloc(page_arena)});
 }
 
 // `dir`/`name`, or just `name` at the root.
