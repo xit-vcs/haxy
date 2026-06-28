@@ -410,6 +410,10 @@ test "SSH-2 negotiation: walk through every step (banner -> KEX -> auth -> chann
         try cs_cipher.writePacket(io, allocator, cw, pkt.items);
     }
 
+    // simulate the client's TCP FIN so the server's teardown drain reads EOF
+    // and returns instead of blocking on a packet that never arrives.
+    c2s.close(io);
+
     server_future.await(io);
     try std.testing.expect(server.result == null);
 
