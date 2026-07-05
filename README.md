@@ -15,7 +15,7 @@ Haxy isn't usable yet, but you can follow the devlogs starting with [the first o
 
 ## Why another git forge?
 
-Haxy is based around [two design ideas](https://www.youtube.com/watch?v=9YjWGXi5tDw):
+Haxy is based around two design ideas:
 
 ### 1. Store project metadata (issues, pull requests, and discussions) in the repo
 
@@ -55,20 +55,14 @@ The easiest way to try Haxy out is like this:
 zig build try
 ```
 
-This will launch a server with fake data that it stores in the `temp-try` directory. It will then launch the TUI directly in your terminal (you can exit by pressing escape).
+This will launch a server with fake data that it stores in the `temp-try` directory. It will then launch the TUI directly in your terminal (you can exit by pressing escape). Additionally, you can view the web UI at http://localhost:8000.
 
-Additionally, you can view the web UI at http://localhost:8000 and push a git repo over SSH like this:
+A fun test is to push Haxy itself to the server. You can do that by running the following command, which will push it to the server using SSH:
 
 ```
-mkdir -p temp-try/client/test
-cd temp-try/client/test
-git init
-echo "hello" > hello.txt
-git add hello.txt
-git commit -m "let there be light"
-GIT_SSH_COMMAND='ssh -p 8022 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -i ../../key' git push localhost:admin/test HEAD:master
+GIT_SSH_COMMAND='ssh -p 8022 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -i temp-try/key' git push localhost:admin/haxy HEAD:master
 ```
 
-After that, the repo will be in `temp-try/server/repos` in a directory named by its repo id.
+After that, go to the admin user in the UI and you'll see Haxy's repo page: http://localhost:8000/repo/admin/haxy/files/branch/master
 
 *"C'mon Alex! You always dreamt about going on a big adventure! Let this be our first!" -- Lunar: Silver Star Story*
