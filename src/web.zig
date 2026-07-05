@@ -27,72 +27,7 @@ const embeds = [_]Embed{
     .{ .path = "haxy.wasm", .content_type = "application/wasm", .body = @embedFile("embed/haxy.wasm") },
 };
 
-pub fn run(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    net_server: *std.Io.net.Server,
-    tasks: *std.Io.Group,
-    admin_repo_path: []const u8,
-    session_store: SessionStore,
-    err: *std.Io.Writer,
-) void {
-    const Listener = struct {
-        io: std.Io,
-        allocator: std.mem.Allocator,
-        net_server: *std.Io.net.Server,
-        tasks: *std.Io.Group,
-        admin_repo_path: []const u8,
-        session_store: SessionStore,
-        err: *std.Io.Writer,
-
-        fn run(ctx: @This()) void {
-            while (true) {
-                const stream = ctx.net_server.accept(ctx.io) catch |accept_err| {
-                    if (accept_err == error.Canceled) return;
-                    logError(ctx.err, "web ui accept failed: {s}\n", .{@errorName(accept_err)});
-                    continue;
-                };
-
-                const Connection = struct {
-                    io: std.Io,
-                    allocator: std.mem.Allocator,
-                    stream: std.Io.net.Stream,
-                    admin_repo_path: []const u8,
-                    session_store: SessionStore,
-                    err: *std.Io.Writer,
-
-                    fn run(conn: @This()) void {
-                        defer conn.stream.close(conn.io);
-                        handleConnection(conn.io, conn.allocator, conn.stream, conn.admin_repo_path, conn.session_store, conn.err) catch |request_err| {
-                            logError(conn.err, "web ui request failed: {s}\n", .{@errorName(request_err)});
-                        };
-                    }
-                };
-
-                ctx.tasks.async(ctx.io, Connection.run, .{Connection{
-                    .io = ctx.io,
-                    .allocator = ctx.allocator,
-                    .stream = stream,
-                    .admin_repo_path = ctx.admin_repo_path,
-                    .session_store = ctx.session_store,
-                    .err = ctx.err,
-                }});
-            }
-        }
-    };
-
-    tasks.async(io, Listener.run, .{Listener{
-        .io = io,
-        .allocator = allocator,
-        .net_server = net_server,
-        .tasks = tasks,
-        .admin_repo_path = admin_repo_path,
-        .session_store = session_store,
-        .err = err,
-    }});
-}
-
-fn handleConnection(
+pub fn handleConnection(
     io: std.Io,
     allocator: std.mem.Allocator,
     stream: std.Io.net.Stream,
@@ -444,11 +379,6 @@ fn findEmbed(request_path: []const u8) ?Embed {
         if (std.mem.eql(u8, path, embed.path)) return embed;
     }
     return null;
-}
-
-fn logError(err: *std.Io.Writer, comptime fmt: []const u8, args: anytype) void {
-    err.print(fmt, args) catch return;
-    err.flush() catch {};
 }
 
 // emits the TUI grid cells as static HTML. each web-native Scroll becomes its

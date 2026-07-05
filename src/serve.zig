@@ -2,6 +2,7 @@ const std = @import("std");
 const xit = @import("xit");
 const rp = xit.repo;
 const web = @import("./web.zig");
+const serve_common = @import("./serve_common.zig");
 const serve_ssh_protocol = @import("./serve_ssh_protocol.zig");
 const serve_ssh = @import("./serve_ssh.zig");
 const serve_http = @import("./serve_http.zig");
@@ -107,13 +108,48 @@ pub fn run(
     try err.print("serving web UI on http://{s}/\n", .{options.wui_listen});
     try err.flush();
 
-    web.run(io, allocator, &wui_server, &tasks, admin_repo_path, session_store, err);
+    runWebListener(io, allocator, &wui_server, &tasks, admin_repo_path, session_store, err);
 
     if (@TypeOf(runnable) != void) {
         try runnable.run();
     } else {
         try tasks.await(io);
     }
+}
+
+fn runWebListener(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    net_server: *std.Io.net.Server,
+    tasks: *std.Io.Group,
+    admin_repo_path: []const u8,
+    session_store: web.SessionStore,
+    err: *std.Io.Writer,
+) void {
+    const Context = struct {
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        admin_repo_path: []const u8,
+        session_store: web.SessionStore,
+        err: *std.Io.Writer,
+    };
+
+    const handle = struct {
+        fn h(ctx: Context, stream: std.Io.net.Stream) void {
+            defer stream.close(ctx.io);
+            web.handleConnection(ctx.io, ctx.allocator, stream, ctx.admin_repo_path, ctx.session_store, ctx.err) catch |request_err| {
+                serve_common.logError(ctx.err, "web ui request failed: {s}\n", .{@errorName(request_err)});
+            };
+        }
+    }.h;
+
+    serve_common.runListener(io, net_server, tasks, err, "web ui", Context{
+        .io = io,
+        .allocator = allocator,
+        .admin_repo_path = admin_repo_path,
+        .session_store = session_store,
+        .err = err,
+    }, handle);
 }
 
 fn parseListenAddress(value: []const u8) !ListenAddress {

@@ -31,7 +31,7 @@ pub fn logError(err: *std.Io.Writer, comptime fmt: []const u8, args: anytype) vo
 
 // accept connections forever, spawning `handleConn(context, stream)` as a task
 // for each. the handler owns the stream (it closes it). `name` labels accept
-// errors in the log. shared by the http and ssh listeners.
+// errors in the log. shared by the http, ssh, and web ui listeners.
 pub fn runListener(
     io: std.Io,
     net_server: *std.Io.net.Server,
