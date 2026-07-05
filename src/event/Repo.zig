@@ -51,8 +51,11 @@ pub fn consume(
         // owner, and the read side resolves the url's username to its user id.
         const repo_path = try std.fmt.allocPrint(arena.allocator(), "{s}/{s}", .{ event.user_id, event.name });
 
+        const user_id_to_repo_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, "user-id->repo-id-set"));
+        const user_id_to_repo_id_set = try DB.HashMap(.read_write).init(user_id_to_repo_id_set_cursor);
+
         // if this event_id already maps to a repo under a different key (its
-        // name or owner changed), drop the stale name->id entry first
+        // name or owner changed), drop the stale index entries first
         const existing_cursor_maybe = try event_id_to_repo.getCursor(repo_key);
         if (existing_cursor_maybe) |existing_cursor| {
             const existing_repo = try DB.HashMap(.read_only).init(existing_cursor);
@@ -62,6 +65,12 @@ pub fn consume(
             const existing_path = try std.fmt.allocPrint(arena.allocator(), "{s}/{s}", .{ existing_event.user_id, existing_event.name });
             if (!std.mem.eql(u8, existing_path, repo_path)) {
                 _ = try name_to_repo_id.remove(hash.hashInt(hash_kind, existing_path));
+            }
+            if (!std.mem.eql(u8, existing_event.user_id, event.user_id)) {
+                const old_user_repos_cursor = try user_id_to_repo_id_set.putCursor(hash.hashInt(hash_kind, existing_event.user_id));
+                const old_user_repos = try DB.SortedSet(.read_write).init(old_user_repos_cursor);
+                const order_key = evt.orderKey(existing_event.created_ts, event_id);
+                _ = try old_user_repos.remove(&order_key);
             }
         } else {
             // first time we've seen this repo: stamp it with the commit timestamp
@@ -83,9 +92,6 @@ pub fn consume(
             const order_key = evt.orderKey(event_to_write.created_ts, event_id);
             try repo_id_set.put(&order_key);
         }
-
-        const user_id_to_repo_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, "user-id->repo-id-set"));
-        const user_id_to_repo_id_set = try DB.HashMap(.read_write).init(user_id_to_repo_id_set_cursor);
 
         // each user's repos are a set ordered by creation time (oldest first), so
         // the user page paginates them the same way the home repos list does.
