@@ -54,7 +54,7 @@ pub fn printHelp(cmd_kind_maybe: ?CommandKind, writer: *std.Io.Writer) !void {
             try writer.print("{s}\n", .{line});
         }
     } else {
-        try writer.print("help: xit <command> [<args>]\n\n", .{});
+        try writer.print("help: haxy <command> [<args>]\n\n", .{});
         inline for (@typeInfo(CommandKind).@"enum".fields) |field| {
             const help = commandHelp(@enumFromInt(field.value));
             // name and description
