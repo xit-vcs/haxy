@@ -4,7 +4,7 @@ pub fn build(b: *std.Build) void {
     const xit_dep = b.dependency("xit", .{});
 
     // wasm
-    const install_wasm_exe = blk: {
+    const wasm_exe = blk: {
         const wasm_target = b.resolveTargetQuery(.{
             .cpu_arch = .wasm32,
             .os_tag = .freestanding,
@@ -35,20 +35,11 @@ pub fn build(b: *std.Build) void {
         exe.max_memory = std.wasm.page_size * max_pages;
 
         const install_exe = b.addInstallArtifact(exe, .{});
-        b.getInstallStep().dependOn(&install_exe.step);
 
         const wasm_step = b.step("wasm", "Generate the wasm");
         wasm_step.dependOn(&install_exe.step);
 
-        // windows can't follow symlinks, so copy the wasm file to the embed dir
-        if (.windows == @import("builtin").os.tag) {
-            const copy_wasm = b.addUpdateSourceFiles();
-            copy_wasm.addCopyFileToSource(exe.getEmittedBin(), "src/embed/haxy.wasm");
-            b.getInstallStep().dependOn(&copy_wasm.step);
-            break :blk copy_wasm;
-        }
-
-        break :blk install_exe;
+        break :blk exe;
     };
 
     const target = b.standardTargetOptions(.{});
@@ -67,7 +58,9 @@ pub fn build(b: *std.Build) void {
             .use_llvm = true,
         });
         exe.root_module.addImport("xit", xit_dep.module("xit"));
-        exe.step.dependOn(&install_wasm_exe.step);
+        exe.root_module.addAnonymousImport("haxy.wasm", .{
+            .root_source_file = wasm_exe.getEmittedBin(),
+        });
 
         const install_exe = b.addInstallArtifact(exe, .{});
         b.getInstallStep().dependOn(&install_exe.step);
@@ -98,6 +91,9 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/lib.zig"),
     });
     haxy.addImport("xit", xit_dep.module("xit"));
+    haxy.addAnonymousImport("haxy.wasm", .{
+        .root_source_file = wasm_exe.getEmittedBin(),
+    });
 
     // try
     {
@@ -110,7 +106,6 @@ pub fn build(b: *std.Build) void {
             }),
         });
         exe.root_module.addImport("haxy", haxy);
-        exe.step.dependOn(&install_wasm_exe.step);
         const try_install = b.addInstallArtifact(exe, .{});
 
         const run_cmd = b.addRunArtifact(exe);
