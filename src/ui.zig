@@ -609,6 +609,7 @@ pub const Session = struct {
     // inputs. web/wasm form handling looks widgets up here by focus id.
     text_inputs: std.AutoHashMapUnmanaged(usize, *wgt.TextInput(Widget)) = .empty,
     nav_back: bool = false, // set by input (escape) to request the native TUI pop a page; see Nav
+    refresh_requested: bool = false, // set by input (ctrl+r)
     // a requested forward navigation. set this (via navigate) to move to a new
     // page; Nav.sync builds it and then copies it into current_page, clearing
     // this back to null. setting current_page directly only updates the url and
@@ -778,6 +779,10 @@ pub fn inputKey(allocator: std.mem.Allocator, root: *Widget, key: inp.Key, sessi
         // request a navigation pop; the host's Nav.sync goes back a page, or
         // quits when there's no history left.
         .escape => session.nav_back = true,
+        .ctrl => |letter| switch (letter) {
+            'r' => session.refresh_requested = true,
+            else => try root.input(allocator, key, root.getFocus()),
+        },
         .enter => {
             const root_focus = root.getFocus();
             if (root_focus.grandchild_id) |gid| {
@@ -905,6 +910,28 @@ pub const Nav = struct {
     // frees the current page and restores the previous one. when escape is
     // pressed with no history left we switch to the quit tab instead of quitting.
     pub fn sync(self: *Nav, allocator: std.mem.Allocator, session: *Session) !void {
+        // refresh: rebuild the current page in place from a current moment
+        if (session.refresh_requested) {
+            session.refresh_requested = false;
+            if (session.haxy_moment != null) {
+                const arena = try allocator.create(std.heap.ArenaAllocator);
+                arena.* = std.heap.ArenaAllocator.init(allocator);
+                errdefer freeArena(allocator, arena);
+
+                session.page_arena = arena;
+
+                const page = try arena.allocator().create(Page);
+                page.* = try Page.init(arena, session, self.route);
+                const new_root = try initRoot(allocator, page, session);
+
+                self.root.deinit(allocator);
+                freeArena(allocator, self.arena);
+                self.root = new_root;
+                self.arena = arena;
+            }
+            return;
+        }
+
         if (session.nav_back) {
             session.nav_back = false;
             if (self.history.pop()) |entry| {
