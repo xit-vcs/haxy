@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const evt = @import("../../event.zig");
 const ui = @import("../../ui.zig");
+const inp = @import("../input.zig");
 const xit = @import("xit");
 const rp = xit.repo;
 const hash = xit.hash;
@@ -161,16 +162,9 @@ pub const View = struct {
         if (current == button_index) {
             switch (key) {
                 .mouse => |mouse| {
-                    if (mouse.action == .press and mouse.action.press == .left) {
-                        if (root_focus.children.get(child_id)) |entry| {
-                            const r = entry.rect;
-                            if (mouse.x >= r.x and mouse.y >= r.y and
-                                mouse.x < r.x + r.size.width and mouse.y < r.y + r.size.height)
-                            {
-                                try self.submit(allocator, root_focus);
-                                return;
-                            }
-                        }
+                    if (inp.leftClickOn(root_focus, child_id, mouse)) {
+                        try self.submit(allocator, root_focus);
+                        return;
                     }
                 },
                 else => {},

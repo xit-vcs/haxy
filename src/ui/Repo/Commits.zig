@@ -634,7 +634,8 @@ pub const View = struct {
         // jump a fixed amount. right/Enter cross into the diff pane. Enter/clicks
         // on the "next" row become navigation in the host before reaching here.
         if (inp.rowDelta(key, @intCast(self.listBox().children.count()))) |delta| {
-            return self.moveSelection(root_focus, delta);
+            ui.moveRowFocus(self.listBox(), self.listScroll(), root_focus, delta);
+            return;
         }
         switch (key) {
             .enter => if (self.selectedCommitIndex() != null)
@@ -655,12 +656,12 @@ pub const View = struct {
             .arrow_left => {
                 if (sc.x > 0) {
                     sc.x -= 1;
-                    self.clampDiffScroll();
+                    ui.clampScroll(self.diffScroll());
                 } else try self.focusList(root_focus);
             },
             .arrow_right => {
                 sc.x += 1;
-                self.clampDiffScroll();
+                ui.clampScroll(self.diffScroll());
             },
             .arrow_up => try self.moveDiff(root_focus, -1),
             .arrow_down => try self.moveDiff(root_focus, 1),
@@ -697,7 +698,7 @@ pub const View = struct {
 
             const sc = self.diffScroll();
             sc.y += delta * 5; // magnify because it's a line count
-            self.clampDiffScroll();
+            ui.clampScroll(self.diffScroll());
             if (in_range and self.hunkVisible(@intCast(target))) {
                 root_focus.setFocus(keys[@intCast(target)]);
             }
@@ -715,7 +716,7 @@ pub const View = struct {
         if (self.session.is_terminal) {
             const sc = self.diffScroll();
             sc.y += delta * 5; // magnify because it's a line count
-            self.clampDiffScroll();
+            ui.clampScroll(self.diffScroll());
             try self.focusVisible(root_focus, delta > 0);
         } else {
             const inner = self.diffInner();
@@ -736,7 +737,7 @@ pub const View = struct {
         if (self.session.is_terminal) {
             const sc = self.diffScroll();
             sc.y = if (to_end) std.math.maxInt(isize) else 0;
-            self.clampDiffScroll();
+            ui.clampScroll(self.diffScroll());
         }
         root_focus.setFocus(if (to_end) keys[keys.len - 1] else keys[0]);
     }
@@ -773,21 +774,6 @@ pub const View = struct {
         if (chosen) |id| root_focus.setFocus(id);
     }
 
-    // keep the diff scroll within its content, using the last build's grids. the
-    // scroll bar's reserved column/row isn't part of the content viewport, so
-    // exclude it (as scrollToRect does) or the last column/row stays unreachable.
-    fn clampDiffScroll(self: *View) void {
-        const sc = self.diffScroll();
-        const vp = sc.grid orelse return;
-        const content = sc.child.box.grid orelse return;
-        const view_w = vp.size.width - sc.bar_w;
-        const view_h = vp.size.height - sc.bar_h;
-        const max_y: isize = if (content.size.height > view_h) @intCast(content.size.height - view_h) else 0;
-        const max_x: isize = if (content.size.width > view_w) @intCast(content.size.width - view_w) else 0;
-        sc.y = std.math.clamp(sc.y, 0, max_y);
-        sc.x = std.math.clamp(sc.x, 0, max_x);
-    }
-
     // enter the diff pane. the host arrives here on right-arrow or Enter from the
     // list. a diff with no rows can't be entered. setFocus handles the too-narrow
     // case where the pane isn't laid out yet (it gets selected, then focused after
@@ -800,19 +786,6 @@ pub const View = struct {
     // return to the list.
     fn focusList(self: *View, root_focus: *Focus) !void {
         root_focus.setFocus(self.listScroll().getFocus().id);
-    }
-
-    fn moveSelection(self: *View, root_focus: *Focus, delta: isize) !void {
-        const lb = self.listBox();
-        const keys = lb.children.keys();
-        if (keys.len == 0) return;
-        const cur_id = lb.getFocus().child_id orelse return;
-        const cur: isize = @intCast(lb.children.getIndex(cur_id) orelse return);
-        const last: isize = @intCast(keys.len - 1);
-        const next: usize = @intCast(std.math.clamp(cur + delta, 0, last));
-        if (next == @as(usize, @intCast(cur))) return;
-        root_focus.setFocus(keys[next]);
-        if (lb.children.values()[next].rect) |rect| self.listScroll().scrollToRect(rect);
     }
 
     pub fn clearGrid(self: *View) void {

@@ -278,7 +278,9 @@ pub const View = struct {
         // same row offset. the parent (Repo) intercepts up at the top row to move
         // focus to the header.
         if (inp.rowDelta(key, self.columnRowCount())) |delta| {
-            return self.moveRow(root_focus, delta);
+            const scroll = self.activeScroll() orelse return;
+            ui.moveRowFocus(&scroll.child.box, scroll, root_focus, delta);
+            return;
         }
         switch (key) {
             .arrow_left => try self.switchColumn(root_focus, left_col),
@@ -301,21 +303,6 @@ pub const View = struct {
 
     fn activeColumn(self: *View) ?*wgt.Box(ui.Widget) {
         return &(self.activeScroll() orelse return null).child.box;
-    }
-
-    fn moveRow(self: *View, root_focus: *Focus, delta: isize) !void {
-        const scroll = self.activeScroll() orelse return;
-        const col = &scroll.child.box;
-        const keys = col.children.keys();
-        if (keys.len == 0) return;
-        const cur_id = col.getFocus().child_id orelse return;
-        const cur: isize = @intCast(col.children.getIndex(cur_id) orelse return);
-        // clamp a delta past either end to the first/last row.
-        const last: isize = @intCast(keys.len - 1);
-        const next: usize = @intCast(std.math.clamp(cur + delta, 0, last));
-        if (next == @as(usize, @intCast(cur))) return;
-        root_focus.setFocus(keys[next]);
-        if (col.children.values()[next].rect) |rect| scroll.scrollToRect(rect);
     }
 
     fn switchColumn(self: *View, root_focus: *Focus, target: usize) !void {

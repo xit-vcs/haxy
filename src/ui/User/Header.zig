@@ -1,5 +1,6 @@
 const std = @import("std");
 const ui = @import("../../ui.zig");
+const inp = @import("../input.zig");
 const xit = @import("xit");
 const xitui = xit.xitui;
 const wgt = xitui.widget;
@@ -183,15 +184,7 @@ pub const View = struct {
     pub fn input(self: *View, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
         _ = allocator;
         const current_tab = self.currentTabIndex() orelse return;
-        var new_tab = current_tab;
-        switch (key) {
-            .arrow_left => new_tab -|= 1,
-            .arrow_right => if (new_tab + 1 < self.tab_ids.count()) {
-                new_tab += 1;
-            },
-            else => {},
-        }
-        if (new_tab != current_tab) {
+        if (inp.moveTab(key, current_tab, self.tab_ids.count())) |new_tab| {
             root_focus.setFocus(self.tab_ids.keys()[new_tab]);
         }
     }

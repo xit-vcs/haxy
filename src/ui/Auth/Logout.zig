@@ -1,5 +1,6 @@
 const std = @import("std");
 const ui = @import("../../ui.zig");
+const inp = @import("../input.zig");
 const xit = @import("xit");
 const xitui = xit.xitui;
 const wgt = xitui.widget;
@@ -89,16 +90,9 @@ pub const View = struct {
                 return;
             },
             .mouse => |mouse| {
-                if (mouse.action == .press and mouse.action.press == .left) {
-                    if (root_focus.children.get(self.button_id)) |entry| {
-                        const r = entry.rect;
-                        if (mouse.x >= r.x and mouse.y >= r.y and
-                            mouse.x < r.x + r.size.width and mouse.y < r.y + r.size.height)
-                        {
-                            try self.logout(root_focus);
-                            return;
-                        }
-                    }
+                if (inp.leftClickOn(root_focus, self.button_id, mouse)) {
+                    try self.logout(root_focus);
+                    return;
                 }
             },
             else => {},

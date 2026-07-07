@@ -633,7 +633,8 @@ pub const View = struct {
         // directory (or "..") row are turned into navigation by the host
         // (crossPageLink) before reaching here.
         if (inp.rowDelta(key, @intCast(self.listBox().children.count()))) |delta| {
-            return self.moveSelection(root_focus, delta);
+            ui.moveRowFocus(self.listBox(), self.listScroll(), root_focus, delta);
+            return;
         }
         switch (key) {
             .enter, .arrow_right => try self.focusDetail(root_focus),
@@ -660,7 +661,7 @@ pub const View = struct {
                 if (on_content) {
                     if (sc.x > 0) {
                         sc.x -= 1;
-                        self.clampDetailScroll();
+                        ui.clampScroll(self.detailScroll());
                     } else try self.focusList(root_focus);
                 } else if (!self.moveNav(root_focus, -1)) {
                     try self.focusList(root_focus);
@@ -669,14 +670,14 @@ pub const View = struct {
             .arrow_right => {
                 if (on_content) {
                     sc.x += 1;
-                    self.clampDetailScroll();
+                    ui.clampScroll(self.detailScroll());
                 } else _ = self.moveNav(root_focus, 1);
             },
             .arrow_up => {
                 if (on_content) {
                     if (self.session.is_terminal and sc.y > 0) {
                         sc.y -= 1;
-                        self.clampDetailScroll();
+                        ui.clampScroll(self.detailScroll());
                     } else self.focusNav(root_focus); // cross up to the links
                 }
             },
@@ -684,30 +685,30 @@ pub const View = struct {
                 if (on_content) {
                     if (self.session.is_terminal) {
                         sc.y += 1;
-                        self.clampDetailScroll();
+                        ui.clampScroll(self.detailScroll());
                     }
                 } else self.focusContent(root_focus); // links -> content
             },
             .page_up => if (on_content and self.session.is_terminal) {
                 sc.y -= 10;
-                self.clampDetailScroll();
+                ui.clampScroll(self.detailScroll());
             },
             .page_down => if (on_content and self.session.is_terminal) {
                 sc.y += 10;
-                self.clampDetailScroll();
+                ui.clampScroll(self.detailScroll());
             },
             .home => if (on_content and self.session.is_terminal) {
                 sc.y = 0;
-                self.clampDetailScroll();
+                ui.clampScroll(self.detailScroll());
             },
             .end => if (on_content and self.session.is_terminal) {
                 sc.y = std.math.maxInt(isize);
-                self.clampDetailScroll();
+                ui.clampScroll(self.detailScroll());
             },
             .mouse => |mouse| switch (mouse.action) {
                 .scroll => |dir| if (on_content and self.session.is_terminal) {
                     sc.y += if (dir == .up) -5 else 5;
-                    self.clampDetailScroll();
+                    ui.clampScroll(self.detailScroll());
                 },
                 else => {},
             },
@@ -742,21 +743,6 @@ pub const View = struct {
         return true;
     }
 
-    // keep the detail scroll within its content, using the last build's grids.
-    // the scroll bar's reserved column/row isn't part of the content viewport,
-    // so exclude it or the last column/row stays unreachable.
-    fn clampDetailScroll(self: *View) void {
-        const sc = self.detailScroll();
-        const vp = sc.grid orelse return;
-        const content = sc.child.box.grid orelse return;
-        const view_w = vp.size.width - sc.bar_w;
-        const view_h = vp.size.height - sc.bar_h;
-        const max_y: isize = if (content.size.height > view_h) @intCast(content.size.height - view_h) else 0;
-        const max_x: isize = if (content.size.width > view_w) @intCast(content.size.width - view_w) else 0;
-        sc.y = std.math.clamp(sc.y, 0, max_y);
-        sc.x = std.math.clamp(sc.x, 0, max_x);
-    }
-
     // enter the detail pane, landing on the "next" link when there is one (so
     // right-arrow reaches it), else on the content. a directory or ".." row has
     // neither, so there's nothing to enter. selecting the frame's child (then
@@ -775,19 +761,6 @@ pub const View = struct {
     // return to the list.
     fn focusList(self: *View, root_focus: *Focus) !void {
         root_focus.setFocus(self.listScroll().getFocus().id);
-    }
-
-    fn moveSelection(self: *View, root_focus: *Focus, delta: isize) !void {
-        const lb = self.listBox();
-        const keys = lb.children.keys();
-        if (keys.len == 0) return;
-        const cur_id = lb.getFocus().child_id orelse return;
-        const cur: isize = @intCast(lb.children.getIndex(cur_id) orelse return);
-        const last: isize = @intCast(keys.len - 1);
-        const next: usize = @intCast(std.math.clamp(cur + delta, 0, last));
-        if (next == @as(usize, @intCast(cur))) return;
-        root_focus.setFocus(keys[next]);
-        if (lb.children.values()[next].rect) |rect| self.listScroll().scrollToRect(rect);
     }
 
     pub fn clearGrid(self: *View) void {
