@@ -54,6 +54,9 @@ const max_exit_drain_packets: u32 = 32;
 
 // SSH message type bytes (RFC 4250 §4.1)
 pub const SSH_MSG_DISCONNECT: u8 = 1;
+pub const SSH_MSG_IGNORE: u8 = 2;
+pub const SSH_MSG_UNIMPLEMENTED: u8 = 3;
+pub const SSH_MSG_DEBUG: u8 = 4;
 pub const SSH_MSG_SERVICE_REQUEST: u8 = 5;
 pub const SSH_MSG_SERVICE_ACCEPT: u8 = 6;
 pub const SSH_MSG_KEXINIT: u8 = 20;
@@ -187,6 +190,8 @@ pub const SessionCtx = struct {
     // until the consumer drains them via SessionReader.
     incoming_buffer: std.ArrayList(u8) = .empty,
     incoming_eof: bool = false,
+    // resize seen by the background pump, returned by the next nextEvent call
+    pending_resize: ?PtySize = null,
 
     pub fn deinit(self: *SessionCtx) void {
         self.incoming_buffer.deinit(self.allocator);
@@ -197,6 +202,10 @@ pub const SessionCtx = struct {
     /// handled silently. used by pumped-event consumers (e.g. the TUI path);
     /// do not mix with SessionReader, which has its own packet pump.
     pub fn nextEvent(self: *SessionCtx) !Event {
+        if (self.pending_resize) |sz| {
+            self.pending_resize = null;
+            return .{ .resize = sz };
+        }
         while (true) {
             const packet = self.cs_cipher.readPacket(self.allocator, self.reader) catch |err| switch (err) {
                 error.EndOfStream => {
@@ -205,7 +214,7 @@ pub const SessionCtx = struct {
                 },
                 else => return err,
             };
-            errdefer self.allocator.free(packet);
+            defer self.allocator.free(packet);
             if (packet.len < 1) return error.EmptyPacket;
 
             switch (packet[0]) {
@@ -216,26 +225,18 @@ pub const SessionCtx = struct {
                     self.channel.local_window -= data_len;
                     try maybeRefillRecvWindow(self.io, self.allocator, self.sc_cipher, self.writer, self.channel);
                     // hand the payload bytes to the caller (caller owns)
-                    const owned_payload = try self.allocator.dupe(u8, payload);
-                    self.allocator.free(packet);
-                    return .{ .data = owned_payload };
+                    return .{ .data = try self.allocator.dupe(u8, payload) };
                 },
                 SSH_MSG_CHANNEL_EXTENDED_DATA => {
                     // stderr from the client is unusual; discard, but adjust window
                     try discardChannelData(self.io, self.allocator, self.sc_cipher, self.writer, self.channel, packet, true);
-                    self.allocator.free(packet);
                 },
-                SSH_MSG_CHANNEL_WINDOW_ADJUST => {
-                    try handleWindowAdjust(self.channel, packet);
-                    self.allocator.free(packet);
-                },
+                SSH_MSG_CHANNEL_WINDOW_ADJUST => try handleWindowAdjust(self.channel, packet),
                 SSH_MSG_KEXINIT => {
-                    defer self.allocator.free(packet);
                     try sendDisconnect(self.io, self.allocator, self.sc_cipher, self.writer, "rekey is not supported");
                     return error.RekeyUnsupported;
                 },
                 SSH_MSG_CHANNEL_REQUEST => {
-                    defer self.allocator.free(packet);
                     var r = std.Io.Reader.fixed(packet[1..]);
                     const recipient_channel = try r.takeInt(u32, .big);
                     if (recipient_channel != self.channel.local_id) return error.UnknownChannel;
@@ -243,12 +244,7 @@ pub const SessionCtx = struct {
                     defer self.allocator.free(req_type);
                     const want_reply = (try r.takeByte()) != 0;
                     if (std.mem.eql(u8, req_type, "window-change")) {
-                        const w = try r.takeInt(u32, .big);
-                        const h = try r.takeInt(u32, .big);
-                        const sz = PtySize{
-                            .width_cells = @intCast(@min(w, 0xFFFF)),
-                            .height_cells = @intCast(@min(h, 0xFFFF)),
-                        };
+                        const sz = try takePtySize(&r);
                         if (self.channel.pty != null) self.channel.pty = sz;
                         try replyChannelRequest(self.io, self.allocator, self.sc_cipher, self.writer, self.channel, want_reply, true);
                         return .{ .resize = sz };
@@ -258,15 +254,11 @@ pub const SessionCtx = struct {
                 },
                 SSH_MSG_CHANNEL_EOF, SSH_MSG_CHANNEL_CLOSE => {
                     try parseChannelId(packet, self.channel.local_id);
-                    self.allocator.free(packet);
                     self.closed = true;
                     return .close;
                 },
-                SSH_MSG_GLOBAL_REQUEST => {
-                    try handleGlobalRequest(self.io, self.allocator, self.sc_cipher, self.writer, packet);
-                    self.allocator.free(packet);
-                },
-                else => self.allocator.free(packet),
+                SSH_MSG_GLOBAL_REQUEST => try handleGlobalRequest(self.io, self.allocator, self.sc_cipher, self.writer, packet),
+                else => {},
             }
         }
     }
@@ -314,9 +306,11 @@ pub const SessionCtx = struct {
 
     /// process exactly one SSH packet for side effects only. CHANNEL_DATA
     /// payloads accumulate in incoming_buffer; CHANNEL_EOF/CLOSE flips
-    /// incoming_eof; WINDOW_ADJUST updates the channel state; channel/global
-    /// requests get a polite failure. used both by SessionReader (waiting
-    /// for inbound bytes) and writeBytes (waiting for send-window).
+    /// incoming_eof; WINDOW_ADJUST updates the channel state; window-change
+    /// is stashed in pending_resize for the next nextEvent call; other
+    /// channel/global requests get a polite failure. used both by
+    /// SessionReader (waiting for inbound bytes) and writeBytes (waiting
+    /// for send-window).
     fn processOneBackgroundPacket(self: *SessionCtx) !void {
         const packet = self.cs_cipher.readPacket(self.allocator, self.reader) catch |err| switch (err) {
             error.EndOfStream => {
@@ -355,8 +349,15 @@ pub const SessionCtx = struct {
                 const req_type = try takeStringField(self.allocator, &r, 64);
                 defer self.allocator.free(req_type);
                 const want_reply = (try r.takeByte()) != 0;
-                // mid-session channel requests aren't honored — fail them
-                try replyChannelRequest(self.io, self.allocator, self.sc_cipher, self.writer, self.channel, want_reply, false);
+                if (std.mem.eql(u8, req_type, "window-change")) {
+                    const sz = try takePtySize(&r);
+                    if (self.channel.pty != null) self.channel.pty = sz;
+                    self.pending_resize = sz;
+                    try replyChannelRequest(self.io, self.allocator, self.sc_cipher, self.writer, self.channel, want_reply, true);
+                } else {
+                    // other mid-session channel requests aren't honored — fail them
+                    try replyChannelRequest(self.io, self.allocator, self.sc_cipher, self.writer, self.channel, want_reply, false);
+                }
             },
             SSH_MSG_CHANNEL_EOF, SSH_MSG_CHANNEL_CLOSE => {
                 try parseChannelId(packet, self.channel.local_id);
@@ -576,9 +577,10 @@ pub fn handleConnection(
     const kex = try runKex(io, allocator, reader, writer, host_key, client_version);
 
     // post-KEX everything is encrypted with chacha20-poly1305@openssh.com.
-    // both sides started counting packet seqnos at 0; KEXINIT, KEX_ECDH and
-    // NEWKEYS used seqno 0/1/2, so the first encrypted packet uses seqno 3.
-    var cs_cipher = Cipher.init(&kex.cs_key, 3);
+    // both sides started counting packet seqnos at 0. we sent exactly
+    // KEXINIT, KEX_ECDH_REPLY and NEWKEYS, so our first encrypted packet
+    // uses seqno 3; the client's count includes any skipped IGNORE/DEBUG.
+    var cs_cipher = Cipher.init(&kex.cs_key, kex.next_cs_seq);
     var sc_cipher = Cipher.init(&kex.sc_key, 3);
 
     const fingerprint = try runAuth(io, allocator, reader, writer, &cs_cipher, &sc_cipher, &kex.session_id);
@@ -640,6 +642,38 @@ pub fn readPlainPacket(allocator: std.mem.Allocator, reader: *std.Io.Reader) ![]
     errdefer allocator.free(payload);
     try reader.discardAll(padding_len);
     return payload;
+}
+
+// IGNORE/DEBUG/UNIMPLEMENTED may arrive at any time (RFC 4253 §11); skip
+// them wherever a specific message is expected
+fn isIgnorableMsg(msg_type: u8) bool {
+    return msg_type == SSH_MSG_IGNORE or msg_type == SSH_MSG_UNIMPLEMENTED or msg_type == SSH_MSG_DEBUG;
+}
+
+// read a plaintext packet, skipping ignorable messages. counts every packet
+// consumed in `seq` so the caller knows the peer's next sequence number.
+fn readPlainKexPacket(allocator: std.mem.Allocator, reader: *std.Io.Reader, seq: *u64) ![]u8 {
+    while (true) {
+        const packet = try readPlainPacket(allocator, reader);
+        seq.* += 1;
+        if (packet.len >= 1 and isIgnorableMsg(packet[0])) {
+            allocator.free(packet);
+            continue;
+        }
+        return packet;
+    }
+}
+
+// read an encrypted packet, skipping ignorable messages
+fn readNonIgnoredPacket(cipher: *Cipher, allocator: std.mem.Allocator, reader: *std.Io.Reader) ![]u8 {
+    while (true) {
+        const packet = try cipher.readPacket(allocator, reader);
+        if (packet.len >= 1 and isIgnorableMsg(packet[0])) {
+            allocator.free(packet);
+            continue;
+        }
+        return packet;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -810,6 +844,7 @@ const KexResult = struct {
     cs_key: [64]u8, // client → server cipher key material (K_2 || K_1)
     sc_key: [64]u8, // server → client cipher key material
     session_id: [Sha256.digest_length]u8,
+    next_cs_seq: u64, // packets the client has sent, including skipped ones
 };
 
 fn runKex(
@@ -820,12 +855,14 @@ fn runKex(
     host_key: *const HostKey,
     client_version: []const u8,
 ) !KexResult {
+    var client_seq: u64 = 0;
+
     // exchange KEXINITs
     const server_kex_init = try buildServerKexInit(io, allocator);
     defer allocator.free(server_kex_init);
     try writePlainPacket(io, writer, server_kex_init);
 
-    const client_kex_init = try readPlainPacket(allocator, reader);
+    const client_kex_init = try readPlainKexPacket(allocator, reader, &client_seq);
     defer allocator.free(client_kex_init);
 
     var parsed = try parseClientKexInit(allocator, client_kex_init);
@@ -849,7 +886,7 @@ fn runKex(
 
     // receive KEX_ECDH_INIT (mlkem768x25519 reuses message code 30 — same
     // wire shape, only the string size differs).
-    const ecdh_init = try readPlainPacket(allocator, reader);
+    const ecdh_init = try readPlainKexPacket(allocator, reader, &client_seq);
     defer allocator.free(ecdh_init);
     if (ecdh_init.len < 1 or ecdh_init[0] != SSH_MSG_KEX_ECDH_INIT) return error.UnexpectedMessage;
 
@@ -931,7 +968,7 @@ fn runKex(
     // the peer's NEWKEYS is received.
     try writePlainPacket(io, writer, &[_]u8{SSH_MSG_NEWKEYS});
 
-    const peer_newkeys = try readPlainPacket(allocator, reader);
+    const peer_newkeys = try readPlainKexPacket(allocator, reader, &client_seq);
     defer allocator.free(peer_newkeys);
     if (peer_newkeys.len < 1 or peer_newkeys[0] != SSH_MSG_NEWKEYS) return error.UnexpectedMessage;
 
@@ -945,6 +982,7 @@ fn runKex(
         .cs_key = keys.cs_enc,
         .sc_key = keys.sc_enc,
         .session_id = exchange_hash,
+        .next_cs_seq = client_seq,
     };
 }
 
@@ -1226,7 +1264,7 @@ fn runAuth(
 ) ![fingerprint_len]u8 {
     // step 1: service request for ssh-userauth → service accept
     {
-        const req = try cs_cipher.readPacket(allocator, reader);
+        const req = try readNonIgnoredPacket(cs_cipher, allocator, reader);
         defer allocator.free(req);
         if (req.len >= 1 and req[0] == SSH_MSG_KEXINIT) {
             try sendDisconnect(io, allocator, sc_cipher, writer, "rekey is not supported");
@@ -1250,7 +1288,7 @@ fn runAuth(
     // signature verifies against the offered pubkey.
     var auth_attempts: u32 = 0;
     while (true) {
-        const req = try cs_cipher.readPacket(allocator, reader);
+        const req = try readNonIgnoredPacket(cs_cipher, allocator, reader);
         defer allocator.free(req);
         if (req.len >= 1 and req[0] == SSH_MSG_KEXINIT) {
             try sendDisconnect(io, allocator, sc_cipher, writer, "rekey is not supported");
@@ -1287,6 +1325,9 @@ fn runAuth(
         }
 
         if (!has_signature) {
+            // probes count as attempts so a client can't loop here forever
+            auth_attempts += 1;
+            if (auth_attempts >= max_auth_attempts) return error.TooManyAuthAttempts;
             // probe — tell the client this key is acceptable so it'll send
             // the signed version next.
             var pk_ok: std.ArrayList(u8) = .empty;
@@ -1434,6 +1475,17 @@ const Channel = struct {
 
 pub const PtySize = struct { width_cells: u16, height_cells: u16 };
 
+// take the uint32 width/height cell counts of a pty-req or window-change,
+// clamped to u16
+fn takePtySize(r: *std.Io.Reader) !PtySize {
+    const width = try r.takeInt(u32, .big);
+    const height = try r.takeInt(u32, .big);
+    return .{
+        .width_cells = @intCast(@min(width, 0xFFFF)),
+        .height_cells = @intCast(@min(height, 0xFFFF)),
+    };
+}
+
 fn runChannelLayer(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -1572,6 +1624,12 @@ fn handleChannelOpen(
         return null;
     }
 
+    // a zero max_packet would leave writeChannel looping without progress
+    if (max_packet == 0) {
+        try sendChannelOpenFailure(io, allocator, sc_cipher, writer, packet, SSH_OPEN_RESOURCE_SHORTAGE, "max packet size must be non-zero");
+        return null;
+    }
+
     const local_id: u32 = 0; // single-channel connection — id is always 0 from our side
     var reply: std.ArrayList(u8) = .empty;
     defer reply.deinit(allocator);
@@ -1646,9 +1704,7 @@ fn handleChannelRequest(
         // uint32 height px, string modes
         const term = try takeStringField(allocator, &r, 64);
         defer allocator.free(term);
-        const width = try r.takeInt(u32, .big);
-        const height = try r.takeInt(u32, .big);
-        ch.pty = .{ .width_cells = @intCast(@min(width, 0xFFFF)), .height_cells = @intCast(@min(height, 0xFFFF)) };
+        ch.pty = try takePtySize(&r);
         try replyChannelRequest(io, allocator, sc_cipher, writer, ch, want_reply, true);
         return null;
     }
@@ -1661,11 +1717,8 @@ fn handleChannelRequest(
 
     if (std.mem.eql(u8, req_type, "window-change")) {
         // uint32 width cells, uint32 height rows, uint32 width px, uint32 height px
-        const width = try r.takeInt(u32, .big);
-        const height = try r.takeInt(u32, .big);
-        if (ch.pty != null) {
-            ch.pty = .{ .width_cells = @intCast(@min(width, 0xFFFF)), .height_cells = @intCast(@min(height, 0xFFFF)) };
-        }
+        const sz = try takePtySize(&r);
+        if (ch.pty != null) ch.pty = sz;
         // spec: window-change MUST NOT request a reply, but accept either
         try replyChannelRequest(io, allocator, sc_cipher, writer, ch, want_reply, true);
         return null;
