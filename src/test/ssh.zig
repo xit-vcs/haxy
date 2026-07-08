@@ -802,6 +802,7 @@ const ServerTask = struct {
             self.reader,
             self.writer,
             self.host_key,
+            null,
             self,
         ) catch |e| {
             self.result = e;

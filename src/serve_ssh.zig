@@ -10,6 +10,16 @@ const ssh = @import("./serve_ssh_protocol.zig");
 const evt = @import("./event.zig");
 const serve_common = @import("./serve_common.zig");
 
+// listener resource limits. idle enforcement is coarse: the watchdog wakes
+// once per interval and shuts the connection down if no SSH packet arrived
+// during the entire previous interval. each connection holds two OS threads
+// under std.Io.Threaded (session + watchdog), so the cap is sized to keep
+// the worst-case thread count in comfortable territory, not by RAM.
+const max_connections: u32 = 4096;
+const idle_interval = std.Io.Duration.fromSeconds(120);
+
+var active_connections: std.atomic.Value(u32) = .init(0);
+
 pub const SessionHandler = struct {
     admin_repo_path: []const u8,
     repo_root_path: []const u8,
@@ -28,6 +38,7 @@ pub const SessionHandler = struct {
                     try sess.exit(1);
                     return;
                 };
+                sess.exemptFromIdleTimeout();
                 try runTuiSession(self, sess, pty);
             },
             .exec => |command| {
@@ -57,6 +68,21 @@ pub fn runListener(
     const handle = struct {
         fn h(ctx: Context, stream: std.Io.net.Stream) void {
             defer stream.close(ctx.io);
+
+            const prev_count = active_connections.fetchAdd(1, .monotonic);
+            defer _ = active_connections.fetchSub(1, .monotonic);
+            if (prev_count >= max_connections) {
+                serve_common.logError(ctx.err, "ssh: connection limit reached, dropping\n", .{});
+                return;
+            }
+
+            var idle_state = ssh.IdleState{};
+            var watchdog_future = std.Io.concurrent(ctx.io, watchdog, .{ ctx.io, &stream, &idle_state }) catch |spawn_err| {
+                serve_common.logError(ctx.err, "ssh: watchdog spawn failed: {s}\n", .{@errorName(spawn_err)});
+                return;
+            };
+            defer watchdog_future.cancel(ctx.io);
+
             var recv_buf: [4096]u8 = undefined;
             var send_buf: [4096]u8 = undefined;
             var stream_reader = stream.reader(ctx.io, &recv_buf);
@@ -67,6 +93,7 @@ pub fn runListener(
                 &stream_reader.interface,
                 &stream_writer.interface,
                 ctx.host_key,
+                &idle_state,
                 ctx.session_handler,
             ) catch |session_err| {
                 serve_common.logError(ctx.err, "ssh session failed: {s}\n", .{@errorName(session_err)});
@@ -81,6 +108,22 @@ pub fn runListener(
         .session_handler = session_handler,
         .err = err,
     }, handle);
+}
+
+// shut down connections that made no SSH packet progress for a whole
+// interval. exempt connections (interactive TUIs) end enforcement instead.
+fn watchdog(io: std.Io, stream: *const std.Io.net.Stream, idle_state: *ssh.IdleState) void {
+    var last_seen: u64 = 0;
+    while (true) {
+        io.sleep(idle_interval, .awake) catch return; // canceled — connection is done
+        if (idle_state.exempt.load(.monotonic)) return;
+        const seen = idle_state.activity.load(.monotonic);
+        if (seen == last_seen) {
+            stream.shutdown(io, .both) catch {};
+            return;
+        }
+        last_seen = seen;
+    }
 }
 
 fn runTuiSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh.PtySize) !void {

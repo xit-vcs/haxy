@@ -2,6 +2,7 @@
 //!
 //! handles, per connection: version exchange, KEXINIT, curve25519 key
 //! exchange, NEWKEYS, key derivation, chacha20-poly1305 packet codec,
+//! strict kex (Terrapin mitigation), client-initiated rekeying,
 //! ssh-userauth service request, publickey authentication (ed25519 only;
 //! captures the SHA256 fingerprint of the verified key), channel-layer
 //! requests (pty-req, env, window-change, shell, exec), CHANNEL_DATA
@@ -26,15 +27,6 @@
 //!   MAC:       none (implicit in AEAD)
 //!   compress:  none
 //!   user auth: publickey + ssh-ed25519 only (RSA/ECDSA deferred)
-//!
-//! TODO: add SSH session idle deadlines. A reachable SSH listener can currently
-//! hold one task per idle connection while blocked in banner exchange, KEX,
-//! auth, channel setup, waiting for send WINDOW_ADJUST, reading git pack data,
-//! or waiting for peer CLOSE during teardown. The eventual fix should enforce a
-//! per-connection idle timeout that is refreshed by successful SSH packet I/O
-//! and closes/shuts down the underlying stream when no progress occurs. Prefer
-//! an I/O-layer deadline if std.Io exposes one; otherwise use a carefully-owned
-//! watchdog that cannot outlive the connection state it observes.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -51,6 +43,7 @@ const max_packet_len: u32 = 35000; // RFC 4253 §6.1 — minimum implementations
 const max_name_list_len: u32 = 4096;
 const max_auth_attempts: u32 = 20;
 const max_exit_drain_packets: u32 = 32;
+const max_banner_lines: u32 = 32;
 
 // SSH message type bytes (RFC 4250 §4.1)
 pub const SSH_MSG_DISCONNECT: u8 = 1;
@@ -98,6 +91,15 @@ const max_packet_size: u32 = 32768;
 const max_incoming_buffered: usize = initial_recv_window;
 const incoming_refill_threshold: usize = max_incoming_buffered / 2;
 
+/// shared with the host's idle watchdog. `activity` is bumped on every
+/// successfully decrypted packet so the watchdog can tell an idle connection
+/// from a slow one; `exempt` is set once an interactive session starts,
+/// since users idle in a TUI legitimately.
+pub const IdleState = struct {
+    activity: std.atomic.Value(u64) = .init(0),
+    exempt: std.atomic.Value(bool) = .init(false),
+};
+
 // ---------------------------------------------------------------------------
 // host key
 // ---------------------------------------------------------------------------
@@ -125,12 +127,11 @@ pub const HostKey = struct {
         }
 
         const keypair = Ed25519.KeyPair.generate(io);
-        const file = try cwd.createFile(io, path, .{});
+        // owner-only from the start — never a window where the key is readable
+        const permissions: std.Io.File.Permissions = if (builtin.os.tag == .windows) .default_file else @enumFromInt(0o600);
+        const file = try cwd.createFile(io, path, .{ .permissions = permissions });
         defer file.close(io);
         try file.writeStreamingAll(io, &keypair.secret_key.bytes);
-        if (builtin.os.tag != .windows) {
-            try file.setPermissions(io, @enumFromInt(0o600));
-        }
         return .{ .keypair = keypair };
     }
 
@@ -177,6 +178,7 @@ pub const SessionCtx = struct {
     writer: *std.Io.Writer,
     cs_cipher: *Cipher,
     sc_cipher: *Cipher,
+    rekey: *const RekeyState,
     channel: *Channel,
     /// SHA256 fingerprint of the pubkey this session authenticated with,
     /// formatted as "SHA256:<base64-no-padding>" — same value the openssh
@@ -197,6 +199,12 @@ pub const SessionCtx = struct {
         self.incoming_buffer.deinit(self.allocator);
     }
 
+    /// interactive sessions idle legitimately; tell the host's idle
+    /// watchdog to stand down for the rest of this connection.
+    pub fn exemptFromIdleTimeout(self: *SessionCtx) void {
+        if (self.cs_cipher.idle) |idle| idle.exempt.store(true, .monotonic);
+    }
+
     /// pump SSH packets until something interesting (data / resize / close)
     /// arrives. background traffic (window adjusts, env requests, etc.) is
     /// handled silently. used by pumped-event consumers (e.g. the TUI path);
@@ -207,7 +215,7 @@ pub const SessionCtx = struct {
             return .{ .resize = sz };
         }
         while (true) {
-            const packet = self.cs_cipher.readPacket(self.allocator, self.reader) catch |err| switch (err) {
+            const packet = readSessionPacket(self.io, self.allocator, self.reader, self.writer, self.cs_cipher, self.sc_cipher, self.rekey) catch |err| switch (err) {
                 error.EndOfStream => {
                     self.closed = true;
                     return .close;
@@ -232,10 +240,6 @@ pub const SessionCtx = struct {
                     try discardChannelData(self.io, self.allocator, self.sc_cipher, self.writer, self.channel, packet, true);
                 },
                 SSH_MSG_CHANNEL_WINDOW_ADJUST => try handleWindowAdjust(self.channel, packet),
-                SSH_MSG_KEXINIT => {
-                    try sendDisconnect(self.io, self.allocator, self.sc_cipher, self.writer, "rekey is not supported");
-                    return error.RekeyUnsupported;
-                },
                 SSH_MSG_CHANNEL_REQUEST => {
                     var r = std.Io.Reader.fixed(packet[1..]);
                     const recipient_channel = try r.takeInt(u32, .big);
@@ -312,7 +316,7 @@ pub const SessionCtx = struct {
     /// SessionReader (waiting for inbound bytes) and writeBytes (waiting
     /// for send-window).
     fn processOneBackgroundPacket(self: *SessionCtx) !void {
-        const packet = self.cs_cipher.readPacket(self.allocator, self.reader) catch |err| switch (err) {
+        const packet = readSessionPacket(self.io, self.allocator, self.reader, self.writer, self.cs_cipher, self.sc_cipher, self.rekey) catch |err| switch (err) {
             error.EndOfStream => {
                 self.incoming_eof = true;
                 return;
@@ -338,10 +342,6 @@ pub const SessionCtx = struct {
                 try discardChannelData(self.io, self.allocator, self.sc_cipher, self.writer, self.channel, packet, true);
             },
             SSH_MSG_CHANNEL_WINDOW_ADJUST => try handleWindowAdjust(self.channel, packet),
-            SSH_MSG_KEXINIT => {
-                try sendDisconnect(self.io, self.allocator, self.sc_cipher, self.writer, "rekey is not supported");
-                return error.RekeyUnsupported;
-            },
             SSH_MSG_CHANNEL_REQUEST => {
                 var r = std.Io.Reader.fixed(packet[1..]);
                 const recipient_channel = try r.takeInt(u32, .big);
@@ -562,13 +562,15 @@ pub const SessionReader = struct {
 ///   pub fn handleSession(self, sess: *SessionCtx, request: Request) anyerror!void
 /// invoked once the channel is open and a shell/exec request has arrived.
 ///
-/// `reader` and `writer` are the bidirectional byte stream
+/// `reader` and `writer` are the bidirectional byte stream. `idle`, if
+/// given, is bumped on packet reads for the host's idle watchdog.
 pub fn handleConnection(
     io: std.Io,
     allocator: std.mem.Allocator,
     reader: *std.Io.Reader,
     writer: *std.Io.Writer,
     host_key: *const HostKey,
+    idle: ?*IdleState,
     handler: anytype,
 ) !void {
     const client_version = try exchangeVersions(allocator, reader, writer);
@@ -576,16 +578,21 @@ pub fn handleConnection(
 
     const kex = try runKex(io, allocator, reader, writer, host_key, client_version);
 
-    // post-KEX everything is encrypted with chacha20-poly1305@openssh.com.
-    // both sides started counting packet seqnos at 0. we sent exactly
-    // KEXINIT, KEX_ECDH_REPLY and NEWKEYS, so our first encrypted packet
-    // uses seqno 3; the client's count includes any skipped IGNORE/DEBUG.
+    // post-KEX everything is encrypted with chacha20-poly1305@openssh.com
     var cs_cipher = Cipher.init(&kex.cs_key, kex.next_cs_seq);
-    var sc_cipher = Cipher.init(&kex.sc_key, 3);
+    var sc_cipher = Cipher.init(&kex.sc_key, kex.next_sc_seq);
+    cs_cipher.idle = idle;
 
-    const fingerprint = try runAuth(io, allocator, reader, writer, &cs_cipher, &sc_cipher, &kex.session_id);
+    const rekey = RekeyState{
+        .host_key = host_key,
+        .client_version = client_version,
+        .session_id = kex.session_id,
+        .strict = kex.strict,
+    };
 
-    try runChannelLayer(io, allocator, reader, writer, &cs_cipher, &sc_cipher, &fingerprint, handler);
+    const fingerprint = try runAuth(io, allocator, reader, writer, &cs_cipher, &sc_cipher, &rekey);
+
+    try runChannelLayer(io, allocator, reader, writer, &cs_cipher, &sc_cipher, &rekey, &fingerprint, handler);
 }
 
 // ---------------------------------------------------------------------------
@@ -600,15 +607,18 @@ fn exchangeVersions(
     try writer.writeAll(server_version ++ "\r\n");
     try writer.flush();
 
-    // the spec allows the client to send arbitrary comment lines before its
-    // banner; skip anything that isn't an "SSH-2.0-…" / "SSH-1.99-…" line.
-    while (true) {
+    // the spec allows the client to send comment lines before its banner;
+    // skip anything that isn't an "SSH-2.0-…" / "SSH-1.99-…" line, up to a cap
+    // so a garbage-spewing peer can't hold the connection open forever.
+    var lines: u32 = 0;
+    while (lines < max_banner_lines) : (lines += 1) {
         const line = (try reader.takeDelimiter('\n')) orelse return error.UnexpectedEof;
         const trimmed = if (line.len > 0 and line[line.len - 1] == '\r') line[0 .. line.len - 1] else line;
         if (std.mem.startsWith(u8, trimmed, "SSH-2.0-") or std.mem.startsWith(u8, trimmed, "SSH-1.99-")) {
             return try allocator.dupe(u8, trimmed);
         }
     }
+    return error.TooManyBannerLines;
 }
 
 // ---------------------------------------------------------------------------
@@ -650,26 +660,61 @@ fn isIgnorableMsg(msg_type: u8) bool {
     return msg_type == SSH_MSG_IGNORE or msg_type == SSH_MSG_UNIMPLEMENTED or msg_type == SSH_MSG_DEBUG;
 }
 
-// read a plaintext packet, skipping ignorable messages. counts every packet
-// consumed in `seq` so the caller knows the peer's next sequence number.
-fn readPlainKexPacket(allocator: std.mem.Allocator, reader: *std.Io.Reader, seq: *u64) ![]u8 {
+// transport for KEX packets: the initial exchange runs in plaintext, a rekey
+// runs under the current session ciphers.
+const KexTransport = union(enum) {
+    plain: *u64, // counts packets read so the caller can seed cipher seqnos
+    encrypted: struct { cs: *Cipher, sc: *Cipher },
+
+    // read one packet, skipping ignorable messages — unless strict kex is in
+    // force, which bans them mid-handshake
+    fn readPacket(self: KexTransport, allocator: std.mem.Allocator, reader: *std.Io.Reader, strict: bool) ![]u8 {
+        while (true) {
+            const packet = switch (self) {
+                .plain => |count| packet: {
+                    const packet = try readPlainPacket(allocator, reader);
+                    count.* += 1;
+                    break :packet packet;
+                },
+                .encrypted => |ciphers| try ciphers.cs.readPacket(allocator, reader),
+            };
+            if (packet.len >= 1 and isIgnorableMsg(packet[0])) {
+                allocator.free(packet);
+                if (strict) return error.StrictKexViolation;
+                continue;
+            }
+            return packet;
+        }
+    }
+
+    fn writePacket(self: KexTransport, io: std.Io, allocator: std.mem.Allocator, writer: *std.Io.Writer, payload: []const u8) !void {
+        switch (self) {
+            .plain => try writePlainPacket(io, writer, payload),
+            .encrypted => |ciphers| try ciphers.sc.writePacket(io, allocator, writer, payload),
+        }
+    }
+};
+
+// read one encrypted packet for the auth and channel layers, transparently
+// skipping ignorable messages and servicing client-initiated rekeys.
+fn readSessionPacket(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    reader: *std.Io.Reader,
+    writer: *std.Io.Writer,
+    cs_cipher: *Cipher,
+    sc_cipher: *Cipher,
+    rekey: *const RekeyState,
+) ![]u8 {
     while (true) {
-        const packet = try readPlainPacket(allocator, reader);
-        seq.* += 1;
+        const packet = try cs_cipher.readPacket(allocator, reader);
         if (packet.len >= 1 and isIgnorableMsg(packet[0])) {
             allocator.free(packet);
             continue;
         }
-        return packet;
-    }
-}
-
-// read an encrypted packet, skipping ignorable messages
-fn readNonIgnoredPacket(cipher: *Cipher, allocator: std.mem.Allocator, reader: *std.Io.Reader) ![]u8 {
-    while (true) {
-        const packet = try cipher.readPacket(allocator, reader);
-        if (packet.len >= 1 and isIgnorableMsg(packet[0])) {
-            allocator.free(packet);
+        if (packet.len >= 1 and packet[0] == SSH_MSG_KEXINIT) {
+            defer allocator.free(packet);
+            try runRekey(io, allocator, reader, writer, cs_cipher, sc_cipher, rekey, packet);
             continue;
         }
         return packet;
@@ -745,6 +790,13 @@ fn nameListContainsAny(haystack: []const u8, our_options: []const []const u8) bo
 
 pub const our_kex_algos = [_][]const u8{ "mlkem768x25519-sha256", "curve25519-sha256", "curve25519-sha256@libssh.org" };
 
+// strict kex markers (Terrapin / CVE-2023-48795 mitigation). pseudo-algorithms
+// carried in the initial KEXINIT's kex list: we advertise the -s form, the
+// client advertises the -c form. they are never selected as an actual kex
+// algorithm because the matcher only picks from our_kex_algos.
+pub const kex_strict_server = "kex-strict-s-v00@openssh.com";
+pub const kex_strict_client = "kex-strict-c-v00@openssh.com";
+
 const MLKem768 = std.crypto.kem.ml_kem.MLKem768;
 const hybrid_client_blob_len = MLKem768.PublicKey.encoded_length + X25519.public_length; // 1216
 const hybrid_server_blob_len = MLKem768.ciphertext_length + X25519.public_length; // 1120
@@ -787,7 +839,7 @@ pub fn buildKexInit(
 }
 
 fn buildServerKexInit(io: std.Io, allocator: std.mem.Allocator) ![]u8 {
-    return buildKexInit(io, allocator, &our_kex_algos, &our_host_key_algos, &our_ciphers);
+    return buildKexInit(io, allocator, &(our_kex_algos ++ [_][]const u8{kex_strict_server}), &our_host_key_algos, &our_ciphers);
 }
 
 const ParsedKexInit = struct {
@@ -844,7 +896,9 @@ const KexResult = struct {
     cs_key: [64]u8, // client → server cipher key material (K_2 || K_1)
     sc_key: [64]u8, // server → client cipher key material
     session_id: [Sha256.digest_length]u8,
-    next_cs_seq: u64, // packets the client has sent, including skipped ones
+    next_cs_seq: u64,
+    next_sc_seq: u64,
+    strict: bool,
 };
 
 fn runKex(
@@ -856,15 +910,120 @@ fn runKex(
     client_version: []const u8,
 ) !KexResult {
     var client_seq: u64 = 0;
+    const transport = KexTransport{ .plain = &client_seq };
 
     // exchange KEXINITs
     const server_kex_init = try buildServerKexInit(io, allocator);
     defer allocator.free(server_kex_init);
     try writePlainPacket(io, writer, server_kex_init);
 
-    const client_kex_init = try readPlainKexPacket(allocator, reader, &client_seq);
+    const client_kex_init = try transport.readPacket(allocator, reader, false);
     defer allocator.free(client_kex_init);
 
+    // strict kex: when the client advertises it, its KEXINIT must be the
+    // first packet, ignorable messages are banned until NEWKEYS, and both
+    // seqnos reset to 0 after every NEWKEYS.
+    const strict = strict: {
+        var parsed = try parseClientKexInit(allocator, client_kex_init);
+        defer parsed.deinit(allocator);
+        break :strict nameListContainsAny(parsed.kex_algos, &.{kex_strict_client});
+    };
+    if (strict and client_seq != 1) return error.StrictKexViolation;
+
+    const negotiated = try exchangeKeys(
+        io,
+        allocator,
+        reader,
+        writer,
+        transport,
+        strict,
+        host_key,
+        client_version,
+        client_kex_init,
+        server_kex_init,
+        null,
+    );
+
+    return .{
+        .cs_key = negotiated.keys.cs_enc,
+        .sc_key = negotiated.keys.sc_enc,
+        .session_id = negotiated.exchange_hash,
+        // the server sent exactly KEXINIT, KEX_ECDH_REPLY and NEWKEYS; the
+        // client's count includes any skipped IGNORE/DEBUG packets.
+        .next_cs_seq = if (strict) 0 else client_seq,
+        .next_sc_seq = if (strict) 0 else 3,
+        .strict = strict,
+    };
+}
+
+/// everything needed to service a client-initiated rekey mid-session.
+pub const RekeyState = struct {
+    host_key: *const HostKey,
+    client_version: []const u8,
+    session_id: [Sha256.digest_length]u8,
+    strict: bool,
+};
+
+// service a rekey whose triggering KEXINIT payload has just been read: run
+// the whole exchange under the current keys, then swap the new keys into
+// both ciphers in place.
+fn runRekey(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    reader: *std.Io.Reader,
+    writer: *std.Io.Writer,
+    cs_cipher: *Cipher,
+    sc_cipher: *Cipher,
+    rekey: *const RekeyState,
+    client_kex_init: []const u8,
+) !void {
+    const server_kex_init = try buildServerKexInit(io, allocator);
+    defer allocator.free(server_kex_init);
+    try sc_cipher.writePacket(io, allocator, writer, server_kex_init);
+
+    const negotiated = try exchangeKeys(
+        io,
+        allocator,
+        reader,
+        writer,
+        .{ .encrypted = .{ .cs = cs_cipher, .sc = sc_cipher } },
+        false,
+        rekey.host_key,
+        rekey.client_version,
+        client_kex_init,
+        server_kex_init,
+        &rekey.session_id,
+    );
+
+    // seqnos continue across a rekey unless strict kex was negotiated,
+    // which resets them after every NEWKEYS
+    cs_cipher.setKeys(&negotiated.keys.cs_enc, if (rekey.strict) 0 else cs_cipher.seq);
+    sc_cipher.setKeys(&negotiated.keys.sc_enc, if (rekey.strict) 0 else sc_cipher.seq);
+}
+
+const NegotiatedKeys = struct {
+    keys: SessionKeys,
+    exchange_hash: [Sha256.digest_length]u8,
+};
+
+// the KEX core shared by the initial exchange and rekeys: pick algorithms,
+// run the (hybrid) ECDH round trip, exchange NEWKEYS, derive keys. both
+// KEXINIT payloads have already been exchanged by the caller. session_id is
+// null on the initial exchange (where it becomes the exchange hash) and the
+// original session id on a rekey.
+fn exchangeKeys(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    reader: *std.Io.Reader,
+    writer: *std.Io.Writer,
+    transport: KexTransport,
+    strict: bool,
+    host_key: *const HostKey,
+    client_version: []const u8,
+    client_kex_init: []const u8,
+    server_kex_init: []const u8,
+    session_id: ?*const [Sha256.digest_length]u8,
+) !NegotiatedKeys {
     var parsed = try parseClientKexInit(allocator, client_kex_init);
     defer parsed.deinit(allocator);
 
@@ -886,7 +1045,7 @@ fn runKex(
 
     // receive KEX_ECDH_INIT (mlkem768x25519 reuses message code 30 — same
     // wire shape, only the string size differs).
-    const ecdh_init = try readPlainKexPacket(allocator, reader, &client_seq);
+    const ecdh_init = try transport.readPacket(allocator, reader, strict);
     defer allocator.free(ecdh_init);
     if (ecdh_init.len < 1 or ecdh_init[0] != SSH_MSG_KEX_ECDH_INIT) return error.UnexpectedMessage;
 
@@ -962,28 +1121,22 @@ fn runKex(
     try writeStringField(&reply, allocator, host_key_blob.items);
     try writeStringField(&reply, allocator, server_blob);
     try writeStringField(&reply, allocator, signature_blob.items);
-    try writePlainPacket(io, writer, reply.items);
+    try transport.writePacket(io, allocator, writer, reply.items);
 
-    // NEWKEYS — both sides switch to encrypted mode after this is sent and
+    // NEWKEYS — both sides switch to the new keys after this is sent and
     // the peer's NEWKEYS is received.
-    try writePlainPacket(io, writer, &[_]u8{SSH_MSG_NEWKEYS});
+    try transport.writePacket(io, allocator, writer, &[_]u8{SSH_MSG_NEWKEYS});
 
-    const peer_newkeys = try readPlainKexPacket(allocator, reader, &client_seq);
+    const peer_newkeys = try transport.readPacket(allocator, reader, strict);
     defer allocator.free(peer_newkeys);
     if (peer_newkeys.len < 1 or peer_newkeys[0] != SSH_MSG_NEWKEYS) return error.UnexpectedMessage;
 
-    // derive session keys per RFC 4253 §7.2. session_id == H for the first
-    // KEX. only the encrypt keys are needed for chacha20-poly1305 (no
-    // separate MAC/IV).
+    // derive session keys per RFC 4253 §7.2. only the encrypt keys are
+    // needed for chacha20-poly1305 (no separate MAC/IV).
     var keys: SessionKeys = undefined;
-    try deriveSessionKeys(allocator, k, &exchange_hash, &exchange_hash, &keys, hybrid);
+    try deriveSessionKeys(allocator, k, &exchange_hash, if (session_id) |sid| sid else &exchange_hash, &keys, hybrid);
 
-    return .{
-        .cs_key = keys.cs_enc,
-        .sc_key = keys.sc_enc,
-        .session_id = exchange_hash,
-        .next_cs_seq = client_seq,
-    };
+    return .{ .keys = keys, .exchange_hash = exchange_hash };
 }
 
 // ---------------------------------------------------------------------------
@@ -1119,6 +1272,7 @@ pub const Cipher = struct {
     main_key: [32]u8, // K_2
     header_key: [32]u8, // K_1
     seq: u64,
+    idle: ?*IdleState = null,
 
     pub fn init(key_material: *const [64]u8, initial_seq: u64) Cipher {
         return .{
@@ -1126,6 +1280,14 @@ pub const Cipher = struct {
             .header_key = key_material[32..64].*,
             .seq = initial_seq,
         };
+    }
+
+    /// swap in new key material after a rekey, leaving the rest of the
+    /// cipher state alone
+    fn setKeys(self: *Cipher, key_material: *const [64]u8, seq: u64) void {
+        self.main_key = key_material[0..32].*;
+        self.header_key = key_material[32..64].*;
+        self.seq = seq;
     }
 
     fn makeNonce(seq: u64) [8]u8 {
@@ -1227,6 +1389,7 @@ pub const Cipher = struct {
         const payload = try allocator.dupe(u8, enc_body[1 .. 1 + payload_len]);
 
         self.seq += 1;
+        if (self.idle) |idle| _ = idle.activity.fetchAdd(1, .monotonic);
         return payload;
     }
 };
@@ -1260,16 +1423,12 @@ fn runAuth(
     writer: *std.Io.Writer,
     cs_cipher: *Cipher,
     sc_cipher: *Cipher,
-    session_id: *const [Sha256.digest_length]u8,
+    rekey: *const RekeyState,
 ) ![fingerprint_len]u8 {
     // step 1: service request for ssh-userauth → service accept
     {
-        const req = try readNonIgnoredPacket(cs_cipher, allocator, reader);
+        const req = try readSessionPacket(io, allocator, reader, writer, cs_cipher, sc_cipher, rekey);
         defer allocator.free(req);
-        if (req.len >= 1 and req[0] == SSH_MSG_KEXINIT) {
-            try sendDisconnect(io, allocator, sc_cipher, writer, "rekey is not supported");
-            return error.RekeyUnsupported;
-        }
         if (req.len < 1 or req[0] != SSH_MSG_SERVICE_REQUEST) return error.UnexpectedMessage;
 
         var req_reader = std.Io.Reader.fixed(req[1..]);
@@ -1288,12 +1447,8 @@ fn runAuth(
     // signature verifies against the offered pubkey.
     var auth_attempts: u32 = 0;
     while (true) {
-        const req = try readNonIgnoredPacket(cs_cipher, allocator, reader);
+        const req = try readSessionPacket(io, allocator, reader, writer, cs_cipher, sc_cipher, rekey);
         defer allocator.free(req);
-        if (req.len >= 1 and req[0] == SSH_MSG_KEXINIT) {
-            try sendDisconnect(io, allocator, sc_cipher, writer, "rekey is not supported");
-            return error.RekeyUnsupported;
-        }
         if (req.len < 1 or req[0] != SSH_MSG_USERAUTH_REQUEST) return error.UnexpectedMessage;
 
         var req_reader = std.Io.Reader.fixed(req[1..]);
@@ -1303,6 +1458,14 @@ fn runAuth(
         defer allocator.free(service_name);
         const method = try takeStringField(allocator, &req_reader, 64);
         defer allocator.free(method);
+
+        // RFC 4252 §5: the server must verify the requested service
+        if (!std.mem.eql(u8, service_name, "ssh-connection")) {
+            auth_attempts += 1;
+            if (auth_attempts >= max_auth_attempts) return error.TooManyAuthAttempts;
+            try sendUserauthFailure(io, allocator, sc_cipher, writer);
+            continue;
+        }
 
         if (!std.mem.eql(u8, method, "publickey")) {
             auth_attempts += 1;
@@ -1345,7 +1508,7 @@ fn runAuth(
 
         const ok = verifyUserauthSignature(
             allocator,
-            session_id,
+            &rekey.session_id,
             user_name,
             service_name,
             algo,
@@ -1376,22 +1539,6 @@ fn sendUserauthFailure(
     try buf.append(allocator, SSH_MSG_USERAUTH_FAILURE);
     try writeNameList(&buf, allocator, &.{"publickey"}); // allowed methods
     try buf.append(allocator, 0); // partial_success = false
-    try sc_cipher.writePacket(io, allocator, writer, buf.items);
-}
-
-fn sendDisconnect(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    sc_cipher: *Cipher,
-    writer: *std.Io.Writer,
-    description: []const u8,
-) !void {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    try buf.append(allocator, SSH_MSG_DISCONNECT);
-    try writeU32(&buf, allocator, SSH_DISCONNECT_PROTOCOL_ERROR);
-    try writeStringField(&buf, allocator, description);
-    try writeStringField(&buf, allocator, "");
     try sc_cipher.writePacket(io, allocator, writer, buf.items);
 }
 
@@ -1493,6 +1640,7 @@ fn runChannelLayer(
     writer: *std.Io.Writer,
     cs_cipher: *Cipher,
     sc_cipher: *Cipher,
+    rekey: *const RekeyState,
     fingerprint: *const [fingerprint_len]u8,
     handler: anytype,
 ) !void {
@@ -1501,18 +1649,13 @@ fn runChannelLayer(
     defer if (pending_exec) |s| allocator.free(s);
 
     while (true) {
-        const packet = try cs_cipher.readPacket(allocator, reader);
+        const packet = try readSessionPacket(io, allocator, reader, writer, cs_cipher, sc_cipher, rekey);
         defer allocator.free(packet);
         if (packet.len < 1) return error.EmptyPacket;
         const msg_type = packet[0];
 
         switch (msg_type) {
             SSH_MSG_GLOBAL_REQUEST => try handleGlobalRequest(io, allocator, sc_cipher, writer, packet),
-
-            SSH_MSG_KEXINIT => {
-                try sendDisconnect(io, allocator, sc_cipher, writer, "rekey is not supported");
-                return error.RekeyUnsupported;
-            },
 
             SSH_MSG_CHANNEL_OPEN => {
                 if (channel != null) {
@@ -1537,6 +1680,7 @@ fn runChannelLayer(
                         .writer = writer,
                         .cs_cipher = cs_cipher,
                         .sc_cipher = sc_cipher,
+                        .rekey = rekey,
                         .channel = ch,
                         .fingerprint = fingerprint.*,
                     };
