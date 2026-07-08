@@ -163,22 +163,29 @@ pub const Request = union(enum) {
 
 /// next thing that arrived from the client.
 pub const Event = union(enum) {
-    data: []u8, // CHANNEL_DATA payload — caller owns and must free via sess.allocator
+    data: []u8, // CHANNEL_DATA payload — caller owns and must free via sess.conn.allocator
     resize: PtySize, // window-change request
     close, // peer sent EOF or CHANNEL_CLOSE
+};
+
+/// per-connection transport state: the byte stream, both ciphers, and what a
+/// rekey needs. built once after the initial KEX and threaded through the
+/// auth and channel layers.
+pub const Conn = struct {
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    reader: *std.Io.Reader,
+    writer: *std.Io.Writer,
+    cs_cipher: Cipher,
+    sc_cipher: Cipher,
+    rekey: RekeyState,
 };
 
 /// session bridge handed to the consumer's handleSession callback. exposes a
 /// pumped event API plus a byte-write API; the byte stream goes out as
 /// CHANNEL_DATA packets respecting the channel's flow-control window.
 pub const SessionCtx = struct {
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    reader: *std.Io.Reader,
-    writer: *std.Io.Writer,
-    cs_cipher: *Cipher,
-    sc_cipher: *Cipher,
-    rekey: *const RekeyState,
+    conn: *Conn,
     channel: *Channel,
     /// SHA256 fingerprint of the pubkey this session authenticated with,
     /// formatted as "SHA256:<base64-no-padding>" — same value the openssh
@@ -199,8 +206,8 @@ pub const SessionCtx = struct {
     write_scratch: std.ArrayList(u8) = .empty,
 
     pub fn deinit(self: *SessionCtx) void {
-        self.incoming_buffer.deinit(self.allocator);
-        self.write_scratch.deinit(self.allocator);
+        self.incoming_buffer.deinit(self.conn.allocator);
+        self.write_scratch.deinit(self.conn.allocator);
     }
 
     fn incomingBytes(self: *const SessionCtx) []const u8 {
@@ -228,13 +235,13 @@ pub const SessionCtx = struct {
         if (payload.len > max_incoming_buffered - self.incoming_buffer.items.len) {
             return error.IncomingBufferExceeded;
         }
-        try self.incoming_buffer.appendSlice(self.allocator, payload);
+        try self.incoming_buffer.appendSlice(self.conn.allocator, payload);
     }
 
     /// interactive sessions idle legitimately; tell the host's idle
     /// watchdog to stand down for the rest of this connection.
     pub fn exemptFromIdleTimeout(self: *SessionCtx) void {
-        if (self.cs_cipher.idle) |idle| idle.exempt.store(true, .monotonic);
+        if (self.conn.cs_cipher.idle) |idle| idle.exempt.store(true, .monotonic);
     }
 
     /// pump SSH packets until something interesting (data / resize / close)
@@ -249,7 +256,7 @@ pub const SessionCtx = struct {
             }
             if (self.incomingBytes().len > 0) {
                 // hand the buffered bytes to the caller (caller owns)
-                const payload = try self.allocator.dupe(u8, self.incomingBytes());
+                const payload = try self.conn.allocator.dupe(u8, self.incomingBytes());
                 self.consumeIncoming(payload.len);
                 return .{ .data = payload };
             }
@@ -280,6 +287,7 @@ pub const SessionCtx = struct {
     /// effects — incoming CHANNEL_DATA goes into incoming_buffer for a future
     /// SessionReader).
     fn writeChannel(self: *SessionCtx, bytes: []const u8, extended: bool) !void {
+        const conn = self.conn;
         var rest = bytes;
         while (rest.len > 0) {
             while (self.channel.remote_window == 0) {
@@ -291,11 +299,11 @@ pub const SessionCtx = struct {
             const chunk_len: u32 = @intCast(cap);
 
             self.write_scratch.clearRetainingCapacity();
-            try self.write_scratch.append(self.allocator, if (extended) SSH_MSG_CHANNEL_EXTENDED_DATA else SSH_MSG_CHANNEL_DATA);
-            try writeU32(&self.write_scratch, self.allocator, self.channel.remote_id);
-            if (extended) try writeU32(&self.write_scratch, self.allocator, SSH_EXTENDED_DATA_STDERR);
-            try writeStringField(&self.write_scratch, self.allocator, rest[0..chunk_len]);
-            try self.sc_cipher.writePacket(self.io, self.writer, self.write_scratch.items);
+            try self.write_scratch.append(conn.allocator, if (extended) SSH_MSG_CHANNEL_EXTENDED_DATA else SSH_MSG_CHANNEL_DATA);
+            try writeU32(&self.write_scratch, conn.allocator, self.channel.remote_id);
+            if (extended) try writeU32(&self.write_scratch, conn.allocator, SSH_EXTENDED_DATA_STDERR);
+            try writeStringField(&self.write_scratch, conn.allocator, rest[0..chunk_len]);
+            try conn.sc_cipher.writePacket(conn.io, conn.writer, self.write_scratch.items);
 
             self.channel.remote_window -= chunk_len;
             rest = rest[chunk_len..];
@@ -309,14 +317,15 @@ pub const SessionCtx = struct {
     /// channel/global requests get a polite failure. driven by nextEvent,
     /// SessionReader, and writeBytes (waiting for send-window).
     fn processOneBackgroundPacket(self: *SessionCtx) !void {
-        const packet = readSessionPacket(self.io, self.allocator, self.reader, self.writer, self.cs_cipher, self.sc_cipher, self.rekey) catch |err| switch (err) {
+        const conn = self.conn;
+        const packet = readSessionPacket(conn) catch |err| switch (err) {
             error.EndOfStream => {
                 self.incoming_eof = true;
                 return;
             },
             else => return err,
         };
-        defer self.allocator.free(packet);
+        defer conn.allocator.free(packet);
         if (packet.len < 1) return;
 
         switch (packet[0]) {
@@ -329,70 +338,71 @@ pub const SessionCtx = struct {
                 try self.maybeRefillRecvWindowForBufferedInput();
             },
             SSH_MSG_CHANNEL_EXTENDED_DATA => {
-                try discardChannelData(self.io, self.allocator, self.sc_cipher, self.writer, self.channel, packet, true);
+                try discardChannelData(conn, self.channel, packet, true);
             },
             SSH_MSG_CHANNEL_WINDOW_ADJUST => try handleWindowAdjust(self.channel, packet),
             SSH_MSG_CHANNEL_REQUEST => {
                 var r = std.Io.Reader.fixed(packet[1..]);
                 const recipient_channel = try r.takeInt(u32, .big);
                 if (recipient_channel != self.channel.local_id) return error.UnknownChannel;
-                const req_type = try takeStringField(self.allocator, &r, 64);
-                defer self.allocator.free(req_type);
+                const req_type = try takeStringField(conn.allocator, &r, 64);
+                defer conn.allocator.free(req_type);
                 const want_reply = (try r.takeByte()) != 0;
                 if (std.mem.eql(u8, req_type, "window-change")) {
                     const sz = try takePtySize(&r);
                     if (self.channel.pty != null) self.channel.pty = sz;
                     self.pending_resize = sz;
-                    try replyChannelRequest(self.io, self.allocator, self.sc_cipher, self.writer, self.channel, want_reply, true);
+                    try replyChannelRequest(conn, self.channel, want_reply, true);
                 } else {
                     // other mid-session channel requests aren't honored — fail them
-                    try replyChannelRequest(self.io, self.allocator, self.sc_cipher, self.writer, self.channel, want_reply, false);
+                    try replyChannelRequest(conn, self.channel, want_reply, false);
                 }
             },
             SSH_MSG_CHANNEL_EOF, SSH_MSG_CHANNEL_CLOSE => {
                 try parseChannelId(packet, self.channel.local_id);
                 self.incoming_eof = true;
             },
-            SSH_MSG_GLOBAL_REQUEST => try handleGlobalRequest(self.io, self.allocator, self.sc_cipher, self.writer, packet),
+            SSH_MSG_GLOBAL_REQUEST => try handleGlobalRequest(conn, packet),
             else => {},
         }
     }
 
     fn maybeRefillRecvWindowForBufferedInput(self: *SessionCtx) !void {
         if (self.incomingBytes().len >= incoming_refill_threshold) return;
-        try maybeRefillRecvWindow(self.io, self.allocator, self.sc_cipher, self.writer, self.channel);
+        try maybeRefillRecvWindow(self.conn, self.channel);
     }
 
     /// signal the consumer's exit status and tear the channel down.
     pub fn exit(self: *SessionCtx, status: u32) !void {
         if (self.closed) return;
         self.closed = true;
+        const conn = self.conn;
 
         // exit-status request (informational; client uses it as the
         // command's exit code)
         {
             var req: std.ArrayList(u8) = .empty;
-            defer req.deinit(self.allocator);
-            try req.append(self.allocator, SSH_MSG_CHANNEL_REQUEST);
-            try writeU32(&req, self.allocator, self.channel.remote_id);
-            try writeStringField(&req, self.allocator, "exit-status");
-            try req.append(self.allocator, 0); // want_reply MUST be false
-            try writeU32(&req, self.allocator, status);
-            try self.sc_cipher.writePacket(self.io, self.writer, req.items);
+            defer req.deinit(conn.allocator);
+            try req.append(conn.allocator, SSH_MSG_CHANNEL_REQUEST);
+            try writeU32(&req, conn.allocator, self.channel.remote_id);
+            try writeStringField(&req, conn.allocator, "exit-status");
+            try req.append(conn.allocator, 0); // want_reply MUST be false
+            try writeU32(&req, conn.allocator, status);
+            try conn.sc_cipher.writePacket(conn.io, conn.writer, req.items);
         }
 
         // EOF then CLOSE
         var eof: std.ArrayList(u8) = .empty;
-        defer eof.deinit(self.allocator);
-        try eof.append(self.allocator, SSH_MSG_CHANNEL_EOF);
-        try writeU32(&eof, self.allocator, self.channel.remote_id);
-        try self.sc_cipher.writePacket(self.io, self.writer, eof.items);
+        defer eof.deinit(conn.allocator);
+        try eof.append(conn.allocator, SSH_MSG_CHANNEL_EOF);
+        try writeU32(&eof, conn.allocator, self.channel.remote_id);
+        try conn.sc_cipher.writePacket(conn.io, conn.writer, eof.items);
 
         var close: std.ArrayList(u8) = .empty;
-        defer close.deinit(self.allocator);
-        try close.append(self.allocator, SSH_MSG_CHANNEL_CLOSE);
-        try writeU32(&close, self.allocator, self.channel.remote_id);
-        try self.sc_cipher.writePacket(self.io, self.writer, close.items);
+        defer close.deinit(conn.allocator);
+        try close.append(conn.allocator, SSH_MSG_CHANNEL_CLOSE);
+        try writeU32(&close, conn.allocator, self.channel.remote_id);
+        try conn.sc_cipher.writePacket(conn.io, conn.writer, close.items);
 
         // read and discard until the peer closes (TCP FIN) before letting the
         // caller close the socket. a git client, after our CHANNEL_CLOSE, still
@@ -404,8 +414,8 @@ pub const SessionCtx = struct {
         // contents don't matter — just get them off the socket.
         var drain_packets: u32 = 0;
         while (drain_packets < max_exit_drain_packets) : (drain_packets += 1) {
-            const packet = self.cs_cipher.readPacket(self.allocator, self.reader) catch break;
-            self.allocator.free(packet);
+            const packet = conn.cs_cipher.readPacket(conn.allocator, conn.reader) catch break;
+            conn.allocator.free(packet);
         }
     }
 };
@@ -566,20 +576,25 @@ pub fn handleConnection(
     const kex = try runKex(io, allocator, reader, writer, host_key, client_version);
 
     // post-KEX everything is encrypted with chacha20-poly1305@openssh.com
-    var cs_cipher = Cipher.init(&kex.cs_key, kex.next_cs_seq);
-    var sc_cipher = Cipher.init(&kex.sc_key, kex.next_sc_seq);
-    cs_cipher.idle = idle;
-
-    const rekey = RekeyState{
-        .host_key = host_key,
-        .client_version = client_version,
-        .session_id = kex.session_id,
-        .strict = kex.strict,
+    var conn = Conn{
+        .io = io,
+        .allocator = allocator,
+        .reader = reader,
+        .writer = writer,
+        .cs_cipher = Cipher.init(&kex.cs_key, kex.next_cs_seq),
+        .sc_cipher = Cipher.init(&kex.sc_key, kex.next_sc_seq),
+        .rekey = .{
+            .host_key = host_key,
+            .client_version = client_version,
+            .session_id = kex.session_id,
+            .strict = kex.strict,
+        },
     };
+    conn.cs_cipher.idle = idle;
 
-    const fingerprint = try runAuth(io, allocator, reader, writer, &cs_cipher, &sc_cipher, &rekey);
+    const fingerprint = try runAuth(&conn);
 
-    try runChannelLayer(io, allocator, reader, writer, &cs_cipher, &sc_cipher, &rekey, &fingerprint, handler);
+    try runChannelLayer(&conn, &fingerprint, handler);
 }
 
 // ---------------------------------------------------------------------------
@@ -684,24 +699,16 @@ const KexTransport = union(enum) {
 
 // read one encrypted packet for the auth and channel layers, transparently
 // skipping ignorable messages and servicing client-initiated rekeys.
-fn readSessionPacket(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    reader: *std.Io.Reader,
-    writer: *std.Io.Writer,
-    cs_cipher: *Cipher,
-    sc_cipher: *Cipher,
-    rekey: *const RekeyState,
-) ![]u8 {
+fn readSessionPacket(conn: *Conn) ![]u8 {
     while (true) {
-        const packet = try cs_cipher.readPacket(allocator, reader);
+        const packet = try conn.cs_cipher.readPacket(conn.allocator, conn.reader);
         if (packet.len >= 1 and isIgnorableMsg(packet[0])) {
-            allocator.free(packet);
+            conn.allocator.free(packet);
             continue;
         }
         if (packet.len >= 1 and packet[0] == SSH_MSG_KEXINIT) {
-            defer allocator.free(packet);
-            try runRekey(io, allocator, reader, writer, cs_cipher, sc_cipher, rekey, packet);
+            defer conn.allocator.free(packet);
+            try runRekey(conn, packet);
             continue;
         }
         return packet;
@@ -944,7 +951,7 @@ fn runKex(
 }
 
 /// everything needed to service a client-initiated rekey mid-session.
-pub const RekeyState = struct {
+const RekeyState = struct {
     host_key: *const HostKey,
     client_version: []const u8,
     session_id: [Sha256.digest_length]u8,
@@ -954,38 +961,29 @@ pub const RekeyState = struct {
 // service a rekey whose triggering KEXINIT payload has just been read: run
 // the whole exchange under the current keys, then swap the new keys into
 // both ciphers in place.
-fn runRekey(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    reader: *std.Io.Reader,
-    writer: *std.Io.Writer,
-    cs_cipher: *Cipher,
-    sc_cipher: *Cipher,
-    rekey: *const RekeyState,
-    client_kex_init: []const u8,
-) !void {
-    const server_kex_init = try buildServerKexInit(io, allocator);
-    defer allocator.free(server_kex_init);
-    try sc_cipher.writePacket(io, writer, server_kex_init);
+fn runRekey(conn: *Conn, client_kex_init: []const u8) !void {
+    const server_kex_init = try buildServerKexInit(conn.io, conn.allocator);
+    defer conn.allocator.free(server_kex_init);
+    try conn.sc_cipher.writePacket(conn.io, conn.writer, server_kex_init);
 
     const negotiated = try exchangeKeys(
-        io,
-        allocator,
-        reader,
-        writer,
-        .{ .encrypted = .{ .cs = cs_cipher, .sc = sc_cipher } },
+        conn.io,
+        conn.allocator,
+        conn.reader,
+        conn.writer,
+        .{ .encrypted = .{ .cs = &conn.cs_cipher, .sc = &conn.sc_cipher } },
         false,
-        rekey.host_key,
-        rekey.client_version,
+        conn.rekey.host_key,
+        conn.rekey.client_version,
         client_kex_init,
         server_kex_init,
-        &rekey.session_id,
+        &conn.rekey.session_id,
     );
 
     // seqnos continue across a rekey unless strict kex was negotiated,
     // which resets them after every NEWKEYS
-    cs_cipher.setKeys(&negotiated.keys.cs_enc, if (rekey.strict) 0 else cs_cipher.seq);
-    sc_cipher.setKeys(&negotiated.keys.sc_enc, if (rekey.strict) 0 else sc_cipher.seq);
+    conn.cs_cipher.setKeys(&negotiated.keys.cs_enc, if (conn.rekey.strict) 0 else conn.cs_cipher.seq);
+    conn.sc_cipher.setKeys(&negotiated.keys.sc_enc, if (conn.rekey.strict) 0 else conn.sc_cipher.seq);
 }
 
 const NegotiatedKeys = struct {
@@ -1404,18 +1402,12 @@ pub fn formatFingerprint(pubkey_blob: []const u8) [fingerprint_len]u8 {
     return out;
 }
 
-fn runAuth(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    reader: *std.Io.Reader,
-    writer: *std.Io.Writer,
-    cs_cipher: *Cipher,
-    sc_cipher: *Cipher,
-    rekey: *const RekeyState,
-) ![fingerprint_len]u8 {
+fn runAuth(conn: *Conn) ![fingerprint_len]u8 {
+    const allocator = conn.allocator;
+
     // step 1: service request for ssh-userauth → service accept
     {
-        const req = try readSessionPacket(io, allocator, reader, writer, cs_cipher, sc_cipher, rekey);
+        const req = try readSessionPacket(conn);
         defer allocator.free(req);
         if (req.len < 1 or req[0] != SSH_MSG_SERVICE_REQUEST) return error.UnexpectedMessage;
 
@@ -1428,14 +1420,14 @@ fn runAuth(
         defer accept.deinit(allocator);
         try accept.append(allocator, SSH_MSG_SERVICE_ACCEPT);
         try writeStringField(&accept, allocator, "ssh-userauth");
-        try sc_cipher.writePacket(io, writer, accept.items);
+        try conn.sc_cipher.writePacket(conn.io, conn.writer, accept.items);
     }
 
     // step 2: USERAUTH loop until SUCCESS. accept any ed25519 key whose
     // signature verifies against the offered pubkey.
     var auth_attempts: u32 = 0;
     while (true) {
-        const req = try readSessionPacket(io, allocator, reader, writer, cs_cipher, sc_cipher, rekey);
+        const req = try readSessionPacket(conn);
         defer allocator.free(req);
         if (req.len < 1 or req[0] != SSH_MSG_USERAUTH_REQUEST) return error.UnexpectedMessage;
 
@@ -1451,14 +1443,14 @@ fn runAuth(
         if (!std.mem.eql(u8, service_name, "ssh-connection")) {
             auth_attempts += 1;
             if (auth_attempts >= max_auth_attempts) return error.TooManyAuthAttempts;
-            try sendUserauthFailure(io, allocator, sc_cipher, writer);
+            try sendUserauthFailure(conn);
             continue;
         }
 
         if (!std.mem.eql(u8, method, "publickey")) {
             auth_attempts += 1;
             if (auth_attempts >= max_auth_attempts) return error.TooManyAuthAttempts;
-            try sendUserauthFailure(io, allocator, sc_cipher, writer);
+            try sendUserauthFailure(conn);
             continue;
         }
 
@@ -1471,7 +1463,7 @@ fn runAuth(
         if (!std.mem.eql(u8, algo, "ssh-ed25519")) {
             auth_attempts += 1;
             if (auth_attempts >= max_auth_attempts) return error.TooManyAuthAttempts;
-            try sendUserauthFailure(io, allocator, sc_cipher, writer);
+            try sendUserauthFailure(conn);
             continue;
         }
 
@@ -1486,7 +1478,7 @@ fn runAuth(
             try pk_ok.append(allocator, SSH_MSG_USERAUTH_PK_OK);
             try writeStringField(&pk_ok, allocator, algo);
             try writeStringField(&pk_ok, allocator, pubkey_blob);
-            try sc_cipher.writePacket(io, writer, pk_ok.items);
+            try conn.sc_cipher.writePacket(conn.io, conn.writer, pk_ok.items);
             continue;
         }
 
@@ -1496,7 +1488,7 @@ fn runAuth(
 
         const ok = verifyUserauthSignature(
             allocator,
-            &rekey.session_id,
+            &conn.rekey.session_id,
             user_name,
             service_name,
             algo,
@@ -1507,27 +1499,22 @@ fn runAuth(
         if (!ok) {
             auth_attempts += 1;
             if (auth_attempts >= max_auth_attempts) return error.TooManyAuthAttempts;
-            try sendUserauthFailure(io, allocator, sc_cipher, writer);
+            try sendUserauthFailure(conn);
             continue;
         }
 
-        try sc_cipher.writePacket(io, writer, &[_]u8{SSH_MSG_USERAUTH_SUCCESS});
+        try conn.sc_cipher.writePacket(conn.io, conn.writer, &[_]u8{SSH_MSG_USERAUTH_SUCCESS});
         return formatFingerprint(pubkey_blob);
     }
 }
 
-fn sendUserauthFailure(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    sc_cipher: *Cipher,
-    writer: *std.Io.Writer,
-) !void {
+fn sendUserauthFailure(conn: *Conn) !void {
     var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    try buf.append(allocator, SSH_MSG_USERAUTH_FAILURE);
-    try writeNameList(&buf, allocator, &.{"publickey"}); // allowed methods
-    try buf.append(allocator, 0); // partial_success = false
-    try sc_cipher.writePacket(io, writer, buf.items);
+    defer buf.deinit(conn.allocator);
+    try buf.append(conn.allocator, SSH_MSG_USERAUTH_FAILURE);
+    try writeNameList(&buf, conn.allocator, &.{"publickey"}); // allowed methods
+    try buf.append(conn.allocator, 0); // partial_success = false
+    try conn.sc_cipher.writePacket(conn.io, conn.writer, buf.items);
 }
 
 /// Append the canonical publickey-signed-data bytes (RFC 4252 §7) to `buf`.
@@ -1622,53 +1609,42 @@ fn takePtySize(r: *std.Io.Reader) !PtySize {
 }
 
 fn runChannelLayer(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    reader: *std.Io.Reader,
-    writer: *std.Io.Writer,
-    cs_cipher: *Cipher,
-    sc_cipher: *Cipher,
-    rekey: *const RekeyState,
+    conn: *Conn,
     fingerprint: *const [fingerprint_len]u8,
     handler: anytype,
 ) !void {
+    const allocator = conn.allocator;
     var channel: ?Channel = null;
     var pending_exec: ?[]u8 = null;
     defer if (pending_exec) |s| allocator.free(s);
 
     while (true) {
-        const packet = try readSessionPacket(io, allocator, reader, writer, cs_cipher, sc_cipher, rekey);
+        const packet = try readSessionPacket(conn);
         defer allocator.free(packet);
         if (packet.len < 1) return error.EmptyPacket;
         const msg_type = packet[0];
 
         switch (msg_type) {
-            SSH_MSG_GLOBAL_REQUEST => try handleGlobalRequest(io, allocator, sc_cipher, writer, packet),
+            SSH_MSG_GLOBAL_REQUEST => try handleGlobalRequest(conn, packet),
 
             SSH_MSG_CHANNEL_OPEN => {
                 if (channel != null) {
-                    try sendChannelOpenFailure(io, allocator, sc_cipher, writer, packet, SSH_OPEN_RESOURCE_SHORTAGE, "only one channel per connection");
+                    try sendChannelOpenFailure(conn, packet, SSH_OPEN_RESOURCE_SHORTAGE, "only one channel per connection");
                     continue;
                 }
-                channel = try handleChannelOpen(io, allocator, sc_cipher, writer, packet) orelse continue;
+                channel = try handleChannelOpen(conn, packet) orelse continue;
             },
 
             SSH_MSG_CHANNEL_REQUEST => {
                 const ch = if (channel) |*c| c else continue;
-                const start_request = try handleChannelRequest(io, allocator, sc_cipher, writer, ch, packet, &pending_exec);
+                const start_request = try handleChannelRequest(conn, ch, packet, &pending_exec);
                 if (start_request) |req_kind| {
                     const request: Request = switch (req_kind) {
                         .shell => .{ .shell = ch.pty },
                         .exec => .{ .exec = pending_exec.? },
                     };
                     var sess = SessionCtx{
-                        .io = io,
-                        .allocator = allocator,
-                        .reader = reader,
-                        .writer = writer,
-                        .cs_cipher = cs_cipher,
-                        .sc_cipher = sc_cipher,
-                        .rekey = rekey,
+                        .conn = conn,
                         .channel = ch,
                         .fingerprint = fingerprint.*,
                     };
@@ -1692,7 +1668,7 @@ fn runChannelLayer(
                 const ch = if (channel) |*c| c else continue;
                 // before shell/exec the client shouldn't be sending data, but
                 // some clients are chatty; discard and refill window.
-                try discardChannelData(io, allocator, sc_cipher, writer, ch, packet, msg_type == SSH_MSG_CHANNEL_EXTENDED_DATA);
+                try discardChannelData(conn, ch, packet, msg_type == SSH_MSG_CHANNEL_EXTENDED_DATA);
             },
 
             SSH_MSG_CHANNEL_EOF => {
@@ -1709,36 +1685,26 @@ fn runChannelLayer(
     }
 }
 
-fn handleGlobalRequest(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    sc_cipher: *Cipher,
-    writer: *std.Io.Writer,
-    packet: []const u8,
-) !void {
+fn handleGlobalRequest(conn: *Conn, packet: []const u8) !void {
     // byte SSH_MSG_GLOBAL_REQUEST
     // string request_name
     // boolean want_reply
     // …request-specific data we ignore
     var r = std.Io.Reader.fixed(packet[1..]);
-    const name = try takeStringField(allocator, &r, 256);
-    defer allocator.free(name);
+    const name = try takeStringField(conn.allocator, &r, 256);
+    defer conn.allocator.free(name);
     const want_reply = (try r.takeByte()) != 0;
     if (want_reply) {
-        try sc_cipher.writePacket(io, writer, &[_]u8{SSH_MSG_REQUEST_FAILURE});
+        try conn.sc_cipher.writePacket(conn.io, conn.writer, &[_]u8{SSH_MSG_REQUEST_FAILURE});
     }
 }
 
 /// Parse a CHANNEL_OPEN. On a session channel, send CHANNEL_OPEN_CONFIRMATION
 /// and return the new Channel. On other types, send CHANNEL_OPEN_FAILURE and
 /// return null.
-fn handleChannelOpen(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    sc_cipher: *Cipher,
-    writer: *std.Io.Writer,
-    packet: []const u8,
-) !?Channel {
+fn handleChannelOpen(conn: *Conn, packet: []const u8) !?Channel {
+    const allocator = conn.allocator;
+
     // byte SSH_MSG_CHANNEL_OPEN
     // string channel_type
     // uint32 sender_channel (peer's id)
@@ -1752,13 +1718,13 @@ fn handleChannelOpen(
     const max_packet = try r.takeInt(u32, .big);
 
     if (!std.mem.eql(u8, ch_type, "session")) {
-        try sendChannelOpenFailure(io, allocator, sc_cipher, writer, packet, SSH_OPEN_UNKNOWN_CHANNEL_TYPE, "only session channels are supported");
+        try sendChannelOpenFailure(conn, packet, SSH_OPEN_UNKNOWN_CHANNEL_TYPE, "only session channels are supported");
         return null;
     }
 
     // a zero max_packet would leave writeChannel looping without progress
     if (max_packet == 0) {
-        try sendChannelOpenFailure(io, allocator, sc_cipher, writer, packet, SSH_OPEN_RESOURCE_SHORTAGE, "max packet size must be non-zero");
+        try sendChannelOpenFailure(conn, packet, SSH_OPEN_RESOURCE_SHORTAGE, "max packet size must be non-zero");
         return null;
     }
 
@@ -1770,7 +1736,7 @@ fn handleChannelOpen(
     try writeU32(&reply, allocator, local_id);
     try writeU32(&reply, allocator, initial_recv_window);
     try writeU32(&reply, allocator, max_packet_size);
-    try sc_cipher.writePacket(io, writer, reply.items);
+    try conn.sc_cipher.writePacket(conn.io, conn.writer, reply.items);
 
     return .{
         .local_id = local_id,
@@ -1781,15 +1747,9 @@ fn handleChannelOpen(
     };
 }
 
-fn sendChannelOpenFailure(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    sc_cipher: *Cipher,
-    writer: *std.Io.Writer,
-    open_packet: []const u8,
-    reason: u32,
-    description: []const u8,
-) !void {
+fn sendChannelOpenFailure(conn: *Conn, open_packet: []const u8, reason: u32, description: []const u8) !void {
+    const allocator = conn.allocator;
+
     // recover the sender_channel field from the CHANNEL_OPEN packet so we
     // address the failure to the correct id
     var r = std.Io.Reader.fixed(open_packet[1..]);
@@ -1804,21 +1764,15 @@ fn sendChannelOpenFailure(
     try writeU32(&reply, allocator, reason);
     try writeStringField(&reply, allocator, description);
     try writeStringField(&reply, allocator, ""); // language tag
-    try sc_cipher.writePacket(io, writer, reply.items);
+    try conn.sc_cipher.writePacket(conn.io, conn.writer, reply.items);
 }
 
 const RequestKind = enum { shell, exec };
 
 /// Returns the kind of session request if this triggered one, else null.
-fn handleChannelRequest(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    sc_cipher: *Cipher,
-    writer: *std.Io.Writer,
-    ch: *Channel,
-    packet: []const u8,
-    pending_exec: *?[]u8,
-) !?RequestKind {
+fn handleChannelRequest(conn: *Conn, ch: *Channel, packet: []const u8, pending_exec: *?[]u8) !?RequestKind {
+    const allocator = conn.allocator;
+
     // byte SSH_MSG_CHANNEL_REQUEST
     // uint32 recipient_channel (== our local_id)
     // string request_type
@@ -1837,13 +1791,13 @@ fn handleChannelRequest(
         const term = try takeStringField(allocator, &r, 64);
         defer allocator.free(term);
         ch.pty = try takePtySize(&r);
-        try replyChannelRequest(io, allocator, sc_cipher, writer, ch, want_reply, true);
+        try replyChannelRequest(conn, ch, want_reply, true);
         return null;
     }
 
     if (std.mem.eql(u8, req_type, "env")) {
         // ignore environment variables silently (we don't pass them anywhere)
-        try replyChannelRequest(io, allocator, sc_cipher, writer, ch, want_reply, true);
+        try replyChannelRequest(conn, ch, want_reply, true);
         return null;
     }
 
@@ -1852,12 +1806,12 @@ fn handleChannelRequest(
         const sz = try takePtySize(&r);
         if (ch.pty != null) ch.pty = sz;
         // spec: window-change MUST NOT request a reply, but accept either
-        try replyChannelRequest(io, allocator, sc_cipher, writer, ch, want_reply, true);
+        try replyChannelRequest(conn, ch, want_reply, true);
         return null;
     }
 
     if (std.mem.eql(u8, req_type, "shell")) {
-        try replyChannelRequest(io, allocator, sc_cipher, writer, ch, want_reply, true);
+        try replyChannelRequest(conn, ch, want_reply, true);
         return .shell;
     }
 
@@ -1866,30 +1820,22 @@ fn handleChannelRequest(
         const cmd = try takeStringField(allocator, &r, 4096);
         if (pending_exec.*) |old| allocator.free(old);
         pending_exec.* = cmd;
-        try replyChannelRequest(io, allocator, sc_cipher, writer, ch, want_reply, true);
+        try replyChannelRequest(conn, ch, want_reply, true);
         return .exec;
     }
 
     // unknown request kind — fail it
-    try replyChannelRequest(io, allocator, sc_cipher, writer, ch, want_reply, false);
+    try replyChannelRequest(conn, ch, want_reply, false);
     return null;
 }
 
-fn replyChannelRequest(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    sc_cipher: *Cipher,
-    writer: *std.Io.Writer,
-    ch: *Channel,
-    want_reply: bool,
-    success: bool,
-) !void {
+fn replyChannelRequest(conn: *Conn, ch: *Channel, want_reply: bool, success: bool) !void {
     if (!want_reply) return;
     var reply: std.ArrayList(u8) = .empty;
-    defer reply.deinit(allocator);
-    try reply.append(allocator, if (success) SSH_MSG_CHANNEL_SUCCESS else SSH_MSG_CHANNEL_FAILURE);
-    try writeU32(&reply, allocator, ch.remote_id);
-    try sc_cipher.writePacket(io, writer, reply.items);
+    defer reply.deinit(conn.allocator);
+    try reply.append(conn.allocator, if (success) SSH_MSG_CHANNEL_SUCCESS else SSH_MSG_CHANNEL_FAILURE);
+    try writeU32(&reply, conn.allocator, ch.remote_id);
+    try conn.sc_cipher.writePacket(conn.io, conn.writer, reply.items);
 }
 
 fn handleWindowAdjust(ch: *Channel, packet: []const u8) !void {
@@ -1903,15 +1849,7 @@ fn handleWindowAdjust(ch: *Channel, packet: []const u8) !void {
     ch.remote_window +|= add;
 }
 
-fn discardChannelData(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    sc_cipher: *Cipher,
-    writer: *std.Io.Writer,
-    ch: *Channel,
-    packet: []const u8,
-    extended: bool,
-) !void {
+fn discardChannelData(conn: *Conn, ch: *Channel, packet: []const u8, extended: bool) !void {
     // byte SSH_MSG_CHANNEL_DATA/EXTENDED_DATA
     // uint32 recipient_channel
     // [if extended: uint32 type_code]
@@ -1921,7 +1859,7 @@ fn discardChannelData(
 
     if (data_len > ch.local_window) return error.WindowExceeded;
     ch.local_window -= data_len;
-    try maybeRefillRecvWindow(io, allocator, sc_cipher, writer, ch);
+    try maybeRefillRecvWindow(conn, ch);
 }
 
 pub fn parseChannelData(packet: []const u8, extended: bool, expected_channel: u32) ![]const u8 {
@@ -1951,22 +1889,16 @@ fn parseChannelId(packet: []const u8, expected_channel: u32) !void {
 /// Send a CHANNEL_WINDOW_ADJUST if our receive window has dipped below half
 /// of the initial value. Used both for the pre-session discard path and by
 /// SessionCtx after it consumes a CHANNEL_DATA payload.
-fn maybeRefillRecvWindow(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    sc_cipher: *Cipher,
-    writer: *std.Io.Writer,
-    ch: *Channel,
-) !void {
+fn maybeRefillRecvWindow(conn: *Conn, ch: *Channel) !void {
     if (ch.local_window >= initial_recv_window / 2) return;
     const add = initial_recv_window - ch.local_window;
     ch.local_window += add;
     var adj: std.ArrayList(u8) = .empty;
-    defer adj.deinit(allocator);
-    try adj.append(allocator, SSH_MSG_CHANNEL_WINDOW_ADJUST);
-    try writeU32(&adj, allocator, ch.remote_id);
-    try writeU32(&adj, allocator, add);
-    try sc_cipher.writePacket(io, writer, adj.items);
+    defer adj.deinit(conn.allocator);
+    try adj.append(conn.allocator, SSH_MSG_CHANNEL_WINDOW_ADJUST);
+    try writeU32(&adj, conn.allocator, ch.remote_id);
+    try writeU32(&adj, conn.allocator, add);
+    try conn.sc_cipher.writePacket(conn.io, conn.writer, adj.items);
 }
 
 pub fn writeU32(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, value: u32) !void {

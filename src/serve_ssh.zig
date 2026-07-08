@@ -142,8 +142,8 @@ fn runTuiSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh
 }
 
 fn runTui(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh.PtySize) !void {
-    const allocator = sess.allocator;
-    const io = sess.io;
+    const allocator = sess.conn.allocator;
+    const io = sess.conn.io;
 
     // some clients (notably scripted ssh with no local controlling tty)
     // allocate a pty without ever sending a non-zero size. fall back to a
@@ -252,8 +252,8 @@ pub const ParsedGitCommand = struct {
 };
 
 fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, command: []const u8) !void {
-    const allocator = sess.allocator;
-    const io = sess.io;
+    const allocator = sess.conn.allocator;
+    const io = sess.conn.io;
 
     const parsed = parseGitCommand(allocator, command) catch return writeError(sess, "unsupported command (expected git-upload-pack or git-receive-pack)");
     defer parsed.deinit(allocator);
