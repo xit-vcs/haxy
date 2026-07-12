@@ -124,37 +124,28 @@ pub const RoutablePage = union(enum) {
         dir: []const u8,
 
         // parse a `.repo_files` route's stored string ("owner/name" or
-        // "owner/name/files/<refkind>/<refvalue>[/<dir>]").
+        // "owner/name/files/<refkind>/<refvalue>[/<dir>]"). a malformed tail
+        // reads as the bare default-branch root.
         pub fn parse(s: []const u8) ?RepoFiles {
-            const s1 = std.mem.indexOfScalar(u8, s, '/') orelse return null;
-            const owner = s[0..s1];
-            const after = s[s1 + 1 ..];
-            const s2 = std.mem.indexOfScalar(u8, after, '/');
-            const name = if (s2) |i| after[0..i] else after;
+            var segments = std.mem.splitScalar(u8, s, '/');
+            const owner = segments.next() orelse return null;
+            const name = segments.next() orelse return null;
             if (owner.len == 0 or name.len == 0) return null;
             var result: RepoFiles = .{
-                .identity = s[0 .. s1 + 1 + name.len],
+                .identity = s[0 .. owner.len + 1 + name.len],
                 .owner = owner,
                 .name = name,
                 .ref_kind = null,
                 .ref_value = "",
                 .dir = "",
             };
-            // the tail after "owner/name/". absent (or a bare "files") = default root.
-            const tail = if (s2) |i| after[i + 1 ..] else return result;
-            if (std.mem.eql(u8, tail, files_seg)) return result;
-            if (!std.mem.startsWith(u8, tail, files_seg ++ "/")) return result;
-            // "<refkind>/<refvalue>[/<dir>]"
-            const ref_part = tail[files_seg.len + 1 ..];
-            const k1 = std.mem.indexOfScalar(u8, ref_part, '/') orelse return result;
-            const kind = RefOrOid.fromSeg(ref_part[0..k1]) orelse return result;
-            const after_kind = ref_part[k1 + 1 ..];
-            const k2 = std.mem.indexOfScalar(u8, after_kind, '/');
-            const value = if (k2) |i| after_kind[0..i] else after_kind;
+            if (!std.mem.eql(u8, segments.next() orelse return result, files_seg)) return result;
+            const kind = RefOrOid.fromSeg(segments.next() orelse return result) orelse return result;
+            const value = segments.next() orelse return result;
             if (value.len == 0) return result;
             result.ref_kind = kind;
             result.ref_value = value;
-            result.dir = if (k2) |i| after_kind[i + 1 ..] else "";
+            result.dir = segments.rest();
             return result;
         }
     };
@@ -179,13 +170,14 @@ pub const RoutablePage = union(enum) {
     // returned value slices into `s`.
     pub const CommitsRef = struct { ref_or_oid: ?RefOrOid, value: []const u8 };
     pub fn repoCommitsRef(s: []const u8) CommitsRef {
-        const marker = "/" ++ commits_seg ++ "/";
-        const i = std.mem.indexOf(u8, s, marker) orelse return .{ .ref_or_oid = null, .value = "" };
-        const ref_part = s[i + marker.len ..]; // "<refkind>/<refvalue>"
-        const k1 = std.mem.indexOfScalar(u8, ref_part, '/') orelse return .{ .ref_or_oid = null, .value = "" };
-        const kind = RefOrOid.fromSeg(ref_part[0..k1]) orelse return .{ .ref_or_oid = null, .value = "" };
-        const value = ref_part[k1 + 1 ..];
-        if (value.len == 0) return .{ .ref_or_oid = null, .value = "" };
+        const bare = CommitsRef{ .ref_or_oid = null, .value = "" };
+        var segments = std.mem.splitScalar(u8, s, '/');
+        _ = segments.next(); // owner
+        _ = segments.next(); // name
+        if (!std.mem.eql(u8, segments.next() orelse "", commits_seg)) return bare;
+        const kind = RefOrOid.fromSeg(segments.next() orelse "") orelse return bare;
+        const value = segments.rest();
+        if (value.len == 0) return bare;
         return .{ .ref_or_oid = kind, .value = value };
     }
 
@@ -297,12 +289,12 @@ pub const RoutablePage = union(enum) {
         // /user/<name>[/repos|/settings|/auth]
         if (std.mem.startsWith(u8, path, user_segment)) {
             const rest = path[user_segment.len..];
-            const slash = std.mem.indexOfScalar(u8, rest, '/');
-            const name = if (slash) |s| rest[0..s] else rest;
+            var segments = std.mem.splitScalar(u8, rest, '/');
+            const name = segments.next() orelse return null;
             if (name.len == 0) return null;
             const parsed = Array(evt.User.name_max_len).from(name) orelse return null; // name too long
-            if (slash) |s| {
-                const sub = rest[s + 1 ..];
+            if (segments.peek() != null) {
+                const sub = segments.rest();
                 if (std.mem.eql(u8, sub, "repos")) return .{ .user_repos = .{ .name = parsed, .after = after } };
                 if (std.mem.eql(u8, sub, "settings")) return .{ .user_settings = parsed };
                 if (std.mem.eql(u8, sub, "auth")) return .{ .user_auth = parsed };
@@ -316,15 +308,14 @@ pub const RoutablePage = union(enum) {
         // "username/reponame/files/<dir>"; settings/auth store just the pair.
         if (std.mem.startsWith(u8, path, repo_segment)) {
             const rest = path[repo_segment.len..];
-            const user_slash = std.mem.indexOfScalar(u8, rest, '/') orelse return null;
-            const after_user = rest[user_slash + 1 ..];
-            const repo_slash = std.mem.indexOfScalar(u8, after_user, '/');
-            const repo_name = if (repo_slash) |s| after_user[0..s] else after_user;
+            var rest_segments = std.mem.splitScalar(u8, rest, '/');
+            const owner = rest_segments.next() orelse return null;
+            const repo_name = rest_segments.next() orelse return null;
             // reject an empty username or reponame
-            if (user_slash == 0 or repo_name.len == 0) return null;
-            const pair = rest[0 .. user_slash + 1 + repo_name.len]; // "username/reponame"
-            if (repo_slash) |s| {
-                const sub = after_user[s + 1 ..];
+            if (owner.len == 0 or repo_name.len == 0) return null;
+            const pair = rest[0 .. owner.len + 1 + repo_name.len]; // "username/reponame"
+            if (rest_segments.peek() != null) {
+                const sub = rest_segments.rest();
                 if (std.mem.eql(u8, sub, "refs")) return .{ .repo_refs = .{
                     .name = Array(repo_route_max_len).from(pair) orelse return null,
                     .kind = refsKind(query),
@@ -351,26 +342,23 @@ pub const RoutablePage = union(enum) {
                 }
                 if (std.mem.eql(u8, sub, "settings")) return .{ .repo_settings = Array(repo_route_max_len).from(pair) orelse return null };
                 if (std.mem.eql(u8, sub, "auth")) return .{ .repo_auth = Array(repo_route_max_len).from(pair) orelse return null };
-                if (std.mem.eql(u8, sub, files_seg)) return repoFilesRoute(pair, null, "", "", after); // trailing /files == default-branch root
-                if (std.mem.startsWith(u8, sub, files_seg ++ "/")) {
-                    // "files/<refkind>/<refvalue>[/<dir>]"
-                    const ref_part = sub[files_seg.len + 1 ..];
-                    const k1 = std.mem.indexOfScalar(u8, ref_part, '/') orelse return null;
-                    const kind = RefOrOid.fromSeg(ref_part[0..k1]) orelse return null;
-                    const after_kind = ref_part[k1 + 1 ..];
-                    const k2 = std.mem.indexOfScalar(u8, after_kind, '/');
-                    const value = if (k2) |i| after_kind[0..i] else after_kind;
+                if (std.mem.eql(u8, sub, files_seg) or std.mem.startsWith(u8, sub, files_seg ++ "/")) {
+                    // "files[/<refkind>/<refvalue>[/<dir>]]" (bare = default-branch root)
+                    var segments = std.mem.splitScalar(u8, sub, '/');
+                    _ = segments.next(); // "files"
+                    const kind_segment = segments.next() orelse return repoFilesRoute(pair, null, "", "", after);
+                    const kind = RefOrOid.fromSeg(kind_segment) orelse return null;
+                    const value = segments.next() orelse return null;
                     if (value.len == 0) return null;
-                    const dir = if (k2) |i| after_kind[i + 1 ..] else "";
-                    return repoFilesRoute(pair, kind, value, dir, after);
+                    return repoFilesRoute(pair, kind, value, segments.rest(), after);
                 }
-                if (std.mem.eql(u8, sub, commits_seg)) return repoCommitsRoute(pair, null, "", after); // trailing /commits == default branch
-                if (std.mem.startsWith(u8, sub, commits_seg ++ "/")) {
-                    // "commits/<refkind>/<refvalue>"
-                    const ref_part = sub[commits_seg.len + 1 ..];
-                    const k1 = std.mem.indexOfScalar(u8, ref_part, '/') orelse return null;
-                    const kind = RefOrOid.fromSeg(ref_part[0..k1]) orelse return null;
-                    const value = ref_part[k1 + 1 ..];
+                if (std.mem.eql(u8, sub, commits_seg) or std.mem.startsWith(u8, sub, commits_seg ++ "/")) {
+                    // "commits[/<refkind>/<refvalue>]" (bare = default branch)
+                    var segments = std.mem.splitScalar(u8, sub, '/');
+                    _ = segments.next(); // "commits"
+                    const kind_segment = segments.next() orelse return repoCommitsRoute(pair, null, "", after);
+                    const kind = RefOrOid.fromSeg(kind_segment) orelse return null;
+                    const value = segments.rest();
                     if (value.len == 0) return null;
                     return repoCommitsRoute(pair, kind, value, after);
                 }
