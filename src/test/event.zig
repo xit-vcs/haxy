@@ -499,6 +499,30 @@ test "merge" {
             try std.testing.expectEqualStrings(events_to_consume2[0].event.issue.?.description, first_issue.description);
             try std.testing.expectEqualStrings(events_to_consume2[0].event.issue.?.tags, first_issue.tags);
         }
+
+        // the ordered issue set unions both branches' additions
+        {
+            const issue_id_set_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, "issue-id-set")) orelse return error.NotFound;
+            const issue_id_set = try Repo.DB.SortedSet(.read_only).init(issue_id_set_cursor);
+            try std.testing.expectEqual(6, try issue_id_set.count());
+
+            var found = [_]bool{false} ** 6;
+            var iter = try issue_id_set.iteratorFromIndex(0);
+            while (try iter.next()) |id_cursor_val| {
+                var id_cursor = id_cursor_val;
+                const id_kv = try id_cursor.readKeyValuePair();
+                var order_key: [@sizeOf(u64) + evt.event_id_size]u8 = undefined;
+                _ = try id_kv.key_cursor.readBytes(&order_key);
+                const id_hex = std.fmt.bytesToHex(order_key[@sizeOf(u64)..].*, .lower);
+                for (events_to_consume, 0..) |event, i| {
+                    if (std.mem.eql(u8, &id_hex, &event.id)) found[i] = true;
+                }
+                for (events_to_consume2, 0..) |event, i| {
+                    if (std.mem.eql(u8, &id_hex, &event.id)) found[events_to_consume.len + i] = true;
+                }
+            }
+            for (found) |f| try std.testing.expect(f);
+        }
     }
 
     //

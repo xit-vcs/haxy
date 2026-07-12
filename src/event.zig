@@ -287,7 +287,7 @@ pub fn consumeInTransaction(
                 const baseline_haxy_moment_cursor = try haxy_moments.getCursor(hash.bytesToInt(repo_opts.hash, &baseline_oid)) orelse return error.CursorNotFound;
                 const baseline_haxy_moment = try DB.HashMap(.read_only).init(baseline_haxy_moment_cursor);
 
-                try mergeChangedMapEntries(DB, haxy_moment, parent_haxy_moment, baseline_haxy_moment, true);
+                try mergeChangedMapEntries(DB, allocator, haxy_moment, parent_haxy_moment, baseline_haxy_moment, true);
             }
         }
 
@@ -566,6 +566,7 @@ pub fn upsert(
 
 fn mergeChangedMapEntries(
     comptime DB: type,
+    allocator: std.mem.Allocator,
     target: DB.HashMap(.read_write),
     parent: DB.HashMap(.read_only),
     baseline: DB.HashMap(.read_only),
@@ -597,26 +598,66 @@ fn mergeChangedMapEntries(
         if (tag == .hash_map) {
             const target_existing_cursor = try target.getCursor(kv_pair.hash) orelse return error.MergeConflict;
             if (target_existing_cursor.slot().tag != .hash_map) {
-                return error.MergeConflict;
+                return error.UnexpectedTag;
             }
 
             const target_child_cursor = try target.putCursor(kv_pair.hash);
             const target_child = try DB.HashMap(.read_write).init(target_child_cursor);
             const parent_child = try DB.HashMap(.read_only).init(kv_pair.value_cursor);
             const baseline_child = try DB.HashMap(.read_only).init(baseline_value_cursor);
-            try mergeChangedMapEntries(DB, target_child, parent_child, baseline_child, false);
+            try mergeChangedMapEntries(DB, allocator, target_child, parent_child, baseline_child, false);
+        } else if (tag == .sorted_set) {
+            const target_existing_cursor = try target.getCursor(kv_pair.hash) orelse return error.MergeConflict;
+            if (target_existing_cursor.slot().tag != .sorted_set) {
+                return error.UnexpectedTag;
+            }
+
+            const target_child_cursor = try target.putCursor(kv_pair.hash);
+            const target_child = try DB.SortedSet(.read_write).init(target_child_cursor);
+            const parent_child = try DB.SortedSet(.read_only).init(kv_pair.value_cursor);
+            const baseline_child = try DB.SortedSet(.read_only).init(baseline_value_cursor);
+            try mergeChangedSetEntries(DB, allocator, target_child, parent_child, baseline_child);
         } else if (is_top_level) {
             // the moment-index is a top-level key in the haxy moment
             // and is not a map. we don't want to do any merge of this.
             continue;
         } else {
             const target_value_cursor = try target.getCursor(kv_pair.hash) orelse return error.MergeConflict;
+            if (target_value_cursor.slot().tag != baseline_value_cursor.slot().tag) {
+                return error.UnexpectedTag;
+            }
             if (target_value_cursor.slot().value != baseline_value_cursor.slot().value) {
                 return error.MergeConflict;
             }
 
             try target.put(kv_pair.hash, .{ .slot = kv_pair.value_cursor.slot() });
         }
+    }
+}
+
+// three-way merge of a sorted set: apply the parent's changes relative to the
+// baseline. keys have no values, so additions and removals can't conflict.
+fn mergeChangedSetEntries(
+    comptime DB: type,
+    allocator: std.mem.Allocator,
+    target: DB.SortedSet(.read_write),
+    parent: DB.SortedSet(.read_only),
+    baseline: DB.SortedSet(.read_only),
+) !void {
+    var parent_iter = try parent.iterator();
+    while (try parent_iter.next()) |kv_pair_cursor| {
+        const kv_pair = try kv_pair_cursor.readKeyValuePair();
+        const key = try kv_pair.key_cursor.readBytesAlloc(allocator, null);
+        defer allocator.free(key);
+        if (!try baseline.contains(key)) try target.put(key);
+    }
+
+    var baseline_iter = try baseline.iterator();
+    while (try baseline_iter.next()) |kv_pair_cursor| {
+        const kv_pair = try kv_pair_cursor.readKeyValuePair();
+        const key = try kv_pair.key_cursor.readBytesAlloc(allocator, null);
+        defer allocator.free(key);
+        if (!try parent.contains(key)) _ = try target.remove(key);
     }
 }
 
