@@ -46,7 +46,7 @@ pub const Page = union(PageKind) {
                 else => return error.UnexpectedRoute,
             },
             .repo => switch (route) {
-                .repo_files, .repo_commits, .repo_refs, .repo_settings, .repo_auth => .{ .repo = try Repo.init(arena, session, route) },
+                .repo_files, .repo_commits, .repo_refs, .repo_issues, .repo_settings, .repo_auth => .{ .repo = try Repo.init(arena, session, route) },
                 else => return error.UnexpectedRoute,
             },
         };
@@ -75,6 +75,7 @@ pub const RoutablePage = union(enum) {
     repo_files: struct { name: Array(repo_route_max_len), after: usize = 0 },
     repo_commits: struct { name: Array(repo_route_max_len), after: usize = 0 },
     repo_refs: struct { name: Array(repo_route_max_len), kind: RefKind = .branch, after: usize = 0 },
+    repo_issues: struct { name: Array(repo_route_max_len), selected: Array(evt.event_id_size * 2) = .{} },
     repo_settings: Array(repo_route_max_len),
     repo_auth: Array(repo_route_max_len),
 
@@ -199,6 +200,15 @@ pub const RoutablePage = union(enum) {
         return .{ .repo_refs = .{ .name = Array(repo_route_max_len).from(identity) orelse return null, .kind = kind, .after = after } };
     }
 
+    // build a `.repo_issues` route for "owner/name" (identity) rooted at the
+    // issue with hex event id `selected` ("" = the first window).
+    pub fn repoIssuesRoute(identity: []const u8, selected: []const u8) ?RoutablePage {
+        return .{ .repo_issues = .{
+            .name = Array(repo_route_max_len).from(identity) orelse return null,
+            .selected = Array(evt.event_id_size * 2).from(selected) orelse return null,
+        } };
+    }
+
     // an inline, owned array of data. keeping it in the route (rather than a
     // borrowed slice) makes RoutablePage a plain value: it can be copied, stored
     // in history, and serialized without any arena tracking.
@@ -244,6 +254,10 @@ pub const RoutablePage = union(enum) {
                 try std.fmt.allocPrint(arena.allocator(), repo_segment ++ "{s}/refs", .{r.name.slice()})
             else
                 try std.fmt.allocPrint(arena.allocator(), repo_segment ++ "{s}/refs?kind={s}&after={d}", .{ r.name.slice(), @tagName(r.kind), r.after }),
+            .repo_issues => |i| if (i.selected.len == 0)
+                try std.fmt.allocPrint(arena.allocator(), repo_segment ++ "{s}/issues", .{i.name.slice()})
+            else
+                try std.fmt.allocPrint(arena.allocator(), repo_segment ++ "{s}/issues/{s}", .{ i.name.slice(), i.selected.slice() }),
             .repo_settings => |name| try std.fmt.allocPrint(arena.allocator(), repo_segment ++ "{s}/settings", .{name.slice()}),
             .repo_auth => |name| try std.fmt.allocPrint(arena.allocator(), repo_segment ++ "{s}/auth", .{name.slice()}),
         };
@@ -253,7 +267,7 @@ pub const RoutablePage = union(enum) {
         return switch (self) {
             .home_users, .home_repos, .home_settings, .home_auth => .home,
             .user_repos, .user_settings, .user_auth => .user,
-            .repo_files, .repo_commits, .repo_refs, .repo_settings, .repo_auth => .repo,
+            .repo_files, .repo_commits, .repo_refs, .repo_issues, .repo_settings, .repo_auth => .repo,
         };
     }
 
@@ -301,6 +315,13 @@ pub const RoutablePage = union(enum) {
                     .kind = refsKind(query),
                     .after = after,
                 } };
+                if (std.mem.eql(u8, sub, "issues")) return repoIssuesRoute(pair, "");
+                if (std.mem.startsWith(u8, sub, "issues/")) {
+                    // "issues/<issue event id>"
+                    const id = sub["issues/".len..];
+                    if (id.len == 0) return null;
+                    return repoIssuesRoute(pair, id);
+                }
                 if (std.mem.eql(u8, sub, "settings")) return .{ .repo_settings = Array(repo_route_max_len).from(pair) orelse return null };
                 if (std.mem.eql(u8, sub, "auth")) return .{ .repo_auth = Array(repo_route_max_len).from(pair) orelse return null };
                 if (std.mem.eql(u8, sub, files_seg)) return repoFilesRoute(pair, null, "", "", after); // trailing /files == default-branch root
@@ -368,6 +389,7 @@ pub const RoutablePage = union(enum) {
             .repo_files => |a_f| std.mem.eql(u8, a_f.name.slice(), b.repo_files.name.slice()) and a_f.after == b.repo_files.after,
             .repo_commits => |a_c| std.mem.eql(u8, a_c.name.slice(), b.repo_commits.name.slice()) and a_c.after == b.repo_commits.after,
             .repo_refs => |a_r| std.mem.eql(u8, a_r.name.slice(), b.repo_refs.name.slice()) and a_r.kind == b.repo_refs.kind and a_r.after == b.repo_refs.after,
+            .repo_issues => |a_i| std.mem.eql(u8, a_i.name.slice(), b.repo_issues.name.slice()) and std.mem.eql(u8, a_i.selected.slice(), b.repo_issues.selected.slice()),
             .repo_settings => |a_name| std.mem.eql(u8, a_name.slice(), b.repo_settings.slice()),
             .repo_auth => |a_name| std.mem.eql(u8, a_name.slice(), b.repo_auth.slice()),
             else => true,
@@ -437,6 +459,12 @@ pub const RoutablePage = union(enum) {
                 try jw.objectField("name");
                 try jw.write(name.slice());
             },
+            .repo_issues => |i| {
+                try jw.objectField("name");
+                try jw.write(i.name.slice());
+                try jw.objectField("selected");
+                try jw.write(i.selected.slice());
+            },
             .repo_files => |f| {
                 try jw.objectField("name");
                 try jw.write(f.name.slice());
@@ -469,7 +497,7 @@ pub const RoutablePage = union(enum) {
     }
 
     pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !RoutablePage {
-        const Helper = struct { kind: std.meta.Tag(RoutablePage), name: ?[]const u8 = null, after: usize = 0, ref_kind: ?[]const u8 = null };
+        const Helper = struct { kind: std.meta.Tag(RoutablePage), name: ?[]const u8 = null, after: usize = 0, ref_kind: ?[]const u8 = null, selected: ?[]const u8 = null };
         const helper = try std.json.innerParse(Helper, allocator, source, options);
         const parseName = struct {
             // errors must stay within std.json's ParseError set; ValueTooLong
@@ -492,6 +520,10 @@ pub const RoutablePage = union(enum) {
                 .name = try parseName(repo_route_max_len, helper.name),
                 .kind = if (helper.ref_kind) |k| (if (std.mem.eql(u8, k, "tag")) .tag else .branch) else .branch,
                 .after = helper.after,
+            } },
+            .repo_issues => .{ .repo_issues = .{
+                .name = try parseName(repo_route_max_len, helper.name),
+                .selected = Array(evt.event_id_size * 2).from(helper.selected orelse "") orelse return error.ValueTooLong,
             } },
             .repo_settings => .{ .repo_settings = try parseName(repo_route_max_len, helper.name) },
             .repo_auth => .{ .repo_auth = try parseName(repo_route_max_len, helper.name) },
@@ -1058,6 +1090,7 @@ pub const Widget = union(enum) {
     repo_files: Repo.Files.View,
     repo_commits: Repo.Commits.View,
     repo_refs: Repo.Refs.View,
+    repo_issues: Repo.Issues.View,
     home_users: Home.Users.View,
     home_repos: Home.Repos.View,
     auth_tab: Home.Header.AuthTab.View,

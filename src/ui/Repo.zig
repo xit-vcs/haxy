@@ -15,6 +15,7 @@ pub const SubHeader = @import("./Repo/SubHeader.zig");
 pub const Files = @import("./Repo/Files.zig");
 pub const Commits = @import("./Repo/Commits.zig");
 pub const Refs = @import("./Repo/Refs.zig");
+pub const Issues = @import("./Repo/Issues.zig");
 pub const Settings = @import("./Settings.zig");
 pub const Auth = @import("./Auth.zig");
 pub const Quit = @import("./Quit.zig");
@@ -26,6 +27,7 @@ repo: evt.Repo,
 files: Files,
 commits: Commits,
 refs: Refs,
+issues: Issues,
 settings: Settings,
 auth: Auth,
 quit: Quit,
@@ -62,6 +64,7 @@ pub fn init(
         .repo_settings, .repo_auth => |n| n.slice(),
         .repo_commits => |c| c.name.slice(),
         .repo_refs => |r| r.name.slice(),
+        .repo_issues => |i| i.name.slice(),
         else => return error.UnexpectedRoute,
     };
     const rf = ui.RoutablePage.RepoFiles.parse(name_str) orelse return error.NotFound;
@@ -105,6 +108,11 @@ pub fn init(
         .repo_refs => |r| r.after,
         else => 0,
     };
+    // the issue the issues tab's window is rooted at ("" = the first window).
+    const issues_selected: []const u8 = switch (route) {
+        .repo_issues => |i| i.selected.slice(),
+        else => "",
+    };
 
     const found = (try evt.Repo.readByOwnerAndName(DB, hash_kind, haxy_moment, arena, rf.owner, rf.name)) orelse return error.NotFound;
     const repo = found.repo;
@@ -139,6 +147,7 @@ pub fn init(
         .files = files,
         .commits = commits,
         .refs = try Refs.init(arena, session, &found.event_id, rf.identity, refs_kind, refs_after),
+        .issues = try Issues.init(arena, session, &found.event_id, rf.identity, issues_selected),
         .settings = Settings.init(),
         .auth = Auth.init(),
         .quit = Quit.init(),
@@ -197,6 +206,13 @@ pub const View = struct {
                 try stack.children.put(allocator, refs_view.getFocus().id, .{ .repo_refs = refs_view });
             }
 
+            // issues — the repo's issue tracker.
+            {
+                var issues_view = try Issues.View.init(allocator, &data.issues, session);
+                errdefer issues_view.deinit(allocator);
+                try stack.children.put(allocator, issues_view.getFocus().id, .{ .repo_issues = issues_view });
+            }
+
             {
                 var settings_view = try Settings.View.init(allocator, session);
                 errdefer settings_view.deinit(allocator);
@@ -244,6 +260,8 @@ pub const View = struct {
                 .repo_commits => self.session.data.current_page = .{ .repo_commits = .{ .name = self.data.commits_route_name, .after = self.data.commits_after } },
                 // the refs tab mirrors this page's paginated column + offset.
                 .repo_refs => self.session.data.current_page = .{ .repo_refs = .{ .name = self.data.identity, .kind = self.data.refs.kind, .after = self.data.refs.after } },
+                // the issues tab mirrors the issue this page's window is rooted at.
+                .repo_issues => self.session.data.current_page = ui.RoutablePage.repoIssuesRoute(self.data.identity.slice(), self.data.issues.selected_id) orelse self.session.data.current_page,
                 .home_settings => self.session.data.current_page = .{ .repo_settings = self.data.identity },
                 .home_auth => self.session.data.current_page = .{ .repo_auth = self.data.identity },
                 // the quit tab is tty-only and not a route, so leave current_page
@@ -276,6 +294,7 @@ pub const View = struct {
                                         .repo_files => |*v| v.getSelectedIndex() == 0,
                                         .repo_commits => |*v| v.getSelectedIndex() == 0,
                                         .repo_refs => |*v| v.getSelectedIndex() == 0,
+                                        .repo_issues => |*v| v.getSelectedIndex() == 0,
                                         .home_settings => |*v| v.getSelectedIndex() == 0,
                                         .home_auth => |*v| v.getSelectedIndex() == 0,
                                         .quit => |*v| v.getSelectedIndex() == 0,

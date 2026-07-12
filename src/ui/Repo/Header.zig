@@ -107,6 +107,7 @@ pub const View = struct {
         const commits_route = ui.RoutablePage.repoCommitsRoute(identity, data.ref_or_oid, data.ref_or_oid_value, 0) orelse return error.RouteTooLong;
         const commits_link = try std.fmt.allocPrint(aa, "ai:{s}", .{try commits_route.urlAlloc(session.page_arena)});
         const refs_link = try std.fmt.allocPrint(aa, "ai:/repo/{s}/{s}/refs", .{ data.owner_name, data.name });
+        const issues_link = try std.fmt.allocPrint(aa, "ai:/repo/{s}/{s}/issues", .{ data.owner_name, data.name });
         const settings_link = try std.fmt.allocPrint(aa, "ai:/repo/{s}/{s}/settings", .{ data.owner_name, data.name });
         const auth_link = try std.fmt.allocPrint(aa, "ai:/repo/{s}/{s}/auth", .{ data.owner_name, data.name });
 
@@ -115,6 +116,7 @@ pub const View = struct {
         const current_link: []const u8 = switch (session.data.current_page) {
             .repo_commits => commits_link,
             .repo_refs => refs_link,
+            .repo_issues => issues_link,
             .repo_settings => settings_link,
             .repo_auth => auth_link,
             else => files_link,
@@ -163,6 +165,21 @@ pub const View = struct {
                 .widget = .{ .text_box = text_box },
                 .rect = null,
                 .min_size = .{ .width = "refs".len + 2, .height = null },
+            });
+        }
+
+        // issues tab
+        {
+            var text_box = try wgt.TextBox(ui.Widget).init(allocator, "issues", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            errdefer text_box.deinit(allocator);
+            text_box.getFocus().focusable = true;
+            text_box.getFocus().kind = .{ .custom = issues_link };
+            try tab_ids.put(allocator, text_box.getFocus().id, {});
+            if (std.mem.eql(u8, issues_link, current_link)) selected_tab = text_box.getFocus().id;
+            try box.children.put(allocator, text_box.getFocus().id, .{
+                .widget = .{ .text_box = text_box },
+                .rect = null,
+                .min_size = .{ .width = "issues".len + 2, .height = null },
             });
         }
 

@@ -316,7 +316,7 @@ pub fn consumeInTransaction(
             switch (event_with_id.event) {
                 .user => |event_maybe| try User.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, event_maybe, &arena, created_ts),
                 .repo => |event_maybe| try Repo.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, event_maybe, &arena, created_ts),
-                .issue => |event_maybe| try Issue.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, event_maybe),
+                .issue => |event_maybe| try Issue.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, event_maybe, &arena, created_ts),
             }
         }
 
