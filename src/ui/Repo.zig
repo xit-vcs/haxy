@@ -170,11 +170,15 @@ pub fn init(
                     var any_repo = rp.AnyRepo(repo_kind, .{}).open(io, gpa, .{ .path = src.path }) catch break :read;
                     defer any_repo.deinit(io, gpa);
                     switch (any_repo) {
-                        inline else => |*opened| break :blk .{
-                            try Files.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, rf.identity, requested_ref_or_oid, requested_ref_value, files_dir, files_after),
-                            try Commits.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, rf.identity, requested_ref_or_oid, requested_ref_value, commits_after),
-                            try Refs.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, rf.identity, refs_kind, refs_after),
-                            try Issues.init(repo_kind, opened.self_repo_opts, arena, opened, rf.identity, issues_tag, issues_selected),
+                        inline else => |*opened| {
+                            // local mode: bring the event db up to date with the events branch
+                            if (session.local != null) evt.syncLocalEvents(repo_kind, opened.self_repo_opts, io, gpa, opened) catch {};
+                            break :blk .{
+                                try Files.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, rf.identity, requested_ref_or_oid, requested_ref_value, files_dir, files_after),
+                                try Commits.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, rf.identity, requested_ref_or_oid, requested_ref_value, commits_after),
+                                try Refs.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, rf.identity, refs_kind, refs_after),
+                                try Issues.init(repo_kind, opened.self_repo_opts, arena, opened, io, rf.identity, issues_tag, issues_selected),
+                            };
                         },
                     }
                 },

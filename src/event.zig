@@ -22,6 +22,12 @@ pub const events_ref: rf.Ref = .{ .kind = .head, .name = "haxy/meta" };
 pub const admin_repo_opts: rp.RepoOpts(.xit) = .{};
 pub const AdminDB = rp.Repo(.xit, admin_repo_opts).DB;
 
+// the xitdb type events are stored in. it only depends on the hash kind, so
+// this matches the db of any xit repo using that hash kind.
+pub fn EventDB(comptime hash_kind: hash.HashKind) type {
+    return rp.Repo(.xit, .{ .hash = hash_kind }).DB;
+}
+
 pub const EventKind = enum {
     user,
     repo,
@@ -108,7 +114,7 @@ pub fn consume(
         pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
             var moment = try DB.HashMap(.read_write).init(cursor.*);
             const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
-            try consumeInTransaction(repo_opts, state, ctx.io, ctx.allocator, ctx.ref);
+            try consumeInTransaction(.xit, repo_opts, state.readOnly(), &ctx.core.db, &moment, ctx.io, ctx.allocator, ctx.ref);
         }
     };
 
@@ -124,18 +130,148 @@ pub fn consume(
     });
 }
 
+// a standalone event db holding events consumed from a local repo's events
+// branch. it lives inside the repo dir but is not part of the repo's own data,
+// so viewing a repo never mutates it.
+pub fn LocalEventDB(comptime hash_kind: hash.HashKind) type {
+    return struct {
+        file: std.Io.File,
+        buffer: *std.Io.Writer.Allocating,
+        db: *EventDB(hash_kind),
+
+        const db_name = "haxy";
+        const Self = @This();
+
+        // open the db in `repo_dir`, creating it if it doesn't exist
+        pub fn create(io: std.Io, allocator: std.mem.Allocator, repo_dir: std.Io.Dir) !Self {
+            const file = try repo_dir.createFile(io, db_name, .{ .truncate = false, .read = true });
+            return fromFile(io, allocator, file);
+        }
+
+        // open the db in `repo_dir`, or null if it doesn't exist
+        pub fn open(io: std.Io, allocator: std.mem.Allocator, repo_dir: std.Io.Dir) !?Self {
+            const file = repo_dir.openFile(io, db_name, .{ .mode = .read_write, .lock = .none }) catch |err| switch (err) {
+                error.FileNotFound => return null,
+                else => |e| return e,
+            };
+            return try fromFile(io, allocator, file);
+        }
+
+        fn fromFile(io: std.Io, allocator: std.mem.Allocator, file: std.Io.File) !Self {
+            errdefer file.close(io);
+
+            const buffer = try allocator.create(std.Io.Writer.Allocating);
+            errdefer allocator.destroy(buffer);
+            buffer.* = std.Io.Writer.Allocating.init(allocator);
+            errdefer buffer.deinit();
+
+            const db = try allocator.create(EventDB(hash_kind));
+            errdefer allocator.destroy(db);
+            db.* = try EventDB(hash_kind).init(.{ .io = io, .file = file, .buffer = buffer });
+
+            return .{ .file = file, .buffer = buffer, .db = db };
+        }
+
+        pub fn deinit(self: *Self, io: std.Io, allocator: std.mem.Allocator) void {
+            self.file.close(io);
+            self.buffer.deinit();
+            allocator.destroy(self.buffer);
+            allocator.destroy(self.db);
+        }
+
+        // consume the events on `repo`'s `ref` into this db
+        pub fn consume(
+            self: *Self,
+            comptime repo_kind: rp.RepoKind,
+            comptime repo_opts: rp.RepoOpts(repo_kind),
+            io: std.Io,
+            allocator: std.mem.Allocator,
+            repo: *rp.Repo(repo_kind, repo_opts),
+            ref: rf.Ref,
+        ) !void {
+            comptime if (repo_opts.hash != hash_kind) @compileError("the repo must use the db's hash kind");
+            const DB = EventDB(hash_kind);
+
+            const Ctx = struct {
+                repo: *rp.Repo(repo_kind, repo_opts),
+                db: *DB,
+                io: std.Io,
+                allocator: std.mem.Allocator,
+                ref: rf.Ref,
+
+                pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
+                    var moment = try DB.HashMap(.read_write).init(cursor.*);
+                    var repo_moment = try ctx.repo.core.latestMoment();
+                    const read_state = rp.Repo(repo_kind, repo_opts).State(.read_only){ .core = &ctx.repo.core, .extra = .{ .moment = &repo_moment } };
+                    try consumeInTransaction(repo_kind, repo_opts, read_state, ctx.db, &moment, ctx.io, ctx.allocator, ctx.ref);
+                }
+            };
+
+            try self.file.lock(io, .exclusive);
+            defer self.file.unlock(io);
+
+            const history = try DB.ArrayList(.read_write).init(self.db.rootCursor());
+            try history.appendContext(.{ .slot = try history.getSlot(-1) }, Ctx{
+                .repo = repo,
+                .db = self.db,
+                .io = io,
+                .allocator = allocator,
+                .ref = ref,
+            });
+        }
+    };
+}
+
+// bring a local repo's event db up to date with its events branch
+pub fn syncLocalEvents(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    repo: *rp.Repo(repo_kind, repo_opts),
+) !void {
+    var remotes = try repo.listRemotes(io, allocator);
+    defer remotes.deinit();
+
+    const ref: rf.Ref, const tip: [hash.hexLen(repo_opts.hash)]u8 = blk: {
+        if (try repo.readRef(io, events_ref)) |oid| break :blk .{ events_ref, oid };
+        for (remotes.sections.keys()) |remote_name| {
+            const remote_ref: rf.Ref = .{ .kind = .{ .remote = remote_name }, .name = events_ref.name };
+            if (try repo.readRef(io, remote_ref)) |oid| break :blk .{ remote_ref, oid };
+        }
+        return;
+    };
+
+    var event_db = try LocalEventDB(repo_opts.hash).create(io, allocator, repo.core.repo_dir);
+    defer event_db.deinit(io, allocator);
+
+    if (try lastConsumedOid(repo_opts.hash, event_db.db)) |last_oid| {
+        var tip_bytes: [hash.byteLen(repo_opts.hash)]u8 = undefined;
+        _ = try std.fmt.hexToBytes(&tip_bytes, &tip);
+        if (std.mem.eql(u8, &last_oid, &tip_bytes)) return;
+    }
+
+    try event_db.consume(repo_kind, repo_opts, io, allocator, repo, ref);
+}
+
+// consume the events on `ref` into the db `moment` writes to. events are read
+// from `read_state`'s repo, which needn't be the repo backing the db — that's
+// how a local (possibly git-backed) repo's events land in a standalone db.
 pub fn consumeInTransaction(
-    comptime repo_opts: rp.RepoOpts(.xit),
-    state: rp.Repo(.xit, repo_opts).State(.read_write),
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    read_state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+    db: *EventDB(repo_opts.hash),
+    moment: *EventDB(repo_opts.hash).HashMap(.read_write),
     io: std.Io,
     allocator: std.mem.Allocator,
     ref: rf.Ref,
 ) !void {
-    const DB = rp.Repo(.xit, repo_opts).DB;
+    const DB = EventDB(repo_opts.hash);
 
     // the last_object_id represents the object id that was last consumed
     var last_object_id_maybe: ?[hash.byteLen(repo_opts.hash)]u8 = null;
-    if (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "haxy-last-object-id"))) |last_object_id_cursor| {
+    if (try moment.getCursor(hash.hashInt(repo_opts.hash, "haxy-last-object-id"))) |last_object_id_cursor| {
         var last_object_id_buffer: [hash.byteLen(repo_opts.hash)]u8 = undefined;
         _ = try last_object_id_cursor.readBytes(&last_object_id_buffer);
         last_object_id_maybe = last_object_id_buffer;
@@ -145,7 +281,7 @@ pub fn consumeInTransaction(
     // the reason it is a list is so we can keep every previous haxy
     // state, making it easy to revert to an older state if the user
     // rebases some of the past commits.
-    const haxy_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "haxy"));
+    const haxy_cursor = try moment.putCursor(hash.hashInt(repo_opts.hash, "haxy"));
     const haxy = try DB.ArrayList(.read_write).init(haxy_cursor);
 
     // add a new item to the haxy list created above.
@@ -159,7 +295,7 @@ pub fn consumeInTransaction(
     }
     var haxy_moments = try DB.HashMap(.read_write).init(haxy_moments_cursor);
 
-    var commit_iter = try CommitIterator(repo_opts).init(state.readOnly(), io, allocator, haxy_moments.readOnly(), ref);
+    var commit_iter = try CommitIterator(repo_kind, repo_opts).init(read_state, io, allocator, haxy_moments.readOnly(), ref);
     defer commit_iter.deinit(io, allocator);
 
     // if there are no events to process, look at the oid at HEAD and update
@@ -167,7 +303,7 @@ pub fn consumeInTransaction(
     // where we do a merge and then force-push to remove the merge. see the
     // merge test for an example.
     if (commit_iter.newest_object_id == null) {
-        const head_oid_hex = (try rf.readRecur(.xit, repo_opts, state.readOnly(), io, .{ .ref = ref })) orelse return error.OidNotFound;
+        const head_oid_hex = (try rf.readRecur(repo_kind, repo_opts, read_state, io, .{ .ref = ref })) orelse return error.OidNotFound;
         var head_oid: [hash.byteLen(repo_opts.hash)]u8 = undefined;
         _ = try std.fmt.hexToBytes(&head_oid, &head_oid_hex);
 
@@ -178,7 +314,7 @@ pub fn consumeInTransaction(
         const moment_index = try moment_index_cursor.readUint();
 
         try haxy.slice(moment_index + 1);
-        try state.extra.moment.put(hash.hashInt(repo_opts.hash, "haxy-last-object-id"), .{ .bytes = &head_oid });
+        try moment.put(hash.hashInt(repo_opts.hash, "haxy-last-object-id"), .{ .bytes = &head_oid });
         return;
     }
 
@@ -191,9 +327,9 @@ pub fn consumeInTransaction(
         const newest_object_id = commit_iter.newest_object_id orelse return error.OidNotFound;
 
         _ = mrg.getDescendent(
-            .xit,
+            repo_kind,
             repo_opts,
-            state.readOnly(),
+            read_state,
             io,
             allocator,
             &std.fmt.bytesToHex(last_object_id, .lower),
@@ -205,7 +341,7 @@ pub fn consumeInTransaction(
 
         if (is_rebased) {
             const oldest_object_id = commit_iter.oldest_object_id orelse return error.OidNotFound;
-            var oldest_object = try obj.Object(.xit, repo_opts).init(state.readOnly(), io, allocator, &std.fmt.bytesToHex(oldest_object_id, .lower));
+            var oldest_object = try obj.Object(repo_kind, repo_opts).init(read_state, io, allocator, &std.fmt.bytesToHex(oldest_object_id, .lower));
             defer oldest_object.deinit();
 
             const parent_oids = oldest_object.content.commit.metadata.parent_oids orelse return error.ParentOidsNotFound;
@@ -250,7 +386,7 @@ pub fn consumeInTransaction(
     }
 
     while (try commit_iter.next()) |repo_event_oid| {
-        var commit_object = try obj.Object(.xit, repo_opts).init(state.readOnly(), io, allocator, &std.fmt.bytesToHex(repo_event_oid, .lower));
+        var commit_object = try obj.Object(repo_kind, repo_opts).init(read_state, io, allocator, &std.fmt.bytesToHex(repo_event_oid, .lower));
         defer commit_object.deinit();
 
         const parent_oids = commit_object.content.commit.metadata.parent_oids orelse return error.ParentOidsNotFound;
@@ -281,7 +417,7 @@ pub fn consumeInTransaction(
                 const parent_haxy_moment_cursor = try haxy_moments.getCursor(hash.bytesToInt(repo_opts.hash, &oid)) orelse return error.CursorNotFound;
                 const parent_haxy_moment = try DB.HashMap(.read_only).init(parent_haxy_moment_cursor);
 
-                const baseline_oid_hex = try mrg.commonAncestor(.xit, repo_opts, state.readOnly(), io, allocator, &parent_oids[0], parent_oid);
+                const baseline_oid_hex = try mrg.commonAncestor(repo_kind, repo_opts, read_state, io, allocator, &parent_oids[0], parent_oid);
                 var baseline_oid: [hash.byteLen(repo_opts.hash)]u8 = undefined;
                 _ = try std.fmt.hexToBytes(&baseline_oid, &baseline_oid_hex);
                 const baseline_haxy_moment_cursor = try haxy_moments.getCursor(hash.bytesToInt(repo_opts.hash, &baseline_oid)) orelse return error.CursorNotFound;
@@ -324,11 +460,11 @@ pub fn consumeInTransaction(
         last_object_id_maybe = repo_event_oid;
 
         // prevent any of the data created above from being mutated by future iterations of this loop
-        try state.core.db.freeze();
+        try db.freeze();
     }
 
     if (last_object_id_maybe) |*last_object_id| {
-        try state.extra.moment.put(hash.hashInt(repo_opts.hash, "haxy-last-object-id"), .{ .bytes = last_object_id });
+        try moment.put(hash.hashInt(repo_opts.hash, "haxy-last-object-id"), .{ .bytes = last_object_id });
     }
 }
 
@@ -336,18 +472,39 @@ pub fn currentMoment(
     comptime repo_opts: rp.RepoOpts(.xit),
     repo: *rp.Repo(.xit, repo_opts),
 ) !rp.Repo(.xit, repo_opts).DB.HashMap(.read_only) {
-    const DB = rp.Repo(.xit, repo_opts).DB;
-    const history = try DB.ArrayList(.read_only).init(repo.core.db.rootCursor().readOnly());
+    return currentMomentFromDb(repo_opts.hash, &repo.core.db);
+}
+
+// the oid of the last event commit consumed into `db`, or null before any
+// consume completed
+fn lastConsumedOid(
+    comptime hash_kind: hash.HashKind,
+    db: *EventDB(hash_kind),
+) !?[hash.byteLen(hash_kind)]u8 {
+    const DB = EventDB(hash_kind);
+    const history = try DB.ArrayList(.read_only).init(db.rootCursor().readOnly());
+    const moment_cursor = try history.getCursor(-1) orelse return null;
+    const moment = try DB.HashMap(.read_only).init(moment_cursor);
+    const last_object_id_cursor = try moment.getCursor(hash.hashInt(hash_kind, "haxy-last-object-id")) orelse return null;
+    var last_object_id: [hash.byteLen(hash_kind)]u8 = undefined;
+    _ = try last_object_id_cursor.readBytes(&last_object_id);
+    return last_object_id;
+}
+
+pub fn currentMomentFromDb(
+    comptime hash_kind: hash.HashKind,
+    db: *EventDB(hash_kind),
+) !EventDB(hash_kind).HashMap(.read_only) {
+    const DB = EventDB(hash_kind);
+    const last_object_id = (try lastConsumedOid(hash_kind, db)) orelse return error.NotFound;
+    const history = try DB.ArrayList(.read_only).init(db.rootCursor().readOnly());
     const moment_cursor = try history.getCursor(-1) orelse return error.NotFound;
     const moment = try DB.HashMap(.read_only).init(moment_cursor);
-    const last_object_id_cursor = try moment.getCursor(hash.hashInt(repo_opts.hash, "haxy-last-object-id")) orelse return error.NotFound;
-    var last_object_id: [hash.byteLen(repo_opts.hash)]u8 = undefined;
-    _ = try last_object_id_cursor.readBytes(&last_object_id);
-    const haxy_cursor = try moment.getCursor(hash.hashInt(repo_opts.hash, "haxy")) orelse return error.NotFound;
+    const haxy_cursor = try moment.getCursor(hash.hashInt(hash_kind, "haxy")) orelse return error.NotFound;
     const haxy = try DB.ArrayList(.read_only).init(haxy_cursor);
     const haxy_moments_cursor = try haxy.getCursor(-1) orelse return error.NotFound;
     const haxy_moments = try DB.HashMap(.read_only).init(haxy_moments_cursor);
-    const haxy_moment_cursor = try haxy_moments.getCursor(hash.bytesToInt(repo_opts.hash, &last_object_id)) orelse return error.NotFound;
+    const haxy_moment_cursor = try haxy_moments.getCursor(hash.bytesToInt(hash_kind, &last_object_id)) orelse return error.NotFound;
     return try DB.HashMap(.read_only).init(haxy_moment_cursor);
 }
 
@@ -870,9 +1027,9 @@ fn bytesEqual(
 // 3. stores its temporary state in a file on disk to avoid OOMs
 //
 
-pub fn CommitIterator(comptime repo_opts: rp.RepoOpts(.xit)) type {
+pub fn CommitIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
     return struct {
-        const DB = rp.Repo(.xit, repo_opts).DB;
+        const DB = EventDB(repo_opts.hash);
         const db_name = "haxy-repo-events.db";
 
         repo_dir: std.Io.Dir,
@@ -892,12 +1049,12 @@ pub fn CommitIterator(comptime repo_opts: rp.RepoOpts(.xit)) type {
         oldest_object_id: ?[hash.byteLen(repo_opts.hash)]u8,
 
         pub fn init(
-            state: rp.Repo(.xit, repo_opts).State(.read_only),
+            state: rp.Repo(repo_kind, repo_opts).State(.read_only),
             io: std.Io,
             allocator: std.mem.Allocator,
             consumed_object_ids: DB.HashMap(.read_only),
             ref: rf.Ref,
-        ) !CommitIterator(repo_opts) {
+        ) !CommitIterator(repo_kind, repo_opts) {
             const db_file = try state.core.repo_dir.createFile(io, db_name, .{ .truncate = true, .lock = .exclusive, .read = true });
             errdefer {
                 db_file.close(io);
@@ -925,7 +1082,7 @@ pub fn CommitIterator(comptime repo_opts: rp.RepoOpts(.xit)) type {
             const ready_queue_cursor = try map.putCursor(hash.hashInt(repo_opts.hash, "ready-queue"));
             const ready_queue = try DB.ArrayList(.read_write).init(ready_queue_cursor);
 
-            var self = CommitIterator(repo_opts){
+            var self = CommitIterator(repo_kind, repo_opts){
                 .repo_dir = state.core.repo_dir,
                 .db_file = db_file,
                 .db = db_ptr,
@@ -943,7 +1100,7 @@ pub fn CommitIterator(comptime repo_opts: rp.RepoOpts(.xit)) type {
             return self;
         }
 
-        pub fn deinit(self: *CommitIterator(repo_opts), io: std.Io, allocator: std.mem.Allocator) void {
+        pub fn deinit(self: *CommitIterator(repo_kind, repo_opts), io: std.Io, allocator: std.mem.Allocator) void {
             self.db_file.close(io);
             self.db.core.memory.buffer.deinit();
             allocator.destroy(self.db.core.memory.buffer);
@@ -951,7 +1108,7 @@ pub fn CommitIterator(comptime repo_opts: rp.RepoOpts(.xit)) type {
             allocator.destroy(self.db);
         }
 
-        pub fn next(self: *CommitIterator(repo_opts)) !?[hash.byteLen(repo_opts.hash)]u8 {
+        pub fn next(self: *CommitIterator(repo_kind, repo_opts)) !?[hash.byteLen(repo_opts.hash)]u8 {
             if (self.ready_queue_index >= try self.ready_queue.count()) return null;
 
             const oid = try readOidFromList(self.ready_queue.readOnly(), self.ready_queue_index);
@@ -962,8 +1119,8 @@ pub fn CommitIterator(comptime repo_opts: rp.RepoOpts(.xit)) type {
         }
 
         fn collect(
-            self: *CommitIterator(repo_opts),
-            state: rp.Repo(.xit, repo_opts).State(.read_only),
+            self: *CommitIterator(repo_kind, repo_opts),
+            state: rp.Repo(repo_kind, repo_opts).State(.read_only),
             io: std.Io,
             allocator: std.mem.Allocator,
             consumed_object_ids: DB.HashMap(.read_only),
@@ -978,7 +1135,7 @@ pub fn CommitIterator(comptime repo_opts: rp.RepoOpts(.xit)) type {
             const seen_object_ids_cursor = try map.putCursor(hash.hashInt(repo_opts.hash, "seen-object-ids"));
             const seen_object_ids = try DB.HashSet(.read_write).init(seen_object_ids_cursor);
 
-            const head_oid_hex = (try rf.readRecur(.xit, repo_opts, state, io, .{ .ref = ref })) orelse return error.OidNotFound;
+            const head_oid_hex = (try rf.readRecur(repo_kind, repo_opts, state, io, .{ .ref = ref })) orelse return error.OidNotFound;
             var head_oid: [hash.byteLen(repo_opts.hash)]u8 = undefined;
             _ = try std.fmt.hexToBytes(&head_oid, &head_oid_hex);
             try walk_queue.append(.{ .bytes = &head_oid });
@@ -996,7 +1153,7 @@ pub fn CommitIterator(comptime repo_opts: rp.RepoOpts(.xit)) type {
 
                 try seen_object_ids.put(oid_int, .{ .bytes = &oid });
 
-                var commit_object = try obj.Object(.xit, repo_opts).init(state, io, allocator, &std.fmt.bytesToHex(oid, .lower));
+                var commit_object = try obj.Object(repo_kind, repo_opts).init(state, io, allocator, &std.fmt.bytesToHex(oid, .lower));
                 defer commit_object.deinit();
 
                 // if this object id has already been consumed, skip it
@@ -1038,7 +1195,7 @@ pub fn CommitIterator(comptime repo_opts: rp.RepoOpts(.xit)) type {
             }
         }
 
-        fn enqueueChildren(self: *CommitIterator(repo_opts), oid: *const [hash.byteLen(repo_opts.hash)]u8) !void {
+        fn enqueueChildren(self: *CommitIterator(repo_kind, repo_opts), oid: *const [hash.byteLen(repo_opts.hash)]u8) !void {
             const oid_int = hash.bytesToInt(repo_opts.hash, oid);
             const children_cursor = try self.parent_to_children.getCursor(oid_int) orelse return;
             const children = try DB.HashSet(.read_only).init(children_cursor);

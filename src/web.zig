@@ -343,7 +343,8 @@ fn renderIndexHtml(
         .remote => |remote| blk: {
             // open the admin repo to read live user/repo data.
             repo_maybe = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = remote.admin_repo_path });
-            var session = try ui.Session.init(&page_arena, &repo_maybe.?, session_data);
+            const repo = if (repo_maybe) |*repo| repo else unreachable;
+            var session = try ui.Session.init(&page_arena, repo, session_data);
             // give the page builders filesystem access to the on-disk repos (a
             // sibling "repos" dir next to the admin repo) so the Repo page can
             // read its files.

@@ -79,9 +79,11 @@ pub fn run(
             var session_arena = std.heap.ArenaAllocator.init(allocator);
             defer session_arena.deinit();
 
-            // probe for a git repo first, then a xit repo. only the work path
+            // probe both backends for a repo; the nearest one wins, so a repo
+            // isn't shadowed by one it is nested inside. only the work path
             // and backend kind are kept; pages re-open the repo on each build.
             const local: ui.RepoSource = blk: {
+                var found: ?ui.RepoSource = null;
                 inline for ([_]rp.RepoKind{ .git, .xit }) |probe_kind| {
                     if (rp.AnyRepo(probe_kind, .{}).open(io, allocator, .{ .path = cwd_path })) |repo| {
                         var opened = repo;
@@ -89,14 +91,19 @@ pub fn run(
                         const work_path = switch (opened) {
                             inline else => |*r| r.core.work_path,
                         };
-                        break :blk .{ .path = try session_arena.allocator().dupe(u8, work_path), .repo_kind = probe_kind };
+                        const found_len = if (found) |f| f.path.len else 0;
+                        if (work_path.len > found_len) {
+                            found = .{ .path = try session_arena.allocator().dupe(u8, work_path), .repo_kind = probe_kind };
+                        }
                     } else |err| switch (err) {
                         error.RepoNotFound => {},
                         else => |e| return e,
                     }
                 }
-                try run_opts.err.print("no git or xit repo found in the current directory\n", .{});
-                return error.HandledError;
+                break :blk found orelse {
+                    try run_opts.err.print("no git or xit repo found in the current directory\n", .{});
+                    return error.HandledError;
+                };
             };
 
             var session = ui.Session{
