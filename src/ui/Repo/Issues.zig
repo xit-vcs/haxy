@@ -389,18 +389,7 @@ pub const View = struct {
         inner.children.clearAndFree(allocator);
         inner.getFocus().child_id = null;
 
-        // the description as a focusable word-wrapped text box. its hidden
-        // border reserves the space the border occupies when focused, so
-        // focusing doesn't shift layout.
-        {
-            var tb = try wgt.TextBox(ui.Widget).init(allocator, entry.issue.description, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .word });
-            errdefer tb.deinit(allocator);
-            tb.getFocus().focusable = true;
-            try inner.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
-        }
-
-        // the issue's tags flow under the description like a paragraph; each
-        // links to the list filtered to that tag.
+        // the issue's tags, each linking to the list filtered to that tag.
         {
             var items: std.ArrayList(ui.TagFlow.Item) = .empty;
             defer items.deinit(allocator);
@@ -417,7 +406,17 @@ pub const View = struct {
             }
         }
 
-        // point the pane at its row so focus recovery can land here.
+        // the description as a focusable word-wrapped text box. its hidden
+        // border reserves the space the border occupies when focused, so
+        // focusing doesn't shift layout.
+        {
+            var tb = try wgt.TextBox(ui.Widget).init(allocator, entry.issue.description, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .word });
+            errdefer tb.deinit(allocator);
+            tb.getFocus().focusable = true;
+            try inner.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
+        }
+
+        // point the pane at its first row so focus recovery can land here.
         inner.getFocus().child_id = inner.children.keys()[0];
 
         // reset the scroll to the top for the newly-shown issue: directly on the
@@ -463,16 +462,15 @@ pub const View = struct {
         const sc = self.detailScroll();
         switch (key) {
             .arrow_left => return self.focusList(root_focus),
-            .arrow_up => sc.y -= 1,
-            // scroll through the description; once it can't scroll further
-            // (always, on the web's native scroll), move into the tags.
-            .arrow_down => {
+            // once the scroll can't move further, cross into the tags.
+            .arrow_up => {
                 const before = sc.y;
-                sc.y += 1;
+                sc.y -= 1;
                 sc.clampToContent();
                 if (sc.y == before) try self.focusTags(root_focus);
                 return;
             },
+            .arrow_down => sc.y += 1,
             .page_up => sc.y -= 10,
             .page_down => sc.y += 10,
             .home => sc.y = 0,
@@ -486,9 +484,8 @@ pub const View = struct {
         sc.clampToContent();
     }
 
-    // left/right step through the tags (left exits to the list at the first);
-    // up/down move to the first tag of the adjacent row, up escaping to the
-    // description from the top row.
+    // arrow keys move the tag selection; at the flow's edges focus crosses to
+    // the neighboring widgets.
     fn tagsInput(self: *View, key: Key, root_focus: *Focus) !void {
         const tf = self.tagFlow() orelse return;
         const cid = tf.focus.child_id orelse return;
@@ -498,8 +495,8 @@ pub const View = struct {
         switch (key) {
             .arrow_left => if (cur > 0) self.focusTag(tf, root_focus, cur - 1) else try self.focusList(root_focus),
             .arrow_right => if (cur + 1 < count) self.focusTag(tf, root_focus, cur + 1),
-            .arrow_up => if (tf.rowStep(cur, false)) |i| self.focusTag(tf, root_focus, i) else try self.focusDescription(root_focus),
-            .arrow_down => if (tf.rowStep(cur, true)) |i| self.focusTag(tf, root_focus, i),
+            .arrow_up => if (tf.rowStep(cur, false)) |i| self.focusTag(tf, root_focus, i),
+            .arrow_down => if (tf.rowStep(cur, true)) |i| self.focusTag(tf, root_focus, i) else try self.focusDescription(root_focus),
             .home => self.focusTag(tf, root_focus, 0),
             .end => self.focusTag(tf, root_focus, count - 1),
             .mouse => |mouse| switch (mouse.action) {
@@ -513,11 +510,11 @@ pub const View = struct {
         }
     }
 
-    const tags_child_index: usize = 1;
+    const tags_child_index: usize = 0;
 
     fn tagFlow(self: *View) ?*ui.TagFlow {
         const inner = self.detailInner();
-        if (inner.children.count() <= tags_child_index) return null;
+        if (inner.children.count() == 0) return null;
         return switch (inner.children.values()[tags_child_index].widget) {
             .tag_flow => |*tf| tf,
             else => null,
@@ -527,7 +524,7 @@ pub const View = struct {
     fn tagsFocused(self: *View) bool {
         const inner = self.detailInner();
         const cid = inner.getFocus().child_id orelse return false;
-        return inner.children.getIndex(cid) == tags_child_index;
+        return inner.children.getIndex(cid) == tags_child_index and self.tagFlow() != null;
     }
 
     fn focusTag(self: *View, tf: *ui.TagFlow, root_focus: *Focus, index: usize) void {
@@ -554,8 +551,9 @@ pub const View = struct {
 
     fn focusDescription(self: *View, root_focus: *Focus) !void {
         const inner = self.detailInner();
-        if (inner.children.count() == 0) return;
-        root_focus.setFocus(inner.children.keys()[0]);
+        const index: usize = if (self.tagFlow() != null) 1 else 0;
+        if (inner.children.count() <= index) return;
+        root_focus.setFocus(inner.children.keys()[index]);
     }
 
     // enter the detail pane. an empty pane (no issues) can't be entered.
@@ -581,19 +579,25 @@ pub const View = struct {
         return self.box.getFocus();
     }
 
-    // for the parent's "scroll up at the top jumps to the header" check. in the
-    // detail pane that means the description is focused and can't scroll up any
-    // further; up from the tags moves to the description instead. when the list
-    // holds focus, report its selected row directly (window-navigation rows
-    // included).
+    // for the parent's "scroll up at the top jumps to the header" check. when
+    // the list holds focus, report its selected row directly.
     pub fn getSelectedIndex(self: *View) ?usize {
         if (self.detailActive()) {
-            if (self.tagsFocused()) return 1;
-            return if (self.detailScroll().y == 0) 0 else 1;
+            return if (self.detailScroll().y == 0 and self.paneTopFocused()) 0 else 1;
         }
         const lb = self.listBox();
         const cid = lb.getFocus().child_id orelse return null;
         return lb.children.getIndex(cid);
+    }
+
+    // whether the focused element is the detail pane's topmost one, so up has
+    // nowhere further to go within the pane.
+    fn paneTopFocused(self: *View) bool {
+        const tf = self.tagFlow() orelse return true;
+        if (!self.tagsFocused()) return false;
+        const cid = tf.focus.child_id orelse return true;
+        const cur = tf.indexOfFocusId(cid) orelse return true;
+        return tf.rowStep(cur, false) == null;
     }
 };
 
