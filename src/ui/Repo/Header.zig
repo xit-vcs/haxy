@@ -12,6 +12,7 @@ const Focus = xitui.focus.Focus;
 pub const AuthTab = @import("./../AuthTab.zig");
 
 const RefOrOid = ui.RoutablePage.RefOrOid;
+const Array = ui.RoutablePage.Array(ui.RoutablePage.repo_route_max_len);
 
 name: []const u8,
 owner_name: []const u8,
@@ -54,7 +55,7 @@ pub const View = struct {
         const aa = session.page_arena.allocator();
 
         // the user's name (local mode has no user pages to link to)
-        if (session.local == null) {
+        if (!session.data.is_local) {
             const text = try std.fmt.allocPrint(aa, "{s}/", .{data.owner_name});
             const link = try std.fmt.allocPrint(aa, "a:/user/{s}", .{data.owner_name});
 
@@ -70,7 +71,8 @@ pub const View = struct {
             });
         }
 
-        const identity = try std.fmt.allocPrint(aa, "{s}/{s}", .{ data.owner_name, data.name });
+        // local routes carry no identity, so their urls come out elided
+        const identity = if (session.data.is_local) "" else try std.fmt.allocPrint(aa, "{s}/{s}", .{ data.owner_name, data.name });
 
         // title sits to the left of the tabs; it links to the repo's files root
         // (the bare route, so it resolves to the default branch).
@@ -114,13 +116,14 @@ pub const View = struct {
         const files_link = try std.fmt.allocPrint(aa, "ai:{s}", .{try files_route.urlAlloc(session.page_arena)});
         const commits_route = ui.RoutablePage.repoCommitsRoute(identity, data.ref_or_oid, data.ref_or_oid_value, 0) orelse return error.RouteTooLong;
         const commits_link = try std.fmt.allocPrint(aa, "ai:{s}", .{try commits_route.urlAlloc(session.page_arena)});
-        const refs_link = try std.fmt.allocPrint(aa, "ai:/repo/{s}/{s}/refs", .{ data.owner_name, data.name });
-        const issues_link = if (data.issues_tag.len == 0)
-            try std.fmt.allocPrint(aa, "ai:/repo/{s}/{s}/issues", .{ data.owner_name, data.name })
-        else
-            try std.fmt.allocPrint(aa, "ai:/repo/{s}/{s}/issues/tag/{s}", .{ data.owner_name, data.name, data.issues_tag });
-        const settings_link = try std.fmt.allocPrint(aa, "ai:/repo/{s}/{s}/settings", .{ data.owner_name, data.name });
-        const auth_link = try std.fmt.allocPrint(aa, "ai:/repo/{s}/{s}/auth", .{ data.owner_name, data.name });
+        const refs_route = ui.RoutablePage.repoRefsRoute(identity, .branch, 0) orelse return error.RouteTooLong;
+        const refs_link = try std.fmt.allocPrint(aa, "ai:{s}", .{try refs_route.urlAlloc(session.page_arena)});
+        const issues_route = ui.RoutablePage.repoIssuesRoute(identity, data.issues_tag, "") orelse return error.RouteTooLong;
+        const issues_link = try std.fmt.allocPrint(aa, "ai:{s}", .{try issues_route.urlAlloc(session.page_arena)});
+        const settings_route = ui.RoutablePage{ .repo_settings = Array.from(identity) orelse return error.RouteTooLong };
+        const settings_link = try std.fmt.allocPrint(aa, "ai:{s}", .{try settings_route.urlAlloc(session.page_arena)});
+        const auth_route = ui.RoutablePage{ .repo_auth = Array.from(identity) orelse return error.RouteTooLong };
+        const auth_link = try std.fmt.allocPrint(aa, "ai:{s}", .{try auth_route.urlAlloc(session.page_arena)});
 
         // the tab matching the current page is focused initially; matching by
         // link (rather than position) keeps this robust to tab changes.
@@ -223,7 +226,7 @@ pub const View = struct {
         // auth tab (login / logout). AuthTab defaults to the global ai:/auth
         // link; repoint its instance at this repo's auth route so it stays on
         // this page. local mode has no accounts, so it has no auth tab.
-        if (session.local == null) {
+        if (!session.data.is_local) {
             var auth_tab = try AuthTab.View.init(allocator, session);
             errdefer auth_tab.deinit(allocator);
             auth_tab.text_box.getFocus().kind = .{ .custom = auth_link };

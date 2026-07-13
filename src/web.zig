@@ -27,12 +27,21 @@ const embeds = [_]Embed{
     .{ .path = "haxy.wasm", .content_type = "application/wasm", .body = @embedFile("haxy.wasm") },
 };
 
+// what a web request is served from: the multi-user server (admin repo +
+// login sessions) or a single local repo.
+pub const Host = union(enum) {
+    remote: struct {
+        admin_repo_path: []const u8,
+        session_store: SessionStore,
+    },
+    local: ui.RepoSource,
+};
+
 pub fn handleConnection(
     io: std.Io,
     allocator: std.mem.Allocator,
     stream: std.Io.net.Stream,
-    admin_repo_path: []const u8,
-    session_store: SessionStore,
+    host: Host,
     err: *std.Io.Writer,
 ) !void {
     var send_buffer = [_]u8{0} ** 4096;
@@ -52,7 +61,7 @@ pub fn handleConnection(
             else => |e| return e,
         };
 
-        handleRequest(io, &request, allocator, admin_repo_path, session_store) catch |request_err| {
+        handleRequest(io, &request, allocator, host) catch |request_err| {
             try err.print("web ui request failed: {s}\n", .{@errorName(request_err)});
             try err.flush();
             // best-effort 500. if handleRequest already started writing a
@@ -70,8 +79,7 @@ fn handleRequest(
     io: std.Io,
     request: *std.http.Server.Request,
     allocator: std.mem.Allocator,
-    admin_repo_path: []const u8,
-    session_store: SessionStore,
+    host: Host,
 ) !void {
     const method = request.head.method;
     const uri = try std.Uri.parseAfterScheme("", request.head.target);
@@ -79,19 +87,24 @@ fn handleRequest(
 
     // POST routes can be scoped by any page, so they can redirect using
     // the base of the URL. this allows logging in to keep you on the page
-    // you were on.
+    // you were on. local mode has no accounts, so no POST routes.
     if (method == .POST) {
-        const PostRoute = enum { login, logout, ansi };
-        inline for (@typeInfo(PostRoute).@"enum".fields) |field| {
-            const suffix = "/" ++ field.name;
-            if (std.mem.endsWith(u8, path, suffix)) {
-                const base = path[0 .. path.len - suffix.len];
-                return switch (@field(PostRoute, field.name)) {
-                    .login => handleLogin(io, request, allocator, base, admin_repo_path, session_store),
-                    .logout => handleLogout(request, base, session_store),
-                    .ansi => handleAnsi(io, request, allocator, base, admin_repo_path, session_store),
-                };
-            }
+        switch (host) {
+            .remote => |remote| {
+                const PostRoute = enum { login, logout, ansi };
+                inline for (@typeInfo(PostRoute).@"enum".fields) |field| {
+                    const suffix = "/" ++ field.name;
+                    if (std.mem.endsWith(u8, path, suffix)) {
+                        const base = path[0 .. path.len - suffix.len];
+                        return switch (@field(PostRoute, field.name)) {
+                            .login => handleLogin(io, request, allocator, base, remote.admin_repo_path, remote.session_store),
+                            .logout => handleLogout(request, base, remote.session_store),
+                            .ansi => handleAnsi(io, request, allocator, base, remote.admin_repo_path, remote.session_store),
+                        };
+                    }
+                }
+            },
+            .local => {},
         }
     }
 
@@ -112,31 +125,44 @@ fn handleRequest(
         return;
     }
 
-    if (ui.RoutablePage.fromUrl(path, if (uri.query) |comp| comp.percent_encoded else null)) |current_page| {
+    const query = if (uri.query) |comp| comp.percent_encoded else null;
+    const current_page_maybe = switch (host) {
+        .remote => ui.RoutablePage.fromUrl(path, query),
+        .local => ui.RoutablePage.fromUrlLocal(path, query),
+    };
+    if (current_page_maybe) |current_page| {
         // resolve the haxy_session cookie's token to a user_id via the
         // store. user_id_buf lives on the stack for the rest of handleRequest,
-        // which is plenty for renderIndexHtml to consume.
+        // which is plenty for renderIndexHtml to consume. local mode has no
+        // accounts, so it is always logged out.
         var user_id_buf: [evt.event_id_size]u8 = undefined;
-        const user_id: ?[]const u8 = blk: {
-            const token = getCookieValue(request, cookie_name) orelse break :blk null;
-            if (!session_store.lookup(token, &user_id_buf)) break :blk null;
-            break :blk user_id_buf[0..evt.event_id_size];
-        };
-        const login_failure: ?ui.Home.Auth.Login.Failure =
-            if (getCookieValue(request, login_failure_cookie)) |raw|
-                if (std.mem.eql(u8, raw, "unknown_user"))
-                    .unknown_user
-                else if (std.mem.eql(u8, raw, "wrong_password"))
-                    .wrong_password
+        var user_id: ?[]const u8 = null;
+        var login_failure: ?ui.Home.Auth.Login.Failure = null;
+        switch (host) {
+            .remote => |remote| {
+                user_id = blk: {
+                    const token = getCookieValue(request, cookie_name) orelse break :blk null;
+                    if (!remote.session_store.lookup(token, &user_id_buf)) break :blk null;
+                    break :blk user_id_buf[0..evt.event_id_size];
+                };
+                login_failure = if (getCookieValue(request, login_failure_cookie)) |raw|
+                    if (std.mem.eql(u8, raw, "unknown_user"))
+                        .unknown_user
+                    else if (std.mem.eql(u8, raw, "wrong_password"))
+                        .wrong_password
+                    else
+                        null
                 else
-                    null
-            else
-                null;
+                    null;
+            },
+            .local => {},
+        }
 
-        const html = renderIndexHtml(io, allocator, admin_repo_path, .{
+        const html = renderIndexHtml(io, allocator, host, .{
             .user_id = user_id,
             .login_failure = login_failure,
             .current_page = current_page,
+            .is_local = host == .local,
         }) catch |err| switch (err) {
             error.NotFound => {
                 try request.respond("not found", .{
@@ -300,23 +326,38 @@ fn handleAnsi(
 fn renderIndexHtml(
     io: std.Io,
     allocator: std.mem.Allocator,
-    admin_repo_path: []const u8,
+    host: Host,
     session_data: ui.Session.Data,
 ) ![]const u8 {
     const template = (findEmbed("/index.html") orelse return error.MissingIndexAsset).body;
 
-    // open the admin repo to read live user/repo data.
-    const Repo = rp.Repo(.xit, evt.admin_repo_opts);
-    var repo = try Repo.open(io, allocator, .{ .path = admin_repo_path });
-    defer repo.deinit(io, allocator);
     var page_arena = std.heap.ArenaAllocator.init(allocator);
     defer page_arena.deinit();
 
-    var session = try ui.Session.init(&page_arena, &repo, session_data);
-    // give the page builders filesystem access to the on-disk repos (a sibling
-    // "repos" dir next to the admin repo) so the Repo page can read its files.
+    // the remote admin repo must outlive the page build, since the session's
+    // moment reads from it.
+    var repo_maybe: ?rp.Repo(.xit, evt.admin_repo_opts) = null;
+    defer if (repo_maybe) |*repo| repo.deinit(io, allocator);
+
+    var session = switch (host) {
+        .remote => |remote| blk: {
+            // open the admin repo to read live user/repo data.
+            repo_maybe = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = remote.admin_repo_path });
+            var session = try ui.Session.init(&page_arena, &repo_maybe.?, session_data);
+            // give the page builders filesystem access to the on-disk repos (a
+            // sibling "repos" dir next to the admin repo) so the Repo page can
+            // read its files.
+            session.repos_dir = try std.fs.path.join(page_arena.allocator(), &.{ std.fs.path.dirname(remote.admin_repo_path) orelse ".", "repos" });
+            break :blk session;
+        },
+        .local => |local| ui.Session{
+            .data = session_data,
+            .arena = &page_arena,
+            .page_arena = &page_arena,
+            .local = local,
+        },
+    };
     session.io = io;
-    session.repos_dir = try std.fs.path.join(page_arena.allocator(), &.{ std.fs.path.dirname(admin_repo_path) orelse ".", "repos" });
 
     const snapshot: ui.Snapshot = .{
         .page = try ui.Page.init(session.page_arena, &session, session.data.current_page),

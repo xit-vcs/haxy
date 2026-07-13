@@ -44,7 +44,7 @@ test "commits list next row is a cross-page link" {
     const lb = &content.children.values()[0].widget.scroll.child.box;
     const next_id = lb.children.keys()[lb.children.count() - 1];
 
-    const route = ui.crossPageLink(root_focus, next_id, session.data.current_page);
+    const route = ui.crossPageLink(root_focus, next_id, session.data);
     try std.testing.expect(route != null);
 }
 

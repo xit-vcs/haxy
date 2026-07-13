@@ -125,13 +125,15 @@ pub fn init(
     var owner_name: []const u8 = undefined;
     if (session.local) |local| {
         source = local;
+        // local routes elide the identity, so the display name comes from the
+        // repo's directory rather than the route.
         repo = .{
             .user_id = "",
-            .name = try arena.allocator().dupe(u8, rf.name),
+            .name = try arena.allocator().dupe(u8, std.fs.path.basename(local.path)),
             .description = "",
             .enable_issue = true,
         };
-        owner_name = try arena.allocator().dupe(u8, rf.owner);
+        owner_name = "";
     } else {
         const haxy_moment = session.haxy_moment orelse return error.NoMoment;
         const found = (try evt.Repo.readByOwnerAndName(DB, hash_kind, haxy_moment, arena, rf.owner, rf.name)) orelse return error.NotFound;
@@ -252,7 +254,7 @@ pub const View = struct {
 
             // the header has no auth tab in local mode, so keep the stack's
             // children 1:1 with the tabs by skipping the auth view too.
-            if (session.local == null) {
+            if (!session.data.is_local) {
                 var auth_view = try Auth.View.init(allocator, &data.auth, session, files_tab_id);
                 errdefer auth_view.deinit(allocator);
                 try stack.children.put(allocator, auth_view.getFocus().id, .{ .home_auth = auth_view });

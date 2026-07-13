@@ -128,7 +128,7 @@ fn onKeyDown(key_code: u32) !void {
     if (key == .enter) {
         if (root_ptr.getFocus().grandchild_id) |gid| {
             // follow a cross-page link
-            if (ui.crossPageLink(root_ptr.getFocus(), gid, session.data.current_page)) |route| {
+            if (ui.crossPageLink(root_ptr.getFocus(), gid, session.data)) |route| {
                 const url = try route.urlAlloc(&page_arena);
                 _navigate(url.ptr, @intCast(url.len));
                 return;
@@ -142,7 +142,7 @@ fn onKeyDown(key_code: u32) !void {
 fn onMouseClick(focus_id: usize) !void {
     const root_ptr = if (root) |*root_value| root_value else return error.NotStarted;
     // follow a cross-page link
-    if (ui.crossPageLink(root_ptr.getFocus(), focus_id, session.data.current_page)) |route| {
+    if (ui.crossPageLink(root_ptr.getFocus(), focus_id, session.data)) |route| {
         const url = try route.urlAlloc(&page_arena);
         _navigate(url.ptr, @intCast(url.len));
         return;

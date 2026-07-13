@@ -1,6 +1,7 @@
 const std = @import("std");
 const xit = @import("xit");
 const rp = xit.repo;
+const ui = @import("./ui.zig");
 const web = @import("./web.zig");
 const serve_common = @import("./serve_common.zig");
 const serve_ssh_protocol = @import("./serve_ssh_protocol.zig");
@@ -108,7 +109,10 @@ pub fn run(
     try err.print("serving web UI on http://{s}/\n", .{options.wui_listen});
     try err.flush();
 
-    runWebListener(io, allocator, &wui_server, &tasks, admin_repo_path, session_store, err);
+    runWebListener(io, allocator, &wui_server, &tasks, .{ .remote = .{
+        .admin_repo_path = admin_repo_path,
+        .session_store = session_store,
+    } }, err);
 
     if (@TypeOf(runnable) != void) {
         try runnable.run();
@@ -117,27 +121,59 @@ pub fn run(
     }
 }
 
+// serve just the web UI for a single local repo, running `runnable` (the
+// local TUI) in the foreground while the listener runs in the background.
+// when the default port is taken, a random ephemeral port is used instead;
+// the bound port is passed to `runnable.run`.
+pub fn runLocal(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    local: ui.RepoSource,
+    err: *std.Io.Writer,
+    runnable: anytype,
+) !void {
+    // no reuse_address here: on linux it also sets SO_REUSEPORT, which would
+    // let this bind silently share a port an already-running server holds
+    // instead of failing over to a random one.
+    const wui_listen_address = try parseListenAddress((Options{}).wui_listen);
+    const wui_address = try std.Io.net.IpAddress.parseIp4(wui_listen_address.host, wui_listen_address.port);
+    var wui_server = wui_address.listen(io, .{}) catch |listen_err| switch (listen_err) {
+        // the default port is taken; bind port 0 so the OS assigns a free one
+        error.AddressInUse => blk: {
+            const any_port = try std.Io.net.IpAddress.parseIp4(wui_listen_address.host, 0);
+            break :blk try any_port.listen(io, .{});
+        },
+        else => |e| return e,
+    };
+    defer wui_server.deinit(io);
+
+    var tasks: std.Io.Group = .init;
+    defer tasks.cancel(io);
+
+    runWebListener(io, allocator, &wui_server, &tasks, .{ .local = local }, err);
+
+    try runnable.run(wui_server.socket.address.getPort());
+}
+
 fn runWebListener(
     io: std.Io,
     allocator: std.mem.Allocator,
     net_server: *std.Io.net.Server,
     tasks: *std.Io.Group,
-    admin_repo_path: []const u8,
-    session_store: web.SessionStore,
+    host: web.Host,
     err: *std.Io.Writer,
 ) void {
     const Context = struct {
         io: std.Io,
         allocator: std.mem.Allocator,
-        admin_repo_path: []const u8,
-        session_store: web.SessionStore,
+        host: web.Host,
         err: *std.Io.Writer,
     };
 
     const handle = struct {
         fn h(ctx: Context, stream: std.Io.net.Stream) void {
             defer stream.close(ctx.io);
-            web.handleConnection(ctx.io, ctx.allocator, stream, ctx.admin_repo_path, ctx.session_store, ctx.err) catch |request_err| {
+            web.handleConnection(ctx.io, ctx.allocator, stream, ctx.host, ctx.err) catch |request_err| {
                 serve_common.logError(ctx.err, "web ui request failed: {s}\n", .{@errorName(request_err)});
             };
         }
@@ -146,8 +182,7 @@ fn runWebListener(
     serve_common.runListener(io, net_server, tasks, err, "web ui", Context{
         .io = io,
         .allocator = allocator,
-        .admin_repo_path = admin_repo_path,
-        .session_store = session_store,
+        .host = host,
         .err = err,
     }, handle);
 }

@@ -107,8 +107,15 @@ pub const RoutablePage = union(enum) {
     // a repo route is "username/reponame", optionally followed by the files tab's
     // "/files/<refkind>/<refvalue>/<dir>" (refkind/refvalue name the ref the tree
     // is read at). the bare "username/reponame" (and "username/reponame/files")
-    // mean the files root of the repo's default branch.
+    // mean the files root of the repo's default branch. a local session's routes
+    // elide the identity: the stored string is "" at the bare root, or starts
+    // straight at the tail's separator ("/files/...").
     pub const repo_route_max_len = 1024;
+
+    // true when a repo route's stored string elides its identity (local mode)
+    fn identityElided(s: []const u8) bool {
+        return s.len == 0 or s[0] == '/';
+    }
 
     // a url-encoded tag can grow to three bytes per source byte.
     pub const issue_tag_route_max_len = evt.Issue.tag_max_len * 3;
@@ -125,21 +132,31 @@ pub const RoutablePage = union(enum) {
         dir: []const u8,
 
         // parse a `.repo_files` route's stored string ("owner/name" or
-        // "owner/name/files/<refkind>/<refvalue>[/<dir>]"). a malformed tail
-        // reads as the bare default-branch root.
+        // "owner/name/files/<refkind>/<refvalue>[/<dir>]", identity elided in
+        // local mode). a malformed tail reads as the bare default-branch root.
         pub fn parse(s: []const u8) ?RepoFiles {
-            var segments = std.mem.splitScalar(u8, s, '/');
-            const owner = segments.next() orelse return null;
-            const name = segments.next() orelse return null;
-            if (owner.len == 0 or name.len == 0) return null;
             var result: RepoFiles = .{
-                .identity = s[0 .. owner.len + 1 + name.len],
-                .owner = owner,
-                .name = name,
+                .identity = "",
+                .owner = "",
+                .name = "",
                 .ref_kind = null,
                 .ref_value = "",
                 .dir = "",
             };
+            var rest: []const u8 = undefined;
+            if (identityElided(s)) {
+                rest = if (s.len == 0) "" else s[1..];
+            } else {
+                var id_segments = std.mem.splitScalar(u8, s, '/');
+                const owner = id_segments.next() orelse return null;
+                const name = id_segments.next() orelse return null;
+                if (owner.len == 0 or name.len == 0) return null;
+                result.identity = s[0 .. owner.len + 1 + name.len];
+                result.owner = owner;
+                result.name = name;
+                rest = id_segments.rest();
+            }
+            var segments = std.mem.splitScalar(u8, rest, '/');
             if (!std.mem.eql(u8, segments.next() orelse return result, files_seg)) return result;
             const kind = RefOrOid.fromSeg(segments.next() orelse return result) orelse return result;
             const value = segments.next() orelse return result;
@@ -172,9 +189,14 @@ pub const RoutablePage = union(enum) {
     pub const CommitsRef = struct { ref_or_oid: ?RefOrOid, value: []const u8 };
     pub fn repoCommitsRef(s: []const u8) CommitsRef {
         const bare = CommitsRef{ .ref_or_oid = null, .value = "" };
+        if (s.len == 0) return bare;
         var segments = std.mem.splitScalar(u8, s, '/');
-        _ = segments.next(); // owner
-        _ = segments.next(); // name
+        if (identityElided(s)) {
+            _ = segments.next(); // the empty segment before the tail
+        } else {
+            _ = segments.next(); // owner
+            _ = segments.next(); // name
+        }
         if (!std.mem.eql(u8, segments.next() orelse "", commits_seg)) return bare;
         const kind = RefOrOid.fromSeg(segments.next() orelse "") orelse return bare;
         const value = segments.rest();
@@ -245,50 +267,51 @@ pub const RoutablePage = union(enum) {
                 try std.fmt.allocPrint(arena.allocator(), user_segment ++ "{s}/repos?after={d}", .{ u.name.slice(), u.after }),
             .user_settings => |name| try std.fmt.allocPrint(arena.allocator(), user_segment ++ "{s}/settings", .{name.slice()}),
             .user_auth => |name| try std.fmt.allocPrint(arena.allocator(), user_segment ++ "{s}/auth", .{name.slice()}),
-            .repo_files => |f| if (f.after == 0)
-                try std.fmt.allocPrint(arena.allocator(), repo_segment ++ "{s}", .{f.name.slice()})
-            else
-                try std.fmt.allocPrint(arena.allocator(), repo_segment ++ "{s}?after={d}", .{ f.name.slice(), f.after }),
-            .repo_commits => |c| if (c.after == 0)
-                try std.fmt.allocPrint(arena.allocator(), repo_segment ++ "{s}", .{c.name.slice()})
-            else
-                try std.fmt.allocPrint(arena.allocator(), repo_segment ++ "{s}?after={d}", .{ c.name.slice(), c.after }),
-            .repo_refs => |r| if (r.after == 0)
-                try std.fmt.allocPrint(arena.allocator(), repo_segment ++ "{s}/refs", .{r.name.slice()})
-            else
-                try std.fmt.allocPrint(arena.allocator(), repo_segment ++ "{s}/refs?kind={s}&after={d}", .{ r.name.slice(), @tagName(r.kind), r.after }),
-            .repo_issues => |i| if (i.tag.len == 0)
-                (if (i.selected.len == 0)
-                    try std.fmt.allocPrint(arena.allocator(), repo_segment ++ "{s}/issues", .{i.name.slice()})
+            .repo_files => |f| blk: {
+                const path = try repoUrlPath(arena, f.name.slice());
+                break :blk if (f.after == 0) path else try std.fmt.allocPrint(arena.allocator(), "{s}?after={d}", .{ path, f.after });
+            },
+            .repo_commits => |c| blk: {
+                const path = try repoUrlPath(arena, c.name.slice());
+                break :blk if (c.after == 0) path else try std.fmt.allocPrint(arena.allocator(), "{s}?after={d}", .{ path, c.after });
+            },
+            .repo_refs => |r| blk: {
+                const prefix = try repoUrlPrefix(arena, r.name.slice());
+                break :blk if (r.after == 0)
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/refs", .{prefix})
                 else
-                    try std.fmt.allocPrint(arena.allocator(), repo_segment ++ "{s}/issues/{s}", .{ i.name.slice(), i.selected.slice() }))
-            else if (i.selected.len == 0)
-                try std.fmt.allocPrint(arena.allocator(), repo_segment ++ "{s}/issues/tag/{s}", .{ i.name.slice(), i.tag.slice() })
-            else
-                try std.fmt.allocPrint(arena.allocator(), repo_segment ++ "{s}/issues/tag/{s}/{s}", .{ i.name.slice(), i.tag.slice(), i.selected.slice() }),
-            .repo_settings => |name| try std.fmt.allocPrint(arena.allocator(), repo_segment ++ "{s}/settings", .{name.slice()}),
-            .repo_auth => |name| try std.fmt.allocPrint(arena.allocator(), repo_segment ++ "{s}/auth", .{name.slice()}),
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/refs?kind={s}&after={d}", .{ prefix, @tagName(r.kind), r.after });
+            },
+            .repo_issues => |i| blk: {
+                const prefix = try repoUrlPrefix(arena, i.name.slice());
+                break :blk if (i.tag.len == 0)
+                    (if (i.selected.len == 0)
+                        try std.fmt.allocPrint(arena.allocator(), "{s}/issues", .{prefix})
+                    else
+                        try std.fmt.allocPrint(arena.allocator(), "{s}/issues/{s}", .{ prefix, i.selected.slice() }))
+                else if (i.selected.len == 0)
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/issues/tag/{s}", .{ prefix, i.tag.slice() })
+                else
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/issues/tag/{s}/{s}", .{ prefix, i.tag.slice(), i.selected.slice() });
+            },
+            .repo_settings => |name| try std.fmt.allocPrint(arena.allocator(), "{s}/settings", .{try repoUrlPrefix(arena, name.slice())}),
+            .repo_auth => |name| try std.fmt.allocPrint(arena.allocator(), "{s}/auth", .{try repoUrlPrefix(arena, name.slice())}),
         };
     }
 
-    // the url with its leading "/repo/<owner>/<name>" elided, for local mode
-    // (every url there points at the one local repo). non-repo routes serialize
-    // in full.
-    pub fn urlAllocLocal(self: RoutablePage, arena: *std.heap.ArenaAllocator) ![]const u8 {
-        const full = try self.urlAlloc(arena);
-        const name_str: []const u8 = switch (self) {
-            .repo_files => |f| f.name.slice(),
-            .repo_commits => |c| c.name.slice(),
-            .repo_refs => |r| r.name.slice(),
-            .repo_issues => |i| i.name.slice(),
-            .repo_settings, .repo_auth => |n| n.slice(),
-            else => return full,
-        };
-        const identity = (RepoFiles.parse(name_str) orelse return full).identity;
-        const rest = full[repo_segment.len + identity.len ..];
-        if (rest.len == 0) return "/";
-        if (rest[0] == '/') return rest;
-        return try std.fmt.allocPrint(arena.allocator(), "/{s}", .{rest});
+    // the url path a files/commits route's stored string (identity + tail) maps
+    // to: "/repo/<string>", or the tail itself when the identity is elided
+    // ("/" at the bare root).
+    fn repoUrlPath(arena: *std.heap.ArenaAllocator, name: []const u8) ![]const u8 {
+        if (identityElided(name)) return if (name.len == 0) "/" else name;
+        return std.fmt.allocPrint(arena.allocator(), repo_segment ++ "{s}", .{name});
+    }
+
+    // the url prefix for a repo route's identity: "/repo/<identity>", or ""
+    // when the identity is elided.
+    fn repoUrlPrefix(arena: *std.heap.ArenaAllocator, identity: []const u8) ![]const u8 {
+        if (identity.len == 0) return "";
+        return std.fmt.allocPrint(arena.allocator(), repo_segment ++ "{s}", .{identity});
     }
 
     pub fn parent(self: RoutablePage) PageKind {
@@ -336,58 +359,72 @@ pub const RoutablePage = union(enum) {
             if (owner.len == 0 or repo_name.len == 0) return null;
             const pair = rest[0 .. owner.len + 1 + repo_name.len]; // "username/reponame"
             if (rest_segments.peek() != null) {
-                const sub = rest_segments.rest();
-                if (std.mem.eql(u8, sub, "refs")) return .{ .repo_refs = .{
-                    .name = Array(repo_route_max_len).from(pair) orelse return null,
-                    .kind = refsKind(query),
-                    .after = after,
-                } };
-                if (std.mem.eql(u8, sub, "issues") or std.mem.startsWith(u8, sub, "issues/")) {
-                    // "issues[/tag/<tag>][/<issue event id>]"
-                    var segments = std.mem.splitScalar(u8, sub, '/');
-                    _ = segments.next(); // "issues"
-                    var tag_value: []const u8 = "";
-                    var id: []const u8 = "";
-                    if (segments.next()) |segment| {
-                        if (std.mem.eql(u8, segment, "tag")) {
-                            tag_value = segments.next() orelse return null;
-                            if (tag_value.len == 0) return null;
-                            id = segments.next() orelse "";
-                        } else {
-                            if (segment.len == 0) return null;
-                            id = segment;
-                        }
-                    }
-                    if (segments.next() != null) return null;
-                    return repoIssuesRoute(pair, tag_value, id);
-                }
-                if (std.mem.eql(u8, sub, "settings")) return .{ .repo_settings = Array(repo_route_max_len).from(pair) orelse return null };
-                if (std.mem.eql(u8, sub, "auth")) return .{ .repo_auth = Array(repo_route_max_len).from(pair) orelse return null };
-                if (std.mem.eql(u8, sub, files_seg) or std.mem.startsWith(u8, sub, files_seg ++ "/")) {
-                    // "files[/<refkind>/<refvalue>[/<dir>]]" (bare = default-branch root)
-                    var segments = std.mem.splitScalar(u8, sub, '/');
-                    _ = segments.next(); // "files"
-                    const kind_segment = segments.next() orelse return repoFilesRoute(pair, null, "", "", after);
-                    const kind = RefOrOid.fromSeg(kind_segment) orelse return null;
-                    const value = segments.next() orelse return null;
-                    if (value.len == 0) return null;
-                    return repoFilesRoute(pair, kind, value, segments.rest(), after);
-                }
-                if (std.mem.eql(u8, sub, commits_seg) or std.mem.startsWith(u8, sub, commits_seg ++ "/")) {
-                    // "commits[/<refkind>/<refvalue>]" (bare = default branch)
-                    var segments = std.mem.splitScalar(u8, sub, '/');
-                    _ = segments.next(); // "commits"
-                    const kind_segment = segments.next() orelse return repoCommitsRoute(pair, null, "", after);
-                    const kind = RefOrOid.fromSeg(kind_segment) orelse return null;
-                    const value = segments.rest();
-                    if (value.len == 0) return null;
-                    return repoCommitsRoute(pair, kind, value, after);
-                }
-                return null; // unknown sub-path
+                return repoSubRoute(pair, rest_segments.rest(), query);
             }
             return repoFilesRoute(pair, null, "", "", after);
         }
         return null;
+    }
+
+    // parse a local-mode url, which elides the "/repo/<owner>/<name>" prefix:
+    // "/" is the files root and the sub-paths follow directly.
+    pub fn fromUrlLocal(path: []const u8, query: ?[]const u8) ?RoutablePage {
+        if (std.mem.eql(u8, path, "/")) return repoFilesRoute("", null, "", "", uintParam(query, "after") orelse 0);
+        if (path.len < 2 or path[0] != '/') return null;
+        return repoSubRoute("", path[1..], query);
+    }
+
+    // parse the sub-path after a repo route's identity into a route whose
+    // stored string carries `pair` as its identity ("" for a local route).
+    fn repoSubRoute(pair: []const u8, sub: []const u8, query: ?[]const u8) ?RoutablePage {
+        const after = uintParam(query, "after") orelse 0;
+        if (std.mem.eql(u8, sub, "refs")) return .{ .repo_refs = .{
+            .name = Array(repo_route_max_len).from(pair) orelse return null,
+            .kind = refsKind(query),
+            .after = after,
+        } };
+        if (std.mem.eql(u8, sub, "issues") or std.mem.startsWith(u8, sub, "issues/")) {
+            // "issues[/tag/<tag>][/<issue event id>]"
+            var segments = std.mem.splitScalar(u8, sub, '/');
+            _ = segments.next(); // "issues"
+            var tag_value: []const u8 = "";
+            var id: []const u8 = "";
+            if (segments.next()) |segment| {
+                if (std.mem.eql(u8, segment, "tag")) {
+                    tag_value = segments.next() orelse return null;
+                    if (tag_value.len == 0) return null;
+                    id = segments.next() orelse "";
+                } else {
+                    if (segment.len == 0) return null;
+                    id = segment;
+                }
+            }
+            if (segments.next() != null) return null;
+            return repoIssuesRoute(pair, tag_value, id);
+        }
+        if (std.mem.eql(u8, sub, "settings")) return .{ .repo_settings = Array(repo_route_max_len).from(pair) orelse return null };
+        if (std.mem.eql(u8, sub, "auth")) return .{ .repo_auth = Array(repo_route_max_len).from(pair) orelse return null };
+        if (std.mem.eql(u8, sub, files_seg) or std.mem.startsWith(u8, sub, files_seg ++ "/")) {
+            // "files[/<refkind>/<refvalue>[/<dir>]]" (bare = default-branch root)
+            var segments = std.mem.splitScalar(u8, sub, '/');
+            _ = segments.next(); // "files"
+            const kind_segment = segments.next() orelse return repoFilesRoute(pair, null, "", "", after);
+            const kind = RefOrOid.fromSeg(kind_segment) orelse return null;
+            const value = segments.next() orelse return null;
+            if (value.len == 0) return null;
+            return repoFilesRoute(pair, kind, value, segments.rest(), after);
+        }
+        if (std.mem.eql(u8, sub, commits_seg) or std.mem.startsWith(u8, sub, commits_seg ++ "/")) {
+            // "commits[/<refkind>/<refvalue>]" (bare = default branch)
+            var segments = std.mem.splitScalar(u8, sub, '/');
+            _ = segments.next(); // "commits"
+            const kind_segment = segments.next() orelse return repoCommitsRoute(pair, null, "", after);
+            const kind = RefOrOid.fromSeg(kind_segment) orelse return null;
+            const value = segments.rest();
+            if (value.len == 0) return null;
+            return repoCommitsRoute(pair, kind, value, after);
+        }
+        return null; // unknown sub-path
     }
 
     // the refs column a "kind=" query param names; absent or unrecognized reads
@@ -704,6 +741,11 @@ pub const Session = struct {
         current_page: RoutablePage = .default,
         // whether to render the ANSI art backdrop
         enable_ansi: bool = true,
+        // true when this session views a single local repo. unlike `local`
+        // (the host-side filesystem source) this travels in the snapshot, so
+        // the wasm side also parses elided link urls and hides the multi-user
+        // chrome.
+        is_local: bool = false,
     };
 
     // a user-initiated state change. widgets enqueue these on the session during
@@ -860,7 +902,7 @@ pub fn inputKey(allocator: std.mem.Allocator, root: *Widget, key: Key, session: 
             const root_focus = root.getFocus();
             if (root_focus.grandchild_id) |gid| {
                 // follow a cross-page link
-                if (crossPageLink(root_focus, gid, session.data.current_page)) |route| {
+                if (crossPageLink(root_focus, gid, session.data)) |route| {
                     return session.navigate(route);
                 }
             }
@@ -884,7 +926,7 @@ pub fn inputKey(allocator: std.mem.Allocator, root: *Widget, key: Key, session: 
                 }
                 if (clicked) |focus_id| {
                     // follow a cross-page link
-                    if (crossPageLink(root_focus, focus_id, session.data.current_page)) |route| {
+                    if (crossPageLink(root_focus, focus_id, session.data)) |route| {
                         return session.navigate(route);
                     }
                     root_focus.setFocus(focus_id);
@@ -905,7 +947,8 @@ pub fn inputKey(allocator: std.mem.Allocator, root: *Widget, key: Key, session: 
 // different parent page, or a different files directory within the repo page),
 // return its route; otherwise null. lets a host turn a click / enter on such a
 // link into a navigation rather than a focus change.
-pub fn crossPageLink(root_focus: *Focus, focus_id: usize, current: RoutablePage) ?RoutablePage {
+pub fn crossPageLink(root_focus: *Focus, focus_id: usize, data: Session.Data) ?RoutablePage {
+    const current = data.current_page;
     const child = root_focus.children.get(focus_id) orelse return null;
     const custom = switch (child.focus.kind) {
         .custom => |c| c,
@@ -915,7 +958,10 @@ pub fn crossPageLink(root_focus: *Focus, focus_id: usize, current: RoutablePage)
     if (!std.mem.startsWith(u8, custom, a_prefix)) return null;
     const url = custom[a_prefix.len..];
     const q = std.mem.indexOfScalar(u8, url, '?');
-    const route = RoutablePage.fromUrl(if (q) |i| url[0..i] else url, if (q) |i| url[i + 1 ..] else null) orelse return null;
+    const path = if (q) |i| url[0..i] else url;
+    const query = if (q) |i| url[i + 1 ..] else null;
+    // local sessions build (and parse) links with the repo identity elided
+    const route = (if (data.is_local) RoutablePage.fromUrlLocal(path, query) else RoutablePage.fromUrl(path, query)) orelse return null;
     // a link to a different parent page always navigates; within a page, a
     // files-directory / commits-page / list-window change navigates while tab
     // links stay in-page (header-handled).
@@ -1729,8 +1775,7 @@ pub const Footer = struct {
 
         _ = self.arena.reset(.retain_capacity);
         const aa = self.arena.allocator();
-        const page = self.session.data.current_page;
-        const path = (if (self.session.local != null) page.urlAllocLocal(&self.arena) else page.urlAlloc(&self.arena)) catch return;
+        const path = self.session.data.current_page.urlAlloc(&self.arena) catch return;
         const text = if (self.session.web_port) |port|
             std.fmt.allocPrint(aa, "http://localhost:{d}{s}", .{ port, path }) catch return
         else

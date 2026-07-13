@@ -107,24 +107,33 @@ pub fn run(
                 break :blk .{ .path = try session_arena.allocator().dupe(u8, work_path), .repo_kind = .xit };
             };
 
-            // every local route internally carries this synthetic
-            // "owner/name"; urls elide it.
-            const identity = try std.fmt.allocPrint(session_arena.allocator(), "local/{s}", .{std.fs.path.basename(local.path)});
-            const route = ui.RoutablePage.repoFilesRoute(identity, null, "", "", 0) orelse {
-                try run_opts.err.print("repo directory name is too long\n", .{});
-                return error.HandledError;
-            };
-
             var session = ui.Session{
                 .arena = &session_arena,
                 .page_arena = &session_arena,
                 .io = io,
                 .local = local,
                 .is_terminal = true,
-                .data = .{ .current_page = route },
+                .data = .{
+                    // the files root; local routes carry no identity
+                    .current_page = .{ .repo_files = .{ .name = .{} } },
+                    .is_local = true,
+                },
             };
 
-            try ui.run(io, allocator, &session, null);
+            // serve the web UI in the background while the TUI runs in the
+            // foreground; the footer points at whatever port it bound.
+            const Runnable = struct {
+                io: std.Io,
+                allocator: std.mem.Allocator,
+                session: *ui.Session,
+
+                pub fn run(self: @This(), web_port: u16) !void {
+                    self.session.web_port = web_port;
+                    try ui.run(self.io, self.allocator, self.session, null);
+                }
+            };
+
+            try srv.runLocal(io, allocator, local, run_opts.err, Runnable{ .io = io, .allocator = allocator, .session = &session });
         },
         .cli => |cli_cmd| switch (cli_cmd) {
             .serve => |options| try srv.run(repo_kind, any_repo_opts, io, allocator, cwd_path, options, run_opts.err, {}),
