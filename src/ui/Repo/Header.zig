@@ -70,12 +70,17 @@ pub const View = struct {
             });
         }
 
-        // title sits to the left of the tabs
+        const identity = try std.fmt.allocPrint(aa, "{s}/{s}", .{ data.owner_name, data.name });
+
+        // title sits to the left of the tabs; it links to the repo's files root
+        // (the bare route, so it resolves to the default branch).
         {
+            const files_root_route = ui.RoutablePage.repoFilesRoute(identity, null, "", "", 0) orelse return error.RouteTooLong;
+            const title_link = try std.fmt.allocPrint(aa, "a:{s}", .{try files_root_route.urlAlloc(session.page_arena)});
             var title_view = try ui.Title.View.init(allocator, &data.title);
             errdefer title_view.deinit(allocator);
             title_view.getFocus().focusable = true;
-            title_view.getFocus().kind = .{ .custom = "a:/" };
+            title_view.getFocus().kind = .{ .custom = title_link };
             // shrink the title when there is not enough space
             try box.children.put(allocator, title_view.getFocus().id, .{
                 .widget = .{ .title = title_view },
@@ -103,7 +108,6 @@ pub const View = struct {
         // tabs (the page already holds every tab's content), while the href is
         // still followed with js off. the files tab routes through the shared
         // helper so the /repo/.../files url format lives in one place.
-        const identity = try std.fmt.allocPrint(aa, "{s}/{s}", .{ data.owner_name, data.name });
         // both tabs link to the ref/oid this page is viewing, so switching tabs
         // keeps the same ref (the files tab opens at its root directory).
         const files_route = ui.RoutablePage.repoFilesRoute(identity, data.ref_or_oid, data.ref_or_oid_value, "", 0) orelse return error.RouteTooLong;
