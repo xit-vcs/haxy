@@ -3,6 +3,7 @@ const xit = @import("xit");
 const rp = xit.repo;
 const cmd = @import("./command.zig");
 const srv = @import("./serve.zig");
+const ui = @import("./ui.zig");
 
 // cook the terminal before a panic/segfault trace is printed, so the trace
 // isn't mangled by raw mode and the alternate buffer
@@ -73,6 +74,58 @@ pub fn run(
             },
         },
         .help => |cmd_kind_maybe| try cmd.printHelp(cmd_kind_maybe, run_opts.out),
+        .local => {
+            // session-lifetime allocations (the repo path, session state)
+            var session_arena = std.heap.ArenaAllocator.init(allocator);
+            defer session_arena.deinit();
+
+            // probe for a git repo first, then a xit repo. only the work path
+            // and backend kind are kept; pages re-open the repo on each build.
+            const local: ui.RepoSource = blk: {
+                if (rp.AnyRepo(.git, .{}).open(io, allocator, .{ .path = cwd_path })) |repo| {
+                    var git_repo = repo;
+                    defer git_repo.deinit(io, allocator);
+                    const work_path = switch (git_repo) {
+                        inline else => |*r| r.core.work_path,
+                    };
+                    break :blk .{ .path = try session_arena.allocator().dupe(u8, work_path), .repo_kind = .git };
+                } else |err| switch (err) {
+                    error.RepoNotFound => {},
+                    else => |e| return e,
+                }
+                var xit_repo = rp.AnyRepo(.xit, .{}).open(io, allocator, .{ .path = cwd_path }) catch |err| switch (err) {
+                    error.RepoNotFound => {
+                        try run_opts.err.print("no git or xit repo found in the current directory\n", .{});
+                        return error.HandledError;
+                    },
+                    else => |e| return e,
+                };
+                defer xit_repo.deinit(io, allocator);
+                const work_path = switch (xit_repo) {
+                    inline else => |*r| r.core.work_path,
+                };
+                break :blk .{ .path = try session_arena.allocator().dupe(u8, work_path), .repo_kind = .xit };
+            };
+
+            // every local route internally carries this synthetic
+            // "owner/name"; urls elide it.
+            const identity = try std.fmt.allocPrint(session_arena.allocator(), "local/{s}", .{std.fs.path.basename(local.path)});
+            const route = ui.RoutablePage.repoFilesRoute(identity, null, "", "", 0) orelse {
+                try run_opts.err.print("repo directory name is too long\n", .{});
+                return error.HandledError;
+            };
+
+            var session = ui.Session{
+                .arena = &session_arena,
+                .page_arena = &session_arena,
+                .io = io,
+                .local = local,
+                .is_terminal = true,
+                .data = .{ .current_page = route },
+            };
+
+            try ui.run(io, allocator, &session, null);
+        },
         .cli => |cli_cmd| switch (cli_cmd) {
             .serve => |options| try srv.run(repo_kind, any_repo_opts, io, allocator, cwd_path, options, run_opts.err, {}),
         },

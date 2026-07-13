@@ -70,7 +70,7 @@ const Self = @This();
 pub fn init(
     arena: *std.heap.ArenaAllocator,
     session: *ui.Session,
-    event_id: *const [evt.event_id_size]u8,
+    source_maybe: ?ui.RepoSource,
     identity: []const u8,
     requested_ref_or_oid: ?ui.RoutablePage.RefOrOid,
     requested_value: []const u8,
@@ -84,30 +84,31 @@ pub fn init(
     // ref the route asked for. the wasm path never calls init anyway — it
     // rebuilds from the serialized snapshot.
     const io = session.io orelse return emptyResult(aa, identity, requested_ref_or_oid orelse .branch, requested_value, path);
-    const repos_dir = session.repos_dir orelse return emptyResult(aa, identity, requested_ref_or_oid orelse .branch, requested_value, path);
-
-    // the repo's working copy lives at <repos_dir>/<hex event id>.
-    const hex = std.fmt.bytesToHex(event_id.*, .lower);
-    const repo_path = try std.fs.path.join(aa, &.{ repos_dir, &hex });
+    const source = source_maybe orelse return emptyResult(aa, identity, requested_ref_or_oid orelse .branch, requested_value, path);
 
     // open + read the committed file list with the arena's backing allocator
     // (transient; freed before init returns); the listing is built into the
     // page arena so it outlives them. AnyRepo opens both sha1 and sha256 repos.
     const gpa = arena.child_allocator;
-    var any_repo = rp.AnyRepo(.xit, .{}).open(io, gpa, .{ .path = repo_path }) catch return emptyResult(aa, identity, requested_ref_or_oid orelse .branch, requested_value, path);
-    defer any_repo.deinit(io, gpa);
+    switch (source.repo_kind) {
+        inline else => |repo_kind| {
+            var any_repo = rp.AnyRepo(repo_kind, .{}).open(io, gpa, .{ .path = source.path }) catch return emptyResult(aa, identity, requested_ref_or_oid orelse .branch, requested_value, path);
+            defer any_repo.deinit(io, gpa);
 
-    return switch (any_repo) {
-        inline else => |*repo| listing(repo.self_repo_opts, arena, repo, io, gpa, identity, requested_ref_or_oid, requested_value, path, after),
-    };
+            return switch (any_repo) {
+                inline else => |*repo| listing(repo_kind, repo.self_repo_opts, arena, repo, io, gpa, identity, requested_ref_or_oid, requested_value, path, after),
+            };
+        },
+    }
 }
 
-// build the listing for an opened repo. generic over the repo's hash kind so
-// the tree/diff types it threads through match the repo's opts.
+// build the listing for an opened repo. generic over the repo's backend and
+// hash kind so the tree/diff types it threads through match the repo's opts.
 fn listing(
-    comptime repo_opts: rp.RepoOpts(.xit),
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
     arena: *std.heap.ArenaAllocator,
-    repo: *rp.Repo(.xit, repo_opts),
+    repo: *rp.Repo(repo_kind, repo_opts),
     io: std.Io,
     gpa: std.mem.Allocator,
     identity: []const u8,
@@ -121,7 +122,7 @@ fn listing(
     // resolve the requested ref (or the default branch) to the commit oid whose
     // tree we list. a ref the route named explicitly that doesn't resolve is a
     // bad url (NotFound -> 404); the default-branch path falls through to empty.
-    const resolved = (try ui.ResolvedRefOrOid(repo_opts).init(repo, io, aa, requested_ref_or_oid, requested_value)) orelse {
+    const resolved = (try ui.ResolvedRefOrOid(repo_kind, repo_opts).init(repo, io, aa, requested_ref_or_oid, requested_value)) orelse {
         if (requested_ref_or_oid != null) return error.NotFound;
         return emptyResult(aa, identity, .branch, requested_value, path);
     };
@@ -129,8 +130,8 @@ fn listing(
     // read the tree at that commit. building the read-only state mirrors what
     // repo.status does internally, but for an arbitrary commit rather than HEAD.
     var moment = repo.core.latestMoment() catch return emptyResult(aa, identity, resolved.ref_or_oid, resolved.value, path);
-    const state = rp.Repo(.xit, repo_opts).State(.read_only){ .core = &repo.core, .extra = .{ .moment = &moment } };
-    var tree = tr.Tree(.xit, repo_opts).init(state, io, gpa, &resolved.oid) catch return emptyResult(aa, identity, resolved.ref_or_oid, resolved.value, path);
+    const state = rp.Repo(repo_kind, repo_opts).State(.read_only){ .core = &repo.core, .extra = .{ .moment = &moment } };
+    var tree = tr.Tree(repo_kind, repo_opts).init(state, io, gpa, &resolved.oid) catch return emptyResult(aa, identity, resolved.ref_or_oid, resolved.value, path);
     defer tree.deinit();
 
     // `path` names a file when it's an exact tree entry: list its parent
@@ -185,7 +186,7 @@ fn listing(
                     // their first window (for the in-page detail when selected).
                     const is_selected = if (selected_file) |sf| std.mem.eql(u8, sf, name) else false;
                     const window_start = if (is_selected) after else 0;
-                    const content = readFileContent(repo_opts, state, io, gpa, aa, file_path, tree_entry, window_start) catch
+                    const content = readFileContent(repo_kind, repo_opts, state, io, gpa, aa, file_path, tree_entry, window_start) catch
                         FileContent{ .lines = &.{} };
                     entry.lines = content.lines;
                     entry.is_binary = content.is_binary;
@@ -220,8 +221,9 @@ const FileContent = struct {
 // line iterator flags binary files (its source becomes `.binary`), in which case
 // we report no lines and let the view show a placeholder.
 fn readFileContent(
-    comptime repo_opts: rp.RepoOpts(.xit),
-    state: rp.Repo(.xit, repo_opts).State(.read_only),
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    state: rp.Repo(repo_kind, repo_opts).State(.read_only),
     io: std.Io,
     gpa: std.mem.Allocator,
     arena: std.mem.Allocator,
@@ -229,7 +231,7 @@ fn readFileContent(
     tree_entry: tr.TreeEntry(repo_opts.hash),
     start: usize,
 ) !FileContent {
-    var line_iter = try df.LineIterator(.xit, repo_opts).initFromTree(state, io, gpa, path, tree_entry);
+    var line_iter = try df.LineIterator(repo_kind, repo_opts).initFromTree(state, io, gpa, path, tree_entry);
     defer line_iter.deinit();
     if (line_iter.source == .binary) return .{ .lines = &.{}, .is_binary = true };
 

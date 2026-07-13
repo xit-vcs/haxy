@@ -31,9 +31,10 @@ pub const Page = union(PageKind) {
     repo: Repo,
 
     pub fn init(arena: *std.heap.ArenaAllocator, session: *Session, route: RoutablePage) !Page {
-        const haxy_moment = session.haxy_moment orelse return error.NoMoment;
+        // the repo page can build without a moment in local mode; the home and
+        // user pages always read from the admin db.
         return switch (route.parent()) {
-            .home => .{ .home = try Home.init(arena, haxy_moment, switch (route) {
+            .home => .{ .home = try Home.init(arena, session.haxy_moment orelse return error.NoMoment, switch (route) {
                 .home_users => |after| after,
                 else => 0,
             }, switch (route) {
@@ -41,8 +42,8 @@ pub const Page = union(PageKind) {
                 else => 0,
             }) },
             .user => switch (route) {
-                .user_repos => |u| .{ .user = try User.init(arena, haxy_moment, u.name, u.after) },
-                .user_settings, .user_auth => |name| .{ .user = try User.init(arena, haxy_moment, name, 0) },
+                .user_repos => |u| .{ .user = try User.init(arena, session.haxy_moment orelse return error.NoMoment, u.name, u.after) },
+                .user_settings, .user_auth => |name| .{ .user = try User.init(arena, session.haxy_moment orelse return error.NoMoment, name, 0) },
                 else => return error.UnexpectedRoute,
             },
             .repo => switch (route) {
@@ -268,6 +269,26 @@ pub const RoutablePage = union(enum) {
             .repo_settings => |name| try std.fmt.allocPrint(arena.allocator(), repo_segment ++ "{s}/settings", .{name.slice()}),
             .repo_auth => |name| try std.fmt.allocPrint(arena.allocator(), repo_segment ++ "{s}/auth", .{name.slice()}),
         };
+    }
+
+    // the url with its leading "/repo/<owner>/<name>" elided, for local mode
+    // (every url there points at the one local repo). non-repo routes serialize
+    // in full.
+    pub fn urlAllocLocal(self: RoutablePage, arena: *std.heap.ArenaAllocator) ![]const u8 {
+        const full = try self.urlAlloc(arena);
+        const name_str: []const u8 = switch (self) {
+            .repo_files => |f| f.name.slice(),
+            .repo_commits => |c| c.name.slice(),
+            .repo_refs => |r| r.name.slice(),
+            .repo_issues => |i| i.name.slice(),
+            .repo_settings, .repo_auth => |n| n.slice(),
+            else => return full,
+        };
+        const identity = (RepoFiles.parse(name_str) orelse return full).identity;
+        const rest = full[repo_segment.len + identity.len ..];
+        if (rest.len == 0) return "/";
+        if (rest[0] == '/') return rest;
+        return try std.fmt.allocPrint(arena.allocator(), "/{s}", .{rest});
     }
 
     pub fn parent(self: RoutablePage) PageKind {
@@ -563,8 +584,8 @@ pub fn urlEncodeRef(aa: std.mem.Allocator, raw: []const u8) ![]const u8 {
     return out.written();
 }
 
-// a resolved ref/oid for a repo opened with `repo_opts`
-pub fn ResolvedRefOrOid(comptime repo_opts: rp.RepoOpts(.xit)) type {
+// a resolved ref/oid for a repo opened with `repo_kind`/`repo_opts`
+pub fn ResolvedRefOrOid(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
     return struct {
         pub const hex_len = hash.hexLen(repo_opts.hash);
 
@@ -584,7 +605,7 @@ pub fn ResolvedRefOrOid(comptime repo_opts: rp.RepoOpts(.xit)) type {
         // the url-encoded form (as it appears in the route). null when it doesn't
         // resolve (an unknown branch/tag, or a malformed/unknown oid).
         pub fn init(
-            repo: *rp.Repo(.xit, repo_opts),
+            repo: *rp.Repo(repo_kind, repo_opts),
             io: std.Io,
             aa: std.mem.Allocator,
             requested_ref_or_oid: ?RoutablePage.RefOrOid,
@@ -628,6 +649,12 @@ pub fn ResolvedRefOrOid(comptime repo_opts: rp.RepoOpts(.xit)) type {
     };
 }
 
+// where a repo page reads its on-disk repo from
+pub const RepoSource = struct {
+    path: []const u8,
+    repo_kind: rp.RepoKind,
+};
+
 // per-connection mutable state. each SSH session / web session / local TUI
 // run gets its own.
 pub const Session = struct {
@@ -646,6 +673,10 @@ pub const Session = struct {
     // rebuilds pages from the serialized snapshot rather than from disk.
     io: ?std.Io = null,
     repos_dir: ?[]const u8 = null,
+    // the single on-disk repo this session views, when running in local mode
+    // (haxy invoked with no arguments inside a repo). null on the server paths,
+    // which resolve repos from the admin db instead.
+    local: ?RepoSource = null,
     pending: std.ArrayList(Action) = .empty, // actions queued by widgets this frame
     // focus id -> the live TextInput, refreshed each frame by the views that own
     // inputs. web/wasm form handling looks widgets up here by focus id.
@@ -761,7 +792,7 @@ pub const Session = struct {
     }
 };
 
-pub fn run(io: std.Io, allocator: std.mem.Allocator, session: *Session, repo: *rp.Repo(.xit, evt.admin_repo_opts)) !void {
+pub fn run(io: std.Io, allocator: std.mem.Allocator, session: *Session, repo_maybe: ?*rp.Repo(.xit, evt.admin_repo_opts)) !void {
     var nav = try Nav.init(allocator, session);
     defer nav.deinit(allocator);
 
@@ -800,8 +831,8 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, session: *Session, repo: *r
         session.applyPending();
 
         // pick up data written by other handles so the next navigation
-        // builds its page from a current moment
-        try session.reloadMoment(repo);
+        // builds its page from a current moment (local mode has no admin repo)
+        if (repo_maybe) |repo| try session.reloadMoment(repo);
 
         // reconcile navigation: forward to a new page, or back on escape.
         try nav.sync(allocator, session);
@@ -955,7 +986,7 @@ pub const Nav = struct {
         // refresh: rebuild the current page in place from a current moment
         if (session.refresh_requested) {
             session.refresh_requested = false;
-            if (session.haxy_moment != null) {
+            if (session.haxy_moment != null or session.local != null) {
                 const arena = try allocator.create(std.heap.ArenaAllocator);
                 arena.* = std.heap.ArenaAllocator.init(allocator);
                 errdefer freeArena(allocator, arena);
@@ -1015,7 +1046,7 @@ pub const Nav = struct {
         // cross-page link or tab change crossing pages)
         if (session.next_page) |route| {
             session.next_page = null;
-            if (session.haxy_moment == null) return;
+            if (session.haxy_moment == null and session.local == null) return;
             // the page we navigated to becomes the current page
             session.data.current_page = route;
 
@@ -1698,7 +1729,8 @@ pub const Footer = struct {
 
         _ = self.arena.reset(.retain_capacity);
         const aa = self.arena.allocator();
-        const path = self.session.data.current_page.urlAlloc(&self.arena) catch return;
+        const page = self.session.data.current_page;
+        const path = (if (self.session.local != null) page.urlAllocLocal(&self.arena) else page.urlAlloc(&self.arena)) catch return;
         const text = if (self.session.web_port) |port|
             std.fmt.allocPrint(aa, "http://localhost:{d}{s}", .{ port, path }) catch return
         else

@@ -41,7 +41,7 @@ const Self = @This();
 pub fn init(
     arena: *std.heap.ArenaAllocator,
     session: *ui.Session,
-    event_id: *const [evt.event_id_size]u8,
+    source_maybe: ?ui.RepoSource,
     identity: []const u8,
     tag: []const u8,
     selected_id: []const u8,
@@ -59,16 +59,15 @@ pub fn init(
     // no filesystem (wasm) or nowhere to look: empty listing. the wasm path
     // never calls init anyway — it rebuilds from the serialized snapshot.
     const io = session.io orelse return empty;
-    const repos_dir = session.repos_dir orelse return empty;
+    const source = source_maybe orelse return empty;
 
-    // the repo's working copy lives at <repos_dir>/<hex event id>.
-    const hex = std.fmt.bytesToHex(event_id.*, .lower);
-    const repo_path = try std.fs.path.join(aa, &.{ repos_dir, &hex });
+    // issues live in the repo's own xit db, so a git-backed repo has none.
+    if (source.repo_kind == .git) return empty;
 
     // open with the arena's backing allocator (transient; the issue strings are
     // duped into the page arena so they outlive the repo handle).
     const gpa = arena.child_allocator;
-    var any_repo = rp.AnyRepo(.xit, .{}).open(io, gpa, .{ .path = repo_path }) catch return empty;
+    var any_repo = rp.AnyRepo(.xit, .{}).open(io, gpa, .{ .path = source.path }) catch return empty;
     defer any_repo.deinit(io, gpa);
 
     return switch (any_repo) {

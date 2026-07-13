@@ -55,7 +55,6 @@ pub fn init(
 ) !Self {
     const DB = evt.AdminDB;
     const hash_kind = evt.admin_repo_opts.hash;
-    const haxy_moment = session.haxy_moment orelse return error.NoMoment;
 
     // every repo route's stored string starts with "owner/name"; the files and
     // commits routes additionally encode a ref/oid (files also a directory).
@@ -118,19 +117,47 @@ pub fn init(
         else => "",
     };
 
-    const found = (try evt.Repo.readByOwnerAndName(DB, hash_kind, haxy_moment, arena, rf.owner, rf.name)) orelse return error.NotFound;
-    const repo = found.repo;
+    // where the on-disk repo lives (null keeps the views' empty fallback), plus
+    // the repo and owner-name metadata the header shows. local mode already
+    // knows all three; the server paths resolve them from the admin db.
+    var source: ?ui.RepoSource = null;
+    var repo: evt.Repo = undefined;
+    var owner_name: []const u8 = undefined;
+    if (session.local) |local| {
+        source = local;
+        repo = .{
+            .user_id = "",
+            .name = try arena.allocator().dupe(u8, rf.name),
+            .description = "",
+            .enable_issue = true,
+        };
+        owner_name = try arena.allocator().dupe(u8, rf.owner);
+    } else {
+        const haxy_moment = session.haxy_moment orelse return error.NoMoment;
+        const found = (try evt.Repo.readByOwnerAndName(DB, hash_kind, haxy_moment, arena, rf.owner, rf.name)) orelse return error.NotFound;
+        repo = found.repo;
 
-    // resolve the creating user so the header can show their name to the left
-    // of the repo title.
-    const owner = (try evt.User.readById(DB, hash_kind, haxy_moment, arena, repo.user_id)) orelse return error.NotFound;
+        // resolve the creating user so the header can show their name to the left
+        // of the repo title.
+        const owner = (try evt.User.readById(DB, hash_kind, haxy_moment, arena, repo.user_id)) orelse return error.NotFound;
+        owner_name = owner.name;
+
+        // the repo's working copy lives at <repos_dir>/<hex event id>.
+        if (session.repos_dir) |repos_dir| {
+            const hex = std.fmt.bytesToHex(found.event_id, .lower);
+            source = .{
+                .path = try std.fs.path.join(arena.allocator(), &.{ repos_dir, &hex }),
+                .repo_kind = .xit,
+            };
+        }
+    }
 
     // build files and commits first so their resolved ref (the default branch
     // when the route named none) can canonicalize each tab's mirror url to the
     // explicit ref it's viewing rather than leaving it bare. both resolve the
     // same requested ref, so they end up viewing the same one.
-    const files = try Files.init(arena, session, &found.event_id, rf.identity, requested_ref_or_oid, requested_ref_value, files_dir, files_after);
-    const commits = try Commits.init(arena, session, &found.event_id, rf.identity, requested_ref_or_oid, requested_ref_value, commits_after);
+    const files = try Files.init(arena, session, source, rf.identity, requested_ref_or_oid, requested_ref_value, files_dir, files_after);
+    const commits = try Commits.init(arena, session, source, rf.identity, requested_ref_or_oid, requested_ref_value, commits_after);
 
     // each tab mirror carries this page's route for that tab; tabs not targeted
     // by the incoming route fall back to their root/first-page route. the files
@@ -146,12 +173,12 @@ pub fn init(
     return .{
         // files and commits resolve the same ref, so either's serves the header,
         // which points both tabs at it.
-        .header = try Header.init(arena, repo.name, owner.name, files.ref_or_oid, files.ref_or_oid_value, issues_tag),
+        .header = try Header.init(arena, repo.name, owner_name, files.ref_or_oid, files.ref_or_oid_value, issues_tag),
         .repo = repo,
         .files = files,
         .commits = commits,
-        .refs = try Refs.init(arena, session, &found.event_id, rf.identity, refs_kind, refs_after),
-        .issues = try Issues.init(arena, session, &found.event_id, rf.identity, issues_tag, issues_selected),
+        .refs = try Refs.init(arena, session, source, rf.identity, refs_kind, refs_after),
+        .issues = try Issues.init(arena, session, source, rf.identity, issues_tag, issues_selected),
         .settings = Settings.init(),
         .auth = Auth.init(),
         .quit = Quit.init(),
@@ -223,7 +250,9 @@ pub const View = struct {
                 try stack.children.put(allocator, settings_view.getFocus().id, .{ .home_settings = settings_view });
             }
 
-            {
+            // the header has no auth tab in local mode, so keep the stack's
+            // children 1:1 with the tabs by skipping the auth view too.
+            if (session.local == null) {
                 var auth_view = try Auth.View.init(allocator, &data.auth, session, files_tab_id);
                 errdefer auth_view.deinit(allocator);
                 try stack.children.put(allocator, auth_view.getFocus().id, .{ .home_auth = auth_view });

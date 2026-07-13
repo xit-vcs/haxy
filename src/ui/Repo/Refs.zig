@@ -37,7 +37,7 @@ const Window = struct { names: []const []const u8, next_after: ?usize };
 pub fn init(
     arena: *std.heap.ArenaAllocator,
     session: *ui.Session,
-    event_id: *const [evt.event_id_size]u8,
+    source_maybe: ?ui.RepoSource,
     identity: []const u8,
     kind: ui.RoutablePage.RefKind,
     after: usize,
@@ -63,28 +63,33 @@ pub fn init(
     // no filesystem (wasm) or nowhere to look: empty lists. the wasm path never
     // calls init anyway — it rebuilds from the serialized snapshot.
     const io = session.io orelse return empty;
-    const repos_dir = session.repos_dir orelse return empty;
-
-    // the repo's working copy lives at <repos_dir>/<hex event id>.
-    const hex = std.fmt.bytesToHex(event_id.*, .lower);
-    const repo_path = try std.fs.path.join(aa, &.{ repos_dir, &hex });
+    const source = source_maybe orelse return empty;
 
     // open with the arena's backing allocator (transient; the ref names are
     // duped into the page arena so they outlive the repo handle).
     const gpa = arena.child_allocator;
-    var any_repo = rp.AnyRepo(.xit, .{}).open(io, gpa, .{ .path = repo_path }) catch return empty;
-    defer any_repo.deinit(io, gpa);
+    const branches, const tags = switch (source.repo_kind) {
+        inline else => |repo_kind| blk: {
+            var any_repo = rp.AnyRepo(repo_kind, .{}).open(io, gpa, .{ .path = source.path }) catch return empty;
+            defer any_repo.deinit(io, gpa);
 
-    const branches, const tags = switch (any_repo) {
-        inline else => |*repo| blk: {
-            var branch_iter = repo.listBranches(io, gpa, .{ .index = branches_after }) catch return empty;
-            defer branch_iter.deinit(io);
-            const b = try collectWindow(io, aa, &branch_iter, branches_after);
+            switch (any_repo) {
+                inline else => |*repo| {
+                    // xit seeks each iterator straight to its window; the git
+                    // backend can't seek, so it starts at the beginning and
+                    // collectWindow discards the entries before the window.
+                    const can_seek = repo_kind == .xit;
 
-            var tag_iter = repo.listTags(io, gpa, .{ .index = tags_after }) catch return empty;
-            defer tag_iter.deinit(io);
-            const t = try collectWindow(io, aa, &tag_iter, tags_after);
-            break :blk .{ b, t };
+                    var branch_iter = repo.listBranches(io, gpa, if (can_seek) .{ .index = branches_after } else .beginning) catch return empty;
+                    defer branch_iter.deinit(io);
+                    const b = try collectWindow(io, aa, &branch_iter, branches_after, if (can_seek) 0 else branches_after);
+
+                    var tag_iter = repo.listTags(io, gpa, if (can_seek) .{ .index = tags_after } else .beginning) catch return empty;
+                    defer tag_iter.deinit(io);
+                    const t = try collectWindow(io, aa, &tag_iter, tags_after, if (can_seek) 0 else tags_after);
+                    break :blk .{ b, t };
+                },
+            }
         },
     };
 
@@ -101,8 +106,12 @@ pub fn init(
     };
 }
 
-// window a ref iterator without materializing the whole list
-fn collectWindow(io: std.Io, aa: std.mem.Allocator, iter: anytype, after: usize) !Window {
+// window a ref iterator without materializing the whole list. `skip` entries
+// are discarded first, for backends whose iterators can't seek.
+fn collectWindow(io: std.Io, aa: std.mem.Allocator, iter: anytype, after: usize, skip: usize) !Window {
+    for (0..skip) |_| {
+        if (try iter.next(io) == null) break;
+    }
     var names = try std.ArrayListUnmanaged([]const u8).initCapacity(aa, page_size);
     while (names.items.len < page_size) {
         const ref = try iter.next(io) orelse break;

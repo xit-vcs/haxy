@@ -57,7 +57,7 @@ const Self = @This();
 pub fn init(
     arena: *std.heap.ArenaAllocator,
     session: *ui.Session,
-    event_id: *const [evt.event_id_size]u8,
+    source_maybe: ?ui.RepoSource,
     identity: []const u8,
     requested_ref_or_oid: ?ui.RoutablePage.RefOrOid,
     requested_value: []const u8,
@@ -66,33 +66,36 @@ pub fn init(
     after: usize,
 ) !Self {
     const aa = arena.allocator();
-    const hex = std.fmt.bytesToHex(event_id.*, .lower);
 
     // no filesystem (wasm) or nowhere to look: empty listing. the wasm path
     // never calls init anyway — it rebuilds from the serialized snapshot.
     const io = session.io orelse return emptyResult(aa, identity, requested_ref_or_oid orelse .branch, requested_value);
-    const repos_dir = session.repos_dir orelse return emptyResult(aa, identity, requested_ref_or_oid orelse .branch, requested_value);
-
-    const repo_path = try std.fs.path.join(aa, &.{ repos_dir, &hex });
+    const source = source_maybe orelse return emptyResult(aa, identity, requested_ref_or_oid orelse .branch, requested_value);
 
     // walk the log with the arena's backing allocator (transient; the commits
     // we keep are duped into the page arena so they outlive it). AnyRepo opens
     // both sha1 and sha256 repos.
     const gpa = arena.child_allocator;
-    var any_repo = rp.AnyRepo(.xit, .{}).open(io, gpa, .{ .path = repo_path }) catch return emptyResult(aa, identity, requested_ref_or_oid orelse .branch, requested_value);
-    defer any_repo.deinit(io, gpa);
+    switch (source.repo_kind) {
+        inline else => |repo_kind| {
+            var any_repo = rp.AnyRepo(repo_kind, .{}).open(io, gpa, .{ .path = source.path }) catch return emptyResult(aa, identity, requested_ref_or_oid orelse .branch, requested_value);
+            defer any_repo.deinit(io, gpa);
 
-    return switch (any_repo) {
-        inline else => |*repo| collect(repo.self_repo_opts, arena, repo, io, gpa, identity, requested_ref_or_oid, requested_value, after),
-    };
+            return switch (any_repo) {
+                inline else => |*repo| collect(repo_kind, repo.self_repo_opts, arena, repo, io, gpa, identity, requested_ref_or_oid, requested_value, after),
+            };
+        },
+    }
 }
 
-// walk the log for an opened repo. generic over the repo's hash kind so the
-// oid buffers and diff types it threads through match the repo's opts.
+// walk the log for an opened repo. generic over the repo's backend and hash
+// kind so the oid buffers and diff types it threads through match the repo's
+// opts.
 fn collect(
-    comptime repo_opts: rp.RepoOpts(.xit),
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
     arena: *std.heap.ArenaAllocator,
-    repo: *rp.Repo(.xit, repo_opts),
+    repo: *rp.Repo(repo_kind, repo_opts),
     io: std.Io,
     gpa: std.mem.Allocator,
     identity: []const u8,
@@ -101,12 +104,12 @@ fn collect(
     after: usize,
 ) !Self {
     const aa = arena.allocator();
-    const hex_len = ui.ResolvedRefOrOid(repo_opts).hex_len;
+    const hex_len = ui.ResolvedRefOrOid(repo_kind, repo_opts).hex_len;
 
     // resolve the requested ref (or the default branch) to the commit oid to
     // walk from. an explicitly named ref that doesn't resolve is a bad url
     // (NotFound -> 404); the default-branch path falls through to empty.
-    const resolved = (try ui.ResolvedRefOrOid(repo_opts).init(repo, io, aa, requested_ref_or_oid, requested_value)) orelse {
+    const resolved = (try ui.ResolvedRefOrOid(repo_kind, repo_opts).init(repo, io, aa, requested_ref_or_oid, requested_value)) orelse {
         if (requested_ref_or_oid != null) return error.NotFound;
         return emptyResult(aa, identity, .branch, requested_value);
     };
@@ -152,7 +155,7 @@ fn collect(
             // the selected commit (the first, == start_oid) shows the window the
             // url asks for; the rest show their first window.
             const start = if (i == 0) after else 0;
-            const rendered = renderCommitDiff(repo_opts, io, gpa, aa, repo, oid, start, diff_page) catch
+            const rendered = renderCommitDiff(repo_kind, repo_opts, io, gpa, aa, repo, oid, start, diff_page) catch
                 RenderedDiff{ .hunks = &.{}, .has_prev = false, .has_more = false };
             commit.hunks = rendered.hunks;
             commit.window_start = start;
@@ -192,11 +195,12 @@ const RenderedDiff = struct {
 // render the window [start, start+len) of a commit's diff against its first
 // parent into `arena`-owned hunks. has_prev/has_more flag adjacent windows.
 fn renderCommitDiff(
-    comptime repo_opts: rp.RepoOpts(.xit),
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
     io: std.Io,
     gpa: std.mem.Allocator,
     arena: std.mem.Allocator,
-    repo: *rp.Repo(.xit, repo_opts),
+    repo: *rp.Repo(repo_kind, repo_opts),
     oid: [xit.hash.hexLen(repo_opts.hash)]u8,
     start: usize,
     len: usize,
@@ -225,7 +229,7 @@ fn renderCommitDiff(
         var pair = pair_val;
         defer pair.deinit();
 
-        var hunk_iter = df.HunkIterator(.xit, repo_opts).init(gpa, &pair.a, &pair.b) catch continue;
+        var hunk_iter = df.HunkIterator(repo_kind, repo_opts).init(gpa, &pair.a, &pair.b) catch continue;
         defer hunk_iter.deinit(gpa);
 
         // the path label rides on the first of this file's hunks we actually show.
@@ -242,7 +246,7 @@ fn renderCommitDiff(
                 break :file_loop;
             }
             var lines: std.ArrayList([]const u8) = .empty;
-            try appendHunkLines(repo_opts, arena, &lines, &hunk_iter, &hunk);
+            try appendHunkLines(repo_kind, repo_opts, arena, &lines, &hunk_iter, &hunk);
             try hunks.append(arena, .{
                 .path = if (path_attached) null else try arena.dupe(u8, pair.path),
                 .lines = try lines.toOwnedSlice(arena),
@@ -257,11 +261,12 @@ fn renderCommitDiff(
 // append a hunk's header and its edit lines, each prefixed with a right-aligned
 // line number in a column wide enough for the hunk's largest number, then a space
 fn appendHunkLines(
-    comptime repo_opts: rp.RepoOpts(.xit),
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
     arena: std.mem.Allocator,
     lines: *std.ArrayList([]const u8),
-    hunk_iter: *df.HunkIterator(.xit, repo_opts),
-    hunk: *df.Hunk(.xit, repo_opts),
+    hunk_iter: *df.HunkIterator(repo_kind, repo_opts),
+    hunk: *df.Hunk(repo_kind, repo_opts),
 ) !void {
     var max_num: usize = 1;
     for (hunk.edits.items) |edit| {

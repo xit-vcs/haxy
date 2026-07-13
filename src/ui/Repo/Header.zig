@@ -53,8 +53,8 @@ pub const View = struct {
 
         const aa = session.page_arena.allocator();
 
-        // the user's name
-        {
+        // the user's name (local mode has no user pages to link to)
+        if (session.local == null) {
             const text = try std.fmt.allocPrint(aa, "{s}/", .{data.owner_name});
             const link = try std.fmt.allocPrint(aa, "a:/user/{s}", .{data.owner_name});
 
@@ -221,8 +221,9 @@ pub const View = struct {
         }
 
         // auth tab (login / logout). AuthTab defaults to the global ai:/auth
-        // link; repoint its instance at this repo's auth route so it stays local.
-        {
+        // link; repoint its instance at this repo's auth route so it stays on
+        // this page. local mode has no accounts, so it has no auth tab.
+        if (session.local == null) {
             var auth_tab = try AuthTab.View.init(allocator, session);
             errdefer auth_tab.deinit(allocator);
             auth_tab.text_box.getFocus().kind = .{ .custom = auth_link };

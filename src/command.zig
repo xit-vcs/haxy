@@ -216,6 +216,7 @@ pub const CommandDispatch = union(enum) {
         },
     },
     help: ?CommandKind,
+    local,
     cli: Command,
 
     pub fn init(cmd_args: *CommandArgs) !CommandDispatch {
@@ -227,6 +228,7 @@ pub const CommandDispatch = union(enum) {
                         .command = switch (dispatch) {
                             .invalid => return dispatch, // if there was already an error, return it instead
                             .help => |cmd_kind_maybe| cmd_kind_maybe,
+                            .local => null,
                             .cli => |command| command,
                         },
                         .value = cmd_args.unused_args.keys()[0],
@@ -250,8 +252,10 @@ pub const CommandDispatch = union(enum) {
             }
         } else if (cmd_args.command_name) |command_name| {
             return .{ .invalid = .{ .command = command_name } };
-        } else {
+        } else if (show_help) {
             return .{ .help = null };
+        } else {
+            return .local;
         }
     }
 };
