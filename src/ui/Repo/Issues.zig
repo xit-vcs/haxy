@@ -30,8 +30,8 @@ tag: []const u8,
 // window), mirrored into the url.
 selected_id: []const u8,
 issues: []const IssueWithId,
-// the id of the previous window's first issue ("" = the bare first window), or
-// null when this window is already the first.
+// the id of the previous window's first issue, or null when this window is
+// already the first.
 prev_id: ?[]const u8,
 // the id of the next window's first issue, or null when this is the last window.
 next_id: ?[]const u8,
@@ -137,15 +137,11 @@ pub fn init(
         const rank = try issue_id_set.rank(&order_key);
         if (rank > 0) {
             const prev_rank = rank -| page_size;
-            if (prev_rank == 0) {
-                prev_id = "";
-            } else {
-                const kv = try issue_id_set.getIndexKeyValuePair(@intCast(prev_rank)) orelse return error.NotFound;
-                var prev_key: [@sizeOf(u64) + evt.event_id_size]u8 = undefined;
-                _ = try kv.key_cursor.readBytes(&prev_key);
-                const prev_hex = std.fmt.bytesToHex(prev_key[@sizeOf(u64)..].*, .lower);
-                prev_id = try aa.dupe(u8, &prev_hex);
-            }
+            const kv = try issue_id_set.getIndexKeyValuePair(@intCast(prev_rank)) orelse return error.NotFound;
+            var prev_key: [@sizeOf(u64) + evt.event_id_size]u8 = undefined;
+            _ = try kv.key_cursor.readBytes(&prev_key);
+            const prev_hex = std.fmt.bytesToHex(prev_key[@sizeOf(u64)..].*, .lower);
+            prev_id = try aa.dupe(u8, &prev_hex);
         }
 
         break :blk try issue_id_set.iteratorFrom(&order_key);
