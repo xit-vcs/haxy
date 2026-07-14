@@ -335,8 +335,8 @@ pub const View = struct {
             }
         }
 
-        // the description shows a single border while selected (the focused
-        // TextBox upgrades it to a double border itself).
+        // the pane's selected child shows the selection border: the description
+        // directly, the tags via the flow's selected item.
         const inner = self.detailInner();
         for (inner.children.keys(), inner.children.values()) |id, *child| {
             switch (child.widget) {
@@ -344,6 +344,7 @@ pub const View = struct {
                 else => {},
             }
         }
+        if (self.tagFlow()) |tf| tf.selected = self.tagsFocused();
 
         // cap the list at list_max_width only while the detail pane fits beside
         // it. the box drops the detail when the width can't hold both minimums,

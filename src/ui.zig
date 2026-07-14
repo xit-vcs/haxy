@@ -1536,6 +1536,9 @@ pub const TagFlow = struct {
     rects: std.ArrayList(layout.IRect),
     // backs the per-item strings the text boxes borrow.
     arena: std.heap.ArenaAllocator,
+    // whether the owning view considers this flow selected; only then does the
+    // selected item show its border.
+    selected: bool,
 
     pub const Item = struct { text: []const u8, link: []const u8 = "" };
 
@@ -1546,6 +1549,7 @@ pub const TagFlow = struct {
             .text_boxes = .empty,
             .rects = .empty,
             .arena = std.heap.ArenaAllocator.init(allocator),
+            .selected = true,
         };
     }
 
@@ -1608,7 +1612,7 @@ pub const TagFlow = struct {
         var row_height: usize = 0;
         var total_width: usize = 0;
         for (self.text_boxes.items) |*tb| {
-            tb.options.border_style = if (self.focus.child_id == tb.getFocus().id) .single else .hidden;
+            tb.options.border_style = if (self.selected and self.focus.child_id == tb.getFocus().id) .single else .hidden;
             try tb.build(allocator, .{
                 .min_size = .{ .width = null, .height = null },
                 .max_size = .{ .width = max_width, .height = null },
