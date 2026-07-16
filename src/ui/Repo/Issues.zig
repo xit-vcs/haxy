@@ -236,7 +236,7 @@ pub const View = struct {
 
         // the tabs at the top.
         {
-            var sub_header = try SubHeader.View.init(allocator, session, data.count, data.tag);
+            var sub_header = try SubHeader.View.init(allocator, session, data.identity, data.count, data.tag);
             errdefer sub_header.deinit(allocator);
             try outer.children.put(allocator, sub_header.getFocus().id, .{ .widget = .{ .repo_issues_sub_header = sub_header }, .rect = null, .min_size = null });
         }
@@ -415,10 +415,14 @@ pub const View = struct {
     pub fn build(self: *View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
         self.clearGrid();
 
-        // each sub header tab maps 1:1 to a stack child by position.
+        // each sub header tab maps 1:1 to a stack child by position
         if (self.subHeader().getSelectedIndex()) |index| {
             const stack = self.viewStack();
             stack.getFocus().child_id = stack.children.keys()[index];
+            self.session.data.current_page = (if (index == tags_view_index)
+                ui.RoutablePage.repoIssuesTagsRoute(self.data.identity)
+            else
+                ui.RoutablePage.repoIssuesRoute(self.data.identity, self.data.tag, "")) orelse self.session.data.current_page;
         }
 
         // swap the detail pane to the selected issue when it changes.

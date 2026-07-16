@@ -84,6 +84,7 @@ pub const RoutablePage = union(enum) {
         // the tag the list is filtered to, url-encoded ("" = unfiltered).
         tag: Array(issue_tag_route_max_len) = .{},
         selected: Array(evt.event_id_size * 2) = .{},
+        view: enum { results, tags } = .results,
     },
     repo_settings: Array(repo_route_max_len),
     repo_auth: Array(repo_route_max_len),
@@ -238,6 +239,14 @@ pub const RoutablePage = union(enum) {
         } };
     }
 
+    // build a `.repo_issues` route showing "owner/name" (identity)'s tags view.
+    pub fn repoIssuesTagsRoute(identity: []const u8) ?RoutablePage {
+        return .{ .repo_issues = .{
+            .name = Array(repo_route_max_len).from(identity) orelse return null,
+            .view = .tags,
+        } };
+    }
+
     // an inline, owned array of data. keeping it in the route (rather than a
     // borrowed slice) makes RoutablePage a plain value: it can be copied, stored
     // in history, and serialized without any arena tracking.
@@ -288,15 +297,18 @@ pub const RoutablePage = union(enum) {
             },
             .repo_issues => |i| blk: {
                 const prefix = try repoUrlPrefix(arena, i.name.slice());
-                break :blk if (i.tag.len == 0)
-                    (if (i.selected.len == 0)
-                        try std.fmt.allocPrint(arena.allocator(), "{s}/issues", .{prefix})
+                break :blk switch (i.view) {
+                    .tags => try std.fmt.allocPrint(arena.allocator(), "{s}/issues/tags", .{prefix}),
+                    .results => if (i.tag.len == 0)
+                        (if (i.selected.len == 0)
+                            try std.fmt.allocPrint(arena.allocator(), "{s}/issues", .{prefix})
+                        else
+                            try std.fmt.allocPrint(arena.allocator(), "{s}/issues/{s}", .{ prefix, i.selected.slice() }))
+                    else if (i.selected.len == 0)
+                        try std.fmt.allocPrint(arena.allocator(), "{s}/issues/tags/{s}", .{ prefix, i.tag.slice() })
                     else
-                        try std.fmt.allocPrint(arena.allocator(), "{s}/issues/{s}", .{ prefix, i.selected.slice() }))
-                else if (i.selected.len == 0)
-                    try std.fmt.allocPrint(arena.allocator(), "{s}/issues/tag/{s}", .{ prefix, i.tag.slice() })
-                else
-                    try std.fmt.allocPrint(arena.allocator(), "{s}/issues/tag/{s}/{s}", .{ prefix, i.tag.slice(), i.selected.slice() });
+                        try std.fmt.allocPrint(arena.allocator(), "{s}/issues/tags/{s}/{s}", .{ prefix, i.tag.slice(), i.selected.slice() }),
+                };
             },
             .repo_settings => |name| try std.fmt.allocPrint(arena.allocator(), "{s}/settings", .{try repoUrlPrefix(arena, name.slice())}),
             .repo_auth => |name| try std.fmt.allocPrint(arena.allocator(), "{s}/auth", .{try repoUrlPrefix(arena, name.slice())}),
@@ -388,14 +400,15 @@ pub const RoutablePage = union(enum) {
             .after = after,
         } };
         if (std.mem.eql(u8, sub, "issues") or std.mem.startsWith(u8, sub, "issues/")) {
-            // "issues[/tag/<tag>][/<issue event id>]"
+            // "issues[/<issue event id>]", "issues/tags" (the tags view), or
+            // "issues/tags/<tag>[/<issue event id>]" (the list filtered to <tag>)
             var segments = std.mem.splitScalar(u8, sub, '/');
             _ = segments.next(); // "issues"
             var tag_value: []const u8 = "";
             var id: []const u8 = "";
             if (segments.next()) |segment| {
-                if (std.mem.eql(u8, segment, "tag")) {
-                    tag_value = segments.next() orelse return null;
+                if (std.mem.eql(u8, segment, "tags")) {
+                    tag_value = segments.next() orelse return repoIssuesTagsRoute(pair);
                     if (tag_value.len == 0) return null;
                     id = segments.next() orelse "";
                 } else {
@@ -468,7 +481,8 @@ pub const RoutablePage = union(enum) {
             .repo_refs => |a_r| std.mem.eql(u8, a_r.name.slice(), b.repo_refs.name.slice()) and a_r.kind == b.repo_refs.kind and a_r.after == b.repo_refs.after,
             .repo_issues => |a_i| std.mem.eql(u8, a_i.name.slice(), b.repo_issues.name.slice()) and
                 std.mem.eql(u8, a_i.tag.slice(), b.repo_issues.tag.slice()) and
-                std.mem.eql(u8, a_i.selected.slice(), b.repo_issues.selected.slice()),
+                std.mem.eql(u8, a_i.selected.slice(), b.repo_issues.selected.slice()) and
+                a_i.view == b.repo_issues.view,
             .repo_settings => |a_name| std.mem.eql(u8, a_name.slice(), b.repo_settings.slice()),
             .repo_auth => |a_name| std.mem.eql(u8, a_name.slice(), b.repo_auth.slice()),
             else => true,
@@ -545,6 +559,8 @@ pub const RoutablePage = union(enum) {
                 try jw.write(i.tag.slice());
                 try jw.objectField("selected");
                 try jw.write(i.selected.slice());
+                try jw.objectField("view");
+                try jw.write(@tagName(i.view));
             },
             .repo_files => |f| {
                 try jw.objectField("name");
@@ -578,7 +594,7 @@ pub const RoutablePage = union(enum) {
     }
 
     pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !RoutablePage {
-        const Helper = struct { kind: std.meta.Tag(RoutablePage), name: ?[]const u8 = null, after: usize = 0, ref_kind: ?[]const u8 = null, tag: ?[]const u8 = null, selected: ?[]const u8 = null };
+        const Helper = struct { kind: std.meta.Tag(RoutablePage), name: ?[]const u8 = null, after: usize = 0, ref_kind: ?[]const u8 = null, tag: ?[]const u8 = null, selected: ?[]const u8 = null, view: ?[]const u8 = null };
         const helper = try std.json.innerParse(Helper, allocator, source, options);
         const parseName = struct {
             // errors must stay within std.json's ParseError set; ValueTooLong
@@ -606,6 +622,7 @@ pub const RoutablePage = union(enum) {
                 .name = try parseName(repo_route_max_len, helper.name),
                 .tag = Array(issue_tag_route_max_len).from(helper.tag orelse "") orelse return error.ValueTooLong,
                 .selected = Array(evt.event_id_size * 2).from(helper.selected orelse "") orelse return error.ValueTooLong,
+                .view = if (helper.view) |v| (if (std.mem.eql(u8, v, "tags")) .tags else .results) else .results,
             } },
             .repo_settings => .{ .repo_settings = try parseName(repo_route_max_len, helper.name) },
             .repo_auth => .{ .repo_auth = try parseName(repo_route_max_len, helper.name) },

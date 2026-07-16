@@ -9,14 +9,14 @@ const Key = xitui.input.Key;
 const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
 
-// tabs switching between the issues page's views. only "results" for now.
+// tabs switching between the issues page's views.
 
 pub const View = struct {
     box: wgt.Box(ui.Widget),
     tab_ids: std.AutoArrayHashMapUnmanaged(usize, void),
 
     // `tag` is the url-encoded tag filter ("" = unfiltered).
-    pub fn init(allocator: std.mem.Allocator, session: *ui.Session, count: usize, tag: []const u8) !View {
+    pub fn init(allocator: std.mem.Allocator, session: *ui.Session, identity: []const u8, count: usize, tag: []const u8) !View {
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = .hidden, .rounded_corners = true, .direction = .horiz });
         errdefer box.deinit(allocator);
 
@@ -25,12 +25,18 @@ pub const View = struct {
 
         const aa = session.page_arena.allocator();
 
+        const results_route = ui.RoutablePage.repoIssuesRoute(identity, tag, "") orelse return error.RouteTooLong;
+        const results_link = try std.fmt.allocPrint(aa, "ai:{s}", .{try results_route.urlAlloc(session.page_arena)});
+        const tags_route = ui.RoutablePage.repoIssuesTagsRoute(identity) orelse return error.RouteTooLong;
+        const tags_link = try std.fmt.allocPrint(aa, "ai:{s}", .{try tags_route.urlAlloc(session.page_arena)});
+
         // results tab, labeled with the listing's issue count
         {
             const label = try std.fmt.allocPrint(aa, "results ({d})", .{count});
             var text_box = try wgt.TextBox(ui.Widget).init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().focusable = true;
+            text_box.getFocus().kind = .{ .custom = results_link };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
             try box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
@@ -48,6 +54,7 @@ pub const View = struct {
             var text_box = try wgt.TextBox(ui.Widget).init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().focusable = true;
+            text_box.getFocus().kind = .{ .custom = tags_link };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
             try box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
@@ -57,7 +64,15 @@ pub const View = struct {
         }
 
         var self = View{ .box = box, .tab_ids = tab_ids };
-        self.getFocus().child_id = self.tab_ids.keys()[0];
+        // the tab matching the incoming route's view is selected initially.
+        const selected_index: usize = switch (session.data.current_page) {
+            .repo_issues => |i| switch (i.view) {
+                .results => 0,
+                .tags => 1,
+            },
+            else => 0,
+        };
+        self.getFocus().child_id = self.tab_ids.keys()[selected_index];
         return self;
     }
 
