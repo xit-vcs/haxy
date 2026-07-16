@@ -5,13 +5,13 @@ const hash = xit.hash;
 
 title: []const u8,
 description: []const u8,
-tags: []const u8, // NUL-separated
+tags: []const u8, // comma-separated
 created_ts: u64 = 0, // the commit timestamp of the event that first created this issue
 
 pub const tag_max_len = 64;
 
 pub fn tagIterator(tags: []const u8) std.mem.SplitIterator(u8, .scalar) {
-    return std.mem.splitScalar(u8, tags, 0);
+    return std.mem.splitScalar(u8, tags, ',');
 }
 
 // `created_ts` comes from the commit timestamp, not the event

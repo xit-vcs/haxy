@@ -50,7 +50,7 @@ test "rebase" {
                 .issue = .{
                     .title = "Login form clears password on validation error",
                     .description = "Submitting an invalid email address resets the password field. Preserve the field value and show an inline validation message.",
-                    .tags = "bug\x00priority-high\x00ui",
+                    .tags = "bug,priority-high,ui",
                 },
             },
         },
@@ -61,7 +61,7 @@ test "rebase" {
                 .issue = .{
                     .title = "Login form clears password on validation error",
                     .description = "Submitting an invalid email address resets the password field and removes typed input. Preserve the field value and show an inline validation message.",
-                    .tags = "bug\x00priority-low\x00ui",
+                    .tags = "bug,priority-low,ui",
                 },
             },
         },
@@ -71,7 +71,7 @@ test "rebase" {
                 .issue = .{
                     .title = "Search results ignore archived project filter",
                     .description = "Filtering search results to active projects still returns issues from archived projects. Apply the archived flag before ranking results.",
-                    .tags = "bug\x00search\x00backend",
+                    .tags = "bug,search,backend",
                 },
             },
         },
@@ -81,7 +81,7 @@ test "rebase" {
                 .issue = .{
                     .title = "Issue list does not persist selected sort order",
                     .description = "Changing the issue list sort order is lost after refresh. Store the selected sort field and direction with the user's view preferences.",
-                    .tags = "enhancement\x00frontend\x00preferences",
+                    .tags = "enhancement,frontend,preferences",
                 },
             },
         },
@@ -146,7 +146,7 @@ test "rebase" {
                 .issue = .{
                     .title = "Double clicking causes the form to submit twice",
                     .description = "When I double click the post button I see duplicate posts.",
-                    .tags = "bug\x00priority-high\x00ui",
+                    .tags = "bug,priority-high,ui",
                 },
             },
         },
@@ -313,7 +313,7 @@ test "merge" {
                 .issue = .{
                     .title = "Login form clears password on validation error",
                     .description = "Submitting an invalid email address resets the password field. Preserve the field value and show an inline validation message.",
-                    .tags = "bug\x00priority-high\x00ui",
+                    .tags = "bug,priority-high,ui",
                 },
             },
         },
@@ -323,7 +323,7 @@ test "merge" {
                 .issue = .{
                     .title = "Search results ignore archived project filter",
                     .description = "Filtering search results to active projects still returns issues from archived projects. Apply the archived flag before ranking results.",
-                    .tags = "bug\x00search\x00backend",
+                    .tags = "bug,search,backend",
                 },
             },
         },
@@ -333,7 +333,7 @@ test "merge" {
                 .issue = .{
                     .title = "Issue list does not persist selected sort order",
                     .description = "Changing the issue list sort order is lost after refresh. Store the selected sort field and direction with the user's view preferences.",
-                    .tags = "enhancement\x00frontend\x00preferences",
+                    .tags = "enhancement,frontend,preferences",
                 },
             },
         },
@@ -397,7 +397,7 @@ test "merge" {
                 .issue = .{
                     .title = "Kanban card status badge falls behind after drag",
                     .description = "Moving an issue between columns updates the card position immediately, but the status badge keeps showing the previous state until refresh.",
-                    .tags = "bug\x00kanban\x00frontend",
+                    .tags = "bug,kanban,frontend",
                 },
             },
         },
@@ -407,7 +407,7 @@ test "merge" {
                 .issue = .{
                     .title = "Assignee autocomplete omits recently invited users",
                     .description = "Users invited during the current session do not appear in the assignee picker until the project page is reloaded.",
-                    .tags = "bug\x00assignees\x00api",
+                    .tags = "bug,assignees,api",
                 },
             },
         },
@@ -417,7 +417,7 @@ test "merge" {
                 .issue = .{
                     .title = "Add due date warning for issues blocked by dependencies",
                     .description = "Show a warning when an issue's due date is earlier than an unresolved blocking issue so planners can adjust the schedule.",
-                    .tags = "enhancement\x00planning\x00dependencies",
+                    .tags = "enhancement,planning,dependencies",
                 },
             },
         },
@@ -588,7 +588,7 @@ test "merge" {
                 .issue = .{
                     .title = "Login form clears password on validation error",
                     .description = "Submitting an invalid email address resets the password field. Preserve the field value and show an inline validation message.",
-                    .tags = "bug\x00priority-low\x00ui",
+                    .tags = "bug,priority-low,ui",
                 },
             },
         },
@@ -598,7 +598,7 @@ test "merge" {
                 .issue = .{
                     .title = "Login form clears password on validation error",
                     .description = "Submitting an invalid email address resets the password field. Preserve the field value and show an inline validation message.",
-                    .tags = "bug\x00priority-medium\x00ui",
+                    .tags = "bug,priority-medium,ui",
                 },
             },
         },
