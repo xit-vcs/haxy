@@ -1190,6 +1190,7 @@ pub const Widget = union(enum) {
     repo_header: Repo.Header.View,
     repo_files_sub_header: Repo.Files.SubHeader.View,
     repo_commits_sub_header: Repo.Commits.SubHeader.View,
+    repo_issues_sub_header: Repo.Issues.SubHeader.View,
     repo_files: Repo.Files.View,
     repo_commits: Repo.Commits.View,
     repo_refs: Repo.Refs.View,

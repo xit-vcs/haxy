@@ -12,6 +12,8 @@ const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
 const inp = @import("../input.zig");
 
+pub const SubHeader = @import("Issues/SubHeader.zig");
+
 // how many issues one window shows before a "next" link appears.
 pub const page_size = 20;
 
@@ -35,6 +37,8 @@ issues: []const IssueWithId,
 prev_id: ?[]const u8,
 // the id of the next window's first issue, or null when this is the last window.
 next_id: ?[]const u8,
+// how many issues the listing holds across all windows.
+count: usize,
 
 const Self = @This();
 
@@ -47,6 +51,7 @@ pub fn emptyResult(aa: std.mem.Allocator, identity: []const u8, tag: []const u8,
         .issues = &.{},
         .prev_id = null,
         .next_id = null,
+        .count = 0,
     };
 }
 
@@ -178,24 +183,39 @@ pub fn init(
         .issues = issues.items,
         .prev_id = prev_id,
         .next_id = next_id,
+        .count = @intCast(try issue_id_set.count()),
     };
 }
 
 pub const View = struct {
-    // a horizontal split with the issue list on the left and a detail pane on
-    // the right showing the selected issue's description.
-    box: wgt.Box(ui.Widget),
+    // a vertical box: the sub header tabs on top, then a stack holding the
+    // results view — a horizontal split with the issue list on the left and a
+    // detail pane on the right showing the selected issue's description.
+    box: wgt.Box(ui.Widget), // vert: [sub_header_index] = tabs, [stack_index] = stack
     data: *const Self,
     session: *ui.Session,
     // the issue whose description the pane currently shows (index into data.issues).
     detailed_index: ?usize,
 
+    const sub_header_index: usize = 0;
+    const stack_index: usize = 1;
+    // indices within the results box (the horizontal split inside the stack).
     const list_index: usize = 0;
     const detail_index: usize = 1;
     const list_max_width: usize = 40;
     const detail_min_width: usize = 40;
 
     pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !View {
+        var outer = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert });
+        errdefer outer.deinit(allocator);
+
+        // the tabs at the top.
+        {
+            var sub_header = try SubHeader.View.init(allocator, session, data.count);
+            errdefer sub_header.deinit(allocator);
+            try outer.children.put(allocator, sub_header.getFocus().id, .{ .widget = .{ .repo_issues_sub_header = sub_header }, .rect = null, .min_size = null });
+        }
+
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
         errdefer box.deinit(allocator);
 
@@ -249,8 +269,23 @@ pub const View = struct {
 
         box.getFocus().child_id = box.children.keys()[list_index];
 
+        // the split sits alone in a stack so future tabs can swap other views
+        // in. the stack enters `outer` before the split enters the stack, so an
+        // error frees the split exactly once.
+        {
+            var stack = try wgt.Stack(ui.Widget).init(allocator);
+            errdefer stack.deinit(allocator);
+            try outer.children.put(allocator, stack.getFocus().id, .{ .widget = .{ .stack = stack }, .rect = null, .min_size = null });
+        }
+        const stack = &outer.children.values()[stack_index].widget.stack;
+        stack.getFocus().child_id = box.getFocus().id;
+        try stack.children.put(allocator, box.getFocus().id, .{ .box = box });
+
+        // focus entering the view lands on the tabs first.
+        outer.getFocus().child_id = outer.children.keys()[sub_header_index];
+
         return .{
-            .box = box,
+            .box = outer,
             .data = data,
             .session = session,
             .detailed_index = null,
@@ -269,8 +304,17 @@ pub const View = struct {
         self.box.deinit(allocator);
     }
 
+    fn subHeader(self: *View) *SubHeader.View {
+        return &self.box.children.values()[sub_header_index].widget.repo_issues_sub_header;
+    }
+
+    // the master-detail split inside the stack.
+    fn resultsBox(self: *View) *wgt.Box(ui.Widget) {
+        return &self.box.children.values()[stack_index].widget.stack.children.values()[0].box;
+    }
+
     fn listScroll(self: *View) *wgt.Scroll(ui.Widget) {
-        return &self.box.children.values()[list_index].widget.scroll;
+        return &self.resultsBox().children.values()[list_index].widget.scroll;
     }
 
     fn listBox(self: *View) *wgt.Box(ui.Widget) {
@@ -278,7 +322,7 @@ pub const View = struct {
     }
 
     fn detailOuter(self: *View) *wgt.Box(ui.Widget) {
-        return &self.box.children.values()[detail_index].widget.box;
+        return &self.resultsBox().children.values()[detail_index].widget.box;
     }
 
     fn detailScroll(self: *View) *wgt.Scroll(ui.Widget) {
@@ -290,8 +334,14 @@ pub const View = struct {
     }
 
     fn detailActive(self: *View) bool {
+        const rb = self.resultsBox();
+        const cid = rb.getFocus().child_id orelse return false;
+        return rb.children.getIndex(cid) == detail_index;
+    }
+
+    fn subHeaderActive(self: *View) bool {
         const cid = self.box.getFocus().child_id orelse return false;
-        return self.box.children.getIndex(cid) == detail_index;
+        return self.box.children.getIndex(cid) == sub_header_index;
     }
 
     // the selected issue's index, or null when a window-navigation row is
@@ -317,7 +367,7 @@ pub const View = struct {
         // an issue's url is the same whether or not the list is filtered, so
         // the mirror drops the tag.
         if (root_focus.grandchild_id) |g| {
-            if (self.box.getFocus().children.contains(g)) {
+            if (self.resultsBox().getFocus().children.contains(g)) {
                 if (self.selectedIssueIndex()) |sel| {
                     if (ui.RoutablePage.repoIssuesRoute(self.data.identity, "", self.data.issues[sel].id)) |route|
                         self.session.data.current_page = route;
@@ -351,14 +401,14 @@ pub const View = struct {
         // so when it's that narrow we lift the cap and let the list fill the
         // whole width.
         const both_panes_fit = if (constraint.max_size.width) |w| w >= list_max_width + detail_min_width else true;
-        self.box.children.values()[list_index].max_size = if (both_panes_fit) .{ .width = list_max_width, .height = null } else null;
+        self.resultsBox().children.values()[list_index].max_size = if (both_panes_fit) .{ .width = list_max_width, .height = null } else null;
 
         // stretch the detail pane across the rest of the width so it fills the
         // area rather than shrinking to its content; its scroll fills the pane.
         if (constraint.max_size.width) |w| {
-            self.box.children.values()[detail_index].min_size = .{ .width = if (both_panes_fit) w - list_max_width else w, .height = null };
+            self.resultsBox().children.values()[detail_index].min_size = .{ .width = if (both_panes_fit) w - list_max_width else w, .height = null };
         } else {
-            self.box.children.values()[detail_index].min_size = .{ .width = detail_min_width, .height = null };
+            self.resultsBox().children.values()[detail_index].min_size = .{ .width = detail_min_width, .height = null };
         }
 
         try self.box.build(allocator, constraint, root_focus);
@@ -406,8 +456,8 @@ pub const View = struct {
             try inner.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
         }
 
-        // point the pane at its first row so focus recovery can land here.
-        inner.getFocus().child_id = inner.children.keys()[0];
+        // select the description by default
+        inner.getFocus().child_id = inner.children.keys()[inner.children.count() - 1];
 
         // reset the scroll to the top for the newly-shown issue: directly on the
         // terminal (the wasm offset), and via a version bump on the web (so the
@@ -419,7 +469,15 @@ pub const View = struct {
     }
 
     pub fn input(self: *View, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
-        _ = allocator;
+        if (self.subHeaderActive()) {
+            // down from the tabs re-enters the split; other keys move the tabs.
+            if (inp.vertDirection(key) == .down) {
+                root_focus.setFocus(self.box.children.keys()[stack_index]);
+            } else {
+                try self.subHeader().input(allocator, key, root_focus);
+            }
+            return;
+        }
         if (self.detailActive()) {
             try self.detailInput(key, root_focus);
         } else {
@@ -429,9 +487,13 @@ pub const View = struct {
 
     fn listInput(self: *View, key: Key, root_focus: *Focus) !void {
         // up/down (and the scroll wheel) move the selection a row; page up/down
-        // jump a fixed amount. right/Enter cross into the detail pane.
+        // jump a fixed amount. right/Enter cross into the detail pane. up from
+        // the top row crosses into the sub header tabs.
         if (inp.rowDelta(key, @intCast(self.listBox().children.count()))) |delta| {
-            ui.moveRowFocus(self.listBox(), self.listScroll(), root_focus, delta);
+            const lb = self.listBox();
+            const at_top = if (lb.getFocus().child_id) |cid| lb.children.getIndex(cid) == 0 else true;
+            if (delta < 0 and at_top) return self.focusSubHeader(root_focus);
+            ui.moveRowFocus(lb, self.listScroll(), root_focus, delta);
             return;
         }
         switch (key) {
@@ -452,12 +514,15 @@ pub const View = struct {
         const sc = self.detailScroll();
         switch (key) {
             .arrow_left => return self.focusList(root_focus),
-            // once the scroll can't move further, cross into the tags.
+            // once the scroll can't move further, cross into the tags (or the
+            // sub header tabs when the issue has none).
             .arrow_up => {
                 const before = sc.y;
                 sc.y -= 1;
                 sc.clampToContent();
-                if (sc.y == before) try self.focusTags(root_focus);
+                if (sc.y == before) {
+                    if (self.tagFlow() != null) try self.focusTags(root_focus) else self.focusSubHeader(root_focus);
+                }
                 return;
             },
             .arrow_down => sc.y += 1,
@@ -485,7 +550,7 @@ pub const View = struct {
         switch (key) {
             .arrow_left => if (cur > 0) self.focusTag(tf, root_focus, cur - 1) else try self.focusList(root_focus),
             .arrow_right => if (cur + 1 < count) self.focusTag(tf, root_focus, cur + 1),
-            .arrow_up => if (tf.rowStep(cur, false)) |i| self.focusTag(tf, root_focus, i),
+            .arrow_up => if (tf.rowStep(cur, false)) |i| self.focusTag(tf, root_focus, i) else self.focusSubHeader(root_focus),
             .arrow_down => if (tf.rowStep(cur, true)) |i| self.focusTag(tf, root_focus, i) else try self.focusDescription(root_focus),
             .home => self.focusTag(tf, root_focus, 0),
             .end => self.focusTag(tf, root_focus, count - 1),
@@ -557,6 +622,11 @@ pub const View = struct {
         root_focus.setFocus(self.listScroll().getFocus().id);
     }
 
+    // cross to the sub header tabs above the split.
+    fn focusSubHeader(self: *View, root_focus: *Focus) void {
+        root_focus.setFocus(self.box.children.keys()[sub_header_index]);
+    }
+
     pub fn clearGrid(self: *View) void {
         self.box.clearGrid();
     }
@@ -569,25 +639,11 @@ pub const View = struct {
         return self.box.getFocus();
     }
 
-    // for the parent's "scroll up at the top jumps to the header" check. when
-    // the list holds focus, report its selected row directly.
+    // for the parent's "scroll up at the top jumps to the header" check: at the
+    // top only while the sub header tabs hold focus, so up from the split
+    // crosses into the tabs first.
     pub fn getSelectedIndex(self: *View) ?usize {
-        if (self.detailActive()) {
-            return if (self.detailScroll().y == 0 and self.paneTopFocused()) 0 else 1;
-        }
-        const lb = self.listBox();
-        const cid = lb.getFocus().child_id orelse return null;
-        return lb.children.getIndex(cid);
-    }
-
-    // whether the focused element is the detail pane's topmost one, so up has
-    // nowhere further to go within the pane.
-    fn paneTopFocused(self: *View) bool {
-        const tf = self.tagFlow() orelse return true;
-        if (!self.tagsFocused()) return false;
-        const cid = tf.focus.child_id orelse return true;
-        const cur = tf.indexOfFocusId(cid) orelse return true;
-        return tf.rowStep(cur, false) == null;
+        return if (self.subHeaderActive()) 0 else 1;
     }
 };
 
