@@ -904,7 +904,7 @@ pub const Header = struct {
     tab_ids: std.AutoArrayHashMapUnmanaged(usize, void),
 
     pub fn init(allocator: std.mem.Allocator, session: *ui.Session, data: *const Self) !Header {
-        var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = .hidden, .rounded_corners = true, .direction = .horiz });
+        var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
         errdefer box.deinit(allocator);
 
         var tab_ids: std.AutoArrayHashMapUnmanaged(usize, void) = .empty;

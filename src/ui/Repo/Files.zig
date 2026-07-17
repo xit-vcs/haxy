@@ -831,27 +831,28 @@ pub const Header = struct {
     }
 
     pub const View = struct {
-        text_box: wgt.TextBox(ui.Widget),
+        box: wgt.Box(ui.Widget),
         data: *const Header,
 
         pub fn init(allocator: std.mem.Allocator, data: *const Header, session: *ui.Session) !Header.View {
             _ = session;
+            var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
+            errdefer box.deinit(allocator);
+
             var text_box = try wgt.TextBox(ui.Widget).init(allocator, data.content, .{ .border_style = .hidden, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
-            return .{ .text_box = text_box, .data = data };
+            try box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
+
+            return .{ .box = box, .data = data };
         }
 
         pub fn deinit(self: *Header.View, allocator: std.mem.Allocator) void {
-            self.text_box.deinit(allocator);
+            self.box.deinit(allocator);
         }
 
         pub fn build(self: *Header.View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
-            // a single line plus the hidden border is 3 rows tall; stretch the box to
-            // the full width by handing the available width down as a min width.
-            try self.text_box.build(allocator, .{
-                .min_size = .{ .width = constraint.max_size.width, .height = null },
-                .max_size = constraint.max_size,
-            }, root_focus);
+            self.clearGrid();
+            try self.box.build(allocator, constraint, root_focus);
         }
 
         pub fn input(self: *Header.View, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
@@ -862,15 +863,15 @@ pub const Header = struct {
         }
 
         pub fn clearGrid(self: *Header.View) void {
-            self.text_box.clearGrid();
+            self.box.clearGrid();
         }
 
         pub fn getGrid(self: Header.View) ?Grid {
-            return self.text_box.getGrid();
+            return self.box.getGrid();
         }
 
         pub fn getFocus(self: *Header.View) *Focus {
-            return self.text_box.getFocus();
+            return self.box.getFocus();
         }
     };
 };
