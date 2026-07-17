@@ -296,7 +296,7 @@ pub const View = struct {
                     const sel = if (entry_idx) |i| i + base else 0;
                     list_box.getFocus().child_id = list_box.children.keys()[sel];
                 }
-                break :blk try wgt.Scroll(ui.Widget).init(allocator, .{ .box = list_box }, .{ .direction = .vert, .web_native = !session.is_terminal });
+                break :blk try wgt.Scroll(ui.Widget).init(allocator, .{ .box = list_box }, .{ .direction = .vert, .web_native = !session.is_terminal, .fill = true });
             };
             errdefer list_scroll.deinit(allocator);
             try box.children.put(allocator, list_scroll.getFocus().id, .{ .widget = .{ .scroll = list_scroll }, .rect = null, .min_size = .{ .width = list_max_width, .height = null }, .max_size = .{ .width = list_max_width, .height = null } });
