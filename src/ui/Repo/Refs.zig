@@ -16,36 +16,33 @@ pub const page_size = 20;
 
 // "owner/name", needed to build the columns' window-navigation links.
 identity: []const u8,
-// only one column paginates at a time: `after` is the window start of `kind`'s
-// column; the other column always starts at 0.
+// only one column windows at a time: `from` (a url-encoded ref name, "" = the
+// first window) roots `kind`'s column; the other always shows its first window.
 kind: ui.RoutablePage.RefKind,
-after: usize,
-// the current window of each column, plus the next window's start (null at the
-// end) so the view can decide whether to show a "next →" row.
-branches: []const []const u8,
-tags: []const []const u8,
-branches_next_after: ?usize,
-tags_next_after: ?usize,
-// the columns' headers, in the half-height SubTitle font.
-branches_label: ui.SubTitle,
-tags_label: ui.SubTitle,
+from: []const u8,
+branches: Column,
+tags: Column,
 
 const Self = @This();
 
-const Window = struct { names: []const []const u8, next_after: ?usize };
+// one ref column: the current window of names, the raw ref names its
+// "← previous" / "next →" rows window from (null = no row; a "" prev means
+// the first window), and the header label.
+pub const Column = struct {
+    names: []const []const u8 = &.{},
+    prev: ?[]const u8 = null,
+    next: ?[]const u8 = null,
+    label: ui.SubTitle,
+};
 
 // empty columns, for the wasm / no-repo paths.
-pub fn emptyResult(arena: *std.heap.ArenaAllocator, identity: []const u8, kind: ui.RoutablePage.RefKind, after: usize) !Self {
+pub fn emptyResult(arena: *std.heap.ArenaAllocator, identity: []const u8, kind: ui.RoutablePage.RefKind, from: []const u8) !Self {
     return .{
         .identity = try arena.allocator().dupe(u8, identity),
         .kind = kind,
-        .after = after,
-        .branches = &.{},
-        .tags = &.{},
-        .branches_next_after = null,
-        .tags_next_after = null,
-        .branches_label = try ui.SubTitle.init(arena, "branches"),
-        .tags_label = try ui.SubTitle.init(arena, "tags"),
+        .from = try arena.allocator().dupe(u8, from),
+        .branches = .{ .label = try ui.SubTitle.init(arena, "branches") },
+        .tags = .{ .label = try ui.SubTitle.init(arena, "tags") },
     };
 }
 
@@ -60,38 +57,69 @@ pub fn init(
     gpa: std.mem.Allocator,
     identity: []const u8,
     kind: ui.RoutablePage.RefKind,
-    after: usize,
+    from: []const u8,
 ) !Self {
     const aa = arena.allocator();
-    // the offset only applies to its own column; the other stays at 0.
-    const branches_after: usize = if (kind == .branch) after else 0;
-    const tags_after: usize = if (kind == .tag) after else 0;
-    var result = try emptyResult(arena, identity, kind, after);
-
-    var branch_iter = repo.listBranches(io, gpa, .{ .index = branches_after }) catch return result;
-    defer branch_iter.deinit();
-    const branches = try collectWindow(aa, &branch_iter, branches_after);
-
-    var tag_iter = repo.listTags(io, gpa, .{ .index = tags_after }) catch return result;
-    defer tag_iter.deinit();
-    const tags = try collectWindow(aa, &tag_iter, tags_after);
-
-    result.branches = branches.names;
-    result.tags = tags.names;
-    result.branches_next_after = branches.next_after;
-    result.tags_next_after = tags.next_after;
+    var result = try emptyResult(arena, identity, kind, from);
+    // the window root only applies to its own column; a ref name arrives
+    // url-encoded, and the iterator seeks to the first name at or after it.
+    const decoded = std.Uri.percentDecodeInPlace(try aa.dupe(u8, from));
+    for (
+        [_]ui.RoutablePage.RefKind{ .branch, .tag },
+        [_]*Column{ &result.branches, &result.tags },
+    ) |col_kind, column| {
+        const col_from: []const u8 = if (kind == col_kind) decoded else "";
+        // an unreadable listing leaves the column empty
+        var iter = listRefs(repo_kind, repo_opts, repo, io, gpa, col_kind, iterStart(col_from)) catch continue;
+        defer iter.deinit();
+        var names = try std.ArrayListUnmanaged([]const u8).initCapacity(aa, page_size);
+        while (names.items.len < page_size) {
+            const ref = try iter.next() orelse break;
+            names.appendAssumeCapacity(try aa.dupe(u8, ref.name));
+        }
+        column.names = names.items;
+        column.next = if (try iter.next()) |ref| try aa.dupe(u8, ref.name) else null;
+        if (col_from.len != 0) {
+            var prev_iter = listRefs(repo_kind, repo_opts, repo, io, gpa, col_kind, .beginning) catch continue;
+            defer prev_iter.deinit();
+            column.prev = try prevRoot(aa, &prev_iter, col_from);
+        }
+    }
     return result;
 }
 
-// collect one window from a ref iterator already seeked to the window start
-fn collectWindow(aa: std.mem.Allocator, iter: anytype, after: usize) !Window {
-    var names = try std.ArrayListUnmanaged([]const u8).initCapacity(aa, page_size);
-    while (names.items.len < page_size) {
-        const ref = try iter.next() orelse break;
-        names.appendAssumeCapacity(try aa.dupe(u8, ref.name));
+fn listRefs(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    repo: *rp.Repo(repo_kind, repo_opts),
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    kind: ui.RoutablePage.RefKind,
+    start: xit.ref.RefIteratorStart,
+) !xit.ref.RefIterator(repo_kind, repo_opts) {
+    return switch (kind) {
+        .branch => repo.listBranches(io, gpa, start),
+        .tag => repo.listTags(io, gpa, start),
+    };
+}
+
+fn iterStart(from: []const u8) xit.ref.RefIteratorStart {
+    return if (from.len == 0) .beginning else .{ .key = from };
+}
+
+// the root of the window before the one starting at `from` (decoded): the ref
+// a page before it ("" = the first window), or null when nothing precedes it.
+fn prevRoot(aa: std.mem.Allocator, iter: anytype, from: []const u8) !?[]const u8 {
+    var ring: [page_size][]const u8 = undefined;
+    var count: usize = 0;
+    while (try iter.next()) |ref| {
+        if (!std.mem.lessThan(u8, ref.name, from)) break;
+        ring[count % page_size] = try aa.dupe(u8, ref.name);
+        count += 1;
     }
-    const has_more = (try iter.next()) != null;
-    return .{ .names = names.items, .next_after = if (has_more) after + page_size else null };
+    if (count == 0) return null;
+    if (count <= page_size) return "";
+    return ring[count % page_size];
 }
 
 pub const View = struct {
@@ -110,11 +138,8 @@ pub const View = struct {
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
         errdefer box.deinit(allocator);
 
-        // the offset only applies to its own column; the other starts at 0.
-        const branches_after: usize = if (data.kind == .branch) data.after else 0;
-        const tags_after: usize = if (data.kind == .tag) data.after else 0;
-        try addColumn(allocator, &box, session, data.identity, .branch, &data.branches_label, data.branches, branches_after, data.branches_next_after);
-        try addColumn(allocator, &box, session, data.identity, .tag, &data.tags_label, data.tags, tags_after, data.tags_next_after);
+        try addColumn(allocator, &box, session, data.identity, .branch, &data.branches);
+        try addColumn(allocator, &box, session, data.identity, .tag, &data.tags);
 
         var self = View{ .box = box, .data = data };
         // select the first row of the first column that has one.
@@ -133,10 +158,7 @@ pub const View = struct {
         session: *ui.Session,
         identity: []const u8,
         kind: ui.RoutablePage.RefKind,
-        label: *const ui.SubTitle,
-        names: []const []const u8,
-        after: usize,
-        next_after: ?usize,
+        data: *const Column,
     ) !void {
         var column = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert });
         errdefer column.deinit(allocator);
@@ -154,7 +176,7 @@ pub const View = struct {
                 try header_box.children.put(allocator, space.getFocus().id, .{ .widget = .{ .text = space }, .rect = null, .min_size = null });
             }
             {
-                var header = try ui.SubTitle.View.init(allocator, label);
+                var header = try ui.SubTitle.View.init(allocator, &data.label);
                 errdefer header.deinit(allocator);
                 try header_box.children.put(allocator, header.getFocus().id, .{ .widget = .{ .sub_title = header }, .rect = null, .min_size = null });
             }
@@ -170,10 +192,10 @@ pub const View = struct {
 
                 // window-navigation rows bracket the names: "← previous" off the
                 // first window, "next →" when more remain. each is a full reload.
-                if (after > 0) try addRow(allocator, &rows, "← previous", try windowLink(session.page_arena, identity, kind, after -| page_size));
+                if (data.prev) |p| try addRow(allocator, &rows, "← previous", try windowLink(session.page_arena, identity, kind, p));
                 // each ref name links to the files tab at that ref's root.
-                for (names) |name| try addRow(allocator, &rows, name, try refLink(session.page_arena, identity, kind, name));
-                if (next_after) |na| try addRow(allocator, &rows, "next →", try windowLink(session.page_arena, identity, kind, na));
+                for (data.names) |name| try addRow(allocator, &rows, name, try refLink(session.page_arena, identity, kind, name));
+                if (data.next) |n| try addRow(allocator, &rows, "next →", try windowLink(session.page_arena, identity, kind, n));
 
                 if (rows.children.count() > 0) rows.getFocus().child_id = rows.children.keys()[0];
 
@@ -325,10 +347,12 @@ pub const View = struct {
     }
 };
 
-// the "a:" link to `kind`'s column paginated to `after` within `identity`
-// ("owner/name"). the other column resets to its first window.
-fn windowLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, kind: ui.RoutablePage.RefKind, after: usize) ![]const u8 {
-    const route = ui.RoutablePage.repoRefsRoute(identity, kind, after) orelse return error.RouteTooLong;
+// the "a:" link to `kind`'s column windowed from ref `name` (raw; "" = the
+// first window) within `identity` ("owner/name"). the other column resets to
+// its first window.
+fn windowLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, kind: ui.RoutablePage.RefKind, name: []const u8) ![]const u8 {
+    const encoded = try ui.urlEncodeRef(page_arena.allocator(), name);
+    const route = ui.RoutablePage.repoRefsRoute(identity, kind, encoded) orelse return error.RouteTooLong;
     const url = try route.urlAlloc(page_arena);
     return std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{url});
 }

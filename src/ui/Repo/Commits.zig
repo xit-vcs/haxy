@@ -54,7 +54,7 @@ const Self = @This();
 
 // walk the log for an opened repo. generic over the repo's backend and hash
 // kind so the oid buffers and diff types it threads through match the repo's
-// opts. `after` is the hunk index the selected commit's (the first one, the
+// opts. `start` is the hunk index the selected commit's (the first one, the
 // walk root) diff window starts at; 0 is the first window, moved by
 // "next"/"previous". walks with the arena's backing allocator (transient; the
 // commits we keep are duped into the page arena so they outlive it).
@@ -68,7 +68,7 @@ pub fn init(
     identity: []const u8,
     requested_ref_or_oid: ?ui.RoutablePage.RefOrOid,
     requested_value: []const u8,
-    after: usize,
+    start: usize,
 ) !Self {
     const aa = arena.allocator();
     const hex_len = ui.ResolvedRefOrOid(repo_kind, repo_opts).hex_len;
@@ -121,11 +121,11 @@ pub fn init(
         for (buf[0..count], oids[0..count], 0..) |*commit, oid, i| {
             // the selected commit (the first, == start_oid) shows the window the
             // url asks for; the rest show their first window.
-            const start = if (i == 0) after else 0;
-            const rendered = renderCommitDiff(repo_kind, repo_opts, io, gpa, aa, repo, oid, start, diff_page) catch
+            const window_start = if (i == 0) start else 0;
+            const rendered = renderCommitDiff(repo_kind, repo_opts, io, gpa, aa, repo, oid, window_start, diff_page) catch
                 RenderedDiff{ .hunks = &.{}, .has_prev = false, .has_more = false };
             commit.hunks = rendered.hunks;
-            commit.window_start = start;
+            commit.window_start = window_start;
             commit.has_prev = rendered.has_prev;
             commit.has_more = rendered.has_more;
         }
@@ -419,10 +419,10 @@ pub const View = struct {
     }
 
     // a focusable window-navigation row ("previous"/"next"). it's a link to this
-    // commit's route at `target_after`, so activating it (the host follows the
+    // commit's route at `target_start`, so activating it (the host follows the
     // "a:" link) reloads the page on the adjacent window — same on TUI and web.
-    fn addNavLink(self: *View, allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8, oid: []const u8, target_after: usize) !void {
-        const link = try commitsLink(self.session.page_arena, self.data.identity, oid, target_after);
+    fn addNavLink(self: *View, allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8, oid: []const u8, target_start: usize) !void {
+        const link = try commitsLink(self.session.page_arena, self.data.identity, oid, target_start);
         var tb = try wgt.TextBox(ui.Widget).init(allocator, label, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .none });
         errdefer tb.deinit(allocator);
         tb.getFocus().focusable = true;
@@ -514,9 +514,9 @@ pub const View = struct {
             }
         }
 
-        // the selected hunk (or the "load more" row) shows a single border (the
-        // focused TextBox upgrades it to a double border itself, so it stays
-        // single when focus is on the commit list); the rest keep their
+        // the selected hunk (or a window-navigation row) shows a single border
+        // (the focused TextBox upgrades it to a double border itself, so it
+        // stays single when focus is on the commit list); the rest keep their
         // space-reserving hidden border.
         const inner = self.diffInner();
         for (inner.children.keys(), inner.children.values()) |id, *child| {
@@ -790,9 +790,9 @@ pub const View = struct {
 };
 
 // the "a:" navigation link for the commits page walking from commit `oid` within
-// `identity`, showing the selected commit's first `after` hunks (0 = default).
-fn commitsLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, oid: []const u8, after: usize) ![]const u8 {
-    const route = ui.RoutablePage.repoCommitsRoute(identity, .object, oid, after) orelse return error.RouteTooLong;
+// `identity`, showing the selected commit's first `start` hunks (0 = default).
+fn commitsLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, oid: []const u8, start: usize) ![]const u8 {
+    const route = ui.RoutablePage.repoCommitsRoute(identity, .object, oid, start) orelse return error.RouteTooLong;
     const url = try route.urlAlloc(page_arena);
     return std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{url});
 }

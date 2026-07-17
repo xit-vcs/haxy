@@ -252,11 +252,13 @@ fn loadWindow(
     // seek once to the window start: the root key, or the set's first entry.
     var prev_id: ?[]const u8 = null;
     var iter = if (root_key) |key| blk: {
-        // the previous window starts page_size ranks back.
+        // the previous window starts page_size ranks back ("" = the first
+        // window, linked as the bare list route).
         const rank = try set.rank(key);
-        if (rank > 0) {
-            const prev_rank = rank -| page_size;
-            const kv = try set.getIndexKeyValuePair(@intCast(prev_rank)) orelse return error.NotFound;
+        if (rank > 0 and rank <= page_size) {
+            prev_id = "";
+        } else if (rank > page_size) {
+            const kv = try set.getIndexKeyValuePair(@intCast(rank - page_size)) orelse return error.NotFound;
             var prev_key: [@sizeOf(u64) + evt.event_id_size]u8 = undefined;
             _ = try kv.key_cursor.readBytes(&prev_key);
             const prev_hex = std.fmt.bytesToHex(prev_key[@sizeOf(u64)..].*, .lower);
@@ -369,7 +371,7 @@ pub const View = struct {
             defer items.deinit(allocator);
             // when filtered, the first item clears the filter
             if (data.tag.len != 0)
-                try items.append(allocator, .{ .text = "╳", .link = try issuesLink(session.page_arena, data.identity, "", "") });
+                try items.append(allocator, .{ .text = "╳", .link = try issuesLink(session.page_arena, data.identity, .open, "", "") });
             for (data.tags) |tag|
                 try items.append(allocator, .{ .text = tag, .link = try tagLink(session.page_arena, data.identity, .open, tag) });
             try tf.setItems(allocator, items.items);
@@ -405,11 +407,11 @@ pub const View = struct {
                 var list_box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert });
                 errdefer list_box.deinit(allocator);
                 if (win.prev_id) |prev|
-                    try addRow(allocator, &list_box, "← previous", try issuesLink(session.page_arena, data.identity, data.tag, prev));
+                    try addRow(allocator, &list_box, "← previous", try issuesLink(session.page_arena, data.identity, status, data.tag, prev));
                 for (win.issues) |entry|
                     try addRow(allocator, &list_box, entry.issue.title, try issueRowLink(session.page_arena, data.identity, entry.id));
                 if (win.next_id) |next|
-                    try addRow(allocator, &list_box, "next →", try issuesLink(session.page_arena, data.identity, data.tag, next));
+                    try addRow(allocator, &list_box, "next →", try issuesLink(session.page_arena, data.identity, status, data.tag, next));
                 // select the window's first issue (past a leading "previous"
                 // row) so its description shows on load.
                 if (win.issues.len > 0)
@@ -544,11 +546,15 @@ pub const View = struct {
         self.clearGrid();
 
         // each header tab maps 1:1 to a stack child by position. mirror the
-        // selection into the url (the list routes keep the tag filter).
+        // selection into the url: the view the page's window is rooted at
+        // keeps its rooted url, the others get their list route (keeping the
+        // tag filter).
         if (self.header().getSelectedIndex()) |index| {
             const stack = self.viewStack();
             stack.getFocus().child_id = stack.children.keys()[index];
-            self.session.data.current_page = (if (index == tags_view_index)
+            self.session.data.current_page = (if (index == viewIndex(self.data.view) and self.data.selected_id.len != 0)
+                ui.RoutablePage.repoIssuesRoute(self.data.identity, .open, self.data.tag, self.data.selected_id)
+            else if (index == tags_view_index)
                 ui.RoutablePage.repoIssuesTagsRoute(self.data.identity, self.data.tag)
             else
                 ui.RoutablePage.repoIssuesRoute(self.data.identity, splitStatus(index), self.data.tag, "")) orelse self.session.data.current_page;
@@ -873,11 +879,12 @@ pub const View = struct {
     }
 };
 
-// the "a:" navigation link for the issues page filtered to the url-encoded
-// `tag` and rooted at issue `id` within `identity` ("owner/name"). a rooted
-// url derives its view from the issue's status; the bare list is the open view.
-fn issuesLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, tag: []const u8, id: []const u8) ![]const u8 {
-    const route = ui.RoutablePage.repoIssuesRoute(identity, .open, tag, id) orelse return error.RouteTooLong;
+// the "a:" navigation link for `status`'s issues page filtered to the
+// url-encoded `tag` and rooted at issue `id` within `identity` ("owner/name").
+// a rooted url ignores `status` (it derives its view from the issue's own);
+// with an empty `id` this is the bare list link.
+fn issuesLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, status: evt.Issue.Status, tag: []const u8, id: []const u8) ![]const u8 {
+    const route = ui.RoutablePage.repoIssuesRoute(identity, status, tag, id) orelse return error.RouteTooLong;
     const url = try route.urlAlloc(page_arena);
     return std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{url});
 }

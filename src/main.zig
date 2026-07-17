@@ -114,7 +114,7 @@ pub fn run(
                 .is_terminal = true,
                 .data = .{
                     // the files root; local routes carry no identity
-                    .current_page = .{ .repo_files = .{ .name = .{} } },
+                    .current_page = .{ .repo_files = .{} },
                     .is_local = true,
                 },
             };

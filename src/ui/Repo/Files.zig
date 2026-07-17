@@ -41,7 +41,7 @@ pub const Entry = struct {
     // pane shows a placeholder rather than its bytes.
     is_binary: bool = false,
     // the line index this window starts at (0 = the first window). non-zero only
-    // for the route's selected file, paginated by the url's `after`.
+    // for the route's selected file, paginated by the url's `start`.
     window_start: usize = 0,
     // whether more lines exist after this window.
     has_more: bool = false,
@@ -80,7 +80,7 @@ pub fn init(
     requested_ref_or_oid: ?ui.RoutablePage.RefOrOid,
     requested_value: []const u8,
     path: []const u8,
-    after: usize,
+    start: usize,
 ) !Self {
     const aa = arena.allocator();
 
@@ -150,7 +150,7 @@ pub fn init(
                     // only the route's selected file paginates; the rest show
                     // their first window (for the in-page detail when selected).
                     const is_selected = if (selected_file) |sf| std.mem.eql(u8, sf, name) else false;
-                    const window_start = if (is_selected) after else 0;
+                    const window_start = if (is_selected) start else 0;
                     const content = readFileContent(repo_kind, repo_opts, state, io, gpa, aa, file_path, tree_entry, window_start) catch
                         FileContent{ .lines = &.{} };
                     entry.lines = content.lines;
@@ -453,17 +453,17 @@ pub const View = struct {
             if (self.box.getFocus().children.contains(g)) {
                 var buf: [ui.RoutablePage.repo_route_max_len]u8 = undefined;
                 var sel_path = self.data.dir;
-                var sel_after: usize = 0;
+                var sel_start: usize = 0;
                 if (self.selectedEntry()) |entry| {
                     if (!entry.is_dir) {
                         sel_path = if (self.data.dir.len == 0)
                             entry.name
                         else
                             std.fmt.bufPrint(&buf, "{s}/{s}", .{ self.data.dir, entry.name }) catch self.data.dir;
-                        sel_after = entry.window_start;
+                        sel_start = entry.window_start;
                     }
                 }
-                if (ui.RoutablePage.repoFilesRoute(self.data.identity, self.data.ref_or_oid, self.data.ref_or_oid_value, sel_path, sel_after)) |route|
+                if (ui.RoutablePage.repoFilesRoute(self.data.identity, self.data.ref_or_oid, self.data.ref_or_oid_value, sel_path, sel_start)) |route|
                     self.session.data.current_page = route;
             }
         }
@@ -571,12 +571,12 @@ pub const View = struct {
     }
 
     // a focusable "next" link above the content. it's an `a:` link to the
-    // selected file at `target_after`, so activating it (the host follows the
+    // selected file at `target_start`, so activating it (the host follows the
     // link) reloads the page on the next window.
-    fn addNavLink(self: *View, allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8, entry: Entry, target_after: usize) !void {
+    fn addNavLink(self: *View, allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8, entry: Entry, target_start: usize) !void {
         const page_arena = self.session.page_arena;
         const path = try childDir(page_arena.allocator(), self.data.dir, entry.name);
-        const route = ui.RoutablePage.repoFilesRoute(self.data.identity, self.data.ref_or_oid, self.data.ref_or_oid_value, path, target_after) orelse return error.RouteTooLong;
+        const route = ui.RoutablePage.repoFilesRoute(self.data.identity, self.data.ref_or_oid, self.data.ref_or_oid_value, path, target_start) orelse return error.RouteTooLong;
         const link = try std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{try route.urlAlloc(page_arena)});
         var tb = try wgt.TextBox(ui.Widget).init(allocator, label, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .none });
         errdefer tb.deinit(allocator);

@@ -14,15 +14,15 @@ pub const page_size = 20; // how many repos one window shows
 
 repos: []const evt.Repo,
 owner_names: []const []const u8,
-after: usize, // the window start this page was built with, mirrored into the url
-next_after: ?usize, // the `after` for the "next" row, or null when this is the last window
+start: usize, // the window start this page was built with, mirrored into the url
+next_start: ?usize, // the `start` for the "next" row, or null when this is the last window
 
 const Self = @This();
 
 pub fn init(
     arena: *std.heap.ArenaAllocator,
     haxy_moment: evt.AdminDB.HashMap(.read_only),
-    after: usize,
+    start: usize,
 ) !Self {
     const DB = evt.AdminDB;
     const hash_kind = evt.admin_repo_opts.hash;
@@ -30,7 +30,7 @@ pub fn init(
     var repos: std.ArrayList(evt.Repo) = .empty;
     var owner_names: std.ArrayList([]const u8) = .empty;
 
-    const empty: Self = .{ .repos = &.{}, .owner_names = &.{}, .after = after, .next_after = null };
+    const empty: Self = .{ .repos = &.{}, .owner_names = &.{}, .start = start, .next_start = null };
 
     // the repos ordered by creation time (oldest first); absent until the first
     // repo exists. keyed by orderKey ([timestamp][event-id]); the trailing bytes
@@ -42,11 +42,11 @@ pub fn init(
     const event_id_to_repo_cursor = try haxy_moment.getCursor(hash.hashInt(hash_kind, "event-id->repo")) orelse return empty;
     const event_id_to_repo = try DB.HashMap(.read_only).init(event_id_to_repo_cursor);
 
-    // read the window [after, after+page_size) with one seek to the start rank,
+    // read the window [start, start+page_size) with one seek to the start rank,
     // then a sequential walk
-    const end = @min(after + page_size, count);
-    var iter = try repo_id_set.iteratorFromIndex(after);
-    var i = after;
+    const end = @min(start + page_size, count);
+    var iter = try repo_id_set.iteratorFromIndex(start);
+    var i = start;
     while (i < end) : (i += 1) {
         var id_cursor = (try iter.next()) orelse break;
         const id_kv = try id_cursor.readKeyValuePair();
@@ -65,8 +65,8 @@ pub fn init(
     return .{
         .repos = repos.items,
         .owner_names = owner_names.items,
-        .after = after,
-        .next_after = if (end < count) end else null,
+        .start = start,
+        .next_start = if (end < count) end else null,
     };
 }
 
@@ -94,8 +94,8 @@ pub const View = struct {
         // a trailing "next" row when more remain. each window row navigates to the
         // adjacent window (full reload on web, Nav rebuild on the TUI).
         var items: std.ArrayList(ui.FlowBox.Item) = .empty;
-        if (data.after > 0)
-            try items.append(aa, .{ .text = "← previous", .link = try std.fmt.allocPrint(aa, "a:/repos?after={d}", .{data.after -| page_size}) });
+        if (data.start > 0)
+            try items.append(aa, .{ .text = "← previous", .link = try std.fmt.allocPrint(aa, "a:/repos/start:{d}", .{data.start -| page_size}) });
         for (data.repos, 0..) |repo, i| {
             // clicking a repo opens its page; the "a:" prefix makes the web
             // renderer emit an <a href="/repo/alice/foo"> anchor. skip the link
@@ -106,8 +106,8 @@ pub const View = struct {
                 .link = if (owner.len > 0) try std.fmt.allocPrint(aa, "a:/repo/{s}/{s}", .{ owner, repo.name }) else "",
             });
         }
-        if (data.next_after) |next_after|
-            try items.append(aa, .{ .text = "next →", .link = try std.fmt.allocPrint(aa, "a:/repos?after={d}", .{next_after}) });
+        if (data.next_start) |next_start|
+            try items.append(aa, .{ .text = "next →", .link = try std.fmt.allocPrint(aa, "a:/repos/start:{d}", .{next_start}) });
         try self.list.setItems(allocator, items.items);
 
         return self;

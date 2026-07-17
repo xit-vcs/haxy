@@ -30,13 +30,13 @@ pub fn init(
     arena: *std.heap.ArenaAllocator,
     haxy_moment: evt.AdminDB.HashMap(.read_only),
     // pagination window start for each list tab; the inactive tab gets 0.
-    users_after: usize,
-    repos_after: usize,
+    users_start: usize,
+    repos_start: usize,
 ) !Self {
     return .{
         .header = try Header.init(arena),
-        .users = try Users.init(arena, haxy_moment, users_after),
-        .repos = try Repos.init(arena, haxy_moment, repos_after),
+        .users = try Users.init(arena, haxy_moment, users_start),
+        .repos = try Repos.init(arena, haxy_moment, repos_start),
         .settings = Settings.init(),
         .auth = Auth.init(),
         .quit = Quit.init(),
@@ -127,8 +127,8 @@ pub const View = struct {
             switch (std.meta.activeTag(stack.children.values()[index])) {
                 // mirror each list tab's built pagination window so the url stays
                 // consistent with what's shown (and so a build doesn't reset it).
-                .home_users => self.session.data.current_page = .{ .home_users = self.data.users.after },
-                .home_repos => self.session.data.current_page = .{ .home_repos = self.data.repos.after },
+                .home_users => self.session.data.current_page = .{ .home_users = self.data.users.start },
+                .home_repos => self.session.data.current_page = .{ .home_repos = self.data.repos.start },
                 .home_settings => self.session.data.current_page = .home_settings,
                 .home_auth => self.session.data.current_page = .home_auth,
                 // the quit tab is tty-only and not a route, so leave current_page

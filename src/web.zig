@@ -125,10 +125,9 @@ fn handleRequest(
         return;
     }
 
-    const query = if (uri.query) |comp| comp.percent_encoded else null;
     const current_page_maybe = switch (host) {
-        .remote => ui.RoutablePage.fromUrl(path, query),
-        .local => ui.RoutablePage.fromUrlLocal(path, query),
+        .remote => ui.RoutablePage.fromUrl(path),
+        .local => ui.RoutablePage.fromUrlLocal(path),
     };
     if (current_page_maybe) |current_page| {
         // resolve the haxy_session cookie's token to a user_id via the
