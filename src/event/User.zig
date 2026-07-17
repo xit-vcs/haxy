@@ -17,6 +17,23 @@ const Self = @This();
 
 pub const name_max_len = 32;
 
+pub fn validateName(name: []const u8) !void {
+    if (name.len == 0) return error.NameEmpty;
+    if (name.len > name_max_len) return error.NameTooLong;
+    if (name[0] == '-' or name[name.len - 1] == '-') return error.InvalidName;
+
+    var previous_was_hyphen = false;
+    for (name) |c| {
+        if (std.ascii.isAlphanumeric(c)) {
+            previous_was_hyphen = false;
+        } else if (c == '-' and !previous_was_hyphen) {
+            previous_was_hyphen = true;
+        } else {
+            return error.InvalidName;
+        }
+    }
+}
+
 // `created_ts` comes from the commit timestamp, not the event
 // payload, so it must not appear in the JSON we output
 pub fn jsonStringify(self: @This(), jw: anytype) !void {
@@ -57,7 +74,7 @@ pub fn consume(
     const name_to_user_id = try DB.HashMap(.read_write).init(name_to_user_id_cursor);
 
     if (event_maybe) |event| {
-        if (event.name.len > name_max_len) return error.NameTooLong;
+        try validateName(event.name);
 
         var event_to_write = event;
 
