@@ -6,6 +6,11 @@ let wasmInstance;
 const decoder = new TextDecoder();
 const encoder = new TextEncoder();
 let currentHtml = "";
+// each scroll div's wasm-side offset (in cells) as of the last render, keyed by
+// scroll id. when a new render's offset differs, the wasm moved the scroll on
+// purpose and its offset is applied; otherwise the browser position (the user's
+// scrolling) is preserved.
+const wasmOffsets = {};
 // seeded from the server-rendered overlay so the first wasm tick can no-op
 // when its layout happens to match the server's. otherwise the first tick
 // always rebuilds and any pre-load focus state is lost.
@@ -68,8 +73,22 @@ const importObject = {
             }
             grid.innerHTML = html;
             for (const el of grid.querySelectorAll(".scroll[data-scroll-id]")) {
-                const p = positions[el.dataset.scrollId];
-                if (p) { el.scrollTop = p.top; el.scrollLeft = p.left; }
+                const id = el.dataset.scrollId;
+                const offset = { top: Number(el.dataset.scrollY || 0), left: Number(el.dataset.scrollX || 0) };
+                const prev = wasmOffsets[id];
+                const p = positions[id];
+                if (p && prev && prev.top === offset.top && prev.left === offset.left) {
+                    el.scrollTop = p.top;
+                    el.scrollLeft = p.left;
+                } else {
+                    // the wasm's offset changed (or this div is new — a fresh
+                    // page load or a bumped content version): apply it,
+                    // converted from cells to pixels.
+                    if (!cellWidth || !cellHeight) measureCell();
+                    el.scrollTop = offset.top * cellHeight;
+                    el.scrollLeft = offset.left * cellWidth;
+                }
+                wasmOffsets[id] = offset;
             }
         },
         _replaceState: function (ptr, len) {

@@ -609,10 +609,13 @@ fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: 
             .both => "overflow:auto",
         };
         // the id carries a content version so JS preserves the native scroll
-        // position across re-renders of the same content but resets it (to the
-        // top) when the content is replaced — e.g. selecting a different commit.
-        var buf: [160]u8 = undefined;
-        try output.appendSlice(allocator, try std.fmt.bufPrint(&buf, "<div class=\"scroll\" data-scroll-id=\"{d}-{d}\" style=\"left:{d}ch;top:{d}em;width:{d}ch;height:{d}em;{s}\">", .{ id, child.focus.version, r.x, r.y, r.size.width, r.size.height, overflow }));
+        // position across re-renders of the same content but resets it when the
+        // content is replaced — e.g. selecting a different commit. the widget's
+        // scroll offset (in cells) rides along so JS can apply it when it has no
+        // preserved position, letting a wasm-side scrollToRect (the files list
+        // scrolling to its selected row on page load) reach the browser.
+        var buf: [224]u8 = undefined;
+        try output.appendSlice(allocator, try std.fmt.bufPrint(&buf, "<div class=\"scroll\" data-scroll-id=\"{d}-{d}\" data-scroll-x=\"{d}\" data-scroll-y=\"{d}\" style=\"left:{d}ch;top:{d}em;width:{d}ch;height:{d}em;{s}\">", .{ id, child.focus.version, info.offset_x, info.offset_y, r.x, r.y, r.size.width, r.size.height, overflow }));
         try renderPanel(allocator, output, child.focus, info.content);
         try output.appendSlice(allocator, "</div>");
     }
