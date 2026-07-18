@@ -16,11 +16,9 @@ const inp = @import("../input.zig");
 // how many lines of a file's content one window shows before a "next" link.
 const file_page = 5000;
 
-// how many files in a directory get their content preloaded (windowed) so
-// selecting them shows contents without a reload. every entry is still listed;
-// files past this limit carry an "a:" link instead, so activating them reloads
-// the page with that file selected (and its content loaded as the selection).
-const max_preloaded = 100;
+// budget for the total bytes of file content preloaded (windowed) per page,
+// so selecting a preloaded file shows its contents without a reload.
+const max_preloaded_bytes = 2 * 1024 * 1024;
 
 // one entry in the directory currently being viewed.
 pub const Entry = struct {
@@ -116,7 +114,7 @@ pub fn init(
     // another lookup.
     const entries = try aa.alloc(Entry, tree_dir.entries.count());
     var i: usize = 0;
-    var preloaded: usize = 0;
+    var preloaded_bytes: usize = 0;
     for ([_]bool{ true, false }) |want_dir| {
         for (tree_dir.entries.keys(), tree_dir.entries.values()) |name, tree_entry| {
             if (tree_entry.isTree() != want_dir) continue;
@@ -126,14 +124,14 @@ pub fn init(
                 // their first window (for the in-page detail when selected).
                 const is_selected = if (selected_file) |sf| std.mem.eql(u8, sf, name) else false;
                 // the README always loads because it's the default selection.
-                if (preloaded < max_preloaded or is_selected or isReadme(name)) {
-                    preloaded += 1;
+                if (preloaded_bytes < max_preloaded_bytes or is_selected or isReadme(name)) {
                     const file_path = try childDir(aa, dir, name);
                     // the url's `line` is 1-based (0 = unset); the window
                     // index is 0-based.
                     const window_start = if (is_selected) line -| 1 else 0;
                     const content = readFileContent(repo_kind, repo_opts, state, io, gpa, aa, file_path, tree_entry, window_start) catch
                         FileContent{ .lines = &.{} };
+                    for (content.lines) |l| preloaded_bytes += l.len;
                     entry.lines = content.lines;
                     entry.is_binary = content.is_binary;
                     entry.window_start = window_start;
