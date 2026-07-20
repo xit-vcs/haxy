@@ -1246,7 +1246,7 @@ fn setupAdmin(io: std.Io, allocator: std.mem.Allocator, data_dir_name: []const u
             .password_hash = password_hash,
             .ssh_keys = admin_ssh_key,
         } },
-    }}, false);
+    }});
 }
 
 // resolve admin/<repo_name> to its on-disk directory under <data_dir>/repos via

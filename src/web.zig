@@ -413,7 +413,7 @@ fn handleIssue(
             .description = description,
             .tags = tags,
         } },
-    }}, false);
+    }});
 
     const location = try std.fmt.allocPrint(allocator, "{s}/issues/{s}", .{ base, &event_id_hex });
     defer allocator.free(location);

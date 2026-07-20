@@ -67,4 +67,3 @@ test "encoded ref name survives the commits url round-trip" {
     try std.testing.expectEqual(RP.RefOrOid.branch, parsed_route.ref_or_oid.?);
     try std.testing.expectEqualStrings("feature%2Ffoo", parsed_route.value.slice());
 }
-

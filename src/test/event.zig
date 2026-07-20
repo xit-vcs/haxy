@@ -115,7 +115,7 @@ test "rebase" {
     //
 
     {
-        try evt.consume(repo_opts, io, allocator, &repo, evt.events_ref);
+        try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref);
 
         const haxy_moment = try evt.currentMoment(repo_opts, &repo);
 
@@ -153,7 +153,7 @@ test "rebase" {
     };
 
     // commit and consume the new event
-    try evt.commitAndConsume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &events_to_consume2, false);
+    try evt.commitAndConsume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &events_to_consume2);
 
     //
     // rebase the branch so it no longer includes the edit event
@@ -196,7 +196,7 @@ test "rebase" {
     //
 
     {
-        try evt.consume(repo_opts, io, allocator, &repo, evt.events_ref);
+        try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref);
 
         const haxy_moment = try evt.currentMoment(repo_opts, &repo);
 
@@ -255,7 +255,7 @@ test "rebase" {
     //
 
     {
-        try evt.consume(repo_opts, io, allocator, &repo, evt.events_ref);
+        try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref);
 
         const haxy_moment = try evt.currentMoment(repo_opts, &repo);
 
@@ -367,7 +367,7 @@ test "merge" {
     //
 
     {
-        try evt.consume(repo_opts, io, allocator, &repo, evt.events_ref);
+        try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref);
 
         const haxy_moment = try evt.currentMoment(repo_opts, &repo);
 
@@ -469,7 +469,7 @@ test "merge" {
     //
 
     {
-        try evt.consume(repo_opts, io, allocator, &repo, evt.events_ref);
+        try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref);
 
         const haxy_moment = try evt.currentMoment(repo_opts, &repo);
 
@@ -561,7 +561,7 @@ test "merge" {
     //
 
     {
-        try evt.consume(repo_opts, io, allocator, &repo, evt.events_ref);
+        try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref);
 
         const haxy_moment = try evt.currentMoment(repo_opts, &repo);
 
@@ -652,7 +652,7 @@ test "merge" {
     // consume events into the database
     //
 
-    try std.testing.expectError(error.MergeConflict, evt.consume(repo_opts, io, allocator, &repo, evt.events_ref));
+    try std.testing.expectError(error.MergeConflict, evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref));
 }
 
 test "user and repo" {
@@ -737,7 +737,7 @@ test "user and repo" {
     };
 
     // commit and consume the seed events
-    try evt.commitAndConsume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &events_to_consume, false);
+    try evt.commitAndConsume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &events_to_consume);
 
     {
         const haxy_moment = try evt.currentMoment(repo_opts, &repo);
@@ -792,7 +792,7 @@ test "user and repo" {
     };
 
     // commit and consume the removal
-    try evt.commitAndConsume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &events_to_consume2, false);
+    try evt.commitAndConsume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &events_to_consume2);
 
     {
         const haxy_moment = try evt.currentMoment(repo_opts, &repo);
@@ -826,7 +826,7 @@ test "user and repo" {
     };
 
     // commit and consume the removal
-    try evt.commitAndConsume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &events_to_consume3, false);
+    try evt.commitAndConsume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &events_to_consume3);
 
     {
         const haxy_moment = try evt.currentMoment(repo_opts, &repo);
@@ -905,7 +905,7 @@ test "repos and users paginate in creation order" {
         .{ .id = std.fmt.bytesToHex(repo_ids[2], .lower), .timestamp = 103, .event = .{ .repo = .{ .user_id = &user_id, .name = "repo2", .description = "d2", .enable_issue = true } } },
         .{ .id = std.fmt.bytesToHex(repo_ids[3], .lower), .timestamp = 104, .event = .{ .repo = .{ .user_id = &user_id, .name = "repo3", .description = "d3", .enable_issue = true } } },
     };
-    try evt.commitAndConsume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &events, false);
+    try evt.commitAndConsume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &events);
 
     {
         const moment = try evt.currentMoment(repo_opts, &repo);
@@ -920,7 +920,7 @@ test "repos and users paginate in creation order" {
     // delete repo1 -> dense order (no tombstone)
     try evt.commitAndConsume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &[_]evt.EventWithId{
         .{ .id = std.fmt.bytesToHex(repo_ids[1], .lower), .timestamp = 200, .event = .{ .repo = null } },
-    }, false);
+    });
     {
         const moment = try evt.currentMoment(repo_opts, &repo);
         try Check.order(Repo.DB, repo_opts.hash, moment, &.{ &repo_ids[0], &repo_ids[2], &repo_ids[3] });
@@ -929,7 +929,7 @@ test "repos and users paginate in creation order" {
     // update repo0 at a later timestamp -> keeps its original slot
     try evt.commitAndConsume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &[_]evt.EventWithId{
         .{ .id = std.fmt.bytesToHex(repo_ids[0], .lower), .timestamp = 300, .event = .{ .repo = .{ .user_id = &user_id, .name = "repo0", .description = "updated", .enable_issue = true } } },
-    }, false);
+    });
     {
         const moment = try evt.currentMoment(repo_opts, &repo);
         try Check.order(Repo.DB, repo_opts.hash, moment, &.{ &repo_ids[0], &repo_ids[2], &repo_ids[3] });

@@ -247,5 +247,5 @@ pub fn toggleAnsi(
         .id = std.fmt.bytesToHex(user_id[0..evt.event_id_size].*, .lower),
         .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
         .event = .{ .user = updated },
-    }}, false);
+    }});
 }

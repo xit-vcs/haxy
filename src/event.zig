@@ -95,39 +95,77 @@ pub const EventWithId = struct {
     }
 };
 
+// consume the events on `ref` into the db the repo's views read: the repo's
+// own db for a xit repo, or the standalone event db next to a git repo
 pub fn consume(
-    comptime repo_opts: rp.RepoOpts(.xit),
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
     io: std.Io,
     allocator: std.mem.Allocator,
-    repo: *rp.Repo(.xit, repo_opts),
+    repo: *rp.Repo(repo_kind, repo_opts),
     ref: rf.Ref,
 ) !void {
-    const DB = rp.Repo(.xit, repo_opts).DB;
-    const State = rp.Repo(.xit, repo_opts).State;
-
-    const Ctx = struct {
-        core: *rp.Repo(.xit, repo_opts).Core,
-        io: std.Io,
-        allocator: std.mem.Allocator,
-        ref: rf.Ref,
-
-        pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
-            var moment = try DB.HashMap(.read_write).init(cursor.*);
-            const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
-            try consumeInTransaction(.xit, repo_opts, state.readOnly(), &ctx.core.db, &moment, ctx.io, ctx.allocator, ctx.ref);
+    // a branch that only exists on a remote is consumed from its remote-tracking ref
+    const resolved_ref: rf.Ref, const tip: [hash.hexLen(repo_opts.hash)]u8 = blk: {
+        if (try repo.readRef(io, ref)) |oid| break :blk .{ ref, oid };
+        var remotes = try repo.listRemotes(io, allocator);
+        defer remotes.deinit();
+        for (remotes.sections.keys()) |remote_name| {
+            const remote_ref: rf.Ref = .{ .kind = .{ .remote = remote_name }, .name = ref.name };
+            if (try repo.readRef(io, remote_ref)) |oid| break :blk .{ remote_ref, oid };
         }
+        // the branch is gone (or never existed): drop any db from a previous
+        // sync rather than serving its issues indefinitely
+        if (repo_kind == .git) try LocalEventDB(repo_opts.hash).delete(io, repo.core.repo_dir);
+        return;
     };
+    var tip_bytes: [hash.byteLen(repo_opts.hash)]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&tip_bytes, &tip);
 
-    try repo.core.db_file.lock(io, .exclusive);
-    defer repo.core.db_file.unlock(io);
+    switch (repo_kind) {
+        .git => {
+            var event_db = try LocalEventDB(repo_opts.hash).open(io, allocator, repo.core.repo_dir);
+            defer event_db.deinit(io, allocator);
 
-    const history = try DB.ArrayList(.read_write).init(repo.core.db.rootCursor());
-    try history.appendContext(.{ .slot = try history.getSlot(-1) }, Ctx{
-        .core = &repo.core,
-        .io = io,
-        .allocator = allocator,
-        .ref = ref,
-    });
+            if (try lastConsumedOid(repo_opts.hash, event_db.db)) |last_oid| {
+                if (std.mem.eql(u8, &last_oid, &tip_bytes)) return;
+            }
+
+            try event_db.consume(repo_kind, repo_opts, io, allocator, repo, resolved_ref);
+        },
+        .xit => {
+            const DB = rp.Repo(.xit, repo_opts).DB;
+            const State = rp.Repo(.xit, repo_opts).State;
+
+            const Ctx = struct {
+                core: *rp.Repo(.xit, repo_opts).Core,
+                io: std.Io,
+                allocator: std.mem.Allocator,
+                ref: rf.Ref,
+
+                pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
+                    var moment = try DB.HashMap(.read_write).init(cursor.*);
+                    const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
+                    try consumeInTransaction(.xit, repo_opts, state.readOnly(), &ctx.core.db, &moment, ctx.io, ctx.allocator, ctx.ref);
+                }
+            };
+
+            try repo.core.db_file.lock(io, .exclusive);
+            defer repo.core.db_file.unlock(io);
+
+            if (try lastConsumedOid(repo_opts.hash, &repo.core.db)) |last_oid| {
+                if (std.mem.eql(u8, &last_oid, &tip_bytes)) return;
+            }
+
+            const history = try DB.ArrayList(.read_write).init(repo.core.db.rootCursor());
+            try history.appendContext(.{ .slot = try history.getSlot(-1) }, Ctx{
+                .core = &repo.core,
+                .io = io,
+                .allocator = allocator,
+                .ref = resolved_ref,
+            });
+        },
+    }
 }
 
 // a standalone event db holding events consumed from a local repo's events
@@ -142,14 +180,14 @@ pub fn LocalEventDB(comptime hash_kind: hash.HashKind) type {
         const db_name = "haxy";
         const Self = @This();
 
-        // open the db in `repo_dir`, creating it if it doesn't exist
-        pub fn create(io: std.Io, allocator: std.mem.Allocator, repo_dir: std.Io.Dir) !Self {
+        // open the db in `repo_dir` for writing, creating it if it doesn't exist
+        pub fn open(io: std.Io, allocator: std.mem.Allocator, repo_dir: std.Io.Dir) !Self {
             const file = try repo_dir.createFile(io, db_name, .{ .truncate = false, .read = true, .lock = .exclusive });
             return fromFile(io, allocator, file);
         }
 
         // open the db in `repo_dir` for reading, or null if it doesn't exist
-        pub fn open(io: std.Io, allocator: std.mem.Allocator, repo_dir: std.Io.Dir) !?Self {
+        pub fn openReadOnly(io: std.Io, allocator: std.mem.Allocator, repo_dir: std.Io.Dir) !?Self {
             const file = repo_dir.openFile(io, db_name, .{ .mode = .read_write, .lock = .shared }) catch |err| switch (err) {
                 error.FileNotFound => return null,
                 else => |e| return e,
@@ -189,7 +227,7 @@ pub fn LocalEventDB(comptime hash_kind: hash.HashKind) type {
         }
 
         // consume the events on `repo`'s `ref` into this db. the db must come
-        // from `create`, whose handle holds the exclusive lock guarding the
+        // from `open`, whose handle holds the exclusive lock guarding the
         // transaction.
         pub fn consume(
             self: *Self,
@@ -228,41 +266,6 @@ pub fn LocalEventDB(comptime hash_kind: hash.HashKind) type {
             });
         }
     };
-}
-
-// bring a local repo's event db up to date with its events branch
-pub fn syncLocalEvents(
-    comptime repo_kind: rp.RepoKind,
-    comptime repo_opts: rp.RepoOpts(repo_kind),
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    repo: *rp.Repo(repo_kind, repo_opts),
-) !void {
-    var remotes = try repo.listRemotes(io, allocator);
-    defer remotes.deinit();
-
-    const ref: rf.Ref, const tip: [hash.hexLen(repo_opts.hash)]u8 = blk: {
-        if (try repo.readRef(io, events_ref)) |oid| break :blk .{ events_ref, oid };
-        for (remotes.sections.keys()) |remote_name| {
-            const remote_ref: rf.Ref = .{ .kind = .{ .remote = remote_name }, .name = events_ref.name };
-            if (try repo.readRef(io, remote_ref)) |oid| break :blk .{ remote_ref, oid };
-        }
-        // the branch is gone (or never existed): drop any db from a previous
-        // sync rather than serving its issues indefinitely
-        try LocalEventDB(repo_opts.hash).delete(io, repo.core.repo_dir);
-        return;
-    };
-
-    var event_db = try LocalEventDB(repo_opts.hash).create(io, allocator, repo.core.repo_dir);
-    defer event_db.deinit(io, allocator);
-
-    if (try lastConsumedOid(repo_opts.hash, event_db.db)) |last_oid| {
-        var tip_bytes: [hash.byteLen(repo_opts.hash)]u8 = undefined;
-        _ = try std.fmt.hexToBytes(&tip_bytes, &tip);
-        if (std.mem.eql(u8, &last_oid, &tip_bytes)) return;
-    }
-
-    try event_db.consume(repo_kind, repo_opts, io, allocator, repo, ref);
 }
 
 // consume the events on `ref` into the db `moment` writes to. events are read
@@ -519,9 +522,7 @@ pub fn currentMomentFromDb(
     return try DB.HashMap(.read_only).init(haxy_moment_cursor);
 }
 
-// commit each event as a JSON commit message on `ref`, then consume them into
-// the db the repo's views read: the repo's own db, or the standalone local
-// event db when `is_local`.
+// commit each event as a JSON commit message on `ref`, then consume them
 pub fn commitAndConsume(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
@@ -530,7 +531,6 @@ pub fn commitAndConsume(
     repo: *rp.Repo(repo_kind, repo_opts),
     ref: rf.Ref,
     events: []const EventWithId,
-    is_local: bool,
 ) !void {
     // a branch that only exists on a remote continues from the remote tip,
     // so a cloned repo's local branch stays connected to the server history
@@ -557,13 +557,7 @@ pub fn commitAndConsume(
         parent_oids = null;
     }
 
-    if (is_local) {
-        try syncLocalEvents(repo_kind, repo_opts, io, allocator, repo);
-    } else switch (repo_kind) {
-        .xit => try consume(repo_opts, io, allocator, repo, ref),
-        // server repos are always xit
-        .git => unreachable,
-    }
+    try consume(repo_kind, repo_opts, io, allocator, repo, ref);
 }
 
 // build the key for SortedSets sorted by timestamp. the big-endian timestamp
@@ -642,7 +636,7 @@ pub fn resolveOrCreateRepo(
             .description = "",
             .enable_issue = true,
         } },
-    }}, false);
+    }});
 
     return event_id_hex;
 }

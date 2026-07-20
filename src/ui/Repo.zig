@@ -174,13 +174,12 @@ pub fn init(
                     switch (any_repo) {
                         inline else => |*opened| {
                             // local mode: bring the event db up to date with the events branch
-                            const is_local = session.local != null;
-                            if (is_local) try evt.syncLocalEvents(repo_kind, opened.self_repo_opts, io, gpa, opened);
+                            if (session.local != null) try evt.consume(repo_kind, opened.self_repo_opts, io, gpa, opened, evt.events_ref);
                             break :blk .{
                                 try Files.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, repo_identity.identity, requested_ref_or_oid, requested_ref_value, files_dir, files_line),
                                 try Commits.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, repo_identity.identity, requested_ref_or_oid, requested_ref_value, commits_start, commits_path),
                                 try Refs.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, repo_identity.identity, refs_kind, refs_from),
-                                try Issues.init(repo_kind, opened.self_repo_opts, arena, opened, io, is_local, repo_identity.identity, issues_tag, issues_selected, issues_view),
+                                try Issues.init(repo_kind, opened.self_repo_opts, arena, opened, io, repo_identity.identity, issues_tag, issues_selected, issues_view),
                             };
                         },
                     }
