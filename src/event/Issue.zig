@@ -80,7 +80,7 @@ pub fn consume(
             event_to_write.created_ts = existing_event.created_ts;
 
             // drop the old status's and tags' entries; the current ones are re-added below
-            const order_key = evt.orderKey(existing_event.created_ts, event_id);
+            const order_key = evt.orderKeyDesc(existing_event.created_ts, event_id);
             const status_set = try statusSet(DB, status_to_issues, existing_event.status);
             _ = try status_set.remove(&order_key);
             try removeFromTagSets(DB, tag_to_issues, existing_event.tags, existing_event.status, &order_key);
@@ -93,7 +93,7 @@ pub fn consume(
         const issue = try DB.HashMap(.read_write).init(issue_cursor);
         try evt.upsert(@This(), DB, hash_kind, issue, event_to_write);
 
-        const order_key = evt.orderKey(event_to_write.created_ts, event_id);
+        const order_key = evt.orderKeyDesc(event_to_write.created_ts, event_id);
 
         const status_set = try statusSet(DB, status_to_issues, event.status);
         try status_set.put(&order_key);
@@ -112,7 +112,7 @@ pub fn consume(
         if (try event_id_to_issue.getCursor(issue_key)) |existing_cursor| {
             const existing_issue = try DB.HashMap(.read_only).init(existing_cursor);
             const existing_event = try evt.read(@This(), DB, hash_kind, arena, existing_issue);
-            const order_key = evt.orderKey(existing_event.created_ts, event_id);
+            const order_key = evt.orderKeyDesc(existing_event.created_ts, event_id);
 
             const status_set = try statusSet(DB, status_to_issues, existing_event.status);
             _ = try status_set.remove(&order_key);

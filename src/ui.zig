@@ -101,7 +101,7 @@ pub const RoutablePage = union(enum) {
 
     pub const RefKind = enum { branch, tag };
 
-    pub const IssuesView = enum { open, closed, tags };
+    pub const IssuesView = enum { open, closed, tags, new };
 
     pub const RefOrOid = enum {
         branch,
@@ -308,13 +308,21 @@ pub const RoutablePage = union(enum) {
         } };
     }
 
-    // build a `.repo_issues` route showing "owner/name" (identity)'s tags view,
-    // keeping the url-encoded `tag` filter ("" = unfiltered).
+    // build a `.repo_issues` route showing tags view, keeping the url-encoded
+    // `tag` filter ("" = unfiltered).
     pub fn repoIssuesTagsRoute(identity: []const u8, tag: []const u8) ?RoutablePage {
         return .{ .repo_issues = .{
             .name = Array(repo_route_max_len).from(identity) orelse return null,
             .tag = Array(issue_tag_route_max_len).from(tag) orelse return null,
             .view = .tags,
+        } };
+    }
+
+    // build a `.repo_issues` route showing new-issue form.
+    pub fn repoIssuesNewRoute(identity: []const u8) ?RoutablePage {
+        return .{ .repo_issues = .{
+            .name = Array(repo_route_max_len).from(identity) orelse return null,
+            .view = .new,
         } };
     }
 
@@ -505,6 +513,7 @@ pub const RoutablePage = union(enum) {
             const w = word orelse return if (tag_value.len == 0) repoIssuesRoute(pair, .open, "", "") else null;
             if (std.meta.stringToEnum(evt.Issue.Status, w)) |status| return repoIssuesRoute(pair, status, tag_value, "");
             if (std.mem.eql(u8, w, "tags")) return repoIssuesTagsRoute(pair, tag_value);
+            if (std.mem.eql(u8, w, "new")) return if (tag_value.len == 0) repoIssuesNewRoute(pair) else null;
             return repoIssuesRoute(pair, .open, tag_value, w);
         }
         if (std.mem.eql(u8, tab, files_seg)) {

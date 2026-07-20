@@ -67,9 +67,6 @@ pub fn main(init: std.process.Init) !void {
     var repo = try Repo.init(io, allocator, .{ .path = work_path });
     defer repo.deinit(io, allocator);
 
-    try repo.addConfig(io, allocator, .{ .name = "user.name", .value = "haxy" });
-    try repo.addConfig(io, allocator, .{ .name = "user.email", .value = "admin@haxy" });
-
     var session_arena = std.heap.ArenaAllocator.init(allocator);
     defer session_arena.deinit();
 
@@ -201,7 +198,7 @@ pub fn main(init: std.process.Init) !void {
         }
 
         // commit the seed events and consume them into the database
-        try evt.commitAndConsume(evt.admin_repo_opts, io, allocator, &repo, evt.events_ref, &events_to_consume);
+        try evt.commitAndConsume(.xit, evt.admin_repo_opts, io, allocator, &repo, evt.events_ref, &events_to_consume, false);
 
         // every repo gets the same generated history, so build it once into a
         // template repo and copy that to each repo's location below rather than
@@ -518,7 +515,7 @@ pub fn main(init: std.process.Init) !void {
                     },
                 };
             }
-            try evt.commitAndConsume(.{}, io, allocator, &template_repo, evt.events_ref, &issue_events);
+            try evt.commitAndConsume(.xit, .{}, io, allocator, &template_repo, evt.events_ref, &issue_events, false);
         }
 
         // copy the template to each repo's on-disk location, named by its

@@ -243,9 +243,9 @@ pub fn toggleAnsi(
 
     var updated = user;
     updated.enable_ansi = !user.enable_ansi;
-    try evt.commitAndConsume(repo_opts, io, allocator, repo, evt.events_ref, &[_]evt.EventWithId{.{
+    try evt.commitAndConsume(.xit, repo_opts, io, allocator, repo, evt.events_ref, &[_]evt.EventWithId{.{
         .id = std.fmt.bytesToHex(user_id[0..evt.event_id_size].*, .lower),
         .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
         .event = .{ .user = updated },
-    }});
+    }}, false);
 }

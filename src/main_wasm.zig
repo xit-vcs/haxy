@@ -94,7 +94,7 @@ fn tick(min_height: u32, max_width: u32) !void {
             // so the browser handles typing and Enter-to-submit natively. without this
             // the submit button never gets focus and Enter falls through to the wasm.
             switch (child.focus.kind) {
-                .text_input, .text_input_password => _focusInput(@intCast(gid)),
+                .text_input, .text_input_password, .text_area => _focusInput(@intCast(gid)),
                 .custom => |custom| if (std.mem.eql(u8, custom, "submit")) _focusInput(@intCast(gid)),
                 else => {},
             }
@@ -232,7 +232,7 @@ fn setTextInputValue(focus_id: u32, bytes: []const u8) !void {
     const root_focus = root_ptr.getFocus();
     const child = root_focus.children.get(focus_id) orelse return error.UnknownFocusId;
     switch (child.focus.kind) {
-        .text_input, .text_input_password => {},
+        .text_input, .text_input_password, .text_area => {},
         else => return error.NotATextInput,
     }
     const ti = session.text_inputs.get(focus_id) orelse return error.UnknownFocusId;

@@ -1237,7 +1237,7 @@ fn setupAdmin(io: std.Io, allocator: std.mem.Allocator, data_dir_name: []const u
     var password_hash_buf: [evt.User.password_hash_max_len]u8 = undefined;
     const password_hash = try evt.User.hashPassword("password", &password_hash_buf, io);
 
-    try evt.commitAndConsume(evt.admin_repo_opts, io, allocator, &repo, evt.events_ref, &[_]evt.EventWithId{.{
+    try evt.commitAndConsume(.xit, evt.admin_repo_opts, io, allocator, &repo, evt.events_ref, &[_]evt.EventWithId{.{
         .id = std.fmt.bytesToHex(user_id, .lower),
         .event = .{ .user = .{
             .name = "admin",
@@ -1246,7 +1246,7 @@ fn setupAdmin(io: std.Io, allocator: std.mem.Allocator, data_dir_name: []const u
             .password_hash = password_hash,
             .ssh_keys = admin_ssh_key,
         } },
-    }});
+    }}, false);
 }
 
 // resolve admin/<repo_name> to its on-disk directory under <data_dir>/repos via

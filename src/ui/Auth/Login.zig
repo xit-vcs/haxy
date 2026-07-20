@@ -150,17 +150,15 @@ pub const View = struct {
                 root_focus.setFocus(self.nav_ids[current + 1]);
                 return;
             },
-            // submit on Enter from any nav field — typical "press Enter in
-            // a form to submit" UX
-            .enter => {
-                try self.submit(allocator, root_focus);
-                return;
-            },
             else => {},
         }
 
         if (current == button_index) {
             switch (key) {
+                .enter => {
+                    try self.submit(allocator, root_focus);
+                    return;
+                },
                 .mouse => |mouse| {
                     if (inp.leftClickOn(root_focus, child_id, mouse)) {
                         try self.submit(allocator, root_focus);

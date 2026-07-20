@@ -189,23 +189,30 @@ WebAssembly.instantiateStreaming(fetch("/haxy.wasm"), importObject).then(async (
         // let the browser handle modifier combos. the TUI only uses unmodified keys,
         // so intercepting these would just break normal browser navigation.
         if (event.altKey || event.ctrlKey || event.metaKey) return;
-        // when a form element (text input or submit button) owns focus,
-        // the browser handles typing, Enter-to-submit, and Tab natively.
-        // we only forward keys into the TUI when focus is elsewhere.
+        // when a form element (text input or submit button) owns focus, the
+        // browser handles typing and Tab natively (and Enter on the button
+        // submits). we only forward keys into the TUI when focus is elsewhere.
         // exception: arrow up/down on an input unfocuses it and forwards
         // the event so the TUI can move focus between widgets.
         if (document.activeElement) {
             const tag = document.activeElement.tagName;
             const isArrow = event.key === "ArrowUp" || event.key === "ArrowDown" ||
                 event.key === "ArrowLeft" || event.key === "ArrowRight";
+            if (tag === "INPUT" && event.key === "Enter") {
+                // enter in a text input never submits the form; only the
+                // submit button does
+                event.preventDefault();
+                return;
+            }
             if (tag === "INPUT" && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
                 // up/down moves between widgets; left/right stay in the input
                 document.activeElement.blur();
             } else if (tag === "BUTTON" && isArrow) {
                 // arrows navigate away from a focused submit button
                 document.activeElement.blur();
-            } else if (tag === "INPUT" || tag === "BUTTON") {
-                // Enter (submit), typing, Tab — handled natively by the browser
+            } else if (tag === "INPUT" || tag === "BUTTON" || tag === "TEXTAREA") {
+                // Enter (submit / newline), typing, Tab, and a textarea's
+                // arrows — handled natively by the browser
                 return;
             }
         }
@@ -220,7 +227,7 @@ WebAssembly.instantiateStreaming(fetch("/haxy.wasm"), importObject).then(async (
     // input/focus events from form elements still bubble up to document.
     document.addEventListener("input", (event) => {
         const t = event.target;
-        if (!t || t.tagName !== "INPUT" || !t.dataset.focusId) return;
+        if (!t || (t.tagName !== "INPUT" && t.tagName !== "TEXTAREA") || !t.dataset.focusId) return;
         sendTextInputValue(Number(t.dataset.focusId), t.value);
     });
 

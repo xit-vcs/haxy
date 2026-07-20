@@ -519,24 +519,51 @@ pub fn currentMomentFromDb(
     return try DB.HashMap(.read_only).init(haxy_moment_cursor);
 }
 
+// commit each event as a JSON commit message on `ref`, then consume them into
+// the db the repo's views read: the repo's own db, or the standalone local
+// event db when `is_local`.
 pub fn commitAndConsume(
-    comptime repo_opts: rp.RepoOpts(.xit),
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
     io: std.Io,
     allocator: std.mem.Allocator,
-    repo: *rp.Repo(.xit, repo_opts),
+    repo: *rp.Repo(repo_kind, repo_opts),
     ref: rf.Ref,
     events: []const EventWithId,
+    is_local: bool,
 ) !void {
+    // a branch that only exists on a remote continues from the remote tip,
+    // so a cloned repo's local branch stays connected to the server history
+    const first_parent_oids: ?[1][hash.hexLen(repo_opts.hash)]u8 = blk: {
+        if (try repo.readRef(io, ref) != null) break :blk null;
+        var remotes = try repo.listRemotes(io, allocator);
+        defer remotes.deinit();
+        for (remotes.sections.keys()) |remote_name| {
+            const remote_ref: rf.Ref = .{ .kind = .{ .remote = remote_name }, .name = ref.name };
+            if (try repo.readRef(io, remote_ref)) |oid| break :blk .{oid};
+        }
+        break :blk null;
+    };
+    var parent_oids: ?[]const [hash.hexLen(repo_opts.hash)]u8 = if (first_parent_oids) |*oids| oids else null;
+
     var json: std.Io.Writer.Allocating = .init(allocator);
     defer json.deinit();
 
     for (events) |event| {
         json.clearRetainingCapacity();
         try std.json.Stringify.value(event, .{}, &json.writer);
-        _ = try repo.commitAtRef(io, allocator, .{ .message = json.written(), .timestamp = event.timestamp }, null, ref);
+        _ = try repo.commitAtRef(io, allocator, .{ .author = "haxy <user@haxy>", .message = json.written(), .timestamp = event.timestamp, .parent_oids = parent_oids }, null, ref);
+        // later events parent on the ref's new tip
+        parent_oids = null;
     }
 
-    try consume(repo_opts, io, allocator, repo, ref);
+    if (is_local) {
+        try syncLocalEvents(repo_kind, repo_opts, io, allocator, repo);
+    } else switch (repo_kind) {
+        .xit => try consume(repo_opts, io, allocator, repo, ref),
+        // server repos are always xit
+        .git => unreachable,
+    }
 }
 
 // build the key for SortedSets sorted by timestamp. the big-endian timestamp
@@ -547,6 +574,10 @@ pub fn orderKey(timestamp: u64, event_id: *const [event_id_size]u8) [@sizeOf(u64
     std.mem.writeInt(u64, key[0..@sizeOf(u64)], timestamp, .big);
     @memcpy(key[@sizeOf(u64)..], event_id);
     return key;
+}
+
+pub fn orderKeyDesc(timestamp: u64, event_id: *const [event_id_size]u8) [@sizeOf(u64) + event_id_size]u8 {
+    return orderKey(std.math.maxInt(u64) - timestamp, event_id);
 }
 
 // split a pushed "<owner>/<repo>" path into its two components, or null if it
@@ -602,7 +633,7 @@ pub fn resolveOrCreateRepo(
     io.random(&id_bytes);
     const event_id_hex = std.fmt.bytesToHex(id_bytes, .lower);
 
-    try commitAndConsume(admin_repo_opts, io, allocator, &repo, events_ref, &[_]EventWithId{.{
+    try commitAndConsume(.xit, admin_repo_opts, io, allocator, &repo, events_ref, &[_]EventWithId{.{
         .id = event_id_hex,
         .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
         .event = .{ .repo = .{
@@ -611,7 +642,7 @@ pub fn resolveOrCreateRepo(
             .description = "",
             .enable_issue = true,
         } },
-    }});
+    }}, false);
 
     return event_id_hex;
 }

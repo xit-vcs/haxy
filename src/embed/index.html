@@ -58,6 +58,7 @@
              their parent (.page) is the positioning ancestor and the
              grid sits at its top-left. */
           .page input,
+          .page textarea,
           .page button {
             position: absolute;
             font: inherit;
@@ -67,10 +68,18 @@
             box-sizing: border-box;
           }
 
-          .page input {
+          .page input,
+          .page textarea {
             color: inherit;
             background: transparent;
             border: none;
+          }
+
+          /* the TUI border cells own the frame, so the textarea can't be
+             drag-resized past them */
+          .page textarea {
+            resize: none;
+            overflow-y: auto;
           }
 
           /* the TUI cells under the button render the border + label;

@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const evt = @import("../../event.zig");
 const ui = @import("../../ui.zig");
 const xit = @import("xit");
@@ -11,6 +12,8 @@ const Key = xitui.input.Key;
 const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
 const inp = @import("../input.zig");
+
+const wasm = builtin.target.cpu.arch == .wasm32;
 
 // how many issues one window shows before a "next" link appears.
 pub const page_size = 20;
@@ -53,6 +56,9 @@ closed: Window,
 view: ui.RoutablePage.IssuesView,
 // every tag in the repo, in sorted order, for the tags view.
 tags: []const []const u8,
+// the on-disk repo this page was read from, for the terminal submit path
+// (the web posts the new-issue form to the issue route instead).
+repo_source: ?ui.RepoSource = null,
 
 const Self = @This();
 
@@ -78,7 +84,7 @@ pub fn emptyResult(aa: std.mem.Allocator, identity: []const u8, tag: []const u8,
 }
 
 // read one window per status of an opened repo's issues (filtered to `tag`
-// when set), ordered by creation time (oldest first). the window of the issue
+// when set), ordered by creation time (newest first). the window of the issue
 // `selected_id` names starts at it ("" = the beginning). a local session
 // reads the event db next to the repo (synced from the events branch on each
 // page build); a server repo reads its own db.
@@ -156,7 +162,7 @@ pub fn init(
         const issue_cursor = try event_id_to_issue.getCursor(hash.hashInt(repo_opts.hash, &id_bytes)) orelse return error.NotFound;
         const issue_map = try DB.HashMap(.read_only).init(issue_cursor);
         const issue_event = try evt.read(evt.Issue, DB, repo_opts.hash, arena, issue_map);
-        const order_key = try aa.dupe(u8, &evt.orderKey(issue_event.created_ts, &id_bytes));
+        const order_key = try aa.dupe(u8, &evt.orderKeyDesc(issue_event.created_ts, &id_bytes));
 
         // the named issue must be in its windowed set (a tag url can name an
         // issue that doesn't carry the tag).
@@ -268,9 +274,8 @@ fn loadWindow(
     } else try set.iteratorFromIndex(0);
 
     // collect this window's issues, plus a peek at the one after it (its id is
-    // the next window's start). the set's keys are orderKey
-    // ([timestamp][event-id]); the trailing bytes of each key are the issue
-    // event id.
+    // the next window's start). the trailing bytes of each set key are the
+    // issue event id.
     var issues: std.ArrayList(IssueWithId) = .empty;
     var next_id: ?[]const u8 = null;
     while (try iter.next()) |id_cursor_val| {
@@ -317,18 +322,25 @@ pub const View = struct {
     const open_view_index: usize = 0;
     const closed_view_index: usize = 1;
     const tags_view_index: usize = 2;
+    const new_view_index: usize = 3;
     const split_count: usize = 2;
     // indices within a split (the horizontal box inside the stack).
     const list_index: usize = 0;
     const detail_index: usize = 1;
     const list_max_width: usize = 40;
     const detail_min_width: usize = 40;
+    // indices within the new-issue form.
+    const title_field_index: usize = 0;
+    const tags_field_index: usize = 1;
+    const description_field_index: usize = 2;
+    const submit_field_index: usize = 3;
 
     fn viewIndex(view: ui.RoutablePage.IssuesView) usize {
         return switch (view) {
             .open => open_view_index,
             .closed => closed_view_index,
             .tags => tags_view_index,
+            .new => new_view_index,
         };
     }
 
@@ -376,6 +388,13 @@ pub const View = struct {
                 try items.append(allocator, .{ .text = tag, .link = try tagLink(session.page_arena, data.identity, .open, tag) });
             try tf.setItems(allocator, items.items);
             try stack.children.put(allocator, tf.getFocus().id, .{ .tag_flow = tf });
+        }
+
+        // the new-issue form
+        {
+            var form = try initNewForm(allocator, session, data);
+            errdefer form.deinit(allocator);
+            try stack.children.put(allocator, form.getFocus().id, .{ .box = form });
         }
 
         // the stack starts on the page's view.
@@ -452,6 +471,60 @@ pub const View = struct {
         return box;
     }
 
+    // the new-issue form: title/tags/description inputs and a submit button.
+    // its form: subtree makes the web overlay wrap them in a <form> POSTing to
+    // the issue route.
+    fn initNewForm(allocator: std.mem.Allocator, session: *ui.Session, data: *const Self) !wgt.Box(ui.Widget) {
+        var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert });
+        errdefer box.deinit(allocator);
+        box.getFocus().kind = .{ .custom = if (data.identity.len == 0)
+            "form:/issue"
+        else
+            try std.fmt.allocPrint(session.page_arena.allocator(), "form:/repo/{s}/issue", .{data.identity}) };
+
+        {
+            var title = try wgt.TextInput(ui.Widget).init(allocator, .{ .label = " title ", .name = "title", .visible_width = null, .rounded_corners = true, .render_content = !wasm });
+            errdefer title.deinit(allocator);
+            title.getFocus().focusable = true;
+            try box.children.put(allocator, title.getFocus().id, .{ .widget = .{ .text_input = title }, .rect = null, .min_size = null });
+        }
+
+        {
+            var tags = try wgt.TextInput(ui.Widget).init(allocator, .{ .label = " tags (separate with spaces) ", .name = "tags", .visible_width = null, .rounded_corners = true, .render_content = !wasm });
+            errdefer tags.deinit(allocator);
+            tags.getFocus().focusable = true;
+            try box.children.put(allocator, tags.getFocus().id, .{ .widget = .{ .text_input = tags }, .rect = null, .min_size = null });
+        }
+
+        {
+            var description = try wgt.TextInput(ui.Widget).init(allocator, .{ .label = " description ", .name = "description", .visible_width = null, .rounded_corners = true, .render_content = !wasm, .multiline = true, .visible_height = 5 });
+            errdefer description.deinit(allocator);
+            description.getFocus().focusable = true;
+            try box.children.put(allocator, description.getFocus().id, .{ .widget = .{ .text_input = description }, .rect = null, .min_size = null });
+        }
+
+        {
+            var button = try wgt.TextBox(ui.Widget).init(allocator, "submit", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            errdefer button.deinit(allocator);
+            button.getFocus().focusable = true;
+            // the renderer distinguishes plain clickables from buttons that
+            // should POST to a server route by this kind.
+            button.getFocus().kind = .{ .custom = "submit" };
+            try box.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = null });
+        }
+
+        // absorbs the leftover min-height the box hands its last child, so
+        // the button keeps its natural height
+        {
+            var spacer = try ui.Spacer.init(allocator);
+            errdefer spacer.deinit(allocator);
+            try box.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null });
+        }
+
+        box.getFocus().child_id = box.children.keys()[title_field_index];
+        return box;
+    }
+
     fn addRow(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8, link: []const u8) !void {
         var row = try wgt.TextBox(ui.Widget).init(allocator, label, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .word });
         errdefer row.deinit(allocator);
@@ -482,6 +555,11 @@ pub const View = struct {
         return &self.viewStack().children.values()[tags_view_index].tag_flow;
     }
 
+    // the new-issue form inside the stack.
+    fn newForm(self: *View) *wgt.Box(ui.Widget) {
+        return &self.viewStack().children.values()[new_view_index].box;
+    }
+
     fn listScroll(self: *View, index: usize) *wgt.Scroll(ui.Widget) {
         return &self.resultsBox(index).children.values()[list_index].widget.scroll;
     }
@@ -506,12 +584,17 @@ pub const View = struct {
         return self.data.window(splitStatus(index));
     }
 
-    // the stack's selected master-detail split (null when the tags view shows).
-    fn selectedSplitIndex(self: *View) ?usize {
+    fn stackSelectedIndex(self: *View) ?usize {
         const stack = self.viewStack();
         const cid = stack.getFocus().child_id orelse return null;
-        const idx = stack.children.getIndex(cid) orelse return null;
-        return if (idx == tags_view_index) null else idx;
+        return stack.children.getIndex(cid);
+    }
+
+    // the stack's selected master-detail split (null when the tags view or the
+    // new-issue form shows).
+    fn selectedSplitIndex(self: *View) ?usize {
+        const idx = self.stackSelectedIndex() orelse return null;
+        return if (idx < split_count) idx else null;
     }
 
     fn detailActive(self: *View, index: usize) bool {
@@ -527,7 +610,12 @@ pub const View = struct {
 
     fn tagsViewActive(self: *View) bool {
         if (self.headerActive()) return false;
-        return self.selectedSplitIndex() == null;
+        return self.stackSelectedIndex() == tags_view_index;
+    }
+
+    fn newViewActive(self: *View) bool {
+        if (self.headerActive()) return false;
+        return self.stackSelectedIndex() == new_view_index;
     }
 
     // the selected issue's index, or null when a window-navigation row is
@@ -556,6 +644,8 @@ pub const View = struct {
                 ui.RoutablePage.repoIssuesRoute(self.data.identity, .open, self.data.tag, self.data.selected_id)
             else if (index == tags_view_index)
                 ui.RoutablePage.repoIssuesTagsRoute(self.data.identity, self.data.tag)
+            else if (index == new_view_index)
+                ui.RoutablePage.repoIssuesNewRoute(self.data.identity)
             else
                 ui.RoutablePage.repoIssuesRoute(self.data.identity, splitStatus(index), self.data.tag, "")) orelse self.session.data.current_page;
         }
@@ -616,6 +706,16 @@ pub const View = struct {
 
         self.tagsView().selected = self.tagsViewActive();
 
+        // refresh the form inputs' entries in the session's focus-id -> input
+        // map with this frame's addresses, so the web/wasm form handling can
+        // find them by focus id
+        const form = self.newForm();
+        const inputs_arena = self.session.arena.allocator();
+        for (form.children.values()) |*child| switch (child.widget) {
+            .text_input => |*ti| try self.session.text_inputs.put(inputs_arena, ti.getFocus().id, ti),
+            else => {},
+        };
+
         try self.box.build(allocator, constraint, root_focus);
     }
 
@@ -656,7 +756,8 @@ pub const View = struct {
         // border reserves the space the border occupies when focused, so
         // focusing doesn't shift layout.
         self.description_id[index] = blk: {
-            var tb = try wgt.TextBox(ui.Widget).init(allocator, entry.issue.description, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .word });
+            const description = if (entry.issue.description.len == 0) "(no description)" else entry.issue.description;
+            var tb = try wgt.TextBox(ui.Widget).init(allocator, description, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .word });
             errdefer tb.deinit(allocator);
             tb.getFocus().focusable = true;
             try inner.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
@@ -692,6 +793,10 @@ pub const View = struct {
         }
         if (self.tagsViewActive()) {
             self.tagsViewInput(key, root_focus);
+            return;
+        }
+        if (self.newViewActive()) {
+            try self.newViewInput(allocator, key, root_focus);
             return;
         }
         const i = self.selectedSplitIndex() orelse return;
@@ -772,6 +877,104 @@ pub const View = struct {
             else => return,
         }
         sc.clampToContent();
+    }
+
+    // up/down (and tab/shift+tab) move between the form's fields; up from the
+    // title crosses into the header tabs. the multiline description keeps
+    // enter and any up/down that has a row to move to.
+    fn newViewInput(self: *View, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
+        const form = self.newForm();
+        const cid = form.getFocus().child_id orelse return;
+        const cur = form.children.getIndex(cid) orelse return;
+
+        if (cur == description_field_index) {
+            const child = &form.children.values()[cur];
+            const description = &child.widget.text_input;
+            switch (key) {
+                .enter => return child.widget.input(allocator, key, root_focus),
+                .arrow_up => if (!try description.cursorOnFirstRow(allocator))
+                    return child.widget.input(allocator, key, root_focus),
+                .arrow_down => if (!try description.cursorOnLastRow(allocator))
+                    return child.widget.input(allocator, key, root_focus),
+                else => {},
+            }
+        }
+
+        switch (key) {
+            .arrow_up, .back_tab => if (cur > 0)
+                root_focus.setFocus(form.children.keys()[cur - 1])
+            else
+                self.focusHeader(root_focus),
+            .arrow_down, .tab => if (cur < submit_field_index) {
+                root_focus.setFocus(form.children.keys()[cur + 1]);
+            },
+            .enter => if (cur == submit_field_index) try self.submitNewIssue(allocator),
+            .mouse => |mouse| if (cur == submit_field_index and inp.leftClickOn(root_focus, cid, mouse)) {
+                try self.submitNewIssue(allocator);
+            },
+            else => try form.children.values()[cur].widget.input(allocator, key, root_focus),
+        }
+    }
+
+    // commit the new issue to the repo's events branch and navigate to it.
+    // this is the terminal path; the web posts the form to the issue route,
+    // so the wasm side never runs (or compiles) the repo access below.
+    fn submitNewIssue(self: *View, allocator: std.mem.Allocator) !void {
+        if (comptime wasm) return;
+        const io = self.session.io orelse return;
+        const src = self.data.repo_source orelse return;
+
+        const form = self.newForm();
+        const title_input = &form.children.values()[title_field_index].widget.text_input;
+        const tags_input = &form.children.values()[tags_field_index].widget.text_input;
+        const description_input = &form.children.values()[description_field_index].widget.text_input;
+
+        const title = try title_input.text(allocator);
+        defer allocator.free(title);
+        const tags = try tags_input.text(allocator);
+        defer allocator.free(tags);
+        const description = try description_input.text(allocator);
+        defer allocator.free(description);
+
+        // a title is required, and a too-long tag would fail consumption
+        // after the event is already committed
+        if (title.len == 0) return;
+        var tag_iter = evt.Issue.tagIterator(tags);
+        while (tag_iter.next()) |tag| {
+            if (tag.len > evt.Issue.tag_max_len) return;
+        }
+
+        var id_bytes: [evt.event_id_size]u8 = undefined;
+        io.random(&id_bytes);
+        const event_id_hex = std.fmt.bytesToHex(id_bytes, .lower);
+
+        const event = evt.EventWithId{
+            .id = event_id_hex,
+            .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
+            .event = .{ .issue = .{
+                .title = title,
+                .description = description,
+                .tags = tags,
+            } },
+        };
+
+        switch (src.repo_kind) {
+            inline else => |repo_kind| {
+                var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, .{ .path = src.path });
+                defer any_repo.deinit(io, allocator);
+                switch (any_repo) {
+                    inline else => |*repo| try evt.commitAndConsume(repo_kind, repo.self_repo_opts, io, allocator, repo, evt.events_ref, &.{event}, self.session.local != null),
+                }
+            },
+        }
+
+        // wipe the form so a return visit starts fresh
+        title_input.clear(allocator);
+        tags_input.clear(allocator);
+        description_input.clear(allocator);
+
+        const route = ui.RoutablePage.repoIssuesRoute(self.data.identity, .open, "", &event_id_hex) orelse return;
+        try self.session.navigate(route);
     }
 
     // arrow keys move the tag selection; at the flow's edges focus crosses to
@@ -953,6 +1156,22 @@ pub const Header = struct {
                 .widget = .{ .text_box = text_box },
                 .rect = null,
                 .min_size = .{ .width = label.len + 2, .height = null },
+            });
+        }
+
+        // new-issue tab
+        {
+            const new_route = ui.RoutablePage.repoIssuesNewRoute(data.identity) orelse return error.RouteTooLong;
+            const new_link = try std.fmt.allocPrint(aa, "ai:{s}", .{try new_route.toUrl(session.page_arena)});
+            var text_box = try wgt.TextBox(ui.Widget).init(allocator, "new", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            errdefer text_box.deinit(allocator);
+            text_box.getFocus().focusable = true;
+            text_box.getFocus().kind = .{ .custom = new_link };
+            try tab_ids.put(allocator, text_box.getFocus().id, {});
+            try box.children.put(allocator, text_box.getFocus().id, .{
+                .widget = .{ .text_box = text_box },
+                .rect = null,
+                .min_size = .{ .width = "new".len + 2, .height = null },
             });
         }
 

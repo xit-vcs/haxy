@@ -2,6 +2,7 @@ const std = @import("std");
 const xit = @import("xit");
 const rp = xit.repo;
 const evt = @import("./event.zig");
+const serve_common = @import("./serve_common.zig");
 const ui = @import("./ui.zig");
 const xitui = xit.xitui;
 const wgt = xitui.widget;
@@ -91,7 +92,7 @@ fn handleRequest(
     if (method == .POST) {
         switch (host) {
             .remote => |remote| {
-                const PostRoute = enum { login, logout, ansi };
+                const PostRoute = enum { login, logout, ansi, issue };
                 inline for (@typeInfo(PostRoute).@"enum".fields) |field| {
                     const suffix = "/" ++ field.name;
                     if (std.mem.endsWith(u8, path, suffix)) {
@@ -100,6 +101,7 @@ fn handleRequest(
                             .login => handleLogin(io, request, allocator, base, remote.admin_repo_path, remote.session_store),
                             .logout => handleLogout(request, base, remote.session_store),
                             .ansi => handleAnsi(io, request, allocator, base, remote.admin_repo_path, remote.session_store),
+                            .issue => handleIssue(io, request, allocator, base, remote.admin_repo_path),
                         };
                     }
                 }
@@ -195,8 +197,13 @@ fn handleRequest(
         return;
     };
 
+    // the embeds change with every build, so the browser must revalidate
+    // rather than heuristically cache them across server restarts
     try request.respond(embed.body, .{
-        .extra_headers = &.{.{ .name = "content-type", .value = embed.content_type }},
+        .extra_headers = &.{
+            .{ .name = "content-type", .value = embed.content_type },
+            .{ .name = "cache-control", .value = "no-cache" },
+        },
     });
 }
 
@@ -319,6 +326,100 @@ fn handleAnsi(
         .extra_headers = &.{
             .{ .name = "location", .value = location },
         },
+    });
+}
+
+// create an issue in the repo the form's page names (base is
+// "/repo/<owner>/<name>") and redirect to it
+fn handleIssue(
+    io: std.Io,
+    request: *std.http.Server.Request,
+    allocator: std.mem.Allocator,
+    base: []const u8,
+    admin_repo_path: []const u8,
+) !void {
+    var body_buf: [256]u8 = undefined;
+    const reader = request.readerExpectNone(&body_buf);
+    const body = reader.allocRemaining(allocator, .limited(65536)) catch &[_]u8{};
+    defer allocator.free(body);
+
+    const title = (try parseFormField(allocator, body, "title")) orelse try allocator.dupe(u8, "");
+    defer allocator.free(title);
+    const tags = (try parseFormField(allocator, body, "tags")) orelse try allocator.dupe(u8, "");
+    defer allocator.free(tags);
+    const description_crlf = (try parseFormField(allocator, body, "description")) orelse try allocator.dupe(u8, "");
+    defer allocator.free(description_crlf);
+    // form submission normalizes textarea line breaks to CRLF; store plain
+    // newlines so the text renders the same on every host
+    const description = try std.mem.replaceOwned(u8, allocator, description_crlf, "\r\n", "\n");
+    defer allocator.free(description);
+
+    // a title is required, and a too-long tag would fail consumption after
+    // the event is already committed; both send the user back to the form
+    const valid = blk: {
+        if (title.len == 0) break :blk false;
+        var tag_iter = evt.Issue.tagIterator(tags);
+        while (tag_iter.next()) |tag| {
+            if (tag.len > evt.Issue.tag_max_len) break :blk false;
+        }
+        break :blk true;
+    };
+    if (!valid) {
+        const form_location = try std.fmt.allocPrint(allocator, "{s}/issues/new", .{base});
+        defer allocator.free(form_location);
+        try request.respond("", .{
+            .status = .see_other,
+            .extra_headers = &.{.{ .name = "location", .value = form_location }},
+        });
+        return;
+    }
+
+    const not_found = "repo not found";
+    const repo_prefix = "/repo/";
+    if (!std.mem.startsWith(u8, base, repo_prefix)) {
+        try request.respond(not_found, .{
+            .status = .not_found,
+            .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+        });
+        return;
+    }
+
+    const repos_dir = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(admin_repo_path) orelse ".", "repos" });
+    defer allocator.free(repos_dir);
+    const repo_path = switch (try serve_common.resolveRepoPath(io, allocator, repos_dir, admin_repo_path, base[repo_prefix.len..], false)) {
+        .ok => |p| p,
+        .invalid, .not_found => {
+            try request.respond(not_found, .{
+                .status = .not_found,
+                .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+            });
+            return;
+        },
+    };
+    defer allocator.free(repo_path);
+
+    var repo = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = repo_path });
+    defer repo.deinit(io, allocator);
+
+    var id_bytes: [evt.event_id_size]u8 = undefined;
+    io.random(&id_bytes);
+    const event_id_hex = std.fmt.bytesToHex(id_bytes, .lower);
+
+    try evt.commitAndConsume(.xit, .{}, io, allocator, &repo, evt.events_ref, &[_]evt.EventWithId{.{
+        .id = event_id_hex,
+        .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
+        .event = .{ .issue = .{
+            .title = title,
+            .description = description,
+            .tags = tags,
+        } },
+    }}, false);
+
+    const location = try std.fmt.allocPrint(allocator, "{s}/issues/{s}", .{ base, &event_id_hex });
+    defer allocator.free(location);
+    try request.respond("", .{
+        .status = .see_other,
+        .extra_headers = &.{.{ .name = "location", .value = location }},
     });
 }
 
@@ -685,6 +786,28 @@ pub fn generateOverlay(allocator: std.mem.Allocator, root: *ui.Widget, session: 
                     var pos_buf: [64]u8 = undefined;
                     try out.appendSlice(allocator, try std.fmt.bufPrint(&pos_buf, "{d}ch;top:{d}em;width:{d}ch;height:1em", .{ inner_left, inner_top, inner_width }));
                     try out.appendSlice(allocator, "\">");
+                },
+                .text_area => {
+                    const ti = session.text_inputs.get(inner_id) orelse continue;
+                    const inner_left = r.x + 1;
+                    const inner_top = r.y + 1;
+                    const inner_width = if (r.size.width > 2) r.size.width - 2 else 0;
+                    const inner_height = if (r.size.height > 2) r.size.height - 2 else 0;
+
+                    try out.appendSlice(allocator, "<textarea data-focus-id=\"");
+                    var id_buf: [32]u8 = undefined;
+                    try out.appendSlice(allocator, try std.fmt.bufPrint(&id_buf, "{d}", .{inner_id}));
+                    if (ti.options.name.len > 0) {
+                        try out.appendSlice(allocator, "\" name=\"");
+                        try appendEscapedHtml(allocator, &out, ti.options.name);
+                    }
+                    // like the input above, no content inside: the browser
+                    // tracks the value and the overlay diff must stay stable
+                    // across keystrokes
+                    try out.appendSlice(allocator, "\" style=\"left:");
+                    var pos_buf: [128]u8 = undefined;
+                    try out.appendSlice(allocator, try std.fmt.bufPrint(&pos_buf, "{d}ch;top:{d}em;width:{d}ch;height:{d}em", .{ inner_left, inner_top, inner_width, inner_height }));
+                    try out.appendSlice(allocator, "\"></textarea>");
                 },
                 .custom => |custom| {
                     if (std.mem.eql(u8, "submit", custom)) {

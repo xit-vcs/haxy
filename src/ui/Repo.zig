@@ -162,7 +162,7 @@ pub fn init(
     // route named none), so they end up viewing the same one and either's
     // resolved ref can canonicalize the tab mirror urls below. no filesystem
     // (wasm), nowhere to look, or a failed open: empty tabs.
-    const files, const commits, const refs, const issues = blk: {
+    const files, const commits, const refs, var issues = blk: {
         read: {
             const io = session.io orelse break :read;
             const src = source orelse break :read;
@@ -195,6 +195,7 @@ pub fn init(
             try Issues.emptyResult(aa, repo_identity.identity, issues_tag, issues_selected, issues_view),
         };
     };
+    issues.repo_source = source;
 
     // each tab mirror carries this page's route for that tab; tabs not targeted
     // by the incoming route fall back to their root/first-page route. the files
