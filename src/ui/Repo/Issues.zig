@@ -192,8 +192,8 @@ pub fn init(
             var kv_cursor = kv_pair_cursor;
             const kv_pair = try kv_cursor.readKeyValuePair();
             const key = try kv_pair.key_cursor.readBytesAlloc(aa, null);
-            const comma = std.mem.indexOfScalar(u8, key, ',') orelse continue;
-            const key_tag = key[0..comma];
+            const space = std.mem.indexOfScalar(u8, key, ' ') orelse continue;
+            const key_tag = key[0..space];
             if (tags.getLastOrNull()) |last| {
                 if (std.mem.eql(u8, last, key_tag)) continue;
             }

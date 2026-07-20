@@ -5,7 +5,7 @@ const hash = xit.hash;
 
 title: []const u8,
 description: []const u8,
-tags: []const u8, // comma-separated
+tags: []const u8, // space-separated
 status: Status = .open,
 created_ts: u64 = 0, // the commit timestamp of the event that first created this issue
 
@@ -22,15 +22,16 @@ pub const Status = enum {
 
 pub const tag_max_len = 64;
 
-// a "tag,status" key names a tag's per-status issue set
+// a "tag status" key names a tag's per-status issue set (tags can't contain
+// spaces, so the pair is unambiguous)
 pub const TagStatusKey = [tag_max_len + 1 + Status.longest_len]u8;
 
 pub fn tagStatusKey(buffer: *TagStatusKey, tag: []const u8, status: Status) ![]const u8 {
-    return std.fmt.bufPrint(buffer, "{s},{s}", .{ tag, @tagName(status) });
+    return std.fmt.bufPrint(buffer, "{s} {s}", .{ tag, @tagName(status) });
 }
 
 pub fn tagIterator(tags: []const u8) std.mem.SplitIterator(u8, .scalar) {
-    return std.mem.splitScalar(u8, tags, ',');
+    return std.mem.splitScalar(u8, tags, ' ');
 }
 
 // `created_ts` comes from the commit timestamp, not the event
