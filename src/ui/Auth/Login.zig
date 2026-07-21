@@ -43,11 +43,7 @@ pub const View = struct {
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .rounded_corners = true, .direction = .vert });
         errdefer box.deinit(allocator);
         // marks this subtree as an HTML form scope for the web overlay
-        box.getFocus().kind = .{ .custom = switch (session.data.current_page) {
-            .user_repos => |u| try std.fmt.allocPrint(session.page_arena.allocator(), "form:/user/{s}/login", .{u.name.slice()}),
-            .user_settings, .user_auth => |name| try std.fmt.allocPrint(session.page_arena.allocator(), "form:/user/{s}/login", .{name.slice()}),
-            else => "form:/login",
-        } };
+        box.getFocus().kind = .{ .custom = "form:login" };
 
         var nav_ids: [3]usize = undefined;
 

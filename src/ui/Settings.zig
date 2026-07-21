@@ -37,11 +37,7 @@ pub const View = struct {
             errdefer box.deinit(allocator);
 
             // on the web each control posts to a page-scoped form
-            box.getFocus().kind = .{ .custom = switch (session.data.current_page) {
-                .user_repos => |u| try std.fmt.allocPrint(session.page_arena.allocator(), "form:/user/{s}/ansi", .{u.name.slice()}),
-                .user_settings, .user_auth => |name| try std.fmt.allocPrint(session.page_arena.allocator(), "form:/user/{s}/ansi", .{name.slice()}),
-                else => "form:/ansi",
-            } };
+            box.getFocus().kind = .{ .custom = "form:ansi" };
 
             {
                 var button = try wgt.TextBox(ui.Widget).init(allocator, ansiLabel(session), .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
