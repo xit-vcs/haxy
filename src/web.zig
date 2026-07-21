@@ -1,6 +1,7 @@
 const std = @import("std");
 const xit = @import("xit");
 const rp = xit.repo;
+const hash = xit.hash;
 const evt = @import("./event.zig");
 const serve_common = @import("./serve_common.zig");
 const ui = @import("./ui.zig");
@@ -92,7 +93,7 @@ fn handleRequest(
     if (method == .POST) {
         switch (host) {
             .remote => |remote| {
-                const PostRoute = enum { login, logout, ansi, issue };
+                const PostRoute = enum { login, logout, ansi, issue, open, close };
                 inline for (@typeInfo(PostRoute).@"enum".fields) |field| {
                     const suffix = "/" ++ field.name;
                     if (std.mem.endsWith(u8, path, suffix)) {
@@ -102,6 +103,8 @@ fn handleRequest(
                             .logout => handleLogout(request, base, remote.session_store),
                             .ansi => handleAnsi(io, request, allocator, base, remote.admin_repo_path, remote.session_store),
                             .issue => handleIssue(io, request, allocator, base, remote.admin_repo_path),
+                            .open => handleIssueStatus(io, request, allocator, base, remote.admin_repo_path, .open),
+                            .close => handleIssueStatus(io, request, allocator, base, remote.admin_repo_path, .closed),
                         };
                     }
                 }
@@ -420,6 +423,98 @@ fn handleIssue(
     try request.respond("", .{
         .status = .see_other,
         .extra_headers = &.{.{ .name = "location", .value = location }},
+    });
+}
+
+// set the status of the issue the url names (base is
+// "/repo/<owner>/<name>/issues/<id>") by re-emitting its event, then
+// redirect back to it
+fn handleIssueStatus(
+    io: std.Io,
+    request: *std.http.Server.Request,
+    allocator: std.mem.Allocator,
+    base: []const u8,
+    admin_repo_path: []const u8,
+    status: evt.Issue.Status,
+) !void {
+    const repo_prefix = "/repo/";
+    const issues_infix = "/issues/";
+    const id_len = evt.event_id_size * 2;
+
+    var id_bytes: [evt.event_id_size]u8 = undefined;
+    const repo_base_maybe: ?[]const u8 = blk: {
+        if (base.len < repo_prefix.len + issues_infix.len + id_len) break :blk null;
+        _ = std.fmt.hexToBytes(&id_bytes, base[base.len - id_len ..]) catch break :blk null;
+        const head = base[0 .. base.len - id_len];
+        if (!std.mem.endsWith(u8, head, issues_infix)) break :blk null;
+        const repo_base = head[0 .. head.len - issues_infix.len];
+        if (!std.mem.startsWith(u8, repo_base, repo_prefix)) break :blk null;
+        break :blk repo_base;
+    };
+
+    const not_found = "issue not found";
+    const repo_base = repo_base_maybe orelse {
+        try request.respond(not_found, .{
+            .status = .not_found,
+            .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+        });
+        return;
+    };
+
+    const repos_dir = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(admin_repo_path) orelse ".", "repos" });
+    defer allocator.free(repos_dir);
+    const repo_path = switch (try serve_common.resolveRepoPath(io, allocator, repos_dir, admin_repo_path, repo_base[repo_prefix.len..], false)) {
+        .ok => |p| p,
+        .invalid, .not_found => {
+            try request.respond(not_found, .{
+                .status = .not_found,
+                .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+            });
+            return;
+        },
+    };
+    defer allocator.free(repo_path);
+
+    const repo_opts: rp.RepoOpts(.xit) = .{};
+    var repo = try rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = repo_path });
+    defer repo.deinit(io, allocator);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const issue_maybe: ?evt.Issue = blk: {
+        const DB = rp.Repo(.xit, repo_opts).DB;
+        const moment = evt.currentMoment(repo_opts, &repo) catch break :blk null;
+        const event_id_to_issue_cursor = (try moment.getCursor(hash.hashInt(repo_opts.hash, "event-id->issue"))) orelse break :blk null;
+        const event_id_to_issue = try DB.HashMap(.read_only).init(event_id_to_issue_cursor);
+        const issue_cursor = (try event_id_to_issue.getCursor(hash.hashInt(repo_opts.hash, &id_bytes))) orelse break :blk null;
+        const issue_map = try DB.HashMap(.read_only).init(issue_cursor);
+        break :blk try evt.read(evt.Issue, DB, repo_opts.hash, &arena, issue_map);
+    };
+    const issue = issue_maybe orelse {
+        try request.respond(not_found, .{
+            .status = .not_found,
+            .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+        });
+        return;
+    };
+
+    if (issue.status != status) {
+        var updated = issue;
+        updated.status = status;
+        try evt.commitAndConsume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &[_]evt.EventWithId{.{
+            .id = base[base.len - id_len ..][0..id_len].*,
+            .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
+            .event = .{ .issue = updated },
+        }});
+    }
+
+    // like logout, this is a bodyless POST, so close the connection rather than
+    // letting the keep-alive path try to discard a body that isn't framed.
+    try request.respond("", .{
+        .status = .see_other,
+        .keep_alive = false,
+        .extra_headers = &.{.{ .name = "location", .value = base }},
     });
 }
 

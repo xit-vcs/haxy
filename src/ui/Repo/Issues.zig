@@ -731,6 +731,40 @@ pub const View = struct {
         inner.children.clearAndFree(allocator);
         inner.getFocus().child_id = null;
 
+        // the open/close button
+        {
+            const action: []const u8 = switch (entry.issue.status) {
+                .open => "close",
+                .closed => "open",
+            };
+            var row = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
+            errdefer row.deinit(allocator);
+            const pa = self.session.page_arena.allocator();
+            row.getFocus().kind = .{ .custom = if (self.data.identity.len == 0)
+                try std.fmt.allocPrint(pa, "form:/issues/{s}/{s}", .{ entry.id, action })
+            else
+                try std.fmt.allocPrint(pa, "form:/repo/{s}/issues/{s}/{s}", .{ self.data.identity, entry.id, action }) };
+
+            {
+                var spacer = try ui.Spacer.init(allocator);
+                errdefer spacer.deinit(allocator);
+                try row.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null });
+            }
+
+            {
+                var button = try wgt.TextBox(ui.Widget).init(allocator, action, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+                errdefer button.deinit(allocator);
+                button.getFocus().focusable = true;
+                // the renderer distinguishes plain clickables from buttons that
+                // should POST to a server route by this kind.
+                button.getFocus().kind = .{ .custom = "submit" };
+                try row.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = .{ .width = action.len + 2, .height = null } });
+            }
+
+            row.getFocus().child_id = row.children.keys()[button_in_row_index];
+            try inner.children.put(allocator, row.getFocus().id, .{ .widget = .{ .box = row }, .rect = null, .min_size = null });
+        }
+
         // the issue's tags, each linking to this status's list filtered to
         // that tag.
         {
@@ -798,7 +832,7 @@ pub const View = struct {
         }
         const i = self.selectedSplitIndex() orelse return;
         if (self.detailActive(i)) {
-            try self.detailInput(i, key, root_focus);
+            try self.detailInput(allocator, i, key, root_focus);
         } else {
             try self.listInput(i, key, root_focus);
         }
@@ -839,11 +873,35 @@ pub const View = struct {
         }
     }
 
-    fn detailInput(self: *View, index: usize, key: Key, root_focus: *Focus) !void {
-        if (self.tagsFocused(index)) {
+    fn detailInput(self: *View, allocator: std.mem.Allocator, index: usize, key: Key, root_focus: *Focus) !void {
+        if (self.statusButtonFocused(index)) {
+            try self.statusButtonInput(allocator, index, key, root_focus);
+        } else if (self.tagsFocused(index)) {
             try self.tagsInput(index, key, root_focus);
         } else {
             try self.descriptionInput(index, key, root_focus);
+        }
+    }
+
+    // the open/close button: enter or a click flips the issue's status;
+    // arrows cross to the neighboring widgets.
+    fn statusButtonInput(self: *View, allocator: std.mem.Allocator, index: usize, key: Key, root_focus: *Focus) !void {
+        switch (key) {
+            .arrow_left => try self.focusList(index, root_focus),
+            .arrow_up => self.focusHeader(root_focus),
+            .arrow_down => if (self.tagFlow(index) != null) try self.focusTags(index, root_focus) else try self.focusDescription(index, root_focus),
+            .enter => try self.toggleIssueStatus(allocator, index),
+            .mouse => |mouse| switch (mouse.action) {
+                .scroll => |dir| {
+                    const sc = self.detailScroll(index);
+                    sc.y += if (dir == .up) @as(isize, -1) else 1;
+                    sc.clampToContent();
+                },
+                else => if (self.statusButton(index)) |button| {
+                    if (inp.leftClickOn(root_focus, button.getFocus().id, mouse)) try self.toggleIssueStatus(allocator, index);
+                },
+            },
+            else => {},
         }
     }
 
@@ -852,13 +910,13 @@ pub const View = struct {
         switch (key) {
             .arrow_left => return self.focusList(index, root_focus),
             // once the scroll can't move further, cross into the tags (or the
-            // header tabs when the issue has none).
+            // open/close button when the issue has none).
             .arrow_up => {
                 const before = sc.y;
                 sc.y -= 1;
                 sc.clampToContent();
                 if (sc.y == before) {
-                    if (self.tagFlow(index) != null) try self.focusTags(index, root_focus) else self.focusHeader(root_focus);
+                    if (self.tagFlow(index) != null) try self.focusTags(index, root_focus) else self.focusStatusButton(index, root_focus);
                 }
                 return;
             },
@@ -974,6 +1032,42 @@ pub const View = struct {
         try self.session.navigate(route);
     }
 
+    // flip the shown issue's status by re-emitting its event, then reload the
+    // page rooted at the issue so the view reflects the change. this is the
+    // terminal path; the web posts the button's form to the status route.
+    fn toggleIssueStatus(self: *View, allocator: std.mem.Allocator, index: usize) !void {
+        if (comptime wasm) return;
+        const io = self.session.io orelse return;
+        const src = self.data.repo_source orelse return;
+        const sel = self.detailed_index[index] orelse return;
+        const entry = self.window(index).issues[sel];
+
+        var updated = entry.issue;
+        updated.status = switch (entry.issue.status) {
+            .open => .closed,
+            .closed => .open,
+        };
+
+        const event = evt.EventWithId{
+            .id = entry.id[0 .. evt.event_id_size * 2].*,
+            .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
+            .event = .{ .issue = updated },
+        };
+
+        switch (src.repo_kind) {
+            inline else => |repo_kind| {
+                var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, .{ .path = src.path });
+                defer any_repo.deinit(io, allocator);
+                switch (any_repo) {
+                    inline else => |*repo| try evt.commitAndConsume(repo_kind, repo.self_repo_opts, io, allocator, repo, evt.events_ref, &.{event}),
+                }
+            },
+        }
+
+        const route = ui.RoutablePage.repoIssuesRoute(self.data.identity, updated.status, "", entry.id) orelse return;
+        try self.session.navigate(route);
+    }
+
     // arrow keys move the tag selection; at the flow's edges focus crosses to
     // the neighboring widgets.
     fn tagsInput(self: *View, index: usize, key: Key, root_focus: *Focus) !void {
@@ -985,7 +1079,7 @@ pub const View = struct {
         switch (key) {
             .arrow_left => if (cur > 0) self.focusTag(index, tf, root_focus, cur - 1) else try self.focusList(index, root_focus),
             .arrow_right => if (cur + 1 < count) self.focusTag(index, tf, root_focus, cur + 1),
-            .arrow_up => if (tf.rowStep(cur, false)) |i| self.focusTag(index, tf, root_focus, i) else self.focusHeader(root_focus),
+            .arrow_up => if (tf.rowStep(cur, false)) |i| self.focusTag(index, tf, root_focus, i) else self.focusStatusButton(index, root_focus),
             .arrow_down => if (tf.rowStep(cur, true)) |i| self.focusTag(index, tf, root_focus, i) else try self.focusDescription(index, root_focus),
             .home => self.focusTag(index, tf, root_focus, 0),
             .end => self.focusTag(index, tf, root_focus, count - 1),
@@ -1000,11 +1094,13 @@ pub const View = struct {
         }
     }
 
-    const tags_child_index: usize = 0;
+    const button_row_index: usize = 0;
+    const button_in_row_index: usize = 1;
+    const tags_child_index: usize = 1;
 
     fn tagFlow(self: *View, index: usize) ?*ui.TagFlow {
         const inner = self.detailInner(index);
-        if (inner.children.count() == 0) return null;
+        if (inner.children.count() <= tags_child_index) return null;
         return switch (inner.children.values()[tags_child_index].widget) {
             .tag_flow => |*tf| tf,
             else => null,
@@ -1015,6 +1111,20 @@ pub const View = struct {
         const inner = self.detailInner(index);
         const cid = inner.getFocus().child_id orelse return false;
         return inner.children.getIndex(cid) == tags_child_index and self.tagFlow(index) != null;
+    }
+
+    // the open/close button inside the detail pane's leading row.
+    fn statusButton(self: *View, index: usize) ?*wgt.TextBox(ui.Widget) {
+        const inner = self.detailInner(index);
+        if (inner.children.count() == 0) return null;
+        const row = &inner.children.values()[button_row_index].widget.box;
+        return &row.children.values()[button_in_row_index].widget.text_box;
+    }
+
+    fn statusButtonFocused(self: *View, index: usize) bool {
+        const inner = self.detailInner(index);
+        const cid = inner.getFocus().child_id orelse return false;
+        return inner.children.getIndex(cid) == button_row_index;
     }
 
     fn focusTag(self: *View, index: usize, tf: *ui.TagFlow, root_focus: *Focus, item: usize) void {
@@ -1041,6 +1151,10 @@ pub const View = struct {
 
     fn focusDescription(self: *View, index: usize, root_focus: *Focus) !void {
         if (self.description_id[index]) |id| root_focus.setFocus(id);
+    }
+
+    fn focusStatusButton(self: *View, index: usize, root_focus: *Focus) void {
+        if (self.statusButton(index)) |button| root_focus.setFocus(button.getFocus().id);
     }
 
     // enter the detail pane. an empty pane (no issues) can't be entered.
