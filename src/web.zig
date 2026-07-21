@@ -93,7 +93,7 @@ fn handleRequest(
     if (method == .POST) {
         switch (host) {
             .remote => |remote| {
-                const PostRoute = enum { login, logout, ansi, issue, open, close };
+                const PostRoute = enum { login, logout, ansi, issue, open, close, edit };
                 inline for (@typeInfo(PostRoute).@"enum".fields) |field| {
                     const suffix = "/" ++ field.name;
                     if (std.mem.endsWith(u8, path, suffix)) {
@@ -105,6 +105,7 @@ fn handleRequest(
                             .issue => handleIssue(io, request, allocator, base, remote.admin_repo_path),
                             .open => handleIssueStatus(io, request, allocator, base, remote.admin_repo_path, .open),
                             .close => handleIssueStatus(io, request, allocator, base, remote.admin_repo_path, .closed),
+                            .edit => handleIssueEdit(io, request, allocator, base, remote.admin_repo_path),
                         };
                     }
                 }
@@ -357,17 +358,7 @@ fn handleIssue(
     const description = try std.mem.replaceOwned(u8, allocator, description_crlf, "\r\n", "\n");
     defer allocator.free(description);
 
-    // a title is required, and a too-long tag would fail consumption after
-    // the event is already committed; both send the user back to the form
-    const valid = blk: {
-        if (title.len == 0) break :blk false;
-        var tag_iter = evt.Issue.tagIterator(tags);
-        while (tag_iter.next()) |tag| {
-            if (tag.len > evt.Issue.tag_max_len) break :blk false;
-        }
-        break :blk true;
-    };
-    if (!valid) {
+    if (!issueFieldsValid(title, tags)) {
         const form_location = try std.fmt.allocPrint(allocator, "{s}/issues/new", .{base});
         defer allocator.free(form_location);
         try request.respond("", .{
@@ -426,6 +417,50 @@ fn handleIssue(
     });
 }
 
+// a title is required, and a too-long tag would fail consumption after the
+// event is already committed
+fn issueFieldsValid(title: []const u8, tags: []const u8) bool {
+    if (title.len == 0) return false;
+    var tag_iter = evt.Issue.tagIterator(tags);
+    while (tag_iter.next()) |tag| {
+        if (tag.len > evt.Issue.tag_max_len) return false;
+    }
+    return true;
+}
+
+// split an issue url ("/repo/<owner>/<name>/issues/<id>") into the repo base
+// and the decoded id, null when it isn't one
+const IssueBaseParts = struct { repo_base: []const u8, id_bytes: [evt.event_id_size]u8 };
+fn issueBaseParts(base: []const u8) ?IssueBaseParts {
+    const repo_prefix = "/repo/";
+    const issues_infix = "/issues/";
+    const id_len = evt.event_id_size * 2;
+    if (base.len < repo_prefix.len + issues_infix.len + id_len) return null;
+    var id_bytes: [evt.event_id_size]u8 = undefined;
+    _ = std.fmt.hexToBytes(&id_bytes, base[base.len - id_len ..]) catch return null;
+    const head = base[0 .. base.len - id_len];
+    if (!std.mem.endsWith(u8, head, issues_infix)) return null;
+    const repo_base = head[0 .. head.len - issues_infix.len];
+    if (!std.mem.startsWith(u8, repo_base, repo_prefix)) return null;
+    return .{ .repo_base = repo_base, .id_bytes = id_bytes };
+}
+
+// the issue `id_bytes` names in `repo`'s consumed event db, or null
+fn readIssue(
+    repo: *rp.Repo(.xit, .{}),
+    arena: *std.heap.ArenaAllocator,
+    id_bytes: *const [evt.event_id_size]u8,
+) !?evt.Issue {
+    const repo_opts: rp.RepoOpts(.xit) = .{};
+    const DB = rp.Repo(.xit, repo_opts).DB;
+    const moment = evt.currentMoment(repo_opts, repo) catch return null;
+    const event_id_to_issue_cursor = (try moment.getCursor(hash.hashInt(repo_opts.hash, "event-id->issue"))) orelse return null;
+    const event_id_to_issue = try DB.HashMap(.read_only).init(event_id_to_issue_cursor);
+    const issue_cursor = (try event_id_to_issue.getCursor(hash.hashInt(repo_opts.hash, id_bytes))) orelse return null;
+    const issue_map = try DB.HashMap(.read_only).init(issue_cursor);
+    return try evt.read(evt.Issue, DB, repo_opts.hash, arena, issue_map);
+}
+
 // set the status of the issue the url names (base is
 // "/repo/<owner>/<name>/issues/<id>") by re-emitting its event, then
 // redirect back to it
@@ -438,22 +473,10 @@ fn handleIssueStatus(
     status: evt.Issue.Status,
 ) !void {
     const repo_prefix = "/repo/";
-    const issues_infix = "/issues/";
     const id_len = evt.event_id_size * 2;
 
-    var id_bytes: [evt.event_id_size]u8 = undefined;
-    const repo_base_maybe: ?[]const u8 = blk: {
-        if (base.len < repo_prefix.len + issues_infix.len + id_len) break :blk null;
-        _ = std.fmt.hexToBytes(&id_bytes, base[base.len - id_len ..]) catch break :blk null;
-        const head = base[0 .. base.len - id_len];
-        if (!std.mem.endsWith(u8, head, issues_infix)) break :blk null;
-        const repo_base = head[0 .. head.len - issues_infix.len];
-        if (!std.mem.startsWith(u8, repo_base, repo_prefix)) break :blk null;
-        break :blk repo_base;
-    };
-
     const not_found = "issue not found";
-    const repo_base = repo_base_maybe orelse {
+    const parts = issueBaseParts(base) orelse {
         try request.respond(not_found, .{
             .status = .not_found,
             .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
@@ -463,7 +486,7 @@ fn handleIssueStatus(
 
     const repos_dir = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(admin_repo_path) orelse ".", "repos" });
     defer allocator.free(repos_dir);
-    const repo_path = switch (try serve_common.resolveRepoPath(io, allocator, repos_dir, admin_repo_path, repo_base[repo_prefix.len..], false)) {
+    const repo_path = switch (try serve_common.resolveRepoPath(io, allocator, repos_dir, admin_repo_path, parts.repo_base[repo_prefix.len..], false)) {
         .ok => |p| p,
         .invalid, .not_found => {
             try request.respond(not_found, .{
@@ -482,16 +505,7 @@ fn handleIssueStatus(
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    const issue_maybe: ?evt.Issue = blk: {
-        const DB = rp.Repo(.xit, repo_opts).DB;
-        const moment = evt.currentMoment(repo_opts, &repo) catch break :blk null;
-        const event_id_to_issue_cursor = (try moment.getCursor(hash.hashInt(repo_opts.hash, "event-id->issue"))) orelse break :blk null;
-        const event_id_to_issue = try DB.HashMap(.read_only).init(event_id_to_issue_cursor);
-        const issue_cursor = (try event_id_to_issue.getCursor(hash.hashInt(repo_opts.hash, &id_bytes))) orelse break :blk null;
-        const issue_map = try DB.HashMap(.read_only).init(issue_cursor);
-        break :blk try evt.read(evt.Issue, DB, repo_opts.hash, &arena, issue_map);
-    };
-    const issue = issue_maybe orelse {
+    const issue = (try readIssue(&repo, &arena, &parts.id_bytes)) orelse {
         try request.respond(not_found, .{
             .status = .not_found,
             .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
@@ -514,6 +528,100 @@ fn handleIssueStatus(
     try request.respond("", .{
         .status = .see_other,
         .keep_alive = false,
+        .extra_headers = &.{.{ .name = "location", .value = base }},
+    });
+}
+
+// replace the title/tags/description of the issue the url names (base is
+// "/repo/<owner>/<name>/issues/<id>", the form posts to "<base>/edit") by
+// re-emitting its event with its status preserved, then redirect back to it
+fn handleIssueEdit(
+    io: std.Io,
+    request: *std.http.Server.Request,
+    allocator: std.mem.Allocator,
+    base: []const u8,
+    admin_repo_path: []const u8,
+) !void {
+    const repo_prefix = "/repo/";
+    const id_len = evt.event_id_size * 2;
+
+    var body_buf: [256]u8 = undefined;
+    const reader = request.readerExpectNone(&body_buf);
+    const body = reader.allocRemaining(allocator, .limited(65536)) catch &[_]u8{};
+    defer allocator.free(body);
+
+    const title = (try parseFormField(allocator, body, "title")) orelse try allocator.dupe(u8, "");
+    defer allocator.free(title);
+    const tags = (try parseFormField(allocator, body, "tags")) orelse try allocator.dupe(u8, "");
+    defer allocator.free(tags);
+    const description_crlf = (try parseFormField(allocator, body, "description")) orelse try allocator.dupe(u8, "");
+    defer allocator.free(description_crlf);
+    // form submission normalizes textarea line breaks to CRLF; store plain
+    // newlines so the text renders the same on every host
+    const description = try std.mem.replaceOwned(u8, allocator, description_crlf, "\r\n", "\n");
+    defer allocator.free(description);
+
+    // invalid fields send the user back to the edit form
+    if (!issueFieldsValid(title, tags)) {
+        const form_location = try std.fmt.allocPrint(allocator, "{s}/edit", .{base});
+        defer allocator.free(form_location);
+        try request.respond("", .{
+            .status = .see_other,
+            .extra_headers = &.{.{ .name = "location", .value = form_location }},
+        });
+        return;
+    }
+
+    const not_found = "issue not found";
+    const parts = issueBaseParts(base) orelse {
+        try request.respond(not_found, .{
+            .status = .not_found,
+            .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+        });
+        return;
+    };
+
+    const repos_dir = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(admin_repo_path) orelse ".", "repos" });
+    defer allocator.free(repos_dir);
+    const repo_path = switch (try serve_common.resolveRepoPath(io, allocator, repos_dir, admin_repo_path, parts.repo_base[repo_prefix.len..], false)) {
+        .ok => |p| p,
+        .invalid, .not_found => {
+            try request.respond(not_found, .{
+                .status = .not_found,
+                .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+            });
+            return;
+        },
+    };
+    defer allocator.free(repo_path);
+
+    const repo_opts: rp.RepoOpts(.xit) = .{};
+    var repo = try rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = repo_path });
+    defer repo.deinit(io, allocator);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const issue = (try readIssue(&repo, &arena, &parts.id_bytes)) orelse {
+        try request.respond(not_found, .{
+            .status = .not_found,
+            .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+        });
+        return;
+    };
+
+    var updated = issue;
+    updated.title = title;
+    updated.tags = tags;
+    updated.description = description;
+    try evt.commitAndConsume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &[_]evt.EventWithId{.{
+        .id = base[base.len - id_len ..][0..id_len].*,
+        .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
+        .event = .{ .issue = updated },
+    }});
+
+    try request.respond("", .{
+        .status = .see_other,
         .extra_headers = &.{.{ .name = "location", .value = base }},
     });
 }
@@ -890,10 +998,15 @@ pub fn generateOverlay(allocator: std.mem.Allocator, root: *ui.Widget, session: 
                         try out.appendSlice(allocator, "\" name=\"");
                         try appendEscapedHtml(allocator, &out, ti.options.name);
                     }
-                    // intentionally no `value` attribute: the browser tracks user input
-                    // natively, and including the wasm-side value here would make the
-                    // overlay HTML differ on every keystroke — that would trip the diff
-                    // in _setOverlay and rebuild the <input>, eating the user's caret.
+                    // never the live content as the `value`: the browser tracks user
+                    // input natively, and including the wasm-side value here would make
+                    // the overlay HTML differ on every keystroke — that would trip the
+                    // diff in _setOverlay and rebuild the <input>, eating the user's
+                    // caret. a page-constant initial value is safe.
+                    if (session.input_values.get(inner_id)) |value| {
+                        try out.appendSlice(allocator, "\" value=\"");
+                        try appendEscapedHtml(allocator, &out, value);
+                    }
                     try out.appendSlice(allocator, "\" style=\"left:");
                     var pos_buf: [64]u8 = undefined;
                     try out.appendSlice(allocator, try std.fmt.bufPrint(&pos_buf, "{d}ch;top:{d}em;width:{d}ch;height:1em", .{ inner_left, inner_top, inner_width }));
@@ -913,13 +1026,15 @@ pub fn generateOverlay(allocator: std.mem.Allocator, root: *ui.Widget, session: 
                         try out.appendSlice(allocator, "\" name=\"");
                         try appendEscapedHtml(allocator, &out, ti.options.name);
                     }
-                    // like the input above, no content inside: the browser
-                    // tracks the value and the overlay diff must stay stable
-                    // across keystrokes
+                    // like the input above, only a page-constant initial value
+                    // inside: the browser tracks the live value and the
+                    // overlay diff must stay stable across keystrokes
                     try out.appendSlice(allocator, "\" style=\"left:");
                     var pos_buf: [128]u8 = undefined;
                     try out.appendSlice(allocator, try std.fmt.bufPrint(&pos_buf, "{d}ch;top:{d}em;width:{d}ch;height:{d}em", .{ inner_left, inner_top, inner_width, inner_height }));
-                    try out.appendSlice(allocator, "\"></textarea>");
+                    try out.appendSlice(allocator, "\">");
+                    if (session.input_values.get(inner_id)) |value| try appendEscapedHtml(allocator, &out, value);
+                    try out.appendSlice(allocator, "</textarea>");
                 },
                 .custom => |custom| {
                     if (std.mem.eql(u8, "submit", custom)) {

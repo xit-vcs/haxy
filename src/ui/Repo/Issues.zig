@@ -70,6 +70,17 @@ pub fn window(self: *const Self, status: evt.Issue.Status) *const Window {
     };
 }
 
+// the issue `selected_id` names, in whichever window holds it.
+pub fn selectedIssue(self: *const Self) ?*const IssueWithId {
+    if (self.selected_id.len == 0) return null;
+    for ([_]*const Window{ &self.open, &self.closed }) |win| {
+        for (win.issues) |*entry| {
+            if (std.mem.eql(u8, entry.id, self.selected_id)) return entry;
+        }
+    }
+    return null;
+}
+
 // an empty listing, for the wasm / no-repo paths.
 pub fn emptyResult(aa: std.mem.Allocator, identity: []const u8, tag: []const u8, selected_id: []const u8, view: ui.RoutablePage.IssuesView) !Self {
     return .{
@@ -170,15 +181,14 @@ pub fn init(
         if (!try set.contains(order_key)) return error.NotFound;
 
         switch (issue_event.status) {
-            .open => {
-                open_root = order_key;
-                resolved_view = .open;
-            },
-            .closed => {
-                closed_root = order_key;
-                resolved_view = .closed;
-            },
+            .open => open_root = order_key,
+            .closed => closed_root = order_key,
         }
+        // an edit url keeps its view; otherwise the issue's status picks it.
+        if (empty.view != .edit) resolved_view = switch (issue_event.status) {
+            .open => .open,
+            .closed => .closed,
+        };
     }
 
     const open_window = try loadWindow(repo_opts.hash, arena, event_id_to_issue, open_set, open_root);
@@ -319,7 +329,9 @@ pub const View = struct {
     const open_view_index: usize = 0;
     const closed_view_index: usize = 1;
     const tags_view_index: usize = 2;
-    const new_view_index: usize = 3;
+    // the new-issue form, or the edit form when the page was loaded at an
+    // edit url.
+    const form_view_index: usize = 3;
     const split_count: usize = 2;
     // indices within a split (the horizontal box inside the stack).
     const list_index: usize = 0;
@@ -337,7 +349,7 @@ pub const View = struct {
             .open => open_view_index,
             .closed => closed_view_index,
             .tags => tags_view_index,
-            .new => new_view_index,
+            .new, .edit => form_view_index,
         };
     }
 
@@ -387,9 +399,24 @@ pub const View = struct {
             try stack.children.put(allocator, tf.getFocus().id, .{ .tag_flow = tf });
         }
 
-        // the new-issue form
+        // the new-issue form, or — on an edit url — the edit form in its
+        // place, prefilled with the selected issue's content.
         {
-            var form = try initNewForm(allocator, session, data);
+            const aa = session.page_arena.allocator();
+            const action = if (data.view == .edit)
+                (if (data.identity.len == 0)
+                    try std.fmt.allocPrint(aa, "form:/issues/{s}/edit", .{data.selected_id})
+                else
+                    try std.fmt.allocPrint(aa, "form:/repo/{s}/issues/{s}/edit", .{ data.identity, data.selected_id }))
+            else if (data.identity.len == 0)
+                "form:/issue"
+            else
+                try std.fmt.allocPrint(aa, "form:/repo/{s}/issue", .{data.identity});
+            const issue = if (data.view == .edit)
+                (if (data.selectedIssue()) |entry| &entry.issue else null)
+            else
+                null;
+            var form = try initIssueForm(allocator, action, issue);
             errdefer form.deinit(allocator);
             try stack.children.put(allocator, form.getFocus().id, .{ .box = form });
         }
@@ -476,21 +503,19 @@ pub const View = struct {
         return box;
     }
 
-    // the new-issue form: title/tags/description inputs and a submit button.
-    // its form: subtree makes the web overlay wrap them in a <form> POSTing to
-    // the issue route.
-    fn initNewForm(allocator: std.mem.Allocator, session: *ui.Session, data: *const Self) !wgt.Box(ui.Widget) {
+    // an issue form: title/tags/description inputs and a submit button,
+    // prefilled from `issue` when given. its form: subtree makes the web
+    // overlay wrap them in a <form> POSTing to `action`'s route.
+    fn initIssueForm(allocator: std.mem.Allocator, action: []const u8, issue: ?*const evt.Issue) !wgt.Box(ui.Widget) {
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert });
         errdefer box.deinit(allocator);
-        box.getFocus().kind = .{ .custom = if (data.identity.len == 0)
-            "form:/issue"
-        else
-            try std.fmt.allocPrint(session.page_arena.allocator(), "form:/repo/{s}/issue", .{data.identity}) };
+        box.getFocus().kind = .{ .custom = action };
 
         {
             var title = try wgt.TextInput(ui.Widget).init(allocator, .{ .label = " title ", .name = "title", .visible_width = null, .rounded_corners = true, .render_content = !wasm });
             errdefer title.deinit(allocator);
             title.getFocus().focusable = true;
+            if (issue) |i| try title.setContent(allocator, i.title);
             try box.children.put(allocator, title.getFocus().id, .{ .widget = .{ .text_input = title }, .rect = null, .min_size = null });
         }
 
@@ -498,6 +523,7 @@ pub const View = struct {
             var tags = try wgt.TextInput(ui.Widget).init(allocator, .{ .label = " tags (separate with spaces) ", .name = "tags", .visible_width = null, .rounded_corners = true, .render_content = !wasm });
             errdefer tags.deinit(allocator);
             tags.getFocus().focusable = true;
+            if (issue) |i| try tags.setContent(allocator, i.tags);
             try box.children.put(allocator, tags.getFocus().id, .{ .widget = .{ .text_input = tags }, .rect = null, .min_size = null });
         }
 
@@ -505,6 +531,7 @@ pub const View = struct {
             var description = try wgt.TextInput(ui.Widget).init(allocator, .{ .label = " description ", .name = "description", .visible_width = null, .rounded_corners = true, .render_content = !wasm, .multiline = true, .visible_height = 5 });
             errdefer description.deinit(allocator);
             description.getFocus().focusable = true;
+            if (issue) |i| try description.setContent(allocator, i.description);
             try box.children.put(allocator, description.getFocus().id, .{ .widget = .{ .text_input = description }, .rect = null, .min_size = null });
         }
 
@@ -560,9 +587,9 @@ pub const View = struct {
         return &self.viewStack().children.values()[tags_view_index].tag_flow;
     }
 
-    // the new-issue form inside the stack.
-    fn newForm(self: *View) *wgt.Box(ui.Widget) {
-        return &self.viewStack().children.values()[new_view_index].box;
+    // the new-issue (or edit) form inside the stack.
+    fn issueForm(self: *View) *wgt.Box(ui.Widget) {
+        return &self.viewStack().children.values()[form_view_index].box;
     }
 
     fn listScroll(self: *View, index: usize) *wgt.Scroll(ui.Widget) {
@@ -626,9 +653,9 @@ pub const View = struct {
         return self.stackSelectedIndex() == tags_view_index;
     }
 
-    fn newViewActive(self: *View) bool {
+    fn formViewActive(self: *View) bool {
         if (self.headerActive()) return false;
-        return self.stackSelectedIndex() == new_view_index;
+        return self.stackSelectedIndex() == form_view_index;
     }
 
     // the selected issue's index, or null when a window-navigation row is
@@ -653,11 +680,13 @@ pub const View = struct {
         if (self.header().getSelectedIndex()) |index| {
             const stack = self.viewStack();
             stack.getFocus().child_id = stack.children.keys()[index];
-            self.session.data.current_page = (if (index == viewIndex(self.data.view) and self.data.selected_id.len != 0)
+            self.session.data.current_page = (if (index == form_view_index and self.data.view == .edit)
+                ui.RoutablePage.repoIssuesEditRoute(self.data.identity, self.data.selected_id)
+            else if (index == viewIndex(self.data.view) and self.data.selected_id.len != 0)
                 ui.RoutablePage.repoIssuesRoute(self.data.identity, .open, self.data.tag, self.data.selected_id)
             else if (index == tags_view_index)
                 ui.RoutablePage.repoIssuesTagsRoute(self.data.identity, self.data.tag)
-            else if (index == new_view_index)
+            else if (index == form_view_index)
                 ui.RoutablePage.repoIssuesNewRoute(self.data.identity)
             else
                 ui.RoutablePage.repoIssuesRoute(self.data.identity, splitStatus(index), self.data.tag, "")) orelse self.session.data.current_page;
@@ -711,12 +740,24 @@ pub const View = struct {
         // refresh the form inputs' entries in the session's focus-id -> input
         // map with this frame's addresses, so the web/wasm form handling can
         // find them by focus id
-        const form = self.newForm();
+        const form = self.issueForm();
         const inputs_arena = self.session.arena.allocator();
         for (form.children.values()) |*child| switch (child.widget) {
             .text_input => |*ti| try self.session.text_inputs.put(inputs_arena, ti.getFocus().id, ti),
             else => {},
         };
+
+        // on an edit page, register the issue's content as the inputs'
+        // page-constant initial values, which the web overlay renders
+        // into them.
+        if (self.data.view == .edit) {
+            if (self.data.selectedIssue()) |entry| {
+                const fields = form.children.values();
+                try self.session.input_values.put(inputs_arena, fields[title_field_index].widget.text_input.getFocus().id, entry.issue.title);
+                try self.session.input_values.put(inputs_arena, fields[tags_field_index].widget.text_input.getFocus().id, entry.issue.tags);
+                try self.session.input_values.put(inputs_arena, fields[description_field_index].widget.text_input.getFocus().id, entry.issue.description);
+            }
+        }
 
         try self.box.build(allocator, constraint, root_focus);
     }
@@ -765,6 +806,16 @@ pub const View = struct {
                 // should POST to a server route by this kind.
                 button.getFocus().kind = .{ .custom = "submit" };
                 try row.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = .{ .width = action.len + 2, .height = null } });
+            }
+
+            // the edit button links to the issue's edit page.
+            {
+                var button = try wgt.TextBox(ui.Widget).init(allocator, "edit", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+                errdefer button.deinit(allocator);
+                button.getFocus().focusable = true;
+                const route = ui.RoutablePage.repoIssuesEditRoute(self.data.identity, entry.id) orelse return error.RouteTooLong;
+                button.getFocus().kind = .{ .custom = try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}) };
+                try row.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = .{ .width = "edit".len + 2, .height = null } });
             }
 
             row.getFocus().child_id = row.children.keys()[button_in_row_index];
@@ -837,8 +888,8 @@ pub const View = struct {
             self.tagsViewInput(key, root_focus);
             return;
         }
-        if (self.newViewActive()) {
-            try self.newViewInput(allocator, key, root_focus);
+        if (self.formViewActive()) {
+            try self.formInput(allocator, key, root_focus);
             return;
         }
         const i = self.selectedSplitIndex() orelse return;
@@ -885,8 +936,8 @@ pub const View = struct {
     }
 
     fn detailInput(self: *View, allocator: std.mem.Allocator, index: usize, key: Key, root_focus: *Focus) !void {
-        if (self.statusButtonFocused(index)) {
-            try self.statusButtonInput(allocator, index, key, root_focus);
+        if (self.toolRowFocused(index)) {
+            try self.toolRowInput(allocator, index, key, root_focus);
         } else if (self.titleFocused(index)) {
             try self.titleInput(index, key, root_focus);
         } else if (self.tagsFocused(index)) {
@@ -896,14 +947,18 @@ pub const View = struct {
         }
     }
 
-    // the open/close button: enter or a click flips the issue's status;
-    // arrows cross to the neighboring widgets.
-    fn statusButtonInput(self: *View, allocator: std.mem.Allocator, index: usize, key: Key, root_focus: *Focus) !void {
+    // the tool row: enter or a click on the open/close button flips the
+    // issue's status; the edit button is an a: link the host follows.
+    // arrows cross between the buttons and to the neighboring widgets.
+    fn toolRowInput(self: *View, allocator: std.mem.Allocator, index: usize, key: Key, root_focus: *Focus) !void {
+        const row = self.toolRow(index);
+        const on_edit = if (row.getFocus().child_id) |cid| row.children.getIndex(cid) == edit_in_row_index else false;
         switch (key) {
-            .arrow_left => try self.focusList(index, root_focus),
+            .arrow_left => if (on_edit) root_focus.setFocus(row.children.keys()[button_in_row_index]) else try self.focusList(index, root_focus),
+            .arrow_right => if (!on_edit) root_focus.setFocus(row.children.keys()[edit_in_row_index]),
             .arrow_up => self.focusHeader(root_focus),
             .arrow_down => self.focusTitle(index, root_focus),
-            .enter => try self.toggleIssueStatus(allocator, index),
+            .enter => if (!on_edit) try self.toggleIssueStatus(allocator, index),
             .mouse => |mouse| switch (mouse.action) {
                 .scroll => |dir| {
                     const sc = self.detailScroll(index);
@@ -922,7 +977,7 @@ pub const View = struct {
         const sc = self.detailScroll(index);
         switch (key) {
             .arrow_left => try self.focusList(index, root_focus),
-            .arrow_up => self.focusStatusButton(index, root_focus),
+            .arrow_up => self.focusToolRow(index, root_focus),
             .arrow_down => if (self.tagFlow(index) != null) try self.focusTags(index, root_focus) else try self.focusDescription(index, root_focus),
             .mouse => |mouse| switch (mouse.action) {
                 .scroll => |dir| {
@@ -964,11 +1019,11 @@ pub const View = struct {
         sc.clampToContent();
     }
 
-    // up/down (and tab/shift+tab) move between the form's fields; up from the
+    // up/down (and tab/shift+tab) move between a form's fields; up from the
     // title crosses into the header tabs. the multiline description keeps
     // enter and any up/down that has a row to move to.
-    fn newViewInput(self: *View, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
-        const form = self.newForm();
+    fn formInput(self: *View, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
+        const form = self.issueForm();
         const cid = form.getFocus().child_id orelse return;
         const cur = form.children.getIndex(cid) orelse return;
 
@@ -993,11 +1048,22 @@ pub const View = struct {
             .arrow_down, .tab => if (cur < submit_field_index) {
                 root_focus.setFocus(form.children.keys()[cur + 1]);
             },
-            .enter => if (cur == submit_field_index) try self.submitNewIssue(allocator),
+            .enter => if (cur == submit_field_index) try self.submitForm(allocator),
             .mouse => |mouse| if (cur == submit_field_index and inp.leftClickOn(root_focus, cid, mouse)) {
-                try self.submitNewIssue(allocator);
+                try self.submitForm(allocator);
             },
             else => try form.children.values()[cur].widget.input(allocator, key, root_focus),
+        }
+    }
+
+    // the terminal submit paths: the new form commits a new-issue event, the
+    // edit form re-emits the selected issue's event with the form's content.
+    // the web posts the forms to their routes instead.
+    fn submitForm(self: *View, allocator: std.mem.Allocator) !void {
+        if (self.data.view == .edit) {
+            try self.submitEditedIssue(allocator);
+        } else {
+            try self.submitNewIssue(allocator);
         }
     }
 
@@ -1009,7 +1075,7 @@ pub const View = struct {
         const io = self.session.io orelse return;
         const src = self.data.repo_source orelse return;
 
-        const form = self.newForm();
+        const form = self.issueForm();
         const title_input = &form.children.values()[title_field_index].widget.text_input;
         const tags_input = &form.children.values()[tags_field_index].widget.text_input;
         const description_input = &form.children.values()[description_field_index].widget.text_input;
@@ -1059,6 +1125,60 @@ pub const View = struct {
         description_input.clear(allocator);
 
         const route = ui.RoutablePage.repoIssuesRoute(self.data.identity, .open, "", &event_id_hex) orelse return;
+        try self.session.navigate(route);
+    }
+
+    // re-emit the selected issue's event with the form's content (status
+    // preserved), then reload the issue's page. this is the terminal path;
+    // the web posts the form to the edit route.
+    fn submitEditedIssue(self: *View, allocator: std.mem.Allocator) !void {
+        if (comptime wasm) return;
+        const io = self.session.io orelse return;
+        const src = self.data.repo_source orelse return;
+        const entry = self.data.selectedIssue() orelse return;
+
+        const form = self.issueForm();
+        const title_input = &form.children.values()[title_field_index].widget.text_input;
+        const tags_input = &form.children.values()[tags_field_index].widget.text_input;
+        const description_input = &form.children.values()[description_field_index].widget.text_input;
+
+        const title = try title_input.text(allocator);
+        defer allocator.free(title);
+        const tags = try tags_input.text(allocator);
+        defer allocator.free(tags);
+        const description = try description_input.text(allocator);
+        defer allocator.free(description);
+
+        // a title is required, and a too-long tag would fail consumption
+        // after the event is already committed
+        if (title.len == 0) return;
+        var tag_iter = evt.Issue.tagIterator(tags);
+        while (tag_iter.next()) |tag| {
+            if (tag.len > evt.Issue.tag_max_len) return;
+        }
+
+        var updated = entry.issue;
+        updated.title = title;
+        updated.tags = tags;
+        updated.description = description;
+
+        const event = evt.EventWithId{
+            .id = entry.id[0 .. evt.event_id_size * 2].*,
+            .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
+            .event = .{ .issue = updated },
+        };
+
+        switch (src.repo_kind) {
+            inline else => |repo_kind| {
+                var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, .{ .path = src.path });
+                defer any_repo.deinit(io, allocator);
+                switch (any_repo) {
+                    inline else => |*repo| try evt.commitAndConsume(repo_kind, repo.self_repo_opts, io, allocator, repo, evt.events_ref, &.{event}),
+                }
+            },
+        }
+
+        const route = ui.RoutablePage.repoIssuesRoute(self.data.identity, updated.status, "", entry.id) orelse return;
         try self.session.navigate(route);
     }
 
@@ -1125,6 +1245,7 @@ pub const View = struct {
     }
 
     const button_in_row_index: usize = 1;
+    const edit_in_row_index: usize = 2;
     const title_child_index: usize = 0;
     const tags_child_index: usize = 1;
 
@@ -1150,7 +1271,7 @@ pub const View = struct {
         return &row.children.values()[button_in_row_index].widget.text_box;
     }
 
-    fn statusButtonFocused(self: *View, index: usize) bool {
+    fn toolRowFocused(self: *View, index: usize) bool {
         const outer = self.detailOuter(index);
         const cid = outer.getFocus().child_id orelse return false;
         return outer.children.getIndex(cid) == tool_row_index;
@@ -1196,8 +1317,10 @@ pub const View = struct {
         if (self.description_id[index]) |id| root_focus.setFocus(id);
     }
 
-    fn focusStatusButton(self: *View, index: usize, root_focus: *Focus) void {
-        if (self.statusButton(index)) |button| root_focus.setFocus(button.getFocus().id);
+    // return to the tool row's last-focused button.
+    fn focusToolRow(self: *View, index: usize, root_focus: *Focus) void {
+        const cid = self.toolRow(index).getFocus().child_id orelse return;
+        root_focus.setFocus(cid);
     }
 
     // enter the detail pane. an empty pane (no issues) can't be entered.
@@ -1313,19 +1436,23 @@ pub const Header = struct {
             });
         }
 
-        // new-issue tab
+        // new-issue tab; an edit url shows the edit tab in its place
         {
-            const new_route = ui.RoutablePage.repoIssuesNewRoute(data.identity) orelse return error.RouteTooLong;
-            const new_link = try std.fmt.allocPrint(aa, "ai:{s}", .{try new_route.toUrl(session.page_arena)});
-            var text_box = try wgt.TextBox(ui.Widget).init(allocator, "new", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            const route = if (data.view == .edit)
+                ui.RoutablePage.repoIssuesEditRoute(data.identity, data.selected_id) orelse return error.RouteTooLong
+            else
+                ui.RoutablePage.repoIssuesNewRoute(data.identity) orelse return error.RouteTooLong;
+            const link = try std.fmt.allocPrint(aa, "ai:{s}", .{try route.toUrl(session.page_arena)});
+            const label: []const u8 = if (data.view == .edit) "edit" else "new";
+            var text_box = try wgt.TextBox(ui.Widget).init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().focusable = true;
-            text_box.getFocus().kind = .{ .custom = new_link };
+            text_box.getFocus().kind = .{ .custom = link };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
             try box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
-                .min_size = .{ .width = "new".len + 2, .height = null },
+                .min_size = .{ .width = label.len + 2, .height = null },
             });
         }
 
