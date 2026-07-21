@@ -770,6 +770,14 @@ pub const View = struct {
             row.getFocus().child_id = row.children.keys()[button_in_row_index];
         }
 
+        // the issue's title as a focusable word-wrapped text box.
+        {
+            var tb = try wgt.TextBox(ui.Widget).init(allocator, entry.issue.title, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .word });
+            errdefer tb.deinit(allocator);
+            tb.getFocus().focusable = true;
+            try inner.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
+        }
+
         // the issue's tags, each linking to this status's list filtered to
         // that tag.
         {
@@ -798,8 +806,8 @@ pub const View = struct {
             break :blk tb.getFocus().id;
         };
 
-        // select the description by default
-        inner.getFocus().child_id = self.description_id[index];
+        // select the title by default
+        inner.getFocus().child_id = inner.children.keys()[title_child_index];
 
         // reset the scroll to the top for the newly-shown issue: directly on the
         // terminal (the wasm offset), and via a version bump on the web (so the
@@ -879,6 +887,8 @@ pub const View = struct {
     fn detailInput(self: *View, allocator: std.mem.Allocator, index: usize, key: Key, root_focus: *Focus) !void {
         if (self.statusButtonFocused(index)) {
             try self.statusButtonInput(allocator, index, key, root_focus);
+        } else if (self.titleFocused(index)) {
+            try self.titleInput(index, key, root_focus);
         } else if (self.tagsFocused(index)) {
             try self.tagsInput(index, key, root_focus);
         } else {
@@ -892,7 +902,7 @@ pub const View = struct {
         switch (key) {
             .arrow_left => try self.focusList(index, root_focus),
             .arrow_up => self.focusHeader(root_focus),
-            .arrow_down => if (self.tagFlow(index) != null) try self.focusTags(index, root_focus) else try self.focusDescription(index, root_focus),
+            .arrow_down => self.focusTitle(index, root_focus),
             .enter => try self.toggleIssueStatus(allocator, index),
             .mouse => |mouse| switch (mouse.action) {
                 .scroll => |dir| {
@@ -903,6 +913,23 @@ pub const View = struct {
                 else => if (self.statusButton(index)) |button| {
                     if (inp.leftClickOn(root_focus, button.getFocus().id, mouse)) try self.toggleIssueStatus(allocator, index);
                 },
+            },
+            else => {},
+        }
+    }
+
+    fn titleInput(self: *View, index: usize, key: Key, root_focus: *Focus) !void {
+        const sc = self.detailScroll(index);
+        switch (key) {
+            .arrow_left => try self.focusList(index, root_focus),
+            .arrow_up => self.focusStatusButton(index, root_focus),
+            .arrow_down => if (self.tagFlow(index) != null) try self.focusTags(index, root_focus) else try self.focusDescription(index, root_focus),
+            .mouse => |mouse| switch (mouse.action) {
+                .scroll => |dir| {
+                    sc.y += if (dir == .up) @as(isize, -1) else 1;
+                    sc.clampToContent();
+                },
+                else => {},
             },
             else => {},
         }
@@ -919,7 +946,7 @@ pub const View = struct {
                 sc.y -= 1;
                 sc.clampToContent();
                 if (sc.y == before) {
-                    if (self.tagFlow(index) != null) try self.focusTags(index, root_focus) else self.focusStatusButton(index, root_focus);
+                    if (self.tagFlow(index) != null) try self.focusTags(index, root_focus) else self.focusTitle(index, root_focus);
                 }
                 return;
             },
@@ -1082,7 +1109,7 @@ pub const View = struct {
         switch (key) {
             .arrow_left => if (cur > 0) self.focusTag(index, tf, root_focus, cur - 1) else try self.focusList(index, root_focus),
             .arrow_right => if (cur + 1 < count) self.focusTag(index, tf, root_focus, cur + 1),
-            .arrow_up => if (tf.rowStep(cur, false)) |i| self.focusTag(index, tf, root_focus, i) else self.focusStatusButton(index, root_focus),
+            .arrow_up => if (tf.rowStep(cur, false)) |i| self.focusTag(index, tf, root_focus, i) else self.focusTitle(index, root_focus),
             .arrow_down => if (tf.rowStep(cur, true)) |i| self.focusTag(index, tf, root_focus, i) else try self.focusDescription(index, root_focus),
             .home => self.focusTag(index, tf, root_focus, 0),
             .end => self.focusTag(index, tf, root_focus, count - 1),
@@ -1098,11 +1125,12 @@ pub const View = struct {
     }
 
     const button_in_row_index: usize = 1;
-    const tags_child_index: usize = 0;
+    const title_child_index: usize = 0;
+    const tags_child_index: usize = 1;
 
     fn tagFlow(self: *View, index: usize) ?*ui.TagFlow {
         const inner = self.detailInner(index);
-        if (inner.children.count() == 0) return null;
+        if (inner.children.count() <= tags_child_index) return null;
         return switch (inner.children.values()[tags_child_index].widget) {
             .tag_flow => |*tf| tf,
             else => null,
@@ -1140,6 +1168,20 @@ pub const View = struct {
                 self.detailScroll(index).scrollToRect(rect);
             }
         }
+    }
+
+    fn titleFocused(self: *View, index: usize) bool {
+        const inner = self.detailInner(index);
+        const cid = inner.getFocus().child_id orelse return false;
+        return inner.children.getIndex(cid) == title_child_index;
+    }
+
+    // the title sits at the top of the pane, so focusing it scrolls there.
+    fn focusTitle(self: *View, index: usize, root_focus: *Focus) void {
+        const inner = self.detailInner(index);
+        if (inner.children.count() == 0) return;
+        root_focus.setFocus(inner.children.keys()[title_child_index]);
+        self.detailScroll(index).y = 0;
     }
 
     fn focusTags(self: *View, index: usize, root_focus: *Focus) !void {
