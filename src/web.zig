@@ -906,17 +906,12 @@ pub fn generateOverlay(allocator: std.mem.Allocator, root: *ui.Widget, session: 
                 },
                 .custom => |custom| {
                     if (std.mem.eql(u8, "submit", custom)) {
-                        // inside the dashed border the TUI cells draw around the button.
-                        const inner_left = r.x + 1;
-                        const inner_top = r.y + 1;
-                        const inner_width = if (r.size.width > 2) r.size.width - 2 else 0;
-                        const inner_height = if (r.size.height > 2) r.size.height - 2 else 0;
                         try out.appendSlice(allocator, "<button type=\"submit\" data-focus-id=\"");
                         var id_buf: [32]u8 = undefined;
                         try out.appendSlice(allocator, try std.fmt.bufPrint(&id_buf, "{d}", .{inner_id}));
                         try out.appendSlice(allocator, "\" style=\"left:");
                         var pos_buf: [128]u8 = undefined;
-                        try out.appendSlice(allocator, try std.fmt.bufPrint(&pos_buf, "{d}ch;top:{d}em;width:{d}ch;height:{d}em", .{ inner_left, inner_top, inner_width, inner_height }));
+                        try out.appendSlice(allocator, try std.fmt.bufPrint(&pos_buf, "{d}ch;top:{d}em;width:{d}ch;height:{d}em", .{ r.x, r.y, r.size.width, r.size.height }));
                         try out.appendSlice(allocator, "\"></button>");
                     }
                 },

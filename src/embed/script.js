@@ -223,6 +223,21 @@ WebAssembly.instantiateStreaming(fetch("/haxy.wasm"), importObject).then(async (
         wasmInstance.exports._tick(minRows(), maxCols());
     });
 
+    // submit on mousedown rather than waiting for click: the focusin this
+    // same mousedown fires ticks the wasm, and a resulting overlay rebuild
+    // would detach the button before its click could land. the form is
+    // guaranteed live at mousedown time.
+    document.addEventListener("mousedown", (event) => {
+        if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        const btn = event.target.closest ? event.target.closest("button[type=submit][data-focus-id]") : null;
+        if (!btn || !btn.form) return;
+        // empty-action forms are handled by their onsubmit on the click path
+        if (!btn.form.getAttribute("action")) return;
+        // if the button survives to receive the click, don't submit twice
+        btn.addEventListener("click", (e) => e.preventDefault(), { once: true });
+        btn.form.requestSubmit(btn);
+    });
+
     // listeners on document (not #grid) since the form lives outside #grid;
     // input/focus events from form elements still bubble up to document.
     document.addEventListener("input", (event) => {

@@ -453,6 +453,14 @@ pub const View = struct {
                 errdefer detail_scroll.deinit(allocator);
                 var frame = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = .hidden, .direction = .vert });
                 errdefer frame.deinit(allocator);
+                // the tool row sits above the scroll (populateDetail fills
+                // it per issue) so it can't scroll out from under the web
+                // overlay <form>, whose position doesn't track pane scrolling.
+                {
+                    var row = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
+                    errdefer row.deinit(allocator);
+                    try frame.children.put(allocator, row.getFocus().id, .{ .widget = .{ .box = row }, .rect = null, .min_size = null });
+                }
                 // the frame's selected child is its scroll, so the focus chain
                 // reaches the description (populateDetail points the scroll's
                 // inner box at it), letting focus recovery descend into the pane.
@@ -565,12 +573,20 @@ pub const View = struct {
         return &self.listScroll(index).child.box;
     }
 
+    // the detail frame's children: the tool row above the scroll pane.
+    const tool_row_index: usize = 0;
+    const detail_scroll_index: usize = 1;
+
     fn detailOuter(self: *View, index: usize) *wgt.Box(ui.Widget) {
         return &self.resultsBox(index).children.values()[detail_index].widget.box;
     }
 
+    fn toolRow(self: *View, index: usize) *wgt.Box(ui.Widget) {
+        return &self.detailOuter(index).children.values()[tool_row_index].widget.box;
+    }
+
     fn detailScroll(self: *View, index: usize) *wgt.Scroll(ui.Widget) {
-        return &self.detailOuter(index).children.values()[0].widget.scroll;
+        return &self.detailOuter(index).children.values()[detail_scroll_index].widget.scroll;
     }
 
     fn detailInner(self: *View, index: usize) *wgt.Box(ui.Widget) {
@@ -726,8 +742,9 @@ pub const View = struct {
                 .open => "close",
                 .closed => "open",
             };
-            var row = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
-            errdefer row.deinit(allocator);
+            const row = self.toolRow(index);
+            for (row.children.values()) |*child| child.widget.deinit(allocator);
+            row.children.clearAndFree(allocator);
             const pa = self.session.page_arena.allocator();
             row.getFocus().kind = .{ .custom = if (self.data.identity.len == 0)
                 try std.fmt.allocPrint(pa, "form:/issues/{s}/{s}", .{ entry.id, action })
@@ -751,7 +768,6 @@ pub const View = struct {
             }
 
             row.getFocus().child_id = row.children.keys()[button_in_row_index];
-            try inner.children.put(allocator, row.getFocus().id, .{ .widget = .{ .box = row }, .rect = null, .min_size = null });
         }
 
         // the issue's tags, each linking to this status's list filtered to
@@ -1081,13 +1097,12 @@ pub const View = struct {
         }
     }
 
-    const button_row_index: usize = 0;
     const button_in_row_index: usize = 1;
-    const tags_child_index: usize = 1;
+    const tags_child_index: usize = 0;
 
     fn tagFlow(self: *View, index: usize) ?*ui.TagFlow {
         const inner = self.detailInner(index);
-        if (inner.children.count() <= tags_child_index) return null;
+        if (inner.children.count() == 0) return null;
         return switch (inner.children.values()[tags_child_index].widget) {
             .tag_flow => |*tf| tf,
             else => null,
@@ -1100,18 +1115,17 @@ pub const View = struct {
         return inner.children.getIndex(cid) == tags_child_index and self.tagFlow(index) != null;
     }
 
-    // the open/close button inside the detail pane's leading row.
+    // the open/close button inside the detail frame's tool row.
     fn statusButton(self: *View, index: usize) ?*wgt.TextBox(ui.Widget) {
-        const inner = self.detailInner(index);
-        if (inner.children.count() == 0) return null;
-        const row = &inner.children.values()[button_row_index].widget.box;
+        const row = self.toolRow(index);
+        if (row.children.count() == 0) return null;
         return &row.children.values()[button_in_row_index].widget.text_box;
     }
 
     fn statusButtonFocused(self: *View, index: usize) bool {
-        const inner = self.detailInner(index);
-        const cid = inner.getFocus().child_id orelse return false;
-        return inner.children.getIndex(cid) == button_row_index;
+        const outer = self.detailOuter(index);
+        const cid = outer.getFocus().child_id orelse return false;
+        return outer.children.getIndex(cid) == tool_row_index;
     }
 
     fn focusTag(self: *View, index: usize, tf: *ui.TagFlow, root_focus: *Focus, item: usize) void {
