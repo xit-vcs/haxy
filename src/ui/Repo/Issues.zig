@@ -675,15 +675,6 @@ pub const View = struct {
 
             // the pane's selected child shows the selection border: the
             // description directly, the tags via the flow's selected item.
-            const inner = self.detailInner(i);
-            for (inner.children.keys(), inner.children.values()) |id, *child| {
-                switch (child.widget) {
-                    .text_box => |*tb| tb.options.border_style = if (inner.getFocus().child_id == id) .single else .hidden,
-                    else => {},
-                }
-            }
-            if (self.tagFlow(i)) |tf| tf.selected = self.tagsFocused(i);
-
             // cap the list at list_max_width only while the detail pane fits
             // beside it. the box drops the detail when the width can't hold
             // both minimums, so when it's that narrow we lift the cap and let
@@ -700,8 +691,6 @@ pub const View = struct {
                 self.resultsBox(i).children.values()[detail_index].min_size = .{ .width = detail_min_width, .height = null };
             }
         }
-
-        self.tagsView().selected = self.tagsViewActive();
 
         // refresh the form inputs' entries in the session's focus-id -> input
         // map with this frame's addresses, so the web/wasm form handling can
@@ -783,12 +772,10 @@ pub const View = struct {
             }
         }
 
-        // the description as a focusable word-wrapped text box. its hidden
-        // border reserves the space the border occupies when focused, so
-        // focusing doesn't shift layout.
+        // the description as a focusable word-wrapped text box.
         self.description_id[index] = blk: {
             const description = if (entry.issue.description.len == 0) "(no description)" else entry.issue.description;
-            var tb = try wgt.TextBox(ui.Widget).init(allocator, description, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .word });
+            var tb = try wgt.TextBox(ui.Widget).init(allocator, description, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .word });
             errdefer tb.deinit(allocator);
             tb.getFocus().focusable = true;
             try inner.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
