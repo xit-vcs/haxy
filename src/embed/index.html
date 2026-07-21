@@ -54,6 +54,13 @@
             vertical-align: top;
           }
 
+          /* a double-width rune pinned to its two grid cells so its advance
+             width can't shift the rest of the row. */
+          #grid .w2 {
+            width: 2ch;
+            overflow: hidden;
+          }
+
           /* overlay elements share the grid's coordinate system since
              their parent (.page) is the positioning ancestor and the
              grid sits at its top-left. */

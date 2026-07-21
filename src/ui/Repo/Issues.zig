@@ -380,7 +380,7 @@ pub const View = struct {
             defer items.deinit(allocator);
             // when filtered, the first item clears the filter
             if (data.tag.len != 0)
-                try items.append(allocator, .{ .text = "╳", .link = try issuesLink(session.page_arena, data.identity, .open, "", "") });
+                try items.append(allocator, .{ .text = "✕", .link = try issuesLink(session.page_arena, data.identity, .open, "", "") });
             for (data.tags) |tag|
                 try items.append(allocator, .{ .text = tag, .link = try tagLink(session.page_arena, data.identity, .open, tag) });
             try tf.setItems(allocator, items.items);

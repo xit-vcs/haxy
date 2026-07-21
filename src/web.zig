@@ -784,7 +784,24 @@ fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: 
                 first = false;
             }
 
-            try appendEscapedHtml(allocator, output, if (covered_by_scroll) " " else (cell.rune orelse " "));
+            if (covered_by_scroll) {
+                try appendEscapedHtml(allocator, output, " ");
+            } else if (cell.continuation) {
+                // the wide rune to the left was emitted 2ch wide, covering this column
+            } else if (cell.rune) |rune| {
+                // a double-width rune is pinned inside a 2ch span so the
+                // fallback glyph's advance width can't shift the rest of the row
+                const wide = x + 1 < grid.size.width and grid.cells.items[try grid.cells.at(.{ y, x + 1 })].continuation;
+                if (wide) {
+                    try output.appendSlice(allocator, "<span class=\"w2\">");
+                    try appendEscapedHtml(allocator, output, rune);
+                    try output.appendSlice(allocator, "</span>");
+                } else {
+                    try appendEscapedHtml(allocator, output, rune);
+                }
+            } else {
+                try appendEscapedHtml(allocator, output, " ");
+            }
         }
         if (open_tag) |t| try output.appendSlice(allocator, t.closeTag());
         try output.append(allocator, '\n');
