@@ -89,7 +89,7 @@ fn handleRequest(
 
     // POST routes can be scoped by any page, so they can redirect using
     // the base of the URL. this allows logging in to keep you on the page
-    // you were on. local mode has no accounts, so no POST routes.
+    // you were on. local mode has no accounts, so only the issue routes.
     if (method == .POST) {
         switch (host) {
             .remote => |remote| {
@@ -102,15 +102,29 @@ fn handleRequest(
                             .login => handleLogin(io, request, allocator, base, remote.admin_repo_path, remote.session_store),
                             .logout => handleLogout(request, base, remote.session_store),
                             .ansi => handleAnsi(io, request, allocator, base, remote.admin_repo_path, remote.session_store),
-                            .issue => handleIssue(io, request, allocator, base, remote.admin_repo_path),
-                            .open => handleIssueStatus(io, request, allocator, base, remote.admin_repo_path, .open),
-                            .close => handleIssueStatus(io, request, allocator, base, remote.admin_repo_path, .closed),
-                            .edit => handleIssueEdit(io, request, allocator, base, remote.admin_repo_path),
+                            .issue => handleIssue(io, request, allocator, base, host),
+                            .open => handleIssueStatus(io, request, allocator, base, host, .open),
+                            .close => handleIssueStatus(io, request, allocator, base, host, .closed),
+                            .edit => handleIssueEdit(io, request, allocator, base, host),
                         };
                     }
                 }
             },
-            .local => {},
+            .local => {
+                const PostRoute = enum { issue, open, close, edit };
+                inline for (@typeInfo(PostRoute).@"enum".fields) |field| {
+                    const suffix = "/" ++ field.name;
+                    if (std.mem.endsWith(u8, path, suffix)) {
+                        const base = path[0 .. path.len - suffix.len];
+                        return switch (@field(PostRoute, field.name)) {
+                            .issue => handleIssue(io, request, allocator, base, host),
+                            .open => handleIssueStatus(io, request, allocator, base, host, .open),
+                            .close => handleIssueStatus(io, request, allocator, base, host, .closed),
+                            .edit => handleIssueEdit(io, request, allocator, base, host),
+                        };
+                    }
+                }
+            },
         }
     }
 
@@ -334,13 +348,13 @@ fn handleAnsi(
 }
 
 // create an issue in the repo the form's page names (base is
-// "/repo/<owner>/<name>") and redirect to it
+// "/repo/<owner>/<name>", or "" in local mode) and redirect to it
 fn handleIssue(
     io: std.Io,
     request: *std.http.Server.Request,
     allocator: std.mem.Allocator,
     base: []const u8,
-    admin_repo_path: []const u8,
+    host: Host,
 ) !void {
     var body_buf: [256]u8 = undefined;
     const reader = request.readerExpectNone(&body_buf);
@@ -368,38 +382,11 @@ fn handleIssue(
         return;
     }
 
-    const not_found = "repo not found";
-    const repo_prefix = "/repo/";
-    if (!std.mem.startsWith(u8, base, repo_prefix)) {
-        try request.respond(not_found, .{
-            .status = .not_found,
-            .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
-        });
-        return;
-    }
-
-    const repos_dir = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(admin_repo_path) orelse ".", "repos" });
-    defer allocator.free(repos_dir);
-    const repo_path = switch (try serve_common.resolveRepoPath(io, allocator, repos_dir, admin_repo_path, base[repo_prefix.len..], false)) {
-        .ok => |p| p,
-        .invalid, .not_found => {
-            try request.respond(not_found, .{
-                .status = .not_found,
-                .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
-            });
-            return;
-        },
-    };
-    defer allocator.free(repo_path);
-
-    var repo = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = repo_path });
-    defer repo.deinit(io, allocator);
-
     var id_bytes: [evt.event_id_size]u8 = undefined;
     io.random(&id_bytes);
     const event_id_hex = std.fmt.bytesToHex(id_bytes, .lower);
 
-    try evt.commitAndConsume(.xit, .{}, io, allocator, &repo, evt.events_ref, &[_]evt.EventWithId{.{
+    const event = evt.EventWithId{
         .id = event_id_hex,
         .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
         .event = .{ .issue = .{
@@ -407,7 +394,58 @@ fn handleIssue(
             .description = description,
             .tags = tags,
         } },
-    }});
+    };
+
+    const not_found = "repo not found";
+    switch (host) {
+        .remote => |remote| {
+            const repo_prefix = "/repo/";
+            if (!std.mem.startsWith(u8, base, repo_prefix)) {
+                try request.respond(not_found, .{
+                    .status = .not_found,
+                    .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+                });
+                return;
+            }
+
+            const repos_dir = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(remote.admin_repo_path) orelse ".", "repos" });
+            defer allocator.free(repos_dir);
+            const repo_path = switch (try serve_common.resolveRepoPath(io, allocator, repos_dir, remote.admin_repo_path, base[repo_prefix.len..], false)) {
+                .ok => |p| p,
+                .invalid, .not_found => {
+                    try request.respond(not_found, .{
+                        .status = .not_found,
+                        .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+                    });
+                    return;
+                },
+            };
+            defer allocator.free(repo_path);
+
+            var repo = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = repo_path });
+            defer repo.deinit(io, allocator);
+            try evt.commitAndConsume(.xit, .{}, io, allocator, &repo, evt.events_ref, &[_]evt.EventWithId{event});
+        },
+        .local => |src| {
+            // the local form posts to "/issue", so base is empty
+            if (base.len != 0) {
+                try request.respond(not_found, .{
+                    .status = .not_found,
+                    .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+                });
+                return;
+            }
+            switch (src.repo_kind) {
+                inline else => |repo_kind| {
+                    var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, .{ .path = src.path });
+                    defer any_repo.deinit(io, allocator);
+                    switch (any_repo) {
+                        inline else => |*repo| try evt.commitAndConsume(repo_kind, repo.self_repo_opts, io, allocator, repo, evt.events_ref, &[_]evt.EventWithId{event}),
+                    }
+                },
+            }
+        },
+    }
 
     const location = try std.fmt.allocPrint(allocator, "{s}/issues/{s}", .{ base, &event_id_hex });
     defer allocator.free(location);
@@ -428,32 +466,124 @@ fn issueFieldsValid(title: []const u8, tags: []const u8) bool {
     return true;
 }
 
-// split an issue url ("/repo/<owner>/<name>/issues/<id>") into the repo base
-// and the decoded id, null when it isn't one
+// split an issue url ("/repo/<owner>/<name>/issues/<id>", identity elided in
+// local mode) into what precedes "/issues/" and the decoded id, null when it
+// isn't one. the repo base is validated per host in updateIssue.
 const IssueBaseParts = struct { repo_base: []const u8, id_bytes: [evt.event_id_size]u8 };
 fn issueBaseParts(base: []const u8) ?IssueBaseParts {
-    const repo_prefix = "/repo/";
     const issues_infix = "/issues/";
     const id_len = evt.event_id_size * 2;
-    if (base.len < repo_prefix.len + issues_infix.len + id_len) return null;
+    if (base.len < issues_infix.len + id_len) return null;
     var id_bytes: [evt.event_id_size]u8 = undefined;
     _ = std.fmt.hexToBytes(&id_bytes, base[base.len - id_len ..]) catch return null;
     const head = base[0 .. base.len - id_len];
     if (!std.mem.endsWith(u8, head, issues_infix)) return null;
-    const repo_base = head[0 .. head.len - issues_infix.len];
-    if (!std.mem.startsWith(u8, repo_base, repo_prefix)) return null;
-    return .{ .repo_base = repo_base, .id_bytes = id_bytes };
+    return .{ .repo_base = head[0 .. head.len - issues_infix.len], .id_bytes = id_bytes };
 }
 
-// the issue `id_bytes` names in `repo`'s consumed event db, or null
-fn readIssue(
-    repo: *rp.Repo(.xit, .{}),
+// what an update route replaces on an issue: its status, or its content.
+const IssueUpdate = union(enum) {
+    status: evt.Issue.Status,
+    fields: struct { title: []const u8, tags: []const u8, description: []const u8 },
+};
+
+// re-emit the issue `parts` names with `update` applied, in the repo the
+// host resolves the base to. error.NotFound when the base names no repo or
+// the id no issue.
+fn updateIssue(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    host: Host,
+    parts: IssueBaseParts,
+    update: IssueUpdate,
+) !void {
+    switch (host) {
+        .remote => |remote| {
+            const repo_prefix = "/repo/";
+            if (!std.mem.startsWith(u8, parts.repo_base, repo_prefix)) return error.NotFound;
+            const repos_dir = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(remote.admin_repo_path) orelse ".", "repos" });
+            defer allocator.free(repos_dir);
+            const repo_path = switch (try serve_common.resolveRepoPath(io, allocator, repos_dir, remote.admin_repo_path, parts.repo_base[repo_prefix.len..], false)) {
+                .ok => |p| p,
+                .invalid, .not_found => return error.NotFound,
+            };
+            defer allocator.free(repo_path);
+
+            var repo = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = repo_path });
+            defer repo.deinit(io, allocator);
+            try updateIssueInRepo(.xit, .{}, io, allocator, &repo, &parts.id_bytes, update);
+        },
+        .local => |src| {
+            // the local forms post to "/issues/<id>/...", so the repo base
+            // is empty
+            if (parts.repo_base.len != 0) return error.NotFound;
+            switch (src.repo_kind) {
+                inline else => |repo_kind| {
+                    var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, .{ .path = src.path });
+                    defer any_repo.deinit(io, allocator);
+                    switch (any_repo) {
+                        inline else => |*repo| try updateIssueInRepo(repo_kind, repo.self_repo_opts, io, allocator, repo, &parts.id_bytes, update),
+                    }
+                },
+            }
+        },
+    }
+}
+
+fn updateIssueInRepo(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    repo: *rp.Repo(repo_kind, repo_opts),
+    id_bytes: *const [evt.event_id_size]u8,
+    update: IssueUpdate,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const issue = (try readRepoIssue(repo_kind, repo_opts, io, allocator, &arena, repo, id_bytes)) orelse return error.NotFound;
+
+    var updated = issue;
+    switch (update) {
+        .status => |status| {
+            if (issue.status == status) return;
+            updated.status = status;
+        },
+        .fields => |fields| {
+            updated.title = fields.title;
+            updated.tags = fields.tags;
+            updated.description = fields.description;
+        },
+    }
+
+    try evt.commitAndConsume(repo_kind, repo_opts, io, allocator, repo, evt.events_ref, &[_]evt.EventWithId{.{
+        .id = std.fmt.bytesToHex(id_bytes.*, .lower),
+        .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
+        .event = .{ .issue = updated },
+    }});
+}
+
+// the issue `id_bytes` names in the repo's consumed event db (the repo's own
+// db for xit; the side db next to a git repo), or null
+fn readRepoIssue(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    io: std.Io,
+    allocator: std.mem.Allocator,
     arena: *std.heap.ArenaAllocator,
+    repo: *rp.Repo(repo_kind, repo_opts),
     id_bytes: *const [evt.event_id_size]u8,
 ) !?evt.Issue {
-    const repo_opts: rp.RepoOpts(.xit) = .{};
-    const DB = rp.Repo(.xit, repo_opts).DB;
-    const moment = evt.currentMoment(repo_opts, repo) catch return null;
+    const DB = evt.EventDB(repo_opts.hash);
+    var event_db_maybe: ?evt.LocalEventDB(repo_opts.hash) = if (repo_kind == .git) try evt.LocalEventDB(repo_opts.hash).openReadOnly(io, allocator, repo.core.repo_dir) else null;
+    defer if (event_db_maybe) |*event_db| event_db.deinit(io, allocator);
+    const moment = (if (event_db_maybe) |*event_db|
+        evt.currentMomentFromDb(repo_opts.hash, event_db.db)
+    else if (repo_kind == .git)
+        return null
+    else
+        evt.currentMoment(repo_opts, repo)) catch return null;
     const event_id_to_issue_cursor = (try moment.getCursor(hash.hashInt(repo_opts.hash, "event-id->issue"))) orelse return null;
     const event_id_to_issue = try DB.HashMap(.read_only).init(event_id_to_issue_cursor);
     const issue_cursor = (try event_id_to_issue.getCursor(hash.hashInt(repo_opts.hash, id_bytes))) orelse return null;
@@ -462,19 +592,16 @@ fn readIssue(
 }
 
 // set the status of the issue the url names (base is
-// "/repo/<owner>/<name>/issues/<id>") by re-emitting its event, then
-// redirect back to it
+// "/repo/<owner>/<name>/issues/<id>", identity elided in local mode) by
+// re-emitting its event, then redirect back to it
 fn handleIssueStatus(
     io: std.Io,
     request: *std.http.Server.Request,
     allocator: std.mem.Allocator,
     base: []const u8,
-    admin_repo_path: []const u8,
+    host: Host,
     status: evt.Issue.Status,
 ) !void {
-    const repo_prefix = "/repo/";
-    const id_len = evt.event_id_size * 2;
-
     const not_found = "issue not found";
     const parts = issueBaseParts(base) orelse {
         try request.respond(not_found, .{
@@ -484,44 +611,16 @@ fn handleIssueStatus(
         return;
     };
 
-    const repos_dir = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(admin_repo_path) orelse ".", "repos" });
-    defer allocator.free(repos_dir);
-    const repo_path = switch (try serve_common.resolveRepoPath(io, allocator, repos_dir, admin_repo_path, parts.repo_base[repo_prefix.len..], false)) {
-        .ok => |p| p,
-        .invalid, .not_found => {
+    updateIssue(io, allocator, host, parts, .{ .status = status }) catch |err| switch (err) {
+        error.NotFound => {
             try request.respond(not_found, .{
                 .status = .not_found,
                 .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
             });
             return;
         },
+        else => |e| return e,
     };
-    defer allocator.free(repo_path);
-
-    const repo_opts: rp.RepoOpts(.xit) = .{};
-    var repo = try rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = repo_path });
-    defer repo.deinit(io, allocator);
-
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-
-    const issue = (try readIssue(&repo, &arena, &parts.id_bytes)) orelse {
-        try request.respond(not_found, .{
-            .status = .not_found,
-            .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
-        });
-        return;
-    };
-
-    if (issue.status != status) {
-        var updated = issue;
-        updated.status = status;
-        try evt.commitAndConsume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &[_]evt.EventWithId{.{
-            .id = base[base.len - id_len ..][0..id_len].*,
-            .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
-            .event = .{ .issue = updated },
-        }});
-    }
 
     // like logout, this is a bodyless POST, so close the connection rather than
     // letting the keep-alive path try to discard a body that isn't framed.
@@ -533,18 +632,16 @@ fn handleIssueStatus(
 }
 
 // replace the title/tags/description of the issue the url names (base is
-// "/repo/<owner>/<name>/issues/<id>", the form posts to "<base>/edit") by
-// re-emitting its event with its status preserved, then redirect back to it
+// "/repo/<owner>/<name>/issues/<id>", identity elided in local mode; the
+// form posts to "<base>/edit") by re-emitting its event with its status
+// preserved, then redirect back to it
 fn handleIssueEdit(
     io: std.Io,
     request: *std.http.Server.Request,
     allocator: std.mem.Allocator,
     base: []const u8,
-    admin_repo_path: []const u8,
+    host: Host,
 ) !void {
-    const repo_prefix = "/repo/";
-    const id_len = evt.event_id_size * 2;
-
     var body_buf: [256]u8 = undefined;
     const reader = request.readerExpectNone(&body_buf);
     const body = reader.allocRemaining(allocator, .limited(65536)) catch &[_]u8{};
@@ -581,44 +678,20 @@ fn handleIssueEdit(
         return;
     };
 
-    const repos_dir = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(admin_repo_path) orelse ".", "repos" });
-    defer allocator.free(repos_dir);
-    const repo_path = switch (try serve_common.resolveRepoPath(io, allocator, repos_dir, admin_repo_path, parts.repo_base[repo_prefix.len..], false)) {
-        .ok => |p| p,
-        .invalid, .not_found => {
+    updateIssue(io, allocator, host, parts, .{ .fields = .{
+        .title = title,
+        .tags = tags,
+        .description = description,
+    } }) catch |err| switch (err) {
+        error.NotFound => {
             try request.respond(not_found, .{
                 .status = .not_found,
                 .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
             });
             return;
         },
+        else => |e| return e,
     };
-    defer allocator.free(repo_path);
-
-    const repo_opts: rp.RepoOpts(.xit) = .{};
-    var repo = try rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = repo_path });
-    defer repo.deinit(io, allocator);
-
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-
-    const issue = (try readIssue(&repo, &arena, &parts.id_bytes)) orelse {
-        try request.respond(not_found, .{
-            .status = .not_found,
-            .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
-        });
-        return;
-    };
-
-    var updated = issue;
-    updated.title = title;
-    updated.tags = tags;
-    updated.description = description;
-    try evt.commitAndConsume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &[_]evt.EventWithId{.{
-        .id = base[base.len - id_len ..][0..id_len].*,
-        .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
-        .event = .{ .issue = updated },
-    }});
 
     try request.respond("", .{
         .status = .see_other,
