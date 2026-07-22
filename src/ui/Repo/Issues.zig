@@ -1087,13 +1087,7 @@ pub const View = struct {
         const description = try description_input.text(allocator);
         defer allocator.free(description);
 
-        // a title is required, and a too-long tag would fail consumption
-        // after the event is already committed
-        if (title.len == 0) return;
-        var tag_iter = evt.Issue.tagIterator(tags);
-        while (tag_iter.next()) |tag| {
-            if (tag.len > evt.Issue.tag_max_len) return;
-        }
+        if (!evt.Issue.fieldsValid(title, tags)) return;
 
         var id_bytes: [evt.event_id_size]u8 = undefined;
         io.random(&id_bytes);
@@ -1149,36 +1143,26 @@ pub const View = struct {
         const description = try description_input.text(allocator);
         defer allocator.free(description);
 
-        // a title is required, and a too-long tag would fail consumption
-        // after the event is already committed
-        if (title.len == 0) return;
-        var tag_iter = evt.Issue.tagIterator(tags);
-        while (tag_iter.next()) |tag| {
-            if (tag.len > evt.Issue.tag_max_len) return;
-        }
+        if (!evt.Issue.fieldsValid(title, tags)) return;
 
-        var updated = entry.issue;
-        updated.title = title;
-        updated.tags = tags;
-        updated.description = description;
-
-        const event = evt.EventWithId{
-            .id = entry.id[0 .. evt.event_id_size * 2].*,
-            .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
-            .event = .{ .issue = updated },
-        };
+        var id_bytes: [evt.event_id_size]u8 = undefined;
+        _ = try std.fmt.hexToBytes(&id_bytes, entry.id[0 .. evt.event_id_size * 2]);
 
         switch (src.repo_kind) {
             inline else => |repo_kind| {
                 var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, .{ .path = src.path });
                 defer any_repo.deinit(io, allocator);
                 switch (any_repo) {
-                    inline else => |*repo| try evt.commitAndConsume(repo_kind, repo.self_repo_opts, io, allocator, repo, evt.events_ref, &.{event}),
+                    inline else => |*repo| try evt.Issue.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &id_bytes, .{ .fields = .{
+                        .title = title,
+                        .tags = tags,
+                        .description = description,
+                    } }),
                 }
             },
         }
 
-        const route = ui.RoutablePage.repoIssuesRoute(self.data.identity, updated.status, "", entry.id) orelse return;
+        const route = ui.RoutablePage.repoIssuesRoute(self.data.identity, entry.issue.status, "", entry.id) orelse return;
         try self.session.navigate(route);
     }
 
@@ -1192,29 +1176,25 @@ pub const View = struct {
         const sel = self.detailed_index[index] orelse return;
         const entry = self.window(index).issues[sel];
 
-        var updated = entry.issue;
-        updated.status = switch (entry.issue.status) {
+        const status: evt.Issue.Status = switch (entry.issue.status) {
             .open => .closed,
             .closed => .open,
         };
 
-        const event = evt.EventWithId{
-            .id = entry.id[0 .. evt.event_id_size * 2].*,
-            .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
-            .event = .{ .issue = updated },
-        };
+        var id_bytes: [evt.event_id_size]u8 = undefined;
+        _ = try std.fmt.hexToBytes(&id_bytes, entry.id[0 .. evt.event_id_size * 2]);
 
         switch (src.repo_kind) {
             inline else => |repo_kind| {
                 var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, .{ .path = src.path });
                 defer any_repo.deinit(io, allocator);
                 switch (any_repo) {
-                    inline else => |*repo| try evt.commitAndConsume(repo_kind, repo.self_repo_opts, io, allocator, repo, evt.events_ref, &.{event}),
+                    inline else => |*repo| try evt.Issue.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &id_bytes, .{ .status = status }),
                 }
             },
         }
 
-        const route = ui.RoutablePage.repoIssuesRoute(self.data.identity, updated.status, "", entry.id) orelse return;
+        const route = ui.RoutablePage.repoIssuesRoute(self.data.identity, status, "", entry.id) orelse return;
         try self.session.navigate(route);
     }
 

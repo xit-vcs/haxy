@@ -1,7 +1,6 @@
 const std = @import("std");
 const xit = @import("xit");
 const rp = xit.repo;
-const hash = xit.hash;
 const evt = @import("./event.zig");
 const serve_common = @import("./serve_common.zig");
 const ui = @import("./ui.zig");
@@ -372,7 +371,7 @@ fn handleIssue(
     const description = try std.mem.replaceOwned(u8, allocator, description_crlf, "\r\n", "\n");
     defer allocator.free(description);
 
-    if (!issueFieldsValid(title, tags)) {
+    if (!evt.Issue.fieldsValid(title, tags)) {
         const form_location = try std.fmt.allocPrint(allocator, "{s}/issues/new", .{base});
         defer allocator.free(form_location);
         try request.respond("", .{
@@ -455,17 +454,6 @@ fn handleIssue(
     });
 }
 
-// a title is required, and a too-long tag would fail consumption after the
-// event is already committed
-fn issueFieldsValid(title: []const u8, tags: []const u8) bool {
-    if (title.len == 0) return false;
-    var tag_iter = evt.Issue.tagIterator(tags);
-    while (tag_iter.next()) |tag| {
-        if (tag.len > evt.Issue.tag_max_len) return false;
-    }
-    return true;
-}
-
 // split an issue url ("/repo/<owner>/<name>/issues/<id>", identity elided in
 // local mode) into what precedes "/issues/" and the decoded id, null when it
 // isn't one. the repo base is validated per host in updateIssue.
@@ -481,12 +469,6 @@ fn issueBaseParts(base: []const u8) ?IssueBaseParts {
     return .{ .repo_base = head[0 .. head.len - issues_infix.len], .id_bytes = id_bytes };
 }
 
-// what an update route replaces on an issue: its status, or its content.
-const IssueUpdate = union(enum) {
-    status: evt.Issue.Status,
-    fields: struct { title: []const u8, tags: []const u8, description: []const u8 },
-};
-
 // re-emit the issue `parts` names with `update` applied, in the repo the
 // host resolves the base to. error.NotFound when the base names no repo or
 // the id no issue.
@@ -495,7 +477,7 @@ fn updateIssue(
     allocator: std.mem.Allocator,
     host: Host,
     parts: IssueBaseParts,
-    update: IssueUpdate,
+    update: evt.Issue.Update,
 ) !void {
     switch (host) {
         .remote => |remote| {
@@ -511,7 +493,7 @@ fn updateIssue(
 
             var repo = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = repo_path });
             defer repo.deinit(io, allocator);
-            try updateIssueInRepo(.xit, .{}, io, allocator, &repo, &parts.id_bytes, update);
+            try evt.Issue.update(.xit, .{}, io, allocator, &repo, &parts.id_bytes, update);
         },
         .local => |src| {
             // the local forms post to "/issues/<id>/...", so the repo base
@@ -522,73 +504,12 @@ fn updateIssue(
                     var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, .{ .path = src.path });
                     defer any_repo.deinit(io, allocator);
                     switch (any_repo) {
-                        inline else => |*repo| try updateIssueInRepo(repo_kind, repo.self_repo_opts, io, allocator, repo, &parts.id_bytes, update),
+                        inline else => |*repo| try evt.Issue.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &parts.id_bytes, update),
                     }
                 },
             }
         },
     }
-}
-
-fn updateIssueInRepo(
-    comptime repo_kind: rp.RepoKind,
-    comptime repo_opts: rp.RepoOpts(repo_kind),
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    repo: *rp.Repo(repo_kind, repo_opts),
-    id_bytes: *const [evt.event_id_size]u8,
-    update: IssueUpdate,
-) !void {
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-
-    const issue = (try readRepoIssue(repo_kind, repo_opts, io, allocator, &arena, repo, id_bytes)) orelse return error.NotFound;
-
-    var updated = issue;
-    switch (update) {
-        .status => |status| {
-            if (issue.status == status) return;
-            updated.status = status;
-        },
-        .fields => |fields| {
-            updated.title = fields.title;
-            updated.tags = fields.tags;
-            updated.description = fields.description;
-        },
-    }
-
-    try evt.commitAndConsume(repo_kind, repo_opts, io, allocator, repo, evt.events_ref, &[_]evt.EventWithId{.{
-        .id = std.fmt.bytesToHex(id_bytes.*, .lower),
-        .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
-        .event = .{ .issue = updated },
-    }});
-}
-
-// the issue `id_bytes` names in the repo's consumed event db (the repo's own
-// db for xit; the side db next to a git repo), or null
-fn readRepoIssue(
-    comptime repo_kind: rp.RepoKind,
-    comptime repo_opts: rp.RepoOpts(repo_kind),
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    arena: *std.heap.ArenaAllocator,
-    repo: *rp.Repo(repo_kind, repo_opts),
-    id_bytes: *const [evt.event_id_size]u8,
-) !?evt.Issue {
-    const DB = evt.EventDB(repo_opts.hash);
-    var event_db_maybe: ?evt.LocalEventDB(repo_opts.hash) = if (repo_kind == .git) try evt.LocalEventDB(repo_opts.hash).openReadOnly(io, allocator, repo.core.repo_dir) else null;
-    defer if (event_db_maybe) |*event_db| event_db.deinit(io, allocator);
-    const moment = (if (event_db_maybe) |*event_db|
-        evt.currentMomentFromDb(repo_opts.hash, event_db.db)
-    else if (repo_kind == .git)
-        return null
-    else
-        evt.currentMoment(repo_opts, repo)) catch return null;
-    const event_id_to_issue_cursor = (try moment.getCursor(hash.hashInt(repo_opts.hash, "event-id->issue"))) orelse return null;
-    const event_id_to_issue = try DB.HashMap(.read_only).init(event_id_to_issue_cursor);
-    const issue_cursor = (try event_id_to_issue.getCursor(hash.hashInt(repo_opts.hash, id_bytes))) orelse return null;
-    const issue_map = try DB.HashMap(.read_only).init(issue_cursor);
-    return try evt.read(evt.Issue, DB, repo_opts.hash, arena, issue_map);
 }
 
 // set the status of the issue the url names (base is
@@ -659,7 +580,7 @@ fn handleIssueEdit(
     defer allocator.free(description);
 
     // invalid fields send the user back to the edit form
-    if (!issueFieldsValid(title, tags)) {
+    if (!evt.Issue.fieldsValid(title, tags)) {
         const form_location = try std.fmt.allocPrint(allocator, "{s}/edit", .{base});
         defer allocator.free(form_location);
         try request.respond("", .{

@@ -1,6 +1,7 @@
 const std = @import("std");
 const evt = @import("../event.zig");
 const xit = @import("xit");
+const rp = xit.repo;
 const hash = xit.hash;
 
 title: []const u8,
@@ -32,6 +33,17 @@ pub fn tagStatusKey(buffer: *TagStatusKey, tag: []const u8, status: Status) ![]c
 
 pub fn tagIterator(tags: []const u8) std.mem.SplitIterator(u8, .scalar) {
     return std.mem.splitScalar(u8, tags, ' ');
+}
+
+// a title is required, and a too-long tag would fail consumption after the
+// event is already committed
+pub fn fieldsValid(title: []const u8, tags: []const u8) bool {
+    if (title.len == 0) return false;
+    var tag_iter = tagIterator(tags);
+    while (tag_iter.next()) |tag| {
+        if (tag.len > tag_max_len) return false;
+    }
+    return true;
 }
 
 // `created_ts` comes from the commit timestamp, not the event
@@ -131,6 +143,76 @@ fn statusSet(
 ) !DB.SortedSet(.read_write) {
     const cursor = try statuses.putCursor(@tagName(status));
     return DB.SortedSet(.read_write).init(cursor);
+}
+
+// what an update replaces on an issue: its status, or its content
+pub const Update = union(enum) {
+    status: Status,
+    fields: struct { title: []const u8, tags: []const u8, description: []const u8 },
+};
+
+// re-emit the issue `id_bytes` names with `change` applied, preserving the
+// rest of its current state. error.NotFound when the id names no issue.
+// `repo` must be writable.
+pub fn update(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    repo: *rp.Repo(repo_kind, repo_opts),
+    id_bytes: *const [evt.event_id_size]u8,
+    change: Update,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const issue = (try readById(repo_kind, repo_opts, io, allocator, &arena, repo, id_bytes)) orelse return error.NotFound;
+
+    var updated = issue;
+    switch (change) {
+        .status => |status| {
+            if (issue.status == status) return;
+            updated.status = status;
+        },
+        .fields => |fields| {
+            updated.title = fields.title;
+            updated.tags = fields.tags;
+            updated.description = fields.description;
+        },
+    }
+
+    try evt.commitAndConsume(repo_kind, repo_opts, io, allocator, repo, evt.events_ref, &[_]evt.EventWithId{.{
+        .id = std.fmt.bytesToHex(id_bytes.*, .lower),
+        .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
+        .event = .{ .issue = updated },
+    }});
+}
+
+// the issue `id_bytes` names in the repo's consumed event db (the repo's own
+// db for xit; the side db next to a git repo), or null
+fn readById(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    arena: *std.heap.ArenaAllocator,
+    repo: *rp.Repo(repo_kind, repo_opts),
+    id_bytes: *const [evt.event_id_size]u8,
+) !?@This() {
+    const DB = evt.EventDB(repo_opts.hash);
+    var event_db_maybe: ?evt.LocalEventDB(repo_opts.hash) = if (repo_kind == .git) try evt.LocalEventDB(repo_opts.hash).openReadOnly(io, allocator, repo.core.repo_dir) else null;
+    defer if (event_db_maybe) |*event_db| event_db.deinit(io, allocator);
+    const moment = (if (event_db_maybe) |*event_db|
+        evt.currentMomentFromDb(repo_opts.hash, event_db.db)
+    else if (repo_kind == .git)
+        return null
+    else
+        evt.currentMoment(repo_opts, repo)) catch return null;
+    const event_id_to_issue_cursor = (try moment.getCursor(hash.hashInt(repo_opts.hash, "event-id->issue"))) orelse return null;
+    const event_id_to_issue = try DB.HashMap(.read_only).init(event_id_to_issue_cursor);
+    const issue_cursor = (try event_id_to_issue.getCursor(hash.hashInt(repo_opts.hash, id_bytes))) orelse return null;
+    const issue_map = try DB.HashMap(.read_only).init(issue_cursor);
+    return try evt.read(@This(), DB, repo_opts.hash, arena, issue_map);
 }
 
 // remove an issue's order key from its tags' `status` sets, pruning entries
