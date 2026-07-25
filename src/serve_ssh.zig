@@ -244,7 +244,10 @@ fn runTui(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh.PtySiz
                     try ui.inputKey(allocator, &nav.root, key, &ui_session);
                 }
             },
-            .close => terminal.requestQuit(),
+            // either way no more input can arrive, so nothing is left to
+            // drive the ui — but on .eof the channel is still open, so the
+            // teardown below still reaches the client.
+            .eof, .close => terminal.requestQuit(),
         }
 
         try ui_session.applyAndWritePending(io, allocator, &repo);

@@ -88,8 +88,10 @@ pub const SSH_EXTENDED_DATA_STDERR: u32 = 1;
 // enough that small interactive sessions never need a WINDOW_ADJUST.
 const initial_recv_window: u32 = 1 << 20;
 const max_packet_size: u32 = 32768;
-const max_incoming_buffered: usize = initial_recv_window;
-const incoming_refill_threshold: usize = max_incoming_buffered / 2;
+// ceiling on unread CHANNEL_DATA held for the consumer. window credit is only
+// ever restored up to what's left of this, so the peer can't send more than
+// the buffer will take.
+const max_incoming_buffered: u32 = initial_recv_window;
 
 /// shared with the host's watchdog. `activity` is bumped only for non-ignored
 /// session packets, `authenticated` releases the hard pre-auth deadline, and
@@ -167,7 +169,8 @@ pub const Request = union(enum) {
 pub const Event = union(enum) {
     data: []u8, // CHANNEL_DATA payload — caller owns and must free via sess.conn.allocator
     resize: PtySize, // window-change request
-    close, // peer sent EOF or CHANNEL_CLOSE
+    eof, // peer sent CHANNEL_EOF: no more input, but we may still write
+    close, // peer sent CHANNEL_CLOSE, or the transport hit EOF
 };
 
 /// per-connection transport state: the byte stream, both ciphers, and what a
@@ -201,7 +204,13 @@ pub const SessionCtx = struct {
     // incoming_start) until drained via SessionReader or nextEvent.
     incoming_buffer: std.ArrayList(u8) = .empty,
     incoming_start: usize = 0,
+    // peer sent CHANNEL_EOF — no more input arrives, but the channel stays
+    // open and we may keep writing (RFC 4254 §5.3)
     incoming_eof: bool = false,
+    // peer sent CHANNEL_CLOSE, or the transport died — the channel is gone
+    remote_closed: bool = false,
+    // .eof is handed to the caller once; later pumps wait for the close
+    eof_reported: bool = false,
     // resize seen by the background pump, returned by the next nextEvent call
     pending_resize: ?PtySize = null,
     // reused per-chunk message buffer for writeChannel
@@ -226,16 +235,14 @@ pub const SessionCtx = struct {
     }
 
     // append to the incoming buffer, first compacting away the consumed
-    // prefix so the buffer only ever holds unread bytes
+    // prefix so the buffer only ever holds unread bytes. bounded by the
+    // receive window, which is never credited past max_incoming_buffered.
     fn appendIncoming(self: *SessionCtx, payload: []const u8) !void {
         if (self.incoming_start > 0) {
             const remaining = self.incoming_buffer.items.len - self.incoming_start;
             std.mem.copyForwards(u8, self.incoming_buffer.items[0..remaining], self.incoming_buffer.items[self.incoming_start..]);
             self.incoming_buffer.shrinkRetainingCapacity(remaining);
             self.incoming_start = 0;
-        }
-        if (payload.len > max_incoming_buffered - self.incoming_buffer.items.len) {
-            return error.IncomingBufferExceeded;
         }
         try self.incoming_buffer.appendSlice(self.conn.allocator, payload);
     }
@@ -262,9 +269,10 @@ pub const SessionCtx = struct {
                 self.consumeIncoming(payload.len);
                 return .{ .data = payload };
             }
-            if (self.incoming_eof) {
-                self.closed = true;
-                return .close;
+            if (self.remote_closed) return .close;
+            if (self.incoming_eof and !self.eof_reported) {
+                self.eof_reported = true;
+                return .eof;
             }
             try self.processOneBackgroundPacket();
         }
@@ -293,7 +301,7 @@ pub const SessionCtx = struct {
         var rest = bytes;
         while (rest.len > 0) {
             while (self.channel.remote_window == 0) {
-                if (self.incoming_eof) return error.RemoteClosed;
+                if (self.remote_closed) return error.RemoteClosed;
                 try self.processOneBackgroundPacket();
             }
             // also clamp to our own max so the chunk fits writePacket's buffer
@@ -323,6 +331,7 @@ pub const SessionCtx = struct {
         const packet = readSessionPacket(conn) catch |err| switch (err) {
             error.EndOfStream => {
                 self.incoming_eof = true;
+                self.remote_closed = true;
                 return;
             },
             else => return err,
@@ -360,18 +369,24 @@ pub const SessionCtx = struct {
                     try replyChannelRequest(conn, self.channel, want_reply, false);
                 }
             },
-            SSH_MSG_CHANNEL_EOF, SSH_MSG_CHANNEL_CLOSE => {
+            SSH_MSG_CHANNEL_EOF => {
                 try parseChannelId(packet, self.channel.local_id);
                 self.incoming_eof = true;
             },
+            SSH_MSG_CHANNEL_CLOSE => {
+                try parseChannelId(packet, self.channel.local_id);
+                self.incoming_eof = true;
+                self.remote_closed = true;
+            },
             SSH_MSG_GLOBAL_REQUEST => try handleGlobalRequest(conn, packet),
-            else => {},
+            else => try sendUnimplemented(conn),
         }
     }
 
     fn maybeRefillRecvWindowForBufferedInput(self: *SessionCtx) !void {
-        if (self.incomingBytes().len >= incoming_refill_threshold) return;
-        try maybeRefillRecvWindow(self.conn, self.channel);
+        // credit only what the incoming buffer can still take
+        const buffered: u32 = @intCast(self.incomingBytes().len);
+        try maybeRefillRecvWindow(self.conn, self.channel, max_incoming_buffered - buffered);
     }
 
     /// signal the consumer's exit status and tear the channel down.
@@ -381,31 +396,38 @@ pub const SessionCtx = struct {
         const conn = self.conn;
         if (conn.cs_cipher.idle) |idle| idle.closing.store(true, .release);
 
-        // exit-status request (informational; client uses it as the
-        // command's exit code)
-        {
-            var req: std.ArrayList(u8) = .empty;
-            defer req.deinit(conn.allocator);
-            try req.append(conn.allocator, SSH_MSG_CHANNEL_REQUEST);
-            try writeU32(&req, conn.allocator, self.channel.remote_id);
-            try writeStringField(&req, conn.allocator, "exit-status");
-            try req.append(conn.allocator, 0); // want_reply MUST be false
-            try writeU32(&req, conn.allocator, status);
-            try conn.sc_cipher.writePacket(conn.io, conn.writer, req.items);
+        // once the peer has sent CHANNEL_CLOSE the channel is gone on its
+        // side, and these would be addressed to an id it no longer knows.
+        if (!self.remote_closed) {
+            // exit-status request (informational; client uses it as the
+            // command's exit code)
+            {
+                var req: std.ArrayList(u8) = .empty;
+                defer req.deinit(conn.allocator);
+                try req.append(conn.allocator, SSH_MSG_CHANNEL_REQUEST);
+                try writeU32(&req, conn.allocator, self.channel.remote_id);
+                try writeStringField(&req, conn.allocator, "exit-status");
+                try req.append(conn.allocator, 0); // want_reply MUST be false
+                try writeU32(&req, conn.allocator, status);
+                try conn.sc_cipher.writePacket(conn.io, conn.writer, req.items);
+            }
+
+            // EOF then CLOSE
+            {
+                var eof: std.ArrayList(u8) = .empty;
+                defer eof.deinit(conn.allocator);
+                try eof.append(conn.allocator, SSH_MSG_CHANNEL_EOF);
+                try writeU32(&eof, conn.allocator, self.channel.remote_id);
+                try conn.sc_cipher.writePacket(conn.io, conn.writer, eof.items);
+            }
+            {
+                var close: std.ArrayList(u8) = .empty;
+                defer close.deinit(conn.allocator);
+                try close.append(conn.allocator, SSH_MSG_CHANNEL_CLOSE);
+                try writeU32(&close, conn.allocator, self.channel.remote_id);
+                try conn.sc_cipher.writePacket(conn.io, conn.writer, close.items);
+            }
         }
-
-        // EOF then CLOSE
-        var eof: std.ArrayList(u8) = .empty;
-        defer eof.deinit(conn.allocator);
-        try eof.append(conn.allocator, SSH_MSG_CHANNEL_EOF);
-        try writeU32(&eof, conn.allocator, self.channel.remote_id);
-        try conn.sc_cipher.writePacket(conn.io, conn.writer, eof.items);
-
-        var close: std.ArrayList(u8) = .empty;
-        defer close.deinit(conn.allocator);
-        try close.append(conn.allocator, SSH_MSG_CHANNEL_CLOSE);
-        try writeU32(&close, conn.allocator, self.channel.remote_id);
-        try conn.sc_cipher.writePacket(conn.io, conn.writer, close.items);
 
         // read and discard until the peer closes (TCP FIN) before letting the
         // caller close the socket. a git client, after our CHANNEL_CLOSE, still
@@ -595,10 +617,33 @@ pub fn handleConnection(
     };
     conn.cs_cipher.idle = idle;
 
-    const fingerprint = try runAuth(&conn);
+    const fingerprint = runAuth(&conn) catch |err| {
+        disconnectOnError(&conn, err);
+        return err;
+    };
     if (idle) |state| state.authenticated.store(true, .release);
 
-    try runChannelLayer(&conn, &fingerprint, handler);
+    runChannelLayer(&conn, &fingerprint, handler) catch |err| {
+        disconnectOnError(&conn, err);
+        return err;
+    };
+}
+
+/// tell the peer why we're hanging up (RFC 4253 §11.1). best effort — a peer
+/// that already went away has nothing left to read it.
+fn disconnectOnError(conn: *Conn, err: anyerror) void {
+    if (err == error.EndOfStream) return; // peer hung up first
+    disconnect(conn, @errorName(err)) catch {};
+}
+
+fn disconnect(conn: *Conn, description: []const u8) !void {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(conn.allocator);
+    try buf.append(conn.allocator, SSH_MSG_DISCONNECT);
+    try writeU32(&buf, conn.allocator, SSH_DISCONNECT_PROTOCOL_ERROR);
+    try writeStringField(&buf, conn.allocator, description);
+    try writeStringField(&buf, conn.allocator, ""); // language tag
+    try conn.sc_cipher.writePacket(conn.io, conn.writer, buf.items);
 }
 
 // ---------------------------------------------------------------------------
@@ -710,6 +755,12 @@ pub fn readSessionPacket(conn: *Conn) ![]u8 {
             conn.allocator.free(packet);
             continue;
         }
+        // the peer is hanging up (RFC 4253 §11.1). same end of the packet
+        // stream as a transport close, so callers handle both the same way.
+        if (packet.len >= 1 and packet[0] == SSH_MSG_DISCONNECT) {
+            conn.allocator.free(packet);
+            return error.EndOfStream;
+        }
         if (packet.len >= 1 and packet[0] == SSH_MSG_KEXINIT) {
             defer conn.allocator.free(packet);
             recordActivity(conn);
@@ -719,6 +770,17 @@ pub fn readSessionPacket(conn: *Conn) ![]u8 {
         recordActivity(conn);
         return packet;
     }
+}
+
+/// RFC 4253 §11.4 — an unrecognized message must be answered with
+/// SSH_MSG_UNIMPLEMENTED carrying the offending packet's sequence number.
+fn sendUnimplemented(conn: *Conn) !void {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(conn.allocator);
+    try buf.append(conn.allocator, SSH_MSG_UNIMPLEMENTED);
+    // the read already advanced past the packet we're rejecting
+    try writeU32(&buf, conn.allocator, @truncate(conn.cs_cipher.seq - 1));
+    try conn.sc_cipher.writePacket(conn.io, conn.writer, buf.items);
 }
 
 fn recordActivity(conn: *Conn) void {
@@ -851,6 +913,7 @@ const ParsedKexInit = struct {
     host_key_algos: []u8,
     cs_cipher: []u8,
     sc_cipher: []u8,
+    first_kex_packet_follows: bool,
 
     fn deinit(self: ParsedKexInit, allocator: std.mem.Allocator) void {
         allocator.free(self.kex_algos);
@@ -881,7 +944,7 @@ fn parseClientKexInit(allocator: std.mem.Allocator, payload: []const u8) !Parsed
         if (len > max_name_list_len) return error.FieldTooLarge;
         try reader.discardAll(len);
     }
-    _ = try reader.takeByte(); // first_kex_packet_follows
+    const first_kex_packet_follows = (try reader.takeByte()) != 0;
     _ = try reader.takeInt(u32, .big); // reserved
 
     return .{
@@ -889,6 +952,7 @@ fn parseClientKexInit(allocator: std.mem.Allocator, payload: []const u8) !Parsed
         .host_key_algos = host_key_algos,
         .cs_cipher = cs_cipher,
         .sc_cipher = sc_cipher,
+        .first_kex_packet_follows = first_kex_packet_follows,
     };
 }
 
@@ -1037,6 +1101,22 @@ fn exchangeKeys(
     if (!nameListContainsAny(parsed.cs_cipher, &our_ciphers)) return error.NoCommonCipher;
     if (!nameListContainsAny(parsed.sc_cipher, &our_ciphers)) return error.NoCommonCipher;
     const hybrid = std.mem.eql(u8, kex_algo, "mlkem768x25519-sha256");
+
+    // a client may follow its KEXINIT with a kex packet for its guess. the
+    // guess is right only when both sides' first kex and host key algorithms
+    // match (RFC 4253 §7.1) — not when the client's first choice merely
+    // happens to be kex_algo, so this compares against our list. a client
+    // whose guess was wrong re-sends an init for the negotiated method.
+    if (parsed.first_kex_packet_follows) {
+        var kex_iter = std.mem.splitScalar(u8, parsed.kex_algos, ',');
+        var host_key_iter = std.mem.splitScalar(u8, parsed.host_key_algos, ',');
+        const guessed_right = std.mem.eql(u8, kex_iter.first(), our_kex_algos[0]) and
+            std.mem.eql(u8, host_key_iter.first(), our_host_key_algos[0]);
+        if (!guessed_right) {
+            const wrong_guess = try transport.readPacket(allocator, reader, strict);
+            allocator.free(wrong_guess);
+        }
+    }
 
     // receive KEX_ECDH_INIT (mlkem768x25519 reuses message code 30 — same
     // wire shape, only the string size differs).
@@ -1689,7 +1769,7 @@ fn runChannelLayer(
                 return;
             },
 
-            else => {}, // ignore unknown messages
+            else => try sendUnimplemented(conn),
         }
     }
 }
@@ -1868,7 +1948,7 @@ fn discardChannelData(conn: *Conn, ch: *Channel, packet: []const u8, extended: b
 
     if (data_len > ch.local_window) return error.WindowExceeded;
     ch.local_window -= data_len;
-    try maybeRefillRecvWindow(conn, ch);
+    try maybeRefillRecvWindow(conn, ch, initial_recv_window);
 }
 
 pub fn parseChannelData(packet: []const u8, extended: bool, expected_channel: u32) ![]const u8 {
@@ -1896,11 +1976,12 @@ fn parseChannelId(packet: []const u8, expected_channel: u32) !void {
 }
 
 /// Send a CHANNEL_WINDOW_ADJUST if our receive window has dipped below half
-/// of the initial value. Used both for the pre-session discard path and by
-/// SessionCtx after it consumes a CHANNEL_DATA payload.
-fn maybeRefillRecvWindow(conn: *Conn, ch: *Channel) !void {
-    if (ch.local_window >= initial_recv_window / 2) return;
-    const add = initial_recv_window - ch.local_window;
+/// of `budget`, the credit we're willing to have outstanding. Used both for
+/// the pre-session discard path and by SessionCtx after it consumes a
+/// CHANNEL_DATA payload.
+fn maybeRefillRecvWindow(conn: *Conn, ch: *Channel, budget: u32) !void {
+    if (ch.local_window >= budget / 2) return;
+    const add = budget - ch.local_window;
     ch.local_window += add;
     var adj: std.ArrayList(u8) = .empty;
     defer adj.deinit(conn.allocator);
