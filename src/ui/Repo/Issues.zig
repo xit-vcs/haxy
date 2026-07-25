@@ -516,7 +516,7 @@ pub const View = struct {
             errdefer title.deinit(allocator);
             title.getFocus().focusable = true;
             if (issue) |i| try title.setContent(allocator, i.title);
-            try box.children.put(allocator, title.getFocus().id, .{ .widget = .{ .text_input = title }, .rect = null, .min_size = null });
+            try box.children.put(allocator, title.getFocus().id, .{ .widget = .{ .text_input = title }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
         }
 
         {
@@ -524,11 +524,11 @@ pub const View = struct {
             errdefer tags.deinit(allocator);
             tags.getFocus().focusable = true;
             if (issue) |i| try tags.setContent(allocator, i.tags);
-            try box.children.put(allocator, tags.getFocus().id, .{ .widget = .{ .text_input = tags }, .rect = null, .min_size = null });
+            try box.children.put(allocator, tags.getFocus().id, .{ .widget = .{ .text_input = tags }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
         }
 
         {
-            var description = try wgt.TextInput(ui.Widget).init(allocator, .{ .label = " description ", .name = "description", .visible_width = null, .rounded_corners = true, .render_content = !wasm, .multiline = true, .visible_height = 5 });
+            var description = try wgt.TextInput(ui.Widget).init(allocator, .{ .label = " description ", .name = "description", .visible_width = null, .rounded_corners = true, .render_content = !wasm, .multiline = true, .scroll = .{ .fill = true } });
             errdefer description.deinit(allocator);
             description.getFocus().focusable = true;
             if (issue) |i| try description.setContent(allocator, i.description);
@@ -542,7 +542,7 @@ pub const View = struct {
             // the renderer distinguishes plain clickables from buttons that
             // should POST to a server route by this kind.
             button.getFocus().kind = .{ .custom = "submit" };
-            try box.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = null });
+            try box.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
         }
 
         // absorbs the leftover min-height the box hands its last child, so
