@@ -449,7 +449,7 @@ fn testPush(
         const oid_before_denied_push = (try server_repo.readRef(io, .{ .kind = .head, .name = "master" })).?;
 
         // force push should be rejected by server due to denyNonFastForwards
-        try client_repo.push(
+        try std.testing.expectError(error.RemoteRejectedRef, client_repo.push(
             io,
             allocator,
             "origin",
@@ -458,7 +458,7 @@ fn testPush(
             .{ .wire = .{ .ssh = .{
                 .command = ssh_cmd_maybe,
             } } },
-        );
+        ));
 
         // verify the server ref was not updated (push was denied)
         {
@@ -1298,5 +1298,5 @@ fn sshCommand(
     const priv_key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "key" });
     defer allocator.free(priv_key_path);
 
-    return try std.fmt.allocPrint(allocator, "ssh -p {} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o IdentityFile=\"{s}\"", .{ ssh_port, priv_key_path });
+    return try std.fmt.allocPrint(allocator, "ssh -p {} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o IdentitiesOnly=yes -o IdentityFile=\"{s}\"", .{ ssh_port, priv_key_path });
 }
