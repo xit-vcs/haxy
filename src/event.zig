@@ -62,25 +62,25 @@ pub const EventWithId = struct {
             kind: EventKind,
             data: ?std.json.Value = null,
         };
-        const json_event = try std.json.parseFromSliceLeaky(JsonEvent, arena.allocator(), message, .{});
+        const json_event = try std.json.parseFromSliceLeaky(JsonEvent, arena.allocator(), message, .{ .ignore_unknown_fields = true });
         return .{
             .id = json_event.id,
             .event = switch (json_event.kind) {
                 .user => .{
                     .user = if (json_event.data) |value|
-                        try std.json.parseFromValueLeaky(User, arena.allocator(), value, .{})
+                        try std.json.parseFromValueLeaky(User, arena.allocator(), value, .{ .ignore_unknown_fields = true })
                     else
                         null,
                 },
                 .repo => .{
                     .repo = if (json_event.data) |value|
-                        try std.json.parseFromValueLeaky(Repo, arena.allocator(), value, .{})
+                        try std.json.parseFromValueLeaky(Repo, arena.allocator(), value, .{ .ignore_unknown_fields = true })
                     else
                         null,
                 },
                 .issue => .{
                     .issue = if (json_event.data) |value|
-                        try std.json.parseFromValueLeaky(Issue, arena.allocator(), value, .{})
+                        try std.json.parseFromValueLeaky(Issue, arena.allocator(), value, .{ .ignore_unknown_fields = true })
                     else
                         null,
                 },
