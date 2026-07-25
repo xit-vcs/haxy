@@ -184,6 +184,7 @@ pub const Conn = struct {
     cs_cipher: Cipher,
     sc_cipher: Cipher,
     rekey: RekeyState,
+    idle: ?*IdleState = null,
 };
 
 /// session bridge handed to the consumer's handleSession callback. exposes a
@@ -250,7 +251,7 @@ pub const SessionCtx = struct {
     /// interactive sessions idle legitimately; tell the host's idle
     /// watchdog to stand down for the rest of this connection.
     pub fn exemptFromIdleTimeout(self: *SessionCtx) void {
-        if (self.conn.cs_cipher.idle) |idle| idle.exempt.store(true, .monotonic);
+        if (self.conn.idle) |idle| idle.exempt.store(true, .monotonic);
     }
 
     /// pump SSH packets until something interesting (data / resize / close)
@@ -394,7 +395,7 @@ pub const SessionCtx = struct {
         if (self.closed) return;
         self.closed = true;
         const conn = self.conn;
-        if (conn.cs_cipher.idle) |idle| idle.closing.store(true, .release);
+        if (conn.idle) |idle| idle.closing.store(true, .release);
 
         // once the peer has sent CHANNEL_CLOSE the channel is gone on its
         // side, and these would be addressed to an id it no longer knows.
@@ -614,8 +615,8 @@ pub fn handleConnection(
             .session_id = kex.session_id,
             .strict = kex.strict,
         },
+        .idle = idle,
     };
-    conn.cs_cipher.idle = idle;
 
     const fingerprint = runAuth(&conn) catch |err| {
         disconnectOnError(&conn, err);
@@ -711,10 +712,14 @@ fn isIgnorableMsg(msg_type: u8) bool {
     return msg_type == SSH_MSG_IGNORE or msg_type == SSH_MSG_UNIMPLEMENTED or msg_type == SSH_MSG_DEBUG;
 }
 
+/// packets handled during the plaintext phase — each direction's cipher picks
+/// up its sequence number where that direction left off.
+pub const PlainSeqs = struct { read: u64 = 0, written: u64 = 0 };
+
 // transport for KEX packets: the initial exchange runs in plaintext, a rekey
 // runs under the current session ciphers.
 pub const KexTransport = union(enum) {
-    plain: *u64, // counts packets read so the caller can seed cipher seqnos
+    plain: *PlainSeqs,
     encrypted: struct { cs: *Cipher, sc: *Cipher },
 
     // read one packet, skipping ignorable messages — unless strict kex is in
@@ -722,9 +727,9 @@ pub const KexTransport = union(enum) {
     pub fn readPacket(self: KexTransport, allocator: std.mem.Allocator, reader: *std.Io.Reader, strict: bool) ![]u8 {
         while (true) {
             const packet = switch (self) {
-                .plain => |count| packet: {
+                .plain => |seqs| packet: {
                     const packet = try readPlainPacket(allocator, reader);
-                    count.* += 1;
+                    seqs.read += 1;
                     break :packet packet;
                 },
                 .encrypted => |ciphers| try ciphers.cs.readPacket(allocator, reader),
@@ -740,7 +745,10 @@ pub const KexTransport = union(enum) {
 
     fn writePacket(self: KexTransport, io: std.Io, writer: *std.Io.Writer, payload: []const u8) !void {
         switch (self) {
-            .plain => try writePlainPacket(io, writer, payload),
+            .plain => |seqs| {
+                try writePlainPacket(io, writer, payload);
+                seqs.written += 1;
+            },
             .encrypted => |ciphers| try ciphers.sc.writePacket(io, writer, payload),
         }
     }
@@ -784,7 +792,7 @@ fn sendUnimplemented(conn: *Conn) !void {
 }
 
 fn recordActivity(conn: *Conn) void {
-    if (conn.cs_cipher.idle) |idle| _ = idle.activity.fetchAdd(1, .monotonic);
+    if (conn.idle) |idle| _ = idle.activity.fetchAdd(1, .monotonic);
 }
 
 // ---------------------------------------------------------------------------
@@ -871,7 +879,7 @@ pub const our_ciphers = [_][]const u8{"chacha20-poly1305@openssh.com"};
 const our_macs = [_][]const u8{}; // none — implicit in the AEAD cipher
 const our_compression = [_][]const u8{"none"};
 
-/// Build a KEXINIT payload with the given algorithm name-lists
+/// build a KEXINIT payload with the given algorithm name-lists
 pub fn buildKexInit(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -977,26 +985,25 @@ fn runKex(
     host_key: *const HostKey,
     client_version: []const u8,
 ) !KexResult {
-    var client_seq: u64 = 0;
-    const transport = KexTransport{ .plain = &client_seq };
+    var seqs: PlainSeqs = .{};
+    const transport = KexTransport{ .plain = &seqs };
 
     // exchange KEXINITs
     const server_kex_init = try buildServerKexInit(io, allocator);
     defer allocator.free(server_kex_init);
-    try writePlainPacket(io, writer, server_kex_init);
+    try transport.writePacket(io, writer, server_kex_init);
 
     const client_kex_init = try transport.readPacket(allocator, reader, false);
     defer allocator.free(client_kex_init);
 
+    var parsed = try parseClientKexInit(allocator, client_kex_init);
+    defer parsed.deinit(allocator);
+
     // strict kex: when the client advertises it, its KEXINIT must be the
     // first packet, ignorable messages are banned until NEWKEYS, and both
     // seqnos reset to 0 after every NEWKEYS.
-    const strict = strict: {
-        var parsed = try parseClientKexInit(allocator, client_kex_init);
-        defer parsed.deinit(allocator);
-        break :strict nameListContainsAny(parsed.kex_algos, &.{kex_strict_client});
-    };
-    if (strict and client_seq != 1) return error.StrictKexViolation;
+    const strict = nameListContainsAny(parsed.kex_algos, &.{kex_strict_client});
+    if (strict and seqs.read != 1) return error.StrictKexViolation;
 
     const negotiated = try exchangeKeys(
         io,
@@ -1009,6 +1016,7 @@ fn runKex(
         client_version,
         client_kex_init,
         server_kex_init,
+        &parsed,
         null,
     );
 
@@ -1016,10 +1024,10 @@ fn runKex(
         .cs_key = negotiated.keys.cs_enc,
         .sc_key = negotiated.keys.sc_enc,
         .session_id = negotiated.exchange_hash,
-        // the server sent exactly KEXINIT, KEX_ECDH_REPLY and NEWKEYS; the
-        // client's count includes any skipped IGNORE/DEBUG packets.
-        .next_cs_seq = if (strict) 0 else client_seq,
-        .next_sc_seq = if (strict) 0 else 3,
+        // each cipher continues its own direction's count; the read side
+        // includes any skipped IGNORE/DEBUG packets.
+        .next_cs_seq = if (strict) 0 else seqs.read,
+        .next_sc_seq = if (strict) 0 else seqs.written,
         .strict = strict,
     };
 }
@@ -1036,6 +1044,9 @@ const RekeyState = struct {
 // the whole exchange under the current keys, then swap the new keys into
 // both ciphers in place.
 fn runRekey(conn: *Conn, client_kex_init: []const u8) !void {
+    var parsed = try parseClientKexInit(conn.allocator, client_kex_init);
+    defer parsed.deinit(conn.allocator);
+
     const server_kex_init = try buildServerKexInit(conn.io, conn.allocator);
     defer conn.allocator.free(server_kex_init);
     try conn.sc_cipher.writePacket(conn.io, conn.writer, server_kex_init);
@@ -1051,6 +1062,7 @@ fn runRekey(conn: *Conn, client_kex_init: []const u8) !void {
         conn.rekey.client_version,
         client_kex_init,
         server_kex_init,
+        &parsed,
         &conn.rekey.session_id,
     );
 
@@ -1067,9 +1079,10 @@ const NegotiatedKeys = struct {
 
 // the KEX core shared by the initial exchange and rekeys: pick algorithms,
 // run the (hybrid) ECDH round trip, exchange NEWKEYS, derive keys. both
-// KEXINIT payloads have already been exchanged by the caller. session_id is
-// null on the initial exchange (where it becomes the exchange hash) and the
-// original session id on a rekey.
+// KEXINIT payloads have already been exchanged by the caller, which also owns
+// `parsed`; the client's raw payload comes along too because the exchange hash
+// covers it verbatim. session_id is null on the initial exchange (where it
+// becomes the exchange hash) and the original session id on a rekey.
 fn exchangeKeys(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -1081,11 +1094,9 @@ fn exchangeKeys(
     client_version: []const u8,
     client_kex_init: []const u8,
     server_kex_init: []const u8,
+    parsed: *const ParsedKexInit,
     session_id: ?*const [Sha256.digest_length]u8,
 ) !NegotiatedKeys {
-    var parsed = try parseClientKexInit(allocator, client_kex_init);
-    defer parsed.deinit(allocator);
-
     // pick the first kex algo in the client's preference list that we also
     // support (RFC 4253 §7.1.3).
     const kex_algo = blk: {
@@ -1347,7 +1358,6 @@ pub const Cipher = struct {
     main_key: [32]u8, // K_2
     header_key: [32]u8, // K_1
     seq: u64,
-    idle: ?*IdleState = null,
 
     pub fn init(key_material: *const [64]u8, initial_seq: u64) Cipher {
         return .{
@@ -1436,9 +1446,11 @@ pub const Cipher = struct {
         const body_len = std.mem.readInt(u32, &length_plain, .big);
         if (body_len < 8 or body_len > max_packet_len or body_len % 8 != 0) return error.InvalidPacketLength;
 
-        const enc_body = try allocator.alloc(u8, body_len);
-        defer allocator.free(enc_body);
-        try reader.readSliceAll(enc_body);
+        // the body allocation becomes the returned payload, so a packet only
+        // ever costs one allocation
+        const body = try allocator.alloc(u8, body_len);
+        errdefer allocator.free(body);
+        try reader.readSliceAll(body);
 
         var tag_recv: [Poly1305.mac_length]u8 = undefined;
         try reader.readSliceAll(&tag_recv);
@@ -1448,21 +1460,24 @@ pub const Cipher = struct {
 
         var poly = Poly1305.init(&poly_key);
         poly.update(&enc_length);
-        poly.update(enc_body);
+        poly.update(body);
         var tag_computed: [Poly1305.mac_length]u8 = undefined;
         poly.final(&tag_computed);
         if (!std.crypto.timing_safe.eql([Poly1305.mac_length]u8, tag_recv, tag_computed)) {
             return error.MacVerificationFailed;
         }
 
-        // decrypt the body in place, then copy out the payload (caller owns)
-        ChaCha20.xor(enc_body, enc_body, 1, self.main_key, nonce);
+        // decrypt the body in place
+        ChaCha20.xor(body, body, 1, self.main_key, nonce);
 
-        const padding_len = enc_body[0];
+        const padding_len = body[0];
         if (padding_len < 4 or 1 + @as(u32, padding_len) > body_len) return error.InvalidPadding;
         const payload_len = body_len - 1 - @as(u32, padding_len);
 
-        const payload = try allocator.dupe(u8, enc_body[1 .. 1 + payload_len]);
+        // shift the payload over the padding_length byte, then release the
+        // trailing padding (caller owns the result)
+        std.mem.copyForwards(u8, body[0..payload_len], body[1 .. 1 + payload_len]);
+        const payload = try allocator.realloc(body, payload_len);
 
         self.seq += 1;
         return payload;
@@ -1606,8 +1621,8 @@ fn sendUserauthFailure(conn: *Conn) !void {
     try conn.sc_cipher.writePacket(conn.io, conn.writer, buf.items);
 }
 
-/// Append the canonical publickey-signed-data bytes (RFC 4252 §7) to `buf`.
-/// Used by the server to recompute the signed input for verification
+/// append the canonical publickey-signed-data bytes (RFC 4252 §7) to `buf`.
+/// used by the server to recompute the signed input for verification
 pub fn appendPublickeySignedData(
     buf: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
@@ -1727,11 +1742,7 @@ fn runChannelLayer(
             SSH_MSG_CHANNEL_REQUEST => {
                 const ch = if (channel) |*c| c else continue;
                 const start_request = try handleChannelRequest(conn, ch, packet, &pending_exec);
-                if (start_request) |req_kind| {
-                    const request: Request = switch (req_kind) {
-                        .shell => .{ .shell = ch.pty },
-                        .exec => .{ .exec = pending_exec.? },
-                    };
+                if (start_request) |request| {
                     var sess = SessionCtx{
                         .conn = conn,
                         .channel = ch,
@@ -1788,8 +1799,8 @@ fn handleGlobalRequest(conn: *Conn, packet: []const u8) !void {
     }
 }
 
-/// Parse a CHANNEL_OPEN. On a session channel, send CHANNEL_OPEN_CONFIRMATION
-/// and return the new Channel. On other types, send CHANNEL_OPEN_FAILURE and
+/// parse a CHANNEL_OPEN. on a session channel, send CHANNEL_OPEN_CONFIRMATION
+/// and return the new Channel. on other types, send CHANNEL_OPEN_FAILURE and
 /// return null.
 fn handleChannelOpen(conn: *Conn, packet: []const u8) !?Channel {
     const allocator = conn.allocator;
@@ -1856,10 +1867,9 @@ fn sendChannelOpenFailure(conn: *Conn, open_packet: []const u8, reason: u32, des
     try conn.sc_cipher.writePacket(conn.io, conn.writer, reply.items);
 }
 
-const RequestKind = enum { shell, exec };
-
-/// Returns the kind of session request if this triggered one, else null.
-fn handleChannelRequest(conn: *Conn, ch: *Channel, packet: []const u8, pending_exec: *?[]u8) !?RequestKind {
+/// returns the session request if this one triggered it, else null. an exec
+/// command is owned by `pending_exec`, which outlives the packet it arrived in.
+fn handleChannelRequest(conn: *Conn, ch: *Channel, packet: []const u8, pending_exec: *?[]u8) !?Request {
     const allocator = conn.allocator;
 
     // byte SSH_MSG_CHANNEL_REQUEST
@@ -1901,7 +1911,7 @@ fn handleChannelRequest(conn: *Conn, ch: *Channel, packet: []const u8, pending_e
 
     if (std.mem.eql(u8, req_type, "shell")) {
         try replyChannelRequest(conn, ch, want_reply, true);
-        return .shell;
+        return .{ .shell = ch.pty };
     }
 
     if (std.mem.eql(u8, req_type, "exec")) {
@@ -1910,7 +1920,7 @@ fn handleChannelRequest(conn: *Conn, ch: *Channel, packet: []const u8, pending_e
         if (pending_exec.*) |old| allocator.free(old);
         pending_exec.* = cmd;
         try replyChannelRequest(conn, ch, want_reply, true);
-        return .exec;
+        return .{ .exec = cmd };
     }
 
     // unknown request kind — fail it
@@ -1975,8 +1985,8 @@ fn parseChannelId(packet: []const u8, expected_channel: u32) !void {
     if (r.buffered().len != 0) return error.InvalidChannelMessage;
 }
 
-/// Send a CHANNEL_WINDOW_ADJUST if our receive window has dipped below half
-/// of `budget`, the credit we're willing to have outstanding. Used both for
+/// send a CHANNEL_WINDOW_ADJUST if our receive window has dipped below half
+/// of `budget`, the credit we're willing to have outstanding. used both for
 /// the pre-session discard path and by SessionCtx after it consumes a
 /// CHANNEL_DATA payload.
 fn maybeRefillRecvWindow(conn: *Conn, ch: *Channel, budget: u32) !void {

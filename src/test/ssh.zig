@@ -95,10 +95,10 @@ test "initial strict kex rejects ignored packets" {
     try proto.writePlainPacket(io, &writer, &.{proto.SSH_MSG_IGNORE});
 
     var reader = std.Io.Reader.fixed(writer.buffered());
-    var client_seq: u64 = 0;
-    const transport = proto.KexTransport{ .plain = &client_seq };
+    var seqs: proto.PlainSeqs = .{};
+    const transport = proto.KexTransport{ .plain = &seqs };
     try std.testing.expectError(error.StrictKexViolation, transport.readPacket(allocator, &reader, true));
-    try std.testing.expectEqual(@as(u64, 1), client_seq);
+    try std.testing.expectEqual(@as(u64, 1), seqs.read);
 }
 
 test "ignored packets do not count as connection activity" {
@@ -112,8 +112,7 @@ test "ignored packets do not count as connection activity" {
     try sender.writePacket(io, &encoded_writer, &.{proto.SSH_MSG_IGNORE});
 
     var idle = proto.IdleState{};
-    var receiver = proto.Cipher.init(&key_material, 0);
-    receiver.idle = &idle;
+    const receiver = proto.Cipher.init(&key_material, 0);
     var reader = std.Io.Reader.fixed(encoded_writer.buffered());
     var output_buf: [1]u8 = undefined;
     var output_writer = std.Io.Writer.fixed(&output_buf);
@@ -125,6 +124,7 @@ test "ignored packets do not count as connection activity" {
         .cs_cipher = receiver,
         .sc_cipher = sender,
         .rekey = undefined,
+        .idle = &idle,
     };
 
     try std.testing.expectError(error.EndOfStream, proto.readSessionPacket(&conn));
@@ -168,8 +168,8 @@ test "SSH-2 negotiation: walk through every step (banner -> KEX -> auth -> chann
     defer c2s.close(io); // unblocks the server even on early test failure
 
     // STEP 1: VERSION EXCHANGE (RFC 4253 §4.2)
-    // Each side writes one "SSH-protoversion-softwareversion\r\n" line.
-    // The exact strings get hashed into the exchange hash later, so they
+    // each side writes one "SSH-protoversion-softwareversion\r\n" line.
+    // the exact strings get hashed into the exchange hash later, so they
     // bind the session's identity.
     try cw.writeAll(client_version ++ "\r\n");
     try cw.flush();
@@ -179,12 +179,12 @@ test "SSH-2 negotiation: walk through every step (banner -> KEX -> auth -> chann
     const v_c = client_version;
 
     // STEP 2: ALGORITHM NEGOTIATION (RFC 4253 §7.1)
-    // Both sides send SSH_MSG_KEXINIT listing supported algorithms, in
+    // both sides send SSH_MSG_KEXINIT listing supported algorithms, in
     // preference order, for: key exchange, host-key signature, c->s and
     // s->c ciphers, c->s and s->c MACs (none with chacha20-poly1305 since
-    // it's an AEAD), c->s and s->c compression, plus languages. The first
+    // it's an AEAD), c->s and s->c compression, plus languages. the first
     // algorithm in each slot that the *client* prefers and the server also
-    // offers is selected. Both raw KEXINITs are hashed into the exchange
+    // offers is selected. both raw KEXINITs are hashed into the exchange
     // hash so tampering is caught at signature verification time.
     const client_kex_init = try proto.buildKexInit(io, allocator, &.{"curve25519-sha256"}, &proto.our_host_key_algos, &proto.our_ciphers);
     defer allocator.free(client_kex_init);
@@ -195,8 +195,8 @@ test "SSH-2 negotiation: walk through every step (banner -> KEX -> auth -> chann
     try std.testing.expectEqual(@as(u8, proto.SSH_MSG_KEXINIT), server_kex_init[0]);
 
     // STEP 3: ECDH KEY EXCHANGE (RFC 8731)
-    // Client generates a fresh X25519 keypair, sends its public ephemeral
-    // q_c in SSH_MSG_KEX_ECDH_INIT. Server:
+    // client generates a fresh X25519 keypair, sends its public ephemeral
+    // q_c in SSH_MSG_KEX_ECDH_INIT. server:
     //   1. generates its own ephemeral
     //   2. computes K = X25519(server_priv, q_c) — shared secret
     //   3. computes H = SHA256(V_C || V_S || I_C || I_S || K_S || q_c || q_s || K)
@@ -204,7 +204,7 @@ test "SSH-2 negotiation: walk through every step (banner -> KEX -> auth -> chann
     //   4. signs H with its long-term host key
     //   5. replies KEX_ECDH_REPLY with K_S (host key blob), q_s, signature
     //
-    // Client verifies the signature against K_S — MITM defense.
+    // client verifies the signature against K_S — MITM defense.
     const client_eph = try newClientEphemeral();
     {
         var pkt: std.ArrayList(u8) = .empty;
@@ -242,11 +242,11 @@ test "SSH-2 negotiation: walk through every step (banner -> KEX -> auth -> chann
     // K = X25519(client_priv, q_s) — same scalarmult on the other side.
     const k = try X25519.scalarmult(client_eph.secret_key, server_eph_pub);
 
-    // Recompute H independently. If the server lied about any input the
+    // recompute H independently. if the server lied about any input the
     // signature won't verify against the trusted host key.
     const h = try proto.computeExchangeHash(allocator, v_c, v_s, client_kex_init, server_kex_init, k_s, &client_eph.public_key, &server_eph_pub, &k, false);
 
-    // Verify the host signature on H.
+    // verify the host signature on H.
     {
         var r = std.Io.Reader.fixed(sig_blob);
         const algo = try proto.takeStringField(allocator, &r, 64);
@@ -261,7 +261,7 @@ test "SSH-2 negotiation: walk through every step (banner -> KEX -> auth -> chann
     }
 
     // STEP 4: NEWKEYS — switch to encrypted mode (RFC 4253 §7.3)
-    // Each side sends a one-byte SSH_MSG_NEWKEYS and starts encrypting
+    // each side sends a one-byte SSH_MSG_NEWKEYS and starts encrypting
     // from the next packet on. chacha20-poly1305@openssh.com needs 64
     // bytes per direction (32 for the body cipher, 32 for the length
     // cipher); only the 'C' (c->s) and 'D' (s->c) RFC 4253 §7.2 outputs
@@ -280,8 +280,8 @@ test "SSH-2 negotiation: walk through every step (banner -> KEX -> auth -> chann
     var sc_cipher = proto.Cipher.init(&keys.sc_enc, 3);
 
     // STEP 5: SERVICE REQUEST (RFC 4253 §10)
-    // First encrypted message: client asks for the "ssh-userauth" service.
-    // Server replies SERVICE_ACCEPT. ("ssh-connection" comes after auth.)
+    // first encrypted message: client asks for the "ssh-userauth" service.
+    // server replies SERVICE_ACCEPT. ("ssh-connection" comes after auth.)
     {
         var req: std.ArrayList(u8) = .empty;
         defer req.deinit(allocator);
@@ -296,8 +296,8 @@ test "SSH-2 negotiation: walk through every step (banner -> KEX -> auth -> chann
     }
 
     // STEP 6: PUBLIC-KEY USERAUTH — PROBE (RFC 4252 §7)
-    // Two-trip dance. Round 1: USERAUTH_REQUEST with method=publickey and
-    // has_signature=false, carrying just the algo + public key blob. The
+    // two-trip dance. round 1: USERAUTH_REQUEST with method=publickey and
+    // has_signature=false, carrying just the algo + public key blob. the
     // server says USERAUTH_PK_OK if it would accept that key (haxy
     // accepts any ed25519) or USERAUTH_FAILURE if not — so the client
     // doesn't waste a signature on a rejected key.
@@ -325,9 +325,9 @@ test "SSH-2 negotiation: walk through every step (banner -> KEX -> auth -> chann
     }
 
     // STEP 7: PUBLIC-KEY USERAUTH — SIGNED REQUEST
-    // Round 2: same USERAUTH_REQUEST, now with has_signature=true and an
+    // round 2: same USERAUTH_REQUEST, now with has_signature=true and an
     // ed25519 signature over the canonical signed-data block — see
-    // proto.appendPublickeySignedData for the exact byte layout. The
+    // proto.appendPublickeySignedData for the exact byte layout. the
     // block includes session_id (== H of the first KEX), so signatures
     // can't be replayed across sessions.
     var signed: std.ArrayList(u8) = .empty;
@@ -361,10 +361,10 @@ test "SSH-2 negotiation: walk through every step (banner -> KEX -> auth -> chann
     }
 
     // STEP 8: CHANNEL_OPEN (RFC 4254 §5.1)
-    // Open a "session" channel — SSH's container for shell/exec/subsystem.
-    // Client picks its own channel id and announces an initial receive
+    // open a "session" channel — SSH's container for shell/exec/subsystem.
+    // client picks its own channel id and announces an initial receive
     // window + max-packet size; server replies CHANNEL_OPEN_CONFIRMATION
-    // with its own channel id and c->s limits. Each side identifies the
+    // with its own channel id and c->s limits. each side identifies the
     // channel by *the other's* id when sending.
     //
     // haxy supports exactly one channel per connection — a second
@@ -392,8 +392,8 @@ test "SSH-2 negotiation: walk through every step (banner -> KEX -> auth -> chann
     }
 
     // STEP 9: CHANNEL_REQUEST exec (RFC 4254 §6.5)
-    // Ask the server to run a command on this channel. Packet is
-    // addressed to the *server's* channel id. With want_reply=true the
+    // ask the server to run a command on this channel. packet is
+    // addressed to the *server's* channel id. with want_reply=true the
     // server must respond CHANNEL_SUCCESS or CHANNEL_FAILURE before any
     // CHANNEL_DATA flows.
     const exec_command = "git-upload-pack 'demo-repo'";
@@ -414,7 +414,7 @@ test "SSH-2 negotiation: walk through every step (banner -> KEX -> auth -> chann
     }
 
     // STEP 10: HANDLER RUNS, CHANNEL TEARDOWN
-    // The server is now in handleSession. Our recording handler returns
+    // the server is now in handleSession. our recording handler returns
     // immediately; runChannelLayer's wrap-up then sends:
     //   - CHANNEL_REQUEST "exit-status" (status=0, want_reply=false)
     //   - CHANNEL_EOF
