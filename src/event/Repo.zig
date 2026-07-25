@@ -6,7 +6,6 @@ const hash = xit.hash;
 user_id: []const u8,
 name: []const u8,
 description: []const u8,
-enable_issue: bool,
 created_ts: u64 = 0, // the commit timestamp of the event that first created this repo
 
 const Self = @This();

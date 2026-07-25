@@ -134,7 +134,6 @@ pub fn init(
             .user_id = "",
             .name = try arena.allocator().dupe(u8, std.fs.path.basename(local.path)),
             .description = "",
-            .enable_issue = true,
         };
         owner_name = "";
     } else {

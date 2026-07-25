@@ -634,7 +634,6 @@ pub fn resolveOrCreateRepo(
             .user_id = &owner_user_id,
             .name = repo_name,
             .description = "",
-            .enable_issue = true,
         } },
     }});
 

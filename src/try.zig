@@ -191,7 +191,6 @@ pub fn main(init: std.process.Init) !void {
                         .user_id = &user_ids[r.user_index],
                         .name = r.name,
                         .description = r.description,
-                        .enable_issue = true,
                     },
                 },
             };

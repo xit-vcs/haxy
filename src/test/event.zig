@@ -730,7 +730,6 @@ test "user and repo" {
                     .user_id = &user_event_id,
                     .name = "ziglings",
                     .description = "Learn the Zig programming language by fixing tiny broken programs",
-                    .enable_issue = true,
                 },
             },
         },
@@ -900,10 +899,10 @@ test "repos and users paginate in creation order" {
     // repos@101..104)
     const events = [_]evt.EventWithId{
         .{ .id = std.fmt.bytesToHex(user_id, .lower), .timestamp = 100, .event = .{ .user = .{ .name = "alice", .display_name = "Alice", .email = "alice@example.test", .password_hash = pw } } },
-        .{ .id = std.fmt.bytesToHex(repo_ids[0], .lower), .timestamp = 101, .event = .{ .repo = .{ .user_id = &user_id, .name = "repo0", .description = "d0", .enable_issue = true } } },
-        .{ .id = std.fmt.bytesToHex(repo_ids[1], .lower), .timestamp = 102, .event = .{ .repo = .{ .user_id = &user_id, .name = "repo1", .description = "d1", .enable_issue = true } } },
-        .{ .id = std.fmt.bytesToHex(repo_ids[2], .lower), .timestamp = 103, .event = .{ .repo = .{ .user_id = &user_id, .name = "repo2", .description = "d2", .enable_issue = true } } },
-        .{ .id = std.fmt.bytesToHex(repo_ids[3], .lower), .timestamp = 104, .event = .{ .repo = .{ .user_id = &user_id, .name = "repo3", .description = "d3", .enable_issue = true } } },
+        .{ .id = std.fmt.bytesToHex(repo_ids[0], .lower), .timestamp = 101, .event = .{ .repo = .{ .user_id = &user_id, .name = "repo0", .description = "d0" } } },
+        .{ .id = std.fmt.bytesToHex(repo_ids[1], .lower), .timestamp = 102, .event = .{ .repo = .{ .user_id = &user_id, .name = "repo1", .description = "d1" } } },
+        .{ .id = std.fmt.bytesToHex(repo_ids[2], .lower), .timestamp = 103, .event = .{ .repo = .{ .user_id = &user_id, .name = "repo2", .description = "d2" } } },
+        .{ .id = std.fmt.bytesToHex(repo_ids[3], .lower), .timestamp = 104, .event = .{ .repo = .{ .user_id = &user_id, .name = "repo3", .description = "d3" } } },
     };
     try evt.commitAndConsume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &events);
 
@@ -928,7 +927,7 @@ test "repos and users paginate in creation order" {
 
     // update repo0 at a later timestamp -> keeps its original slot
     try evt.commitAndConsume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &[_]evt.EventWithId{
-        .{ .id = std.fmt.bytesToHex(repo_ids[0], .lower), .timestamp = 300, .event = .{ .repo = .{ .user_id = &user_id, .name = "repo0", .description = "updated", .enable_issue = true } } },
+        .{ .id = std.fmt.bytesToHex(repo_ids[0], .lower), .timestamp = 300, .event = .{ .repo = .{ .user_id = &user_id, .name = "repo0", .description = "updated" } } },
     });
     {
         const moment = try evt.currentMoment(repo_opts, &repo);
