@@ -18,6 +18,8 @@ const page_size = 20;
 // how many diff hunks one window of a commit's diff shows; "next"/"previous"
 // move to the adjacent window.
 const diff_page = 10;
+// the largest commit message the detail view will read in full.
+const max_message_size = 64 * 1024;
 
 pub const Hunk = struct {
     path: ?[]const u8 = null, // the file this hunk belongs to
@@ -29,7 +31,7 @@ pub const Hunk = struct {
 pub const Commit = struct {
     oid: []const u8,
     date: []const u8, // "YYYY-MM-DD"
-    message: []const u8, // first line only
+    message: []const u8, // trimmed, may be multi-line
     hunks: []const Hunk,
     // the hunk index this window starts at (0 = the first window).
     window_start: usize,
@@ -107,7 +109,7 @@ pub fn init(
             buf[count] = .{
                 .oid = try aa.dupe(u8, &commit_object.oid),
                 .date = try formatDate(aa, md.timestamp),
-                .message = try aa.dupe(u8, firstLine(md.message orelse "")),
+                .message = try readMessage(repo_kind, repo_opts, aa, commit_object),
                 .hunks = &.{},
                 .window_start = 0,
                 .has_prev = false,
@@ -299,11 +301,25 @@ fn formatDate(arena: std.mem.Allocator, timestamp: u64) ![]const u8 {
     });
 }
 
-// the first line of a commit message, with surrounding whitespace trimmed.
+// the whole commit message, trimmed and duped into `aa`. an oversized
+// message falls back to that first line.
+fn readMessage(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    aa: std.mem.Allocator,
+    commit_object: *xit.object.Object(repo_kind, repo_opts),
+) ![]const u8 {
+    const md = commit_object.content.commit.metadata;
+    try commit_object.object_reader.seekTo(commit_object.content.commit.message_position);
+    const message = commit_object.object_reader.interface.allocRemaining(aa, .limited(max_message_size)) catch
+        return try aa.dupe(u8, std.mem.trim(u8, md.message orelse "", " \t\r\n"));
+    return std.mem.trim(u8, message, " \t\r\n");
+}
+
+// the first line of a commit message, for the one-row list entries.
 fn firstLine(message: []const u8) []const u8 {
-    const trimmed = std.mem.trim(u8, message, " \t\r\n");
-    const nl = std.mem.indexOfScalar(u8, trimmed, '\n');
-    return if (nl) |i| trimmed[0..i] else trimmed;
+    const nl = std.mem.indexOfScalar(u8, message, '\n');
+    return if (nl) |i| std.mem.trimEnd(u8, message[0..i], " \t\r") else message;
 }
 
 pub const View = struct {
@@ -315,6 +331,8 @@ pub const View = struct {
     session: *ui.Session,
     // the commit whose diff the pane currently shows (index into data.commits).
     diffed_index: ?usize,
+    // the diff pane's message row, capped to the pane width so it word-wraps.
+    message_id: ?usize,
 
     const header_index: usize = 0;
     const content_index: usize = 1;
@@ -347,7 +365,7 @@ pub const View = struct {
                     // an in-page "ai:" anchor so a commit row is clickable with
                     // js off (the browser follows it, rooting the list there);
                     // with wasm the click just selects it and swaps the diff pane.
-                    try addRow(allocator, &list_box, commit.message, try commitRowLink(session.page_arena, data.identity, commit.oid, ""));
+                    try addRow(allocator, &list_box, firstLine(commit.message), try commitRowLink(session.page_arena, data.identity, commit.oid, ""));
                 }
                 if (data.next_start) |next| {
                     try addRow(allocator, &list_box, "next →", try commitsLink(session.page_arena, data.identity, next, 0, ""));
@@ -395,6 +413,7 @@ pub const View = struct {
             .data = data,
             .session = session,
             .diffed_index = null,
+            .message_id = null,
         };
     }
 
@@ -407,13 +426,12 @@ pub const View = struct {
     }
 
     // one hunk as a focusable multi-line text box. its lines sit flush (the
-    // inner Text rows have no border); the box's hidden border reserves the
-    // space the double border occupies when focused, so focusing doesn't shift
-    // layout. `lines` are joined into the page arena (text_box borrows it).
+    // inner Text rows have no border). `lines` are joined into the page arena
+    // (text_box borrows it).
     fn addHunkBox(self: *View, allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), lines: []const []const u8) !void {
         if (lines.len == 0) return;
         const text = try std.mem.join(self.session.page_arena.allocator(), "\n", lines);
-        var tb = try wgt.TextBox(ui.Widget).init(allocator, text, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .none });
+        var tb = try wgt.TextBox(ui.Widget).init(allocator, text, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
         errdefer tb.deinit(allocator);
         tb.getFocus().focusable = true;
         try box.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
@@ -424,7 +442,7 @@ pub const View = struct {
     // there.
     fn addPathBox(self: *View, allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), path: []const u8, oid: []const u8) !void {
         const link = try commitsLink(self.session.page_arena, self.data.identity, oid, 0, path);
-        var tb = try wgt.TextBox(ui.Widget).init(allocator, path, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .none });
+        var tb = try wgt.TextBox(ui.Widget).init(allocator, path, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
         errdefer tb.deinit(allocator);
         tb.getFocus().focusable = true;
         tb.getFocus().kind = .{ .custom = link };
@@ -436,7 +454,7 @@ pub const View = struct {
     // "a:" link) reloads the page on the adjacent window — same on TUI and web.
     fn addNavLink(self: *View, allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8, oid: []const u8, target_start: usize, path: []const u8) !void {
         const link = try commitsLink(self.session.page_arena, self.data.identity, oid, target_start, path);
-        var tb = try wgt.TextBox(ui.Widget).init(allocator, label, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .none });
+        var tb = try wgt.TextBox(ui.Widget).init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
         errdefer tb.deinit(allocator);
         tb.getFocus().focusable = true;
         tb.getFocus().kind = .{ .custom = link };
@@ -447,11 +465,23 @@ pub const View = struct {
     // this commit's tree, so its files are always viewable as of this object.
     fn addViewFilesLink(self: *View, allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), oid: []const u8) !void {
         const link = try filesObjectLink(self.session.page_arena, self.data.identity, oid);
-        var tb = try wgt.TextBox(ui.Widget).init(allocator, "view files at this commit", .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .none });
+        var tb = try wgt.TextBox(ui.Widget).init(allocator, "view files at this commit", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
         errdefer tb.deinit(allocator);
         tb.getFocus().focusable = true;
         tb.getFocus().kind = .{ .custom = link };
         try box.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
+    }
+
+    // the selected commit's full message, focusable like the rows around it. it
+    // word-wraps, which needs a bounded width: the diff scroll grants its rows
+    // an unbounded one, so build caps this row via `message_id`.
+    fn addMessageBox(self: *View, allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), message: []const u8) !void {
+        if (message.len == 0) return;
+        var tb = try wgt.TextBox(ui.Widget).init(allocator, message, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .word, .label = "commit message" });
+        errdefer tb.deinit(allocator);
+        tb.getFocus().focusable = true;
+        try box.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
+        self.message_id = tb.getFocus().id;
     }
 
     pub fn deinit(self: *View, allocator: std.mem.Allocator) void {
@@ -527,18 +557,6 @@ pub const View = struct {
             }
         }
 
-        // the selected hunk (or a window-navigation row) shows a single border
-        // (the focused TextBox upgrades it to a double border itself, so it
-        // stays single when focus is on the commit list); the rest keep their
-        // space-reserving hidden border.
-        const inner = self.diffInner();
-        for (inner.children.keys(), inner.children.values()) |id, *child| {
-            switch (child.widget) {
-                .text_box => |*tb| tb.options.border_style = if (inner.getFocus().child_id == id) .single else .hidden,
-                else => {},
-            }
-        }
-
         // cap the list at list_max_width only while the diff pane fits beside it.
         // the box drops the diff when the width can't hold both minimums, so when
         // it's that narrow we lift the cap and let the list fill the whole width.
@@ -548,10 +566,18 @@ pub const View = struct {
         // stretch the diff pane across the rest of the width so it fills the area
         // rather than shrinking to its content; its scroll fills the pane. when
         // too narrow for both, it fills the whole width.
-        if (constraint.max_size.width) |w| {
-            self.contentBox().children.values()[diff_index].min_size = .{ .width = if (both_panes_fit) w - list_max_width else w, .height = null };
-        } else {
-            self.contentBox().children.values()[diff_index].min_size = .{ .width = diff_min_width, .height = null };
+        const diff_width: usize = if (constraint.max_size.width) |w|
+            (if (both_panes_fit) w - list_max_width else w)
+        else
+            diff_min_width;
+        self.contentBox().children.values()[diff_index].min_size = .{ .width = diff_width, .height = null };
+
+        // cap the message row so it wraps within the pane, leaving room for the
+        // pane's border and its scrollbar column.
+        if (self.message_id) |id| {
+            if (self.diffInner().children.getPtr(id)) |child| {
+                child.max_size = .{ .width = diff_width -| 3, .height = null };
+            }
         }
 
         // the web bounds the layout to the browser viewport like the terminal;
@@ -582,16 +608,17 @@ pub const View = struct {
         for (inner.children.values()) |*child| child.widget.deinit(allocator);
         inner.children.clearAndFree(allocator);
         inner.getFocus().child_id = null;
+        self.message_id = null;
 
         if (path.len != 0) {
             // the file's path, then a row returning to this commit's unfiltered diff.
-            var label = try wgt.TextBox(ui.Widget).init(allocator, path, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .none });
+            var label = try wgt.TextBox(ui.Widget).init(allocator, path, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer label.deinit(allocator);
             label.getFocus().focusable = true;
             try inner.children.put(allocator, label.getFocus().id, .{ .widget = .{ .text_box = label }, .rect = null, .min_size = null });
             try self.addNavLink(allocator, inner, "← all files", commit.oid, 0, "");
         } else {
-            // the first row always links to viewing the repo's files at this commit.
+            try self.addMessageBox(allocator, inner, commit.message);
             try self.addViewFilesLink(allocator, inner, commit.oid);
         }
 
