@@ -551,7 +551,7 @@ pub fn commitAndConsume(
 
     for (events) |event| {
         json.clearRetainingCapacity();
-        try std.json.Stringify.value(event, .{}, &json.writer);
+        try std.json.Stringify.value(event, .{ .whitespace = .indent_2 }, &json.writer);
         _ = try repo.commitAtRef(io, allocator, .{ .author = "haxy <user@haxy>", .message = json.written(), .timestamp = event.timestamp, .parent_oids = parent_oids }, null, ref);
         // later events parent on the ref's new tip
         parent_oids = null;
