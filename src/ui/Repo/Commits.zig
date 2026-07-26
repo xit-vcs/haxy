@@ -843,9 +843,11 @@ fn commitRowLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, oid
 pub const Header = struct {
     content: []const u8,
 
+    // `value` arrives url-encoded, so decode it for display.
     pub fn init(aa: std.mem.Allocator, ref_or_oid: ui.RoutablePage.RefOrOid, value: []const u8) !Header {
+        const decoded = std.Uri.percentDecodeInPlace(try aa.dupe(u8, value));
         return .{
-            .content = try std.fmt.allocPrint(aa, "viewing {s} {s}", .{ @tagName(ref_or_oid), value }),
+            .content = try std.fmt.allocPrint(aa, "viewing {s} {s}", .{ @tagName(ref_or_oid), decoded }),
         };
     }
 
