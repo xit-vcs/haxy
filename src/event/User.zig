@@ -17,6 +17,19 @@ const Self = @This();
 
 pub const name_max_len = 32;
 
+// the moment keys `evt.merge` reads and writes for this kind
+pub const record_map_key = "event-id->user";
+pub const id_set_key = "user-id-set";
+pub const name_index_key = "name->user-id";
+pub const conflicts_key = "conflicted-user-id->conflict";
+pub const id_to_field_to_oid_key = "user-id->field->oid";
+
+// a user's key in the name index
+pub fn indexKey(self: Self, allocator: std.mem.Allocator) ![]const u8 {
+    _ = allocator;
+    return self.name;
+}
+
 pub fn validateName(name: []const u8) !void {
     if (name.len == 0) return error.NameEmpty;
     if (name.len > name_max_len) return error.NameTooLong;
@@ -64,6 +77,9 @@ pub fn consume(
     event_maybe: ?@This(),
     arena: *std.heap.ArenaAllocator,
     created_ts: u64,
+    // the commit this event came from, recorded against every field it
+    // changes. null from `merge`, which sets oids and conflicts itself.
+    event_oid: ?[]const u8,
 ) !void {
     const user_key = hash.hashInt(hash_kind, event_id);
 
@@ -73,6 +89,12 @@ pub fn consume(
     const name_to_user_id_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, "name->user-id"));
     const name_to_user_id = try DB.HashMap(.read_write).init(name_to_user_id_cursor);
 
+    const conflicts_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, conflicts_key));
+    const conflicts = try DB.SortedMap(.read_write).init(conflicts_cursor);
+
+    const user_id_to_field_to_oid_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, id_to_field_to_oid_key));
+    const user_id_to_field_to_oid = try DB.HashMap(.read_write).init(user_id_to_field_to_oid_cursor);
+
     if (event_maybe) |event| {
         try validateName(event.name);
 
@@ -80,19 +102,29 @@ pub fn consume(
 
         // if this event_id already maps to a user with a different name,
         // drop the stale name->id entry first
+        var existing_event_maybe: ?@This() = null;
         const existing_cursor_maybe = try event_id_to_user.getCursor(user_key);
         if (existing_cursor_maybe) |existing_cursor| {
             const existing_user = try DB.HashMap(.read_only).init(existing_cursor);
             const existing_event = try evt.read(@This(), DB, hash_kind, arena, existing_user);
+            existing_event_maybe = existing_event;
             // updates preserve the original creation timestamp
             event_to_write.created_ts = existing_event.created_ts;
             if (!std.mem.eql(u8, existing_event.name, event.name)) {
                 _ = try name_to_user_id.remove(hash.hashInt(hash_kind, existing_event.name));
             }
+
+            // any event settles the conflict, since resolving in the ui may
+            // keep our own values and so change nothing to detect
+            if (event_oid != null) {
+                _ = try conflicts.remove(&evt.orderKeyDesc(existing_event.created_ts, event_id));
+            }
         } else {
             // first time we've seen this user: stamp it with the commit timestamp
             event_to_write.created_ts = created_ts;
         }
+
+        try evt.writeOid(@This(), DB, hash_kind, user_id_to_field_to_oid, user_key, existing_event_maybe, event, event_oid);
 
         const user_cursor = try event_id_to_user.putCursor(user_key);
         const user = try DB.HashMap(.read_write).init(user_cursor);
@@ -101,12 +133,12 @@ pub fn consume(
         try name_to_user_id.put(hash.hashInt(hash_kind, event.name), .{ .bytes = event_id });
 
         // first time we've seen this user: add it to the ordered set the users
-        // view paginates through. the key (orderKey) embeds the event id, so the
-        // set needs no value.
+        // view paginates through. the key embeds the event id, so the set needs
+        // no value.
         if (existing_cursor_maybe == null) {
             const user_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, "user-id-set"));
             const user_id_set = try DB.SortedSet(.read_write).init(user_id_set_cursor);
-            const order_key = evt.orderKey(event_to_write.created_ts, event_id);
+            const order_key = evt.orderKeyDesc(event_to_write.created_ts, event_id);
             try user_id_set.put(&order_key);
         }
     } else {
@@ -119,8 +151,11 @@ pub fn consume(
             // drop it from the ordered set using its recorded creation timestamp
             const user_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, "user-id-set"));
             const user_id_set = try DB.SortedSet(.read_write).init(user_id_set_cursor);
-            const order_key = evt.orderKey(existing_event.created_ts, event_id);
+            const order_key = evt.orderKeyDesc(existing_event.created_ts, event_id);
             _ = try user_id_set.remove(&order_key);
+
+            _ = try conflicts.remove(&order_key);
+            _ = try user_id_to_field_to_oid.remove(user_key);
         }
 
         if (!try event_id_to_user.remove(user_key)) return error.EventNotFound;

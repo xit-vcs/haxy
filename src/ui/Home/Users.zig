@@ -28,7 +28,7 @@ pub fn init(
 
     var users: std.ArrayList(evt.User.Safe) = .empty;
 
-    // the users ordered by creation time (oldest first); absent until the first
+    // the users ordered by creation time (newest first); absent until the first
     // user exists. keyed by orderKey ([timestamp][event-id]); the trailing bytes
     // of each key are the user event id.
     const user_id_set_cursor = try haxy_moment.getCursor(hash.hashInt(hash_kind, "user-id-set")) orelse

@@ -34,13 +34,16 @@ pub const EventKind = enum {
     issue,
 };
 
+// a null payload deletes the record
+pub const Event = union(EventKind) {
+    user: ?User,
+    repo: ?Repo,
+    issue: ?Issue,
+};
+
 pub const EventWithId = struct {
     id: [event_id_size * 2]u8,
-    event: union(EventKind) {
-        user: ?User,
-        repo: ?Repo,
-        issue: ?Issue,
-    },
+    event: Event,
     timestamp: u64 = 0, // not serialized, because it comes from the commit timestamp
 
     pub fn jsonStringify(self: EventWithId, jw: anytype) !void {
@@ -421,8 +424,10 @@ pub fn consumeInTransaction(
         const haxy_moment = try DB.HashMap(.read_write).init(haxy_moment_cursor);
 
         // merge changes from every parent after the first parent. the common
-        // ancestor is the baseline, so a later parent only contributes values
-        // it changed relative to the merge base.
+        // ancestor is the baseline, so a later parent only contributes records
+        // it changed relative to the merge base. only the record maps are
+        // merged; every other view is derived from them, and each kind's
+        // `consume` re-derives its own as the winning records are written.
         if (parent_oids.len > 1) {
             for (parent_oids[1..]) |*parent_oid| {
                 var oid: [hash.byteLen(repo_opts.hash)]u8 = undefined;
@@ -437,7 +442,10 @@ pub fn consumeInTransaction(
                 const baseline_haxy_moment_cursor = try haxy_moments.getCursor(hash.bytesToInt(repo_opts.hash, &baseline_oid)) orelse return error.CursorNotFound;
                 const baseline_haxy_moment = try DB.HashMap(.read_only).init(baseline_haxy_moment_cursor);
 
-                try mergeChangedMapEntries(DB, allocator, haxy_moment, parent_haxy_moment, baseline_haxy_moment, true);
+                inline for (std.meta.fields(Event)) |field| {
+                    const T = @typeInfo(field.type).optional.child;
+                    try merge(T, DB, repo_opts.hash, allocator, haxy_moment, parent_haxy_moment, baseline_haxy_moment);
+                }
             }
         }
 
@@ -464,9 +472,9 @@ pub fn consumeInTransaction(
             const created_ts = commit_object.content.commit.metadata.timestamp;
 
             switch (event_with_id.event) {
-                .user => |event_maybe| try User.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, event_maybe, &arena, created_ts),
-                .repo => |event_maybe| try Repo.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, event_maybe, &arena, created_ts),
-                .issue => |event_maybe| try Issue.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, event_maybe, &arena, created_ts),
+                .user => |event_maybe| try User.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, event_maybe, &arena, created_ts, &repo_event_oid),
+                .repo => |event_maybe| try Repo.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, event_maybe, &arena, created_ts, &repo_event_oid),
+                .issue => |event_maybe| try Issue.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, event_maybe, &arena, created_ts, &repo_event_oid),
             }
         }
 
@@ -479,6 +487,323 @@ pub fn consumeInTransaction(
 
     if (last_object_id_maybe) |*last_object_id| {
         try moment.put(hash.hashInt(repo_opts.hash, "haxy-last-object-id"), .{ .bytes = last_object_id });
+    }
+}
+
+// the conflicted records of one kind, keyed by the same order key its id set
+// uses, so this doubles as the index the conflicts view lists and counts. every
+// value under an entry is a slot reference to a structure that already exists:
+//
+//   <order key> -> conflict entry
+//     conflicted-fields        the conflicting field names, space separated
+//     base-record              the merge base's whole record
+//     their-record             the merged-in side's whole record
+//     their-field->oid         that side's field name to commit map
+//
+// our own value is the live record and our commit is in the kind's oid map, so
+// neither is repeated here.
+pub const conflicted_fields_key = "conflicted-fields";
+pub const base_record_key = "base-record";
+pub const their_record_key = "their-record";
+pub const their_field_to_oid_key = "their-field->oid";
+
+// record the commit against every field this event changes. a merge passes no
+// oid, since each field's winner may come from a different side.
+pub fn writeOid(
+    comptime T: type,
+    comptime DB: type,
+    comptime hash_kind: hash.HashKind,
+    id_to_field_to_oid: DB.HashMap(.read_write),
+    record_key: hash.HashInt(hash_kind),
+    existing_maybe: ?T,
+    event: T,
+    event_oid: ?[]const u8,
+) !void {
+    const oid = event_oid orelse return;
+
+    // created only once a field actually changes
+    var field_oids: ?DB.SortedMap(.read_write) = null;
+
+    inline for (std.meta.fields(T)) |field| {
+        if (comptime !std.mem.eql(u8, field.name, "created_ts")) {
+            const changed = if (existing_maybe) |existing|
+                !fieldEqual(field.type, @field(existing, field.name), @field(event, field.name))
+            else
+                true;
+            if (changed) {
+                if (field_oids == null) {
+                    field_oids = try DB.SortedMap(.read_write).init(try id_to_field_to_oid.putCursor(record_key));
+                }
+                if (field_oids) |map| try map.put(field.name, .{ .bytes = oid });
+            }
+        }
+    }
+}
+
+// the whole field list, space separated, is the longest it can get
+fn conflictedFieldsMaxLen(comptime T: type) usize {
+    var len: usize = 0;
+    for (std.meta.fields(T)) |field| len += field.name.len + 1;
+    return len;
+}
+
+// what a three-way merge did with a field
+const FieldMerge = enum {
+    // the target's value stands, because neither side changed it, both made the
+    // same change, or only the target changed it
+    kept,
+    parent,
+    conflicted,
+};
+
+// three-way merge each field. one only the parent changed takes the parent's
+// value; one both sides changed differently keeps the target's. a missing
+// baseline makes every differing field a conflict.
+fn mergeFields(
+    comptime T: type,
+    baseline_maybe: ?T,
+    target: T,
+    parent: T,
+    outcome: *[std.meta.fields(T).len]FieldMerge,
+) T {
+    var merged = target;
+
+    inline for (std.meta.fields(T), 0..) |field, i| {
+        if (comptime !std.mem.eql(u8, field.name, "created_ts")) {
+            const target_value = @field(target, field.name);
+            const parent_value = @field(parent, field.name);
+
+            if (!fieldEqual(field.type, target_value, parent_value)) {
+                outcome[i] = if (baseline_maybe) |baseline| blk: {
+                    const baseline_value = @field(baseline, field.name);
+                    if (fieldEqual(field.type, target_value, baseline_value)) {
+                        @field(merged, field.name) = parent_value;
+                        break :blk .parent;
+                    }
+                    // only the target changed it
+                    if (fieldEqual(field.type, parent_value, baseline_value)) break :blk .kept;
+                    break :blk .conflicted;
+                } else .conflicted;
+            }
+        }
+    }
+
+    return merged;
+}
+
+// three-way merge of one kind's records from a merge parent, field by field, so
+// sides editing different fields combine cleanly. the result goes through the
+// kind's `consume`, which re-derives the indexes from it. a field both sides
+// changed differently keeps the target's value and records a conflict entry. a
+// deletion carries over unless the other side changed the record, so a merge
+// never fails.
+pub fn merge(
+    comptime T: type,
+    comptime DB: type,
+    comptime hash_kind: hash.HashKind,
+    allocator: std.mem.Allocator,
+    haxy_moment: DB.HashMap(.read_write),
+    parent_moment: DB.HashMap(.read_only),
+    baseline_moment: DB.HashMap(.read_only),
+) !void {
+    const parent_set_cursor = try parent_moment.getCursor(hash.hashInt(hash_kind, T.id_set_key)) orelse return;
+    const parent_set = try DB.SortedSet(.read_only).init(parent_set_cursor);
+
+    const parent_records_cursor = try parent_moment.getCursor(hash.hashInt(hash_kind, T.record_map_key)) orelse return;
+    const parent_records = try DB.HashMap(.read_only).init(parent_records_cursor);
+
+    var baseline_records: ?DB.HashMap(.read_only) = null;
+    if (try baseline_moment.getCursor(hash.hashInt(hash_kind, T.record_map_key))) |cursor| {
+        baseline_records = try DB.HashMap(.read_only).init(cursor);
+    }
+
+    var parent_conflicts: ?DB.SortedMap(.read_only) = null;
+    if (try parent_moment.getCursor(hash.hashInt(hash_kind, T.conflicts_key))) |cursor| {
+        parent_conflicts = try DB.SortedMap(.read_only).init(cursor);
+    }
+
+    var baseline_conflicts: ?DB.SortedMap(.read_only) = null;
+    if (try baseline_moment.getCursor(hash.hashInt(hash_kind, T.conflicts_key))) |cursor| {
+        baseline_conflicts = try DB.SortedMap(.read_only).init(cursor);
+    }
+
+    var parent_id_to_field_to_oid: ?DB.HashMap(.read_only) = null;
+    if (try parent_moment.getCursor(hash.hashInt(hash_kind, T.id_to_field_to_oid_key))) |cursor| {
+        parent_id_to_field_to_oid = try DB.HashMap(.read_only).init(cursor);
+    }
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    // a record the parent deleted is deleted here too, unless the target
+    // changed it. runs first so a delete and recreate is applied in that order.
+    deletions: {
+        const baseline_map = baseline_records orelse break :deletions;
+        const baseline_set_cursor = try baseline_moment.getCursor(hash.hashInt(hash_kind, T.id_set_key)) orelse break :deletions;
+        const baseline_set = try DB.SortedSet(.read_only).init(baseline_set_cursor);
+
+        var baseline_iter = try baseline_set.iteratorFromIndex(0);
+        while (try baseline_iter.next()) |kv_pair_cursor| {
+            const event_id = try readOrderKeyId(DB, kv_pair_cursor);
+            const record_key = hash.hashInt(hash_kind, &event_id);
+
+            if (null != try parent_records.getSlot(record_key)) continue;
+            const baseline_record_cursor = try baseline_map.getCursor(record_key) orelse continue;
+
+            _ = arena.reset(.retain_capacity);
+
+            // re-derived every iteration, since `consume` writes through its
+            // own handles
+            const target_records_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, T.record_map_key));
+            const target_records = try DB.HashMap(.read_write).init(target_records_cursor);
+            const target_record_cursor = try target_records.getCursor(record_key) orelse continue;
+
+            if (!target_record_cursor.slot().eql(baseline_record_cursor.slot())) {
+                // every write copies the record's block, so only a content
+                // change means the target kept it
+                const target_record = try read(T, DB, hash_kind, &arena, try DB.HashMap(.read_only).init(target_record_cursor));
+                const baseline_record = try read(T, DB, hash_kind, &arena, try DB.HashMap(.read_only).init(baseline_record_cursor));
+                if (!fieldsEqual(T, target_record, baseline_record)) continue;
+            }
+
+            try T.consume(DB, hash_kind, haxy_moment, &event_id, null, &arena, 0, null);
+        }
+    }
+
+    var iter = try parent_set.iteratorFromIndex(0);
+    while (try iter.next()) |kv_pair_cursor| {
+        const event_id = try readOrderKeyId(DB, kv_pair_cursor);
+        const record_key = hash.hashInt(hash_kind, &event_id);
+
+        _ = arena.reset(.retain_capacity);
+
+        const parent_record_cursor = try parent_records.getCursor(record_key) orelse continue;
+        const parent_slot = parent_record_cursor.slot();
+        const baseline_slot = if (baseline_records) |map| try map.getSlot(record_key) else null;
+
+        // the parent left this record alone
+        if (baseline_slot) |slot| {
+            if (slot.eql(parent_slot)) continue;
+        }
+
+        const parent_record = try read(T, DB, hash_kind, &arena, try DB.HashMap(.read_only).init(parent_record_cursor));
+
+        // re-derived every iteration, since `consume` writes through its own
+        // handles
+        const target_records_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, T.record_map_key));
+        const target_records = try DB.HashMap(.read_write).init(target_records_cursor);
+
+        // a record the target doesn't have, or deleted, arrives wholesale from
+        // the parent
+        var outcome: [std.meta.fields(T).len]FieldMerge = @splat(.parent);
+        var merged = parent_record;
+
+        if (try target_records.getCursor(record_key)) |target_record_cursor| {
+            // both sides share the change
+            if (target_record_cursor.slot().eql(parent_slot)) continue;
+
+            const target_record = try read(T, DB, hash_kind, &arena, try DB.HashMap(.read_only).init(target_record_cursor));
+
+            var baseline_record: ?T = null;
+            if (baseline_records) |map| {
+                if (try map.getCursor(record_key)) |baseline_record_cursor| {
+                    baseline_record = try read(T, DB, hash_kind, &arena, try DB.HashMap(.read_only).init(baseline_record_cursor));
+                }
+            }
+
+            outcome = @splat(.kept);
+            merged = mergeFields(T, baseline_record, target_record, parent_record, &outcome);
+        }
+
+        // the index is unique, so a key the target gave to a different record
+        // leaves this one out rather than stranding that one behind a name it
+        // no longer owns
+        if (@hasDecl(T, "name_index_key")) {
+            const index_key = try merged.indexKey(arena.allocator());
+            const name_index_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, T.name_index_key));
+            const name_index = try DB.HashMap(.read_write).init(name_index_cursor);
+            if (try name_index.getCursor(hash.hashInt(hash_kind, index_key))) |owner_cursor| {
+                var owner_id: [event_id_size]u8 = undefined;
+                _ = try owner_cursor.readBytes(&owner_id);
+                if (!std.mem.eql(u8, &owner_id, &event_id)) continue;
+            }
+        }
+
+        // `consume` sets no oids, since each field's winner may come from
+        // a different side
+        try T.consume(DB, hash_kind, haxy_moment, &event_id, merged, &arena, merged.created_ts, null);
+
+        const conflicts_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, T.conflicts_key));
+        const conflicts = try DB.SortedMap(.read_write).init(conflicts_cursor);
+        const id_to_field_to_oid_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, T.id_to_field_to_oid_key));
+        const id_to_field_to_oid = try DB.HashMap(.read_write).init(id_to_field_to_oid_cursor);
+        const merged_key = orderKeyDesc(merged.created_ts, &event_id);
+
+        // both created only once a field actually comes from the parent
+        var parent_field_oids: ?DB.SortedMap(.read_only) = null;
+        if (parent_id_to_field_to_oid) |map| {
+            if (try map.getCursor(record_key)) |field_oids_cursor| {
+                parent_field_oids = try DB.SortedMap(.read_only).init(field_oids_cursor);
+            }
+        }
+        var field_oids: ?DB.SortedMap(.read_write) = null;
+
+        // the fields both sides changed differently, space separated
+        var conflicted_fields: [conflictedFieldsMaxLen(T)]u8 = undefined;
+        var conflicted_len: usize = 0;
+
+        inline for (std.meta.fields(T), 0..) |field, i| {
+            if (comptime !std.mem.eql(u8, field.name, "created_ts")) {
+                switch (outcome[i]) {
+                    // the target's value stands, so its oid does too
+                    .kept => {},
+                    .parent => if (parent_field_oids) |parent_map| {
+                        if (try parent_map.getCursor(field.name)) |oid_cursor| {
+                            if (field_oids == null) {
+                                field_oids = try DB.SortedMap(.read_write).init(try id_to_field_to_oid.putCursor(record_key));
+                            }
+                            if (field_oids) |map| try map.put(field.name, .{ .slot = oid_cursor.slot() });
+                        }
+                    },
+                    .conflicted => {
+                        if (conflicted_len > 0) {
+                            conflicted_fields[conflicted_len] = ' ';
+                            conflicted_len += 1;
+                        }
+                        @memcpy(conflicted_fields[conflicted_len..][0..field.name.len], field.name);
+                        conflicted_len += field.name.len;
+                    },
+                }
+            }
+        }
+
+        if (conflicted_len > 0) {
+            // each side's whole record is stored by reference, so the view can
+            // show any of them or take theirs wholesale
+            _ = try conflicts.remove(&merged_key);
+            const conflict = try DB.HashMap(.read_write).init(try conflicts.putCursor(&merged_key));
+            try conflict.put(hash.hashInt(hash_kind, conflicted_fields_key), .{ .bytes = conflicted_fields[0..conflicted_len] });
+            try conflict.put(hash.hashInt(hash_kind, base_record_key), .{ .slot = baseline_slot });
+            try conflict.put(hash.hashInt(hash_kind, their_record_key), .{ .slot = parent_slot });
+            if (parent_field_oids) |map| {
+                try conflict.put(hash.hashInt(hash_kind, their_field_to_oid_key), .{ .slot = map.slot() });
+            }
+            continue;
+        }
+
+        // created_ts never changes, so the parent keys this record's conflict
+        // identically, and it carries over when the target has none, unless the
+        // parent's entry is unchanged from the baseline, meaning the target
+        // inherited it too and resolving it removed it here.
+        if (parent_conflicts) |map| {
+            if (null == try conflicts.getCursor(&merged_key)) {
+                if (try map.getSlot(&merged_key)) |conflict_slot| {
+                    const baseline_conflict_slot = if (baseline_conflicts) |baseline_map| try baseline_map.getSlot(&merged_key) else null;
+                    const resolved = if (baseline_conflict_slot) |slot| slot.eql(conflict_slot) else false;
+                    if (!resolved) try conflicts.put(&merged_key, .{ .slot = conflict_slot });
+                }
+            }
+        }
     }
 }
 
@@ -572,6 +897,15 @@ pub fn orderKey(timestamp: u64, event_id: *const [event_id_size]u8) [@sizeOf(u64
 
 pub fn orderKeyDesc(timestamp: u64, event_id: *const [event_id_size]u8) [@sizeOf(u64) + event_id_size]u8 {
     return orderKey(std.math.maxInt(u64) - timestamp, event_id);
+}
+
+// the event id embedded in a set entry's order key
+fn readOrderKeyId(comptime DB: type, kv_pair_cursor: DB.Cursor(.read_only)) ![event_id_size]u8 {
+    var cursor = kv_pair_cursor;
+    const kv_pair = try cursor.readKeyValuePair();
+    var order_key: [@sizeOf(u64) + event_id_size]u8 = undefined;
+    _ = try kv_pair.key_cursor.readBytes(&order_key);
+    return order_key[@sizeOf(u64)..][0..event_id_size].*;
 }
 
 // split a pushed "<owner>/<repo>" path into its two components, or null if it
@@ -692,6 +1026,43 @@ pub fn read(
     return event;
 }
 
+// whether two events carry the same data. `created_ts` comes from the commit
+// rather than the payload, so it isn't compared.
+fn fieldsEqual(comptime T: type, a: T, b: T) bool {
+    switch (@typeInfo(T)) {
+        .@"struct" => |struct_info| {
+            inline for (struct_info.fields) |field| {
+                if (comptime std.mem.eql(u8, field.name, "created_ts")) continue;
+                if (!fieldEqual(field.type, @field(a, field.name), @field(b, field.name))) return false;
+            }
+        },
+        else => @compileError("fieldsEqual expects a struct"),
+    }
+
+    return true;
+}
+
+pub fn fieldEqual(comptime Field: type, a: Field, b: Field) bool {
+    switch (@typeInfo(Field)) {
+        .pointer => |pointer_info| {
+            if (pointer_info.size == .slice and pointer_info.child == u8) {
+                return std.mem.eql(u8, a, b);
+            } else {
+                @compileError("unsupported field type: " ++ @typeName(Field));
+            }
+        },
+        .array => |array_info| {
+            if (array_info.child == u8) {
+                return std.mem.eql(u8, &a, &b);
+            } else {
+                @compileError("unsupported field type: " ++ @typeName(Field));
+            }
+        },
+        .bool, .int, .@"enum" => return a == b,
+        else => @compileError("unsupported field type: " ++ @typeName(Field)),
+    }
+}
+
 fn readBytes(
     comptime DB: type,
     comptime hash_kind: hash.HashKind,
@@ -757,193 +1128,6 @@ pub fn upsert(
             }
         },
         else => @compileError("upsert expects a struct"),
-    }
-}
-
-// three-way merge of a hash map
-fn mergeChangedMapEntries(
-    comptime DB: type,
-    allocator: std.mem.Allocator,
-    target: DB.HashMap(.read_write),
-    parent: DB.HashMap(.read_only),
-    baseline: DB.HashMap(.read_only),
-    comptime is_top_level: bool,
-) !void {
-    var parent_iter = try parent.iterator();
-    while (try parent_iter.next()) |kv_pair_cursor| {
-        const kv_pair = try kv_pair_cursor.readKeyValuePair();
-
-        const baseline_value_cursor = try baseline.getCursor(kv_pair.hash) orelse {
-            if ((try target.getCursor(kv_pair.hash)) != null) {
-                return error.MergeConflict;
-            }
-
-            try target.put(kv_pair.hash, .{ .slot = kv_pair.value_cursor.slot() });
-            continue;
-        };
-
-        const tag = kv_pair.value_cursor.slot().tag;
-
-        if (tag != baseline_value_cursor.slot().tag) {
-            return error.UnexpectedTag;
-        }
-
-        if (kv_pair.value_cursor.slot().value == baseline_value_cursor.slot().value) {
-            continue;
-        }
-
-        if (tag == .hash_map) {
-            const target_existing_cursor = try target.getCursor(kv_pair.hash) orelse return error.MergeConflict;
-            if (target_existing_cursor.slot().tag != .hash_map) {
-                return error.UnexpectedTag;
-            }
-
-            const target_child_cursor = try target.putCursor(kv_pair.hash);
-            const target_child = try DB.HashMap(.read_write).init(target_child_cursor);
-            const parent_child = try DB.HashMap(.read_only).init(kv_pair.value_cursor);
-            const baseline_child = try DB.HashMap(.read_only).init(baseline_value_cursor);
-            try mergeChangedMapEntries(DB, allocator, target_child, parent_child, baseline_child, false);
-        } else if (tag == .sorted_set) {
-            const target_existing_cursor = try target.getCursor(kv_pair.hash) orelse return error.MergeConflict;
-            if (target_existing_cursor.slot().tag != .sorted_set) {
-                return error.UnexpectedTag;
-            }
-
-            const target_child_cursor = try target.putCursor(kv_pair.hash);
-            const target_child = try DB.SortedSet(.read_write).init(target_child_cursor);
-            const parent_child = try DB.SortedSet(.read_only).init(kv_pair.value_cursor);
-            const baseline_child = try DB.SortedSet(.read_only).init(baseline_value_cursor);
-            try mergeChangedSetEntries(DB, allocator, target_child, parent_child, baseline_child);
-        } else if (tag == .sorted_map) {
-            const target_existing_cursor = try target.getCursor(kv_pair.hash) orelse return error.MergeConflict;
-            if (target_existing_cursor.slot().tag != .sorted_map) {
-                return error.UnexpectedTag;
-            }
-
-            const target_child_cursor = try target.putCursor(kv_pair.hash);
-            const target_child = try DB.SortedMap(.read_write).init(target_child_cursor);
-            const parent_child = try DB.SortedMap(.read_only).init(kv_pair.value_cursor);
-            const baseline_child = try DB.SortedMap(.read_only).init(baseline_value_cursor);
-            try mergeChangedSortedMapEntries(DB, allocator, target_child, parent_child, baseline_child);
-        } else if (is_top_level) {
-            // the moment-index is a top-level key in the haxy moment
-            // and is not a map. we don't want to do any merge of this.
-            continue;
-        } else {
-            const target_value_cursor = try target.getCursor(kv_pair.hash) orelse return error.MergeConflict;
-            if (target_value_cursor.slot().tag != baseline_value_cursor.slot().tag) {
-                return error.UnexpectedTag;
-            }
-            if (target_value_cursor.slot().value != baseline_value_cursor.slot().value) {
-                return error.MergeConflict;
-            }
-
-            try target.put(kv_pair.hash, .{ .slot = kv_pair.value_cursor.slot() });
-        }
-    }
-}
-
-// three-way merge of a sorted map
-fn mergeChangedSortedMapEntries(
-    comptime DB: type,
-    allocator: std.mem.Allocator,
-    target: DB.SortedMap(.read_write),
-    parent: DB.SortedMap(.read_only),
-    baseline: DB.SortedMap(.read_only),
-) !void {
-    var parent_iter = try parent.iterator();
-    while (try parent_iter.next()) |kv_pair_cursor| {
-        const kv_pair = try kv_pair_cursor.readKeyValuePair();
-        const key = try kv_pair.key_cursor.readBytesAlloc(allocator, null);
-        defer allocator.free(key);
-
-        const baseline_value_cursor = try baseline.getCursor(key) orelse {
-            if (try target.getCursor(key)) |target_existing_cursor| {
-                // both parents created this key. sets union (they hold
-                // independently added members); anything else conflicts.
-                const parent_tag = kv_pair.value_cursor.slot().tag;
-                if (target_existing_cursor.slot().tag != parent_tag) {
-                    return error.UnexpectedTag;
-                }
-                if (parent_tag != .sorted_set) {
-                    return error.MergeConflict;
-                }
-
-                const target_child_cursor = try target.putCursor(key);
-                const target_child = try DB.SortedSet(.read_write).init(target_child_cursor);
-                const parent_child = try DB.SortedSet(.read_only).init(kv_pair.value_cursor);
-                var set_iter = try parent_child.iterator();
-                while (try set_iter.next()) |set_kv_cursor| {
-                    const set_kv = try set_kv_cursor.readKeyValuePair();
-                    const set_key = try set_kv.key_cursor.readBytesAlloc(allocator, null);
-                    defer allocator.free(set_key);
-                    try target_child.put(set_key);
-                }
-                continue;
-            }
-
-            try target.put(key, .{ .slot = kv_pair.value_cursor.slot() });
-            continue;
-        };
-
-        const tag = kv_pair.value_cursor.slot().tag;
-
-        if (tag != baseline_value_cursor.slot().tag) {
-            return error.UnexpectedTag;
-        }
-
-        if (kv_pair.value_cursor.slot().value == baseline_value_cursor.slot().value) {
-            continue;
-        }
-
-        if (tag == .sorted_set) {
-            const target_existing_cursor = try target.getCursor(key) orelse return error.MergeConflict;
-            if (target_existing_cursor.slot().tag != .sorted_set) {
-                return error.UnexpectedTag;
-            }
-
-            const target_child_cursor = try target.putCursor(key);
-            const target_child = try DB.SortedSet(.read_write).init(target_child_cursor);
-            const parent_child = try DB.SortedSet(.read_only).init(kv_pair.value_cursor);
-            const baseline_child = try DB.SortedSet(.read_only).init(baseline_value_cursor);
-            try mergeChangedSetEntries(DB, allocator, target_child, parent_child, baseline_child);
-        } else {
-            const target_value_cursor = try target.getCursor(key) orelse return error.MergeConflict;
-            if (target_value_cursor.slot().tag != baseline_value_cursor.slot().tag) {
-                return error.UnexpectedTag;
-            }
-            if (target_value_cursor.slot().value != baseline_value_cursor.slot().value) {
-                return error.MergeConflict;
-            }
-
-            try target.put(key, .{ .slot = kv_pair.value_cursor.slot() });
-        }
-    }
-}
-
-// three-way merge of a sorted set: apply the parent's changes relative to the
-// baseline. keys have no values, so additions and removals can't conflict.
-fn mergeChangedSetEntries(
-    comptime DB: type,
-    allocator: std.mem.Allocator,
-    target: DB.SortedSet(.read_write),
-    parent: DB.SortedSet(.read_only),
-    baseline: DB.SortedSet(.read_only),
-) !void {
-    var parent_iter = try parent.iterator();
-    while (try parent_iter.next()) |kv_pair_cursor| {
-        const kv_pair = try kv_pair_cursor.readKeyValuePair();
-        const key = try kv_pair.key_cursor.readBytesAlloc(allocator, null);
-        defer allocator.free(key);
-        if (!try baseline.contains(key)) try target.put(key);
-    }
-
-    var baseline_iter = try baseline.iterator();
-    while (try baseline_iter.next()) |kv_pair_cursor| {
-        const kv_pair = try kv_pair_cursor.readKeyValuePair();
-        const key = try kv_pair.key_cursor.readBytesAlloc(allocator, null);
-        defer allocator.free(key);
-        if (!try parent.contains(key)) _ = try target.remove(key);
     }
 }
 

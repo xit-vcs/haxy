@@ -610,6 +610,8 @@ test "merge" {
     // insert issues as commits in the repo on different branches
     //
 
+    var conflicting_oids: [events_to_consume3.len][hash.byteLen(repo_opts.hash)]u8 = undefined;
+
     {
         var json: std.Io.Writer.Allocating = .init(allocator);
         defer json.deinit();
@@ -620,7 +622,7 @@ test "merge" {
             try std.json.Stringify.value(event, .{}, &json.writer);
 
             // commit the event into a special branch
-            _ = try repo.commitAtRef(
+            const oid = try repo.commitAtRef(
                 io,
                 allocator,
                 .{ .parent_oids = &.{merge_oid}, .message = json.written() },
@@ -631,12 +633,257 @@ test "merge" {
                     else => unreachable,
                 },
             );
+            _ = try std.fmt.hexToBytes(&conflicting_oids[i], &oid);
         }
     }
 
     //
     // check out the events branch and merge the other events branch into it
     //
+
+    const conflicting_merge_oid = blk: {
+        var result = try repo.switchDir(io, allocator, .{ .target = .{ .ref = evt.events_ref } });
+        defer result.deinit();
+
+        var merge = try repo.merge(io, allocator, .{ .kind = .full, .action = .{ .new = .{ .source = &.{.{ .ref = other_events_ref }} } } }, null);
+        defer merge.deinit();
+
+        try std.testing.expect(.success == merge.result);
+
+        break :blk merge.result.success.oid;
+    };
+
+    //
+    // consume events into the database
+    //
+
+    var issue_id: [evt.event_id_size]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&issue_id, &events_to_consume[0].id);
+
+    {
+        try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref);
+
+        // consuming the merge again must be a no-op rather than replaying it
+        try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref);
+
+        const haxy_moment = try evt.currentMoment(repo_opts, &repo);
+
+        // the first parent is the events branch, so its version stays live
+        const issue = try readIssue(Repo.DB, repo_opts.hash, haxy_moment, &arena, &issue_id);
+        try std.testing.expectEqualStrings("bug priority-low ui", issue.tags);
+
+        // the issue is listed as conflicted, with the merge base recorded
+        const conflicts_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Issue.conflicts_key)) orelse return error.NotFound;
+        const conflicts = try Repo.DB.SortedMap(.read_only).init(conflicts_cursor);
+        try std.testing.expectEqual(1, try conflicts.count());
+
+        const order_key = evt.orderKeyDesc(issue.created_ts, &issue_id);
+        const conflict_cursor = try conflicts.getCursor(&order_key) orelse return error.NotFound;
+        const conflict = try Repo.DB.HashMap(.read_only).init(conflict_cursor);
+
+        const base_cursor = try conflict.getCursor(hash.hashInt(repo_opts.hash, evt.base_record_key)) orelse return error.NotFound;
+        const base = try evt.read(evt.Issue, Repo.DB, repo_opts.hash, &arena, try Repo.DB.HashMap(.read_only).init(base_cursor));
+        try std.testing.expectEqualStrings("bug priority-high ui", base.tags);
+
+        // tags is the one field both sides changed differently
+        const fields_cursor = try conflict.getCursor(hash.hashInt(repo_opts.hash, evt.conflicted_fields_key)) orelse return error.NotFound;
+        const conflicted_fields = try fields_cursor.readBytesAlloc(arena.allocator(), null);
+        try std.testing.expectEqualStrings("tags", conflicted_fields);
+
+        // their whole version is recorded, not just the conflicting field
+        const their_cursor = try conflict.getCursor(hash.hashInt(repo_opts.hash, evt.their_record_key)) orelse return error.NotFound;
+        const theirs = try evt.read(evt.Issue, Repo.DB, repo_opts.hash, &arena, try Repo.DB.HashMap(.read_only).init(their_cursor));
+        try std.testing.expectEqualStrings("bug priority-medium ui", theirs.tags);
+        try std.testing.expectEqualStrings(issue.title, theirs.title);
+        try std.testing.expectEqualStrings(issue.description, theirs.description);
+
+        // their value is attributed to the commit that set it on their branch
+        const oids_cursor = try conflict.getCursor(hash.hashInt(repo_opts.hash, evt.their_field_to_oid_key)) orelse return error.NotFound;
+        const oids = try Repo.DB.SortedMap(.read_only).init(oids_cursor);
+        const oid_cursor = try oids.getCursor("tags") orelse return error.NotFound;
+        var their_oid: [hash.byteLen(repo_opts.hash)]u8 = undefined;
+        _ = try oid_cursor.readBytes(&their_oid);
+        try std.testing.expectEqualSlices(u8, &conflicting_oids[1], &their_oid);
+
+        // ours stays attributed to the commit on the events branch
+        try std.testing.expectEqualSlices(u8, &conflicting_oids[0], &try readOid(Repo.DB, repo_opts.hash, haxy_moment, &issue_id, "tags"));
+
+        // the losing side's tag didn't leak into the tag index
+        const tag_to_issues_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, "tag+status->issue-id-set")) orelse return error.NotFound;
+        const tag_to_issues = try Repo.DB.SortedMap(.read_only).init(tag_to_issues_cursor);
+        try std.testing.expect(null != try tag_to_issues.getCursor("priority-low open"));
+        try std.testing.expect(null == try tag_to_issues.getCursor("priority-medium open"));
+    }
+
+    //
+    // a merge that touches the issue without conflicting leaves the conflict
+    // alone, since only events settle one
+    //
+
+    {
+        const their_issue = events_to_consume3[1].event.issue orelse return error.NotFound;
+
+        var json: std.Io.Writer.Allocating = .init(allocator);
+        defer json.deinit();
+
+        // the other branch never saw the conflict and rewrites an unrelated
+        // field
+        const event = evt.EventWithId{ .id = events_to_consume3[1].id, .event = .{ .issue = .{
+            .title = their_issue.title,
+            .description = "Rewritten on a branch that never merged.",
+            .tags = their_issue.tags,
+        } } };
+        try std.json.Stringify.value(event, .{}, &json.writer);
+        _ = try repo.commitAtRef(io, allocator, .{ .message = json.written() }, null, other_events_ref);
+
+        {
+            var result = try repo.switchDir(io, allocator, .{ .target = .{ .ref = evt.events_ref } });
+            defer result.deinit();
+
+            var merge = try repo.merge(io, allocator, .{ .kind = .full, .action = .{ .new = .{ .source = &.{.{ .ref = other_events_ref }} } } }, null);
+            defer merge.deinit();
+
+            try std.testing.expect(.success == merge.result);
+        }
+
+        try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref);
+
+        const haxy_moment = try evt.currentMoment(repo_opts, &repo);
+
+        // their edit came over, so the merge really did touch the issue
+        const issue = try readIssue(Repo.DB, repo_opts.hash, haxy_moment, &arena, &issue_id);
+        try std.testing.expectEqualStrings("Rewritten on a branch that never merged.", issue.description);
+
+        // and the conflict is still waiting to be resolved
+        const conflicts_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Issue.conflicts_key)) orelse return error.NotFound;
+        const conflicts = try Repo.DB.SortedMap(.read_only).init(conflicts_cursor);
+        try std.testing.expectEqual(1, try conflicts.count());
+    }
+
+    //
+    // any event settles the conflict, even one that changes no conflicting
+    // field
+    //
+
+    {
+        try evt.Issue.update(.xit, repo_opts, io, allocator, &repo, &issue_id, .{ .status = .closed });
+
+        const haxy_moment = try evt.currentMoment(repo_opts, &repo);
+        const conflicts_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Issue.conflicts_key)) orelse return error.NotFound;
+        const conflicts = try Repo.DB.SortedMap(.read_only).init(conflicts_cursor);
+        try std.testing.expectEqual(0, try conflicts.count());
+    }
+
+    //
+    // edit the issue, so the merge below has a resolution to preserve
+    //
+
+    {
+        try evt.Issue.update(.xit, repo_opts, io, allocator, &repo, &issue_id, .{ .fields = .{
+            .title = "Login form clears password on validation error",
+            .tags = "bug priority-medium ui",
+            .description = "Submitting an invalid email address resets the password field.",
+        } });
+    }
+
+    //
+    // merging a branch that still holds the settled conflict must not bring it
+    // back
+    //
+
+    {
+        const conflicted_issue = events_to_consume3[0].event.issue orelse return error.NotFound;
+
+        var json: std.Io.Writer.Allocating = .init(allocator);
+        defer json.deinit();
+
+        // the other branch changes the record on a commit that predates the
+        // resolution, so it still carries the conflict
+        const event = evt.EventWithId{ .id = events_to_consume3[0].id, .event = .{ .issue = .{
+            .title = conflicted_issue.title,
+            .description = conflicted_issue.description,
+            .tags = conflicted_issue.tags,
+            .status = .closed,
+        } } };
+        try std.json.Stringify.value(event, .{}, &json.writer);
+        _ = try repo.commitAtRef(io, allocator, .{ .parent_oids = &.{conflicting_merge_oid}, .message = json.written() }, null, other_events_ref);
+
+        {
+            var result = try repo.switchDir(io, allocator, .{ .target = .{ .ref = evt.events_ref } });
+            defer result.deinit();
+
+            var merge = try repo.merge(io, allocator, .{ .kind = .full, .action = .{ .new = .{ .source = &.{.{ .ref = other_events_ref }} } } }, null);
+            defer merge.deinit();
+
+            try std.testing.expect(.success == merge.result);
+        }
+
+        try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref);
+
+        const haxy_moment = try evt.currentMoment(repo_opts, &repo);
+
+        const conflicts_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Issue.conflicts_key)) orelse return error.NotFound;
+        const conflicts = try Repo.DB.SortedMap(.read_only).init(conflicts_cursor);
+        try std.testing.expectEqual(0, try conflicts.count());
+
+        // and the resolution stands
+        const issue = try readIssue(Repo.DB, repo_opts.hash, haxy_moment, &arena, &issue_id);
+        try std.testing.expectEqualStrings("bug priority-medium ui", issue.tags);
+    }
+
+    //
+    // diverge again, with each side editing different fields of one issue and
+    // only the other side touching a second issue
+    //
+
+    const second_issue = events_to_consume[1].event.issue orelse return error.NotFound;
+    const third_issue = events_to_consume[2].event.issue orelse return error.NotFound;
+
+    var retitle_oid: [hash.byteLen(repo_opts.hash)]u8 = undefined;
+    var rewrite_oid: [hash.byteLen(repo_opts.hash)]u8 = undefined;
+
+    {
+        const base_oid = try repo.readRef(io, evt.events_ref) orelse return error.NotFound;
+
+        var json: std.Io.Writer.Allocating = .init(allocator);
+        defer json.deinit();
+
+        // the events branch only retitles the second issue
+        {
+            const event = evt.EventWithId{ .id = events_to_consume[1].id, .event = .{ .issue = .{
+                .title = "Search results ignore the archived project filter",
+                .description = second_issue.description,
+                .tags = second_issue.tags,
+            } } };
+            try std.json.Stringify.value(event, .{}, &json.writer);
+            const oid = try repo.commitAtRef(io, allocator, .{ .message = json.written() }, null, evt.events_ref);
+            _ = try std.fmt.hexToBytes(&retitle_oid, &oid);
+        }
+
+        // the other branch rewrites the second issue's description and drops one
+        // of its tags, then retags the third issue
+        {
+            json.clearRetainingCapacity();
+            const event = evt.EventWithId{ .id = events_to_consume[1].id, .event = .{ .issue = .{
+                .title = second_issue.title,
+                .description = "Archived projects are ranked before the flag is applied.",
+                .tags = "bug search",
+            } } };
+            try std.json.Stringify.value(event, .{}, &json.writer);
+            const oid = try repo.commitAtRef(io, allocator, .{ .parent_oids = &.{base_oid}, .message = json.written() }, null, other_events_ref);
+            _ = try std.fmt.hexToBytes(&rewrite_oid, &oid);
+        }
+        {
+            json.clearRetainingCapacity();
+            const event = evt.EventWithId{ .id = events_to_consume[2].id, .event = .{ .issue = .{
+                .title = third_issue.title,
+                .description = third_issue.description,
+                .tags = "enhancement roadmap",
+            } } };
+            try std.json.Stringify.value(event, .{}, &json.writer);
+            _ = try repo.commitAtRef(io, allocator, .{ .message = json.written() }, null, other_events_ref);
+        }
+    }
 
     {
         var result = try repo.switchDir(io, allocator, .{ .target = .{ .ref = evt.events_ref } });
@@ -648,11 +895,144 @@ test "merge" {
         try std.testing.expect(.success == merge.result);
     }
 
+    {
+        try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref);
+
+        const haxy_moment = try evt.currentMoment(repo_opts, &repo);
+
+        var second_id: [evt.event_id_size]u8 = undefined;
+        _ = try std.fmt.hexToBytes(&second_id, &events_to_consume[1].id);
+
+        // each side's edit to a different field survives, without conflicting
+        const merged = try readIssue(Repo.DB, repo_opts.hash, haxy_moment, &arena, &second_id);
+        try std.testing.expectEqualStrings("Search results ignore the archived project filter", merged.title);
+        try std.testing.expectEqualStrings("Archived projects are ranked before the flag is applied.", merged.description);
+        try std.testing.expectEqualStrings("bug search", merged.tags);
+
+        // each merged field is attributed to the branch it came from
+        try std.testing.expectEqualSlices(u8, &retitle_oid, &try readOid(Repo.DB, repo_opts.hash, haxy_moment, &second_id, "title"));
+        try std.testing.expectEqualSlices(u8, &rewrite_oid, &try readOid(Repo.DB, repo_opts.hash, haxy_moment, &second_id, "description"));
+
+        const conflicts_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Issue.conflicts_key)) orelse return error.NotFound;
+        const conflicts = try Repo.DB.SortedMap(.read_only).init(conflicts_cursor);
+        try std.testing.expectEqual(0, try conflicts.count());
+
+        // tags the merged-in side dropped don't survive in the tag index,
+        // whether we edited that issue or left it alone
+        const tag_to_issues_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, "tag+status->issue-id-set")) orelse return error.NotFound;
+        const tag_to_issues = try Repo.DB.SortedMap(.read_only).init(tag_to_issues_cursor);
+
+        var third_id: [evt.event_id_size]u8 = undefined;
+        _ = try std.fmt.hexToBytes(&third_id, &events_to_consume[2].id);
+        const retagged = try readIssue(Repo.DB, repo_opts.hash, haxy_moment, &arena, &third_id);
+        try std.testing.expectEqualStrings("enhancement roadmap", retagged.tags);
+
+        try std.testing.expect(null == try tag_to_issues.getCursor("backend open"));
+        try std.testing.expect(null == try tag_to_issues.getCursor("preferences open"));
+        try std.testing.expect(null != try tag_to_issues.getCursor("roadmap open"));
+        try std.testing.expect(null != try tag_to_issues.getCursor("enhancement open"));
+    }
+
     //
-    // consume events into the database
+    // a deletion on the other branch carries over, unless we edited the issue,
+    // in which case the edit wins
     //
 
-    try std.testing.expectError(error.MergeConflict, evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref));
+    {
+        const edited_issue = events_to_consume2[1].event.issue orelse return error.NotFound;
+
+        const base_oid = try repo.readRef(io, evt.events_ref) orelse return error.NotFound;
+
+        var json: std.Io.Writer.Allocating = .init(allocator);
+        defer json.deinit();
+
+        // we retitle one of the two the other branch is about to drop
+        {
+            const event = evt.EventWithId{ .id = events_to_consume2[1].id, .event = .{ .issue = .{
+                .title = "Kept by the edit",
+                .description = edited_issue.description,
+                .tags = edited_issue.tags,
+            } } };
+            try std.json.Stringify.value(event, .{}, &json.writer);
+            _ = try repo.commitAtRef(io, allocator, .{ .message = json.written() }, null, evt.events_ref);
+        }
+
+        // the other branch deletes both
+        {
+            json.clearRetainingCapacity();
+            const event = evt.EventWithId{ .id = events_to_consume2[0].id, .event = .{ .issue = null } };
+            try std.json.Stringify.value(event, .{}, &json.writer);
+            _ = try repo.commitAtRef(io, allocator, .{ .parent_oids = &.{base_oid}, .message = json.written() }, null, other_events_ref);
+        }
+        {
+            json.clearRetainingCapacity();
+            const event = evt.EventWithId{ .id = events_to_consume2[1].id, .event = .{ .issue = null } };
+            try std.json.Stringify.value(event, .{}, &json.writer);
+            _ = try repo.commitAtRef(io, allocator, .{ .message = json.written() }, null, other_events_ref);
+        }
+
+        {
+            var result = try repo.switchDir(io, allocator, .{ .target = .{ .ref = evt.events_ref } });
+            defer result.deinit();
+
+            var merge = try repo.merge(io, allocator, .{ .kind = .full, .action = .{ .new = .{ .source = &.{.{ .ref = other_events_ref }} } } }, null);
+            defer merge.deinit();
+
+            try std.testing.expect(.success == merge.result);
+        }
+
+        try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref);
+
+        const haxy_moment = try evt.currentMoment(repo_opts, &repo);
+
+        // the one we left alone is gone, and its tags left the index with it
+        var dropped_id: [evt.event_id_size]u8 = undefined;
+        _ = try std.fmt.hexToBytes(&dropped_id, &events_to_consume2[0].id);
+        try std.testing.expectError(error.NotFound, readIssue(Repo.DB, repo_opts.hash, haxy_moment, &arena, &dropped_id));
+
+        const tag_to_issues_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, "tag+status->issue-id-set")) orelse return error.NotFound;
+        const tag_to_issues = try Repo.DB.SortedMap(.read_only).init(tag_to_issues_cursor);
+        try std.testing.expect(null == try tag_to_issues.getCursor("kanban open"));
+
+        // the one we edited survives, with our edit
+        var kept_id: [evt.event_id_size]u8 = undefined;
+        _ = try std.fmt.hexToBytes(&kept_id, &events_to_consume2[1].id);
+        const kept = try readIssue(Repo.DB, repo_opts.hash, haxy_moment, &arena, &kept_id);
+        try std.testing.expectEqualStrings("Kept by the edit", kept.title);
+    }
+}
+
+// the commit that last set `field_name` on the issue `id` names
+fn readOid(
+    comptime DB: type,
+    comptime hash_kind: hash.HashKind,
+    haxy_moment: DB.HashMap(.read_only),
+    id: *const [evt.event_id_size]u8,
+    comptime field_name: []const u8,
+) ![hash.byteLen(hash_kind)]u8 {
+    const id_to_field_to_oid_cursor = try haxy_moment.getCursor(hash.hashInt(hash_kind, evt.Issue.id_to_field_to_oid_key)) orelse return error.NotFound;
+    const id_to_field_to_oid = try DB.HashMap(.read_only).init(id_to_field_to_oid_cursor);
+    const field_oids_cursor = try id_to_field_to_oid.getCursor(hash.hashInt(hash_kind, id)) orelse return error.NotFound;
+    const field_oids = try DB.SortedMap(.read_only).init(field_oids_cursor);
+    const cursor = try field_oids.getCursor(field_name) orelse return error.NotFound;
+    var oid: [hash.byteLen(hash_kind)]u8 = undefined;
+    _ = try cursor.readBytes(&oid);
+    return oid;
+}
+
+// the issue `id` names, read out of `event-id->issue`
+fn readIssue(
+    comptime DB: type,
+    comptime hash_kind: hash.HashKind,
+    haxy_moment: DB.HashMap(.read_only),
+    arena: *std.heap.ArenaAllocator,
+    id: *const [evt.event_id_size]u8,
+) !evt.Issue {
+    const event_id_to_issue_cursor = try haxy_moment.getCursor(hash.hashInt(hash_kind, "event-id->issue")) orelse return error.NotFound;
+    const event_id_to_issue = try DB.HashMap(.read_only).init(event_id_to_issue_cursor);
+    const issue_cursor = try event_id_to_issue.getCursor(hash.hashInt(hash_kind, id)) orelse return error.NotFound;
+    const issue_map = try DB.HashMap(.read_only).init(issue_cursor);
+    return try evt.read(evt.Issue, DB, hash_kind, arena, issue_map);
 }
 
 test "user and repo" {
@@ -774,8 +1154,8 @@ test "user and repo" {
 
         try std.testing.expectEqual(1, try user_repos.count());
 
-        // the set is keyed by orderKey([created-ts][event-id])
-        const order_key = evt.orderKey(repo_event.created_ts, &repo_event_id);
+        // the set is keyed by orderKeyDesc([created-ts][event-id])
+        const order_key = evt.orderKeyDesc(repo_event.created_ts, &repo_event_id);
         try std.testing.expect(try user_repos.contains(&order_key));
     }
 
@@ -838,7 +1218,7 @@ test "user and repo" {
     }
 }
 
-test "repos and users paginate in creation order" {
+test "repos and users paginate newest first" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
     const temp_dir_name = "temp-event-order";
@@ -887,7 +1267,7 @@ test "repos and users paginate in creation order" {
             try std.testing.expectEqual(expected.len, try set.count());
             for (expected, 0..) |id, i| {
                 const kv = (try set.getIndexKeyValuePair(@intCast(i))) orelse return error.NotFound;
-                // the key is orderKey ([timestamp][event-id]); its trailing bytes are the id
+                // the key is orderKeyDesc ([timestamp][event-id]); its trailing bytes are the id
                 var order_key: [@sizeOf(u64) + evt.event_id_size]u8 = undefined;
                 _ = try kv.key_cursor.readBytes(&order_key);
                 try std.testing.expectEqualSlices(u8, id, order_key[@sizeOf(u64)..]);
@@ -908,7 +1288,7 @@ test "repos and users paginate in creation order" {
 
     {
         const moment = try evt.currentMoment(repo_opts, &repo);
-        try Check.order(Repo.DB, repo_opts.hash, moment, &.{ &repo_ids[0], &repo_ids[1], &repo_ids[2], &repo_ids[3] });
+        try Check.order(Repo.DB, repo_opts.hash, moment, &.{ &repo_ids[3], &repo_ids[2], &repo_ids[1], &repo_ids[0] });
 
         // the single user shows up in its own ordered set
         const ucur = try moment.getCursor(hash.hashInt(repo_opts.hash, "user-id-set")) orelse return error.NotFound;
@@ -922,16 +1302,16 @@ test "repos and users paginate in creation order" {
     });
     {
         const moment = try evt.currentMoment(repo_opts, &repo);
-        try Check.order(Repo.DB, repo_opts.hash, moment, &.{ &repo_ids[0], &repo_ids[2], &repo_ids[3] });
+        try Check.order(Repo.DB, repo_opts.hash, moment, &.{ &repo_ids[3], &repo_ids[2], &repo_ids[0] });
     }
 
-    // update repo0 at a later timestamp -> keeps its original slot
+    // update repo0 at a later timestamp -> keeps its original place
     try evt.commitAndConsume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &[_]evt.EventWithId{
         .{ .id = std.fmt.bytesToHex(repo_ids[0], .lower), .timestamp = 300, .event = .{ .repo = .{ .user_id = &user_id, .name = "repo0", .description = "updated" } } },
     });
     {
         const moment = try evt.currentMoment(repo_opts, &repo);
-        try Check.order(Repo.DB, repo_opts.hash, moment, &.{ &repo_ids[0], &repo_ids[2], &repo_ids[3] });
+        try Check.order(Repo.DB, repo_opts.hash, moment, &.{ &repo_ids[3], &repo_ids[2], &repo_ids[0] });
 
         // the value really was updated
         const e2r_cur = try moment.getCursor(hash.hashInt(repo_opts.hash, "event-id->repo")) orelse return error.NotFound;
