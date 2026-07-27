@@ -182,6 +182,8 @@ pub const RoutablePage = union(enum) {
     const repo_segment = "/repo/";
     const files_seg = "files";
     const commits_seg = "commits";
+    // ends a commits route naming its commit's full message
+    const message_seg = "message";
     // the `Params` key spellings the url emitters use
     const tag_filter_seg = @tagName(Params.ParamKey.tag) ++ ":";
     const start_seg = @tagName(Params.ParamKey.start) ++ ":";
@@ -249,9 +251,20 @@ pub const RoutablePage = union(enum) {
         name: Array(repo_identity_max_len),
         ref_or_oid: ?RefOrOid = null,
         value: Array(ref_route_max_len) = .{},
-        start: usize = 0,
-        // the file the diff pane is filtered to ("" = every file).
-        path: Array(repo_route_max_len) = .{},
+        // what the pane shows for the commit the log walks from.
+        content: Content = .{ .diff = .{} },
+
+        // a diff window and the message are alternatives, so the window's
+        // params can't be named alongside the message.
+        pub const Content = union(enum) {
+            diff: struct {
+                // the hunk index the window starts at.
+                start: usize = 0,
+                // the file the diff is filtered to ("" = every file).
+                path: Array(repo_route_max_len) = .{},
+            },
+            message,
+        };
     };
 
     // build a `.repo_files` route (a null ref_kind = the bare default-branch
@@ -278,8 +291,22 @@ pub const RoutablePage = union(enum) {
             .name = Array(repo_identity_max_len).from(identity) orelse return null,
             .ref_or_oid = ref_or_oid,
             .value = Array(ref_route_max_len).from(value) orelse return null,
-            .start = start,
-            .path = Array(repo_route_max_len).from(path) orelse return null,
+            .content = .{ .diff = .{
+                .start = start,
+                .path = Array(repo_route_max_len).from(path) orelse return null,
+            } },
+        } };
+    }
+
+    // build a `.repo_commits` route showing the ref/oid's commit message in
+    // full, which is the only content that page renders.
+    pub fn repoCommitMessageRoute(identity: []const u8, ref_or_oid: RefOrOid, value: []const u8) ?RoutablePage {
+        if (value.len == 0) return null;
+        return .{ .repo_commits = .{
+            .name = Array(repo_identity_max_len).from(identity) orelse return null,
+            .ref_or_oid = ref_or_oid,
+            .value = Array(ref_route_max_len).from(value) orelse return null,
+            .content = .message,
         } };
     }
 
@@ -396,8 +423,13 @@ pub const RoutablePage = union(enum) {
                 var out: std.Io.Writer.Allocating = .init(arena.allocator());
                 try out.writer.print("{s}/" ++ commits_seg, .{prefix});
                 if (c.ref_or_oid) |kind| if (c.value.len != 0) try out.writer.print("/{s}:{s}", .{ @tagName(kind), c.value.slice() });
-                if (c.start != 0) try out.writer.print("/" ++ start_seg ++ "{d}", .{c.start});
-                if (c.path.len != 0) try out.writer.print("/" ++ path_seg ++ "{s}", .{c.path.slice()});
+                switch (c.content) {
+                    .diff => |d| {
+                        if (d.start != 0) try out.writer.print("/" ++ start_seg ++ "{d}", .{d.start});
+                        if (d.path.len != 0) try out.writer.print("/" ++ path_seg ++ "{s}", .{d.path.slice()});
+                    },
+                    .message => try out.writer.print("/" ++ message_seg, .{}),
+                }
                 break :blk out.written();
             },
             .repo_refs => |r| blk: {
@@ -548,9 +580,14 @@ pub const RoutablePage = union(enum) {
             params.scanPairs(&segments) catch return null;
             if (!params.only(&.{ .start, .branch, .tag, .object })) return null;
             const start = params.start() orelse return null;
-            const file = pathValue(segments.rest()) orelse return null;
-            const ref = (params.ref() catch return null) orelse
+            const ref = (params.ref() catch return null) orelse {
+                const file = pathValue(segments.rest()) orelse return null;
                 return if (file.len == 0) repoCommitsRoute(pair, null, "", start, "") else null;
+            };
+            // the message page names its commit and nothing else
+            if (std.mem.eql(u8, segments.rest(), message_seg))
+                return if (start == 0) repoCommitMessageRoute(pair, ref.kind, ref.value) else null;
+            const file = pathValue(segments.rest()) orelse return null;
             return repoCommitsRoute(pair, ref.kind, ref.value, start, file);
         }
         return null; // unknown sub-path
@@ -572,8 +609,13 @@ pub const RoutablePage = union(enum) {
             .repo_commits => |a_c| std.mem.eql(u8, a_c.name.slice(), b.repo_commits.name.slice()) and
                 a_c.ref_or_oid == b.repo_commits.ref_or_oid and
                 std.mem.eql(u8, a_c.value.slice(), b.repo_commits.value.slice()) and
-                a_c.start == b.repo_commits.start and
-                std.mem.eql(u8, a_c.path.slice(), b.repo_commits.path.slice()),
+                switch (a_c.content) {
+                    .diff => |a_d| switch (b.repo_commits.content) {
+                        .diff => |b_d| a_d.start == b_d.start and std.mem.eql(u8, a_d.path.slice(), b_d.path.slice()),
+                        .message => false,
+                    },
+                    .message => std.meta.activeTag(b.repo_commits.content) == .message,
+                },
             .repo_refs => |a_r| std.mem.eql(u8, a_r.name.slice(), b.repo_refs.name.slice()) and a_r.kind == b.repo_refs.kind and std.mem.eql(u8, a_r.from.slice(), b.repo_refs.from.slice()),
             .repo_issues => |a_i| std.mem.eql(u8, a_i.name.slice(), b.repo_issues.name.slice()) and
                 std.mem.eql(u8, a_i.tag.slice(), b.repo_issues.tag.slice()) and

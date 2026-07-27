@@ -300,8 +300,9 @@ pub fn main(init: std.process.Init) !void {
                 "refactor badger walrus module",
                 "drop dead ferret marmot branch",
             };
+            const commit_count = 30;
             var c: usize = 0;
-            while (c < 30) : (c += 1) {
+            while (c < commit_count) : (c += 1) {
                 {
                     var repo_dir = try cwd.openDir(io, template_path, .{});
                     defer repo_dir.close(io);
@@ -323,6 +324,14 @@ pub fn main(init: std.process.Init) !void {
                     const len = msg_writer.written().len;
                     if (len >= msg_target or len + 1 + word.len > 120) break;
                     try msg_writer.writer.print(" {s}", .{word});
+                }
+                // the newest commit's message runs past what the detail pane
+                // reads, so it shows the truncated message and its link.
+                if (c == commit_count - 1) {
+                    var line: usize = 0;
+                    while (msg_writer.written().len <= ui.Repo.Commits.max_message_size) : (line += 1) {
+                        try msg_writer.writer.print("\n{d} {s}", .{ line, scatter_words[line % scatter_words.len] });
+                    }
                 }
                 const message = try arena.allocator().dupe(u8, msg_writer.written());
                 _ = try template_repo.commit(io, allocator, .{ .message = message, .timestamp = base_ts + c * std.time.s_per_day });

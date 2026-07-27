@@ -460,10 +460,10 @@ pub fn consumeInTransaction(
             defer arena.deinit();
 
             // read the message from the commit
-            try commit_object.object_reader.seekTo(commit_object.content.commit.message_position);
-            const message = try commit_object.object_reader.interface.allocRemaining(arena.allocator(), .unlimited);
+            var message: std.ArrayList(u8) = .empty;
+            try commit_object.readMessage(arena.allocator(), &message, .unlimited);
 
-            const event_with_id = try EventWithId.fromString(&arena, message);
+            const event_with_id = try EventWithId.fromString(&arena, message.items);
 
             // get the id of the current event as bytes
             var current_event_id: [event_id_size]u8 = undefined;

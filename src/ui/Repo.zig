@@ -85,15 +85,15 @@ pub fn init(
         .repo_files => |f| f.line,
         else => 0,
     };
-    // the hunk the commits view's selected commit's diff window starts at.
-    const commits_start = switch (route) {
-        .repo_commits => |c| c.start,
-        else => 0,
+    // what the commits view's pane shows for the commit it walks from: a diff
+    // window (with the file it's filtered to) or that commit's message.
+    const commits_content: ui.RoutablePage.RepoCommitsRoute.Content = switch (route) {
+        .repo_commits => |c| c.content,
+        else => .{ .diff = .{} },
     };
-    // the file the commits view's diff pane is filtered to ("" = every file).
-    const commits_path = switch (route) {
-        .repo_commits => |c| c.path.slice(),
-        else => "",
+    const commits_start = switch (commits_content) {
+        .diff => |d| d.start,
+        .message => 0,
     };
     // the refs tab windows one column at a time: `refs_from` (a url-encoded
     // ref name) roots `refs_kind`'s column, the other stays at its first window.
@@ -176,7 +176,7 @@ pub fn init(
                             if (session.local != null) try evt.consume(repo_kind, opened.self_repo_opts, io, gpa, opened, evt.events_ref);
                             break :blk .{
                                 try Files.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, repo_identity.identity, requested_ref_or_oid, requested_ref_value, files_dir, files_line),
-                                try Commits.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, repo_identity.identity, requested_ref_or_oid, requested_ref_value, commits_start, commits_path),
+                                try Commits.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, repo_identity.identity, requested_ref_or_oid, requested_ref_value, commits_content),
                                 try Refs.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, repo_identity.identity, refs_kind, refs_from),
                                 try Issues.init(repo_kind, opened.self_repo_opts, arena, opened, io, repo_identity.identity, issues_tag, issues_selected, issues_view),
                             };
@@ -188,7 +188,7 @@ pub fn init(
         const aa = arena.allocator();
         break :blk .{
             try Files.emptyResult(aa, repo_identity.identity, requested_ref_or_oid orelse .branch, requested_ref_value, files_dir),
-            try Commits.emptyResult(aa, repo_identity.identity, requested_ref_or_oid orelse .branch, requested_ref_value, commits_path),
+            try Commits.emptyResult(aa, repo_identity.identity, requested_ref_or_oid orelse .branch, requested_ref_value, commits_content),
             try Refs.emptyResult(arena, repo_identity.identity, refs_kind, refs_from),
             try Issues.emptyResult(aa, repo_identity.identity, issues_tag, issues_selected, issues_view),
         };
@@ -204,7 +204,12 @@ pub fn init(
     // directory route drops it.
     const files_route_line = if (files.selected_file != null) files_line else 0;
     const route_name = (ui.RoutablePage.repoFilesRoute(repo_identity.identity, files.ref_or_oid, files.ref_or_oid_value, files_path, files_route_line) orelse return error.NotFound).repo_files;
-    const commits_route_name = (ui.RoutablePage.repoCommitsRoute(repo_identity.identity, commits.ref_or_oid, commits.ref_or_oid_value, commits_start, commits.path) orelse return error.NotFound).repo_commits;
+    // the message page mirrors its own url, not the log's
+    const commits_route = switch (commits.content) {
+        .message => ui.RoutablePage.repoCommitMessageRoute(repo_identity.identity, commits.ref_or_oid, commits.ref_or_oid_value),
+        .diff => |d| ui.RoutablePage.repoCommitsRoute(repo_identity.identity, commits.ref_or_oid, commits.ref_or_oid_value, commits_start, d.path),
+    };
+    const commits_route_name = (commits_route orelse return error.NotFound).repo_commits;
 
     return .{
         // files and commits resolve the same ref, so either's serves the header,

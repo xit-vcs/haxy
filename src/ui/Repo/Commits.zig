@@ -18,8 +18,11 @@ const page_size = 20;
 // how many diff hunks one window of a commit's diff shows; "next"/"previous"
 // move to the adjacent window.
 const diff_page = 10;
-// the largest commit message the detail view will read in full.
-const max_message_size = 64 * 1024;
+// the largest commit message a log page's detail view reads; a longer one is
+// cut here, with the message page carrying the whole thing.
+pub const max_message_size = 2 * 1024;
+// the same for the message page, which only reads the one commit.
+const max_full_message_size = 100 * 1024;
 
 pub const Hunk = struct {
     path: ?[]const u8 = null, // the file this hunk belongs to
@@ -32,6 +35,8 @@ pub const Commit = struct {
     oid: []const u8,
     date: []const u8, // "YYYY-MM-DD"
     message: []const u8, // trimmed, may be multi-line
+    // whether `message` is only the first line of a message too big to read.
+    message_truncated: bool = false,
     hunks: []const Hunk,
     // the hunk index this window starts at (0 = the first window).
     window_start: usize,
@@ -46,21 +51,31 @@ identity: []const u8,
 // didn't name one), so the page can canonicalize its url to it.
 ref_or_oid: ui.RoutablePage.RefOrOid,
 ref_or_oid_value: []const u8,
-// the file the top commit's diff is filtered to ("" = every file).
-path: []const u8 = "",
 commits: []const Commit,
 // the first oid of the next page, or null when this is the last page.
 next_start: ?[]const u8,
+// what the pane shows for the commit the log walks from.
+content: Content = .{ .diff = .{} },
 // the "viewing <ref> <value>" banner shown above the log.
 header: Header,
 
 const Self = @This();
 
+// the diff and the message are alternatives, so a filtered diff can't also be
+// a message. the message is read whole, however big, since it's all its pane
+// shows.
+pub const Content = union(enum) {
+    diff: struct {
+        // the file the top commit's diff is filtered to ("" = every file).
+        path: []const u8 = "",
+    },
+    message,
+};
+
 // walk the log for an opened repo. generic over the repo's backend and hash
 // kind so the oid buffers and diff types it threads through match the repo's
-// opts. `start` is the hunk index the selected commit's (the first one, the
-// walk root) diff window starts at; 0 is the first window, moved by
-// "next"/"previous". walks with the arena's backing allocator (transient; the
+// opts. `content` is what the walk root's pane shows, the only commit any of
+// it applies to. walks with the arena's backing allocator (transient; the
 // commits we keep are duped into the page arena so they outlive it).
 pub fn init(
     comptime repo_kind: rp.RepoKind,
@@ -72,18 +87,29 @@ pub fn init(
     identity: []const u8,
     requested_ref_or_oid: ?ui.RoutablePage.RefOrOid,
     requested_value: []const u8,
-    start: usize,
-    path: []const u8,
+    content: ui.RoutablePage.RepoCommitsRoute.Content,
 ) !Self {
     const aa = arena.allocator();
     const hex_len = ui.ResolvedRefOrOid(repo_kind, repo_opts).hex_len;
+
+    // the walk root's message replaces its diff, so it's read whole and its
+    // hunks aren't rendered. the window and the filter are its diff's.
+    const root_message = std.meta.activeTag(content) == .message;
+    const root_start: usize = switch (content) {
+        .diff => |d| d.start,
+        .message => 0,
+    };
+    const root_path: []const u8 = switch (content) {
+        .diff => |d| d.path.slice(),
+        .message => "",
+    };
 
     // resolve the requested ref (or the default branch) to the commit oid to
     // walk from. an explicitly named ref that doesn't resolve is a bad url
     // (NotFound -> 404); the default-branch path falls through to empty.
     const resolved = (try ui.ResolvedRefOrOid(repo_kind, repo_opts).init(repo, io, aa, requested_ref_or_oid, requested_value)) orelse {
         if (requested_ref_or_oid != null) return error.NotFound;
-        return emptyResult(aa, identity, .branch, requested_value, path);
+        return emptyResult(aa, identity, .branch, requested_value, content);
     };
     var start_arr = [1][hex_len]u8{resolved.oid};
     const start_oids: []const [hex_len]u8 = start_arr[0..1];
@@ -96,7 +122,7 @@ pub fn init(
     var count: usize = 0;
     var next_start: ?[]const u8 = null;
     {
-        var iter = repo.log(io, gpa, start_oids) catch return emptyResult(aa, identity, resolved.ref_or_oid, resolved.value, path);
+        var iter = repo.log(io, gpa, start_oids) catch return emptyResult(aa, identity, resolved.ref_or_oid, resolved.value, content);
         defer iter.deinit();
         while (try iter.next(gpa)) |commit_object| {
             defer commit_object.deinit();
@@ -106,10 +132,13 @@ pub fn init(
             }
             const md = commit_object.content.commit.metadata;
             @memcpy(&oids[count], &commit_object.oid);
+            // only the message the pane shows is read past the log's limit.
+            const text, const truncated = try readMessage(repo_kind, repo_opts, aa, commit_object, if (root_message and count == 0) max_full_message_size else max_message_size);
             buf[count] = .{
                 .oid = try aa.dupe(u8, &commit_object.oid),
                 .date = try formatDate(aa, md.timestamp),
-                .message = try readMessage(repo_kind, repo_opts, aa, commit_object),
+                .message = text,
+                .message_truncated = truncated,
                 .hunks = &.{},
                 .window_start = 0,
                 .has_prev = false,
@@ -124,11 +153,11 @@ pub fn init(
     // renders from the snapshot), so gate it out of the wasm build.
     if (!builtin.cpu.arch.isWasm()) {
         for (buf[0..count], oids[0..count], 0..) |*commit, oid, i| {
-            // the selected commit (the first, == start_oid) shows the window the
-            // url asks for; the rest show their first window.
-            // the path filter only applies to the top commit (the walk root).
-            const window_start = if (i == 0) start else 0;
-            const rendered = renderCommitDiff(repo_kind, repo_opts, io, gpa, aa, repo, oid, window_start, diff_page, if (i == 0) path else "") catch
+            if (root_message and i == 0) continue;
+            // the walk root shows the window the url asks for and its filter;
+            // the rest show their first window, unfiltered.
+            const window_start = if (i == 0) root_start else 0;
+            const rendered = renderCommitDiff(repo_kind, repo_opts, io, gpa, aa, repo, oid, window_start, diff_page, if (i == 0) root_path else "") catch
                 RenderedDiff{ .hunks = &.{}, .has_prev = false, .has_more = false };
             commit.hunks = rendered.hunks;
             commit.window_start = window_start;
@@ -141,23 +170,32 @@ pub fn init(
         .identity = try aa.dupe(u8, identity),
         .ref_or_oid = resolved.ref_or_oid,
         .ref_or_oid_value = resolved.value,
-        .path = try aa.dupe(u8, path),
         .commits = try aa.dupe(Commit, buf[0..count]),
         .next_start = next_start,
+        .content = try pageContent(aa, content),
         .header = try Header.init(aa, resolved.ref_or_oid, resolved.value),
     };
 }
 
 // an empty listing pinned to a ref, for the wasm / no-repo / unresolved paths.
-pub fn emptyResult(aa: std.mem.Allocator, identity: []const u8, ref_or_oid: ui.RoutablePage.RefOrOid, value: []const u8, path: []const u8) !Self {
+pub fn emptyResult(aa: std.mem.Allocator, identity: []const u8, ref_or_oid: ui.RoutablePage.RefOrOid, value: []const u8, content: ui.RoutablePage.RepoCommitsRoute.Content) !Self {
     return .{
         .identity = try aa.dupe(u8, identity),
         .ref_or_oid = ref_or_oid,
         .ref_or_oid_value = try aa.dupe(u8, value),
-        .path = try aa.dupe(u8, path),
         .commits = &.{},
         .next_start = null,
+        .content = try pageContent(aa, content),
         .header = try Header.init(aa, ref_or_oid, value),
+    };
+}
+
+// the page's content for a route's, duped into `aa`. the diff window doesn't
+// carry over: each commit holds the one its pane shows as `window_start`.
+fn pageContent(aa: std.mem.Allocator, content: ui.RoutablePage.RepoCommitsRoute.Content) !Content {
+    return switch (content) {
+        .diff => |d| .{ .diff = .{ .path = try aa.dupe(u8, d.path.slice()) } },
+        .message => .message,
     };
 }
 
@@ -301,19 +339,42 @@ fn formatDate(arena: std.mem.Allocator, timestamp: u64) ![]const u8 {
     });
 }
 
-// the whole commit message, trimmed and duped into `aa`. an oversized
-// message falls back to that first line.
+// the commit message, trimmed and read into `aa`, plus whether it ran past
+// `limit` and was cut short there.
 fn readMessage(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     aa: std.mem.Allocator,
     commit_object: *xit.object.Object(repo_kind, repo_opts),
-) ![]const u8 {
-    const md = commit_object.content.commit.metadata;
-    try commit_object.object_reader.seekTo(commit_object.content.commit.message_position);
-    const message = commit_object.object_reader.interface.allocRemaining(aa, .limited(max_message_size)) catch
-        return try aa.dupe(u8, std.mem.trim(u8, md.message orelse "", " \t\r\n"));
-    return std.mem.trim(u8, message, " \t\r\n");
+    limit: usize,
+) !struct { []const u8, bool } {
+    var message: std.ArrayList(u8) = .empty;
+    // a message past the limit keeps the bytes read so far
+    const truncated = if (commit_object.readMessage(aa, &message, .limited(limit))) |_|
+        false
+    else |err| switch (err) {
+        error.StreamTooLong => true,
+        else => |e| return e,
+    };
+    // the cut lands wherever the limit falls, so a truncated message keeps
+    // only its whole lines: a line break can't fall inside a codepoint, and
+    // the widgets need valid utf-8. a first line past the limit keeps none.
+    const text = if (truncated) message.items[0 .. std.mem.lastIndexOfScalar(u8, message.items, '\n') orelse 0] else message.items;
+    return .{ std.mem.trim(u8, text, " \t\r\n"), truncated };
+}
+
+// a focusable, word-wrapping box holding a commit message. `bottom_label`
+// marks a message the page only shows part of ("" when it's whole).
+fn messageBox(allocator: std.mem.Allocator, message: []const u8, bottom_label: []const u8) !wgt.TextBox(ui.Widget) {
+    var tb = try wgt.TextBox(ui.Widget).init(allocator, message, .{
+        .border_style = .single,
+        .rounded_corners = true,
+        .wrap_kind = .word,
+        .label = " commit message ",
+        .bottom_label = bottom_label,
+    });
+    tb.getFocus().focusable = true;
+    return tb;
 }
 
 // the first line of a commit message, for the one-row list entries.
@@ -331,8 +392,6 @@ pub const View = struct {
     session: *ui.Session,
     // the commit whose diff the pane currently shows (index into data.commits).
     diffed_index: ?usize,
-    // the diff pane's message row, capped to the pane width so it word-wraps.
-    message_id: ?usize,
 
     const header_index: usize = 0;
     const content_index: usize = 1;
@@ -413,7 +472,6 @@ pub const View = struct {
             .data = data,
             .session = session,
             .diffed_index = null,
-            .message_id = null,
         };
     }
 
@@ -472,16 +530,20 @@ pub const View = struct {
         try box.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
     }
 
-    // the selected commit's full message, focusable like the rows around it. it
-    // word-wraps, which needs a bounded width: the diff scroll grants its rows
-    // an unbounded one, so build caps this row via `message_id`.
-    fn addMessageBox(self: *View, allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), message: []const u8) !void {
-        if (message.len == 0) return;
-        var tb = try wgt.TextBox(ui.Widget).init(allocator, message, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .word, .label = "commit message" });
+    // how much of the message a pane's box holds: the preview links to the pane
+    // holding the whole thing, which is that link's destination.
+    const MessageBox = enum { preview, whole };
+
+    // the selected commit's message.
+    fn addMessageBox(self: *View, allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), commit: Commit, kind: MessageBox) !void {
+        // a truncated message keeps its box even with no whole line to show,
+        // since the box is what links to the whole thing.
+        if (commit.message.len == 0 and !commit.message_truncated) return;
+        const cut_short = commit.message_truncated and kind == .preview;
+        var tb = try messageBox(allocator, commit.message, if (cut_short) " click or press enter to see more " else "");
         errdefer tb.deinit(allocator);
-        tb.getFocus().focusable = true;
+        if (kind == .preview) tb.getFocus().kind = .{ .custom = try messageLink(self.session.page_arena, self.data.identity, commit.oid) };
         try box.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
-        self.message_id = tb.getFocus().id;
     }
 
     pub fn deinit(self: *View, allocator: std.mem.Allocator) void {
@@ -518,6 +580,12 @@ pub const View = struct {
         return content.children.getIndex(cid) == diff_index;
     }
 
+    // what the pane shows for the commit at `sel`. the page's content only
+    // applies to the commit it walks from; the rest show their plain diff.
+    fn paneContent(self: *View, sel: usize) Self.Content {
+        return if (sel == 0) self.data.content else .{ .diff = .{} };
+    }
+
     // the selected commit's index, or null when the "next" row is selected.
     fn selectedCommitIndex(self: *View) ?usize {
         const lb = self.listBox();
@@ -539,10 +607,17 @@ pub const View = struct {
         if (root_focus.grandchild_id) |g| {
             if (self.box.getFocus().children.contains(g)) {
                 if (self.selectedCommitIndex()) |sel| {
+                    const oid = self.data.commits[sel].oid;
+                    const window_start = self.data.commits[sel].window_start;
                     // mirror the commit's current diff window so the url stays
                     // linkable (0 for any commit but the windowed start one).
-                    if (ui.RoutablePage.repoCommitsRoute(self.data.identity, .object, self.data.commits[sel].oid, self.data.commits[sel].window_start, if (sel == 0) self.data.path else "")) |route|
-                        self.session.data.current_page = route;
+                    // selecting another commit leaves the message behind, like
+                    // it leaves the path filter behind.
+                    const mirrored = switch (self.paneContent(sel)) {
+                        .message => ui.RoutablePage.repoCommitMessageRoute(self.data.identity, .object, oid),
+                        .diff => |d| ui.RoutablePage.repoCommitsRoute(self.data.identity, .object, oid, window_start, d.path),
+                    };
+                    if (mirrored) |route| self.session.data.current_page = route;
                 }
             }
         }
@@ -572,13 +647,16 @@ pub const View = struct {
             diff_min_width;
         self.contentBox().children.values()[diff_index].min_size = .{ .width = diff_width, .height = null };
 
-        // cap the message row so it wraps within the pane, leaving room for the
-        // pane's border and its scrollbar column.
-        if (self.message_id) |id| {
-            if (self.diffInner().children.getPtr(id)) |child| {
+        // the message is the pane's only wrapping row, and wrapping needs a
+        // bounded width, which the pane's scroll doesn't grant (it scrolls
+        // horizontally too). cap it to the pane, leaving room for the border
+        // and the scrollbar column. re-capped each build so it tracks resizes.
+        for (self.diffInner().children.values()) |*child| switch (child.widget) {
+            .text_box => |text_box| if (text_box.options.wrap_kind == .word) {
                 child.max_size = .{ .width = diff_width -| 3, .height = null };
-            }
-        }
+            },
+            else => {},
+        };
 
         // the web bounds the layout to the browser viewport like the terminal;
         // each Scroll's web-native mode hands its full content to a real
@@ -601,35 +679,40 @@ pub const View = struct {
 
     fn populateDiff(self: *View, allocator: std.mem.Allocator, sel: usize) !void {
         const commit = self.data.commits[sel];
-        // the path filter only applies to the top commit (the walk root).
-        const path = if (sel == 0) self.data.path else "";
         const inner = self.diffInner();
 
         for (inner.children.values()) |*child| child.widget.deinit(allocator);
         inner.children.clearAndFree(allocator);
         inner.getFocus().child_id = null;
-        self.message_id = null;
 
-        if (path.len != 0) {
-            // the file's path, then a row returning to this commit's unfiltered diff.
-            var label = try wgt.TextBox(ui.Widget).init(allocator, path, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
-            errdefer label.deinit(allocator);
-            label.getFocus().focusable = true;
-            try inner.children.put(allocator, label.getFocus().id, .{ .widget = .{ .text_box = label }, .rect = null, .min_size = null });
-            try self.addNavLink(allocator, inner, "← all files", commit.oid, 0, "");
-        } else {
-            try self.addMessageBox(allocator, inner, commit.message);
-            try self.addViewFilesLink(allocator, inner, commit.oid);
-        }
+        switch (self.paneContent(sel)) {
+            .message => {
+                try self.addNavLink(allocator, inner, "← back to diff", commit.oid, 0, "");
+                try self.addMessageBox(allocator, inner, commit, .whole);
+            },
+            .diff => |d| {
+                if (d.path.len != 0) {
+                    // the file's path, then a row returning to this commit's unfiltered diff.
+                    var label = try wgt.TextBox(ui.Widget).init(allocator, d.path, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+                    errdefer label.deinit(allocator);
+                    label.getFocus().focusable = true;
+                    try inner.children.put(allocator, label.getFocus().id, .{ .widget = .{ .text_box = label }, .rect = null, .min_size = null });
+                    try self.addNavLink(allocator, inner, "← all files", commit.oid, 0, "");
+                } else {
+                    try self.addMessageBox(allocator, inner, commit, .preview);
+                    try self.addViewFilesLink(allocator, inner, commit.oid);
+                }
 
-        // a "previous" row and a "next" row at the bottom reload the page on the
-        // adjacent diff window.
-        if (commit.has_prev) try self.addNavLink(allocator, inner, "← previous", commit.oid, commit.window_start -| diff_page, path);
-        for (commit.hunks) |hunk| {
-            if (path.len == 0) if (hunk.path) |hunk_path| try self.addPathBox(allocator, inner, hunk_path, commit.oid);
-            try self.addHunkBox(allocator, inner, hunk.lines);
+                // a "previous" row and a "next" row at the bottom reload the page
+                // on the adjacent diff window.
+                if (commit.has_prev) try self.addNavLink(allocator, inner, "← previous", commit.oid, commit.window_start -| diff_page, d.path);
+                for (commit.hunks) |hunk| {
+                    if (d.path.len == 0) if (hunk.path) |hunk_path| try self.addPathBox(allocator, inner, hunk_path, commit.oid);
+                    try self.addHunkBox(allocator, inner, hunk.lines);
+                }
+                if (commit.has_more) try self.addNavLink(allocator, inner, "next →", commit.oid, commit.window_start + diff_page, d.path);
+            },
         }
-        if (commit.has_more) try self.addNavLink(allocator, inner, "next →", commit.oid, commit.window_start + diff_page, path);
 
         // point the pane at its first row so focus recovery can land here.
         if (inner.children.count() > 0) inner.getFocus().child_id = inner.children.keys()[0];
@@ -864,6 +947,13 @@ fn commitRowLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, oid
     const route = ui.RoutablePage.repoCommitsRoute(identity, .object, oid, 0, path) orelse return error.RouteTooLong;
     const url = try route.toUrl(page_arena);
     return std.fmt.allocPrint(page_arena.allocator(), "ai:{s}", .{url});
+}
+
+// the "a:" link to the page showing `oid`'s message on its own.
+fn messageLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, oid: []const u8) ![]const u8 {
+    const route = ui.RoutablePage.repoCommitMessageRoute(identity, .object, oid) orelse return error.RouteTooLong;
+    const url = try route.toUrl(page_arena);
+    return std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{url});
 }
 
 // the "viewing <ref_or_oid> <value>" banner shown above the log.
