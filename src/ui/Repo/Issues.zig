@@ -823,7 +823,7 @@ pub const View = struct {
 
         // the issue's title as a focusable word-wrapped text box.
         {
-            var tb = try wgt.TextBox(ui.Widget).init(allocator, entry.issue.title, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .word });
+            var tb = try wgt.TextBox(ui.Widget).init(allocator, entry.issue.title, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .word, .label = " title " });
             errdefer tb.deinit(allocator);
             tb.getFocus().focusable = true;
             try inner.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
@@ -850,7 +850,7 @@ pub const View = struct {
         // the description as a focusable word-wrapped text box.
         self.description_id[index] = blk: {
             const description = if (entry.issue.description.len == 0) "(no description)" else entry.issue.description;
-            var tb = try wgt.TextBox(ui.Widget).init(allocator, description, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .word });
+            var tb = try wgt.TextBox(ui.Widget).init(allocator, description, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .word, .label = " description " });
             errdefer tb.deinit(allocator);
             tb.getFocus().focusable = true;
             try inner.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
