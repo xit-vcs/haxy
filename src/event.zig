@@ -10,7 +10,7 @@ pub const User = @import("event/User.zig");
 pub const Repo = @import("event/Repo.zig");
 pub const Issue = @import("event/Issue.zig");
 
-pub const event_id_size: usize = 32;
+pub const event_id_size: usize = 16;
 
 // the most bytes an event's serialized form may hold
 pub const max_event_size: usize = 100 * 1024;
