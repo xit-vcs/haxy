@@ -370,7 +370,7 @@ fn messageBox(allocator: std.mem.Allocator, message: []const u8, bottom_label: [
         .border_style = .single,
         .rounded_corners = true,
         .wrap_kind = .word,
-        .label = " commit message ",
+        .label = " message ",
         .bottom_label = bottom_label,
     });
     tb.getFocus().focusable = true;
@@ -542,7 +542,7 @@ pub const View = struct {
         const cut_short = commit.message_truncated and kind == .preview;
         var tb = try messageBox(allocator, commit.message, if (cut_short) " click or press enter to see more " else "");
         errdefer tb.deinit(allocator);
-        if (kind == .preview) tb.getFocus().kind = .{ .custom = try messageLink(self.session.page_arena, self.data.identity, commit.oid) };
+        if (cut_short) tb.getFocus().kind = .{ .custom = try messageLink(self.session.page_arena, self.data.identity, commit.oid) };
         try box.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
     }
 
