@@ -530,8 +530,8 @@ pub const View = struct {
         try box.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
     }
 
-    // how much of the message a pane's box holds: the preview links to the pane
-    // holding the whole thing, which is that link's destination.
+    // how much of the message a pane's box holds: a truncated preview links to
+    // the pane holding the whole thing, which is that link's destination.
     const MessageBox = enum { preview, whole };
 
     // the selected commit's message.

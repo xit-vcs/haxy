@@ -513,6 +513,19 @@ pub fn main(init: std.process.Init) !void {
 
             var issue_events: [issue_data.len]evt.EventWithId = undefined;
             for (issue_data, 0..) |issue, i| {
+                // the newest issue's description runs past what the detail
+                // pane shows, so it shows the truncated description and its
+                // link.
+                const description = if (i == issue_data.len - 1) desc: {
+                    var desc_writer = std.Io.Writer.Allocating.init(allocator);
+                    defer desc_writer.deinit();
+                    try desc_writer.writer.print("{s}", .{issue.description});
+                    var line: usize = 0;
+                    while (desc_writer.written().len <= ui.Repo.Issues.max_description_size) : (line += 1) {
+                        try desc_writer.writer.print("\n{d} {s}", .{ line, scatter_words[line % scatter_words.len] });
+                    }
+                    break :desc try arena.allocator().dupe(u8, desc_writer.written());
+                } else issue.description;
                 issue_events[i] = .{
                     .id = std.fmt.bytesToHex(evt.EventWithId.randomId(prng.random()), .lower),
                     // stepped timestamps so the issues list in a stable order
@@ -520,7 +533,7 @@ pub fn main(init: std.process.Init) !void {
                     .event = .{
                         .issue = .{
                             .title = issue.title,
-                            .description = issue.description,
+                            .description = description,
                             .tags = issue.tags,
                             .status = issue.status,
                         },

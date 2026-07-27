@@ -15,6 +15,10 @@ const inp = @import("../input.zig");
 
 const wasm = builtin.target.cpu.arch == .wasm32;
 
+// how much of a description the detail pane shows before linking to the
+// /description page, the same limit commit messages use.
+pub const max_description_size = 2 * 1024;
+
 // how many issues one window shows before a "next" link appears.
 pub const page_size = 20;
 
@@ -54,6 +58,9 @@ open: Window,
 closed: Window,
 // the view the page shows initially (a selected issue's status overrides the route's)
 view: ui.RoutablePage.IssuesView,
+// the /description page: the detail pane shows the selected issue's whole
+// description behind a back link.
+description_page: bool = false,
 // every tag in the repo, in sorted order, for the tags view.
 tags: []const []const u8,
 // the on-disk repo this page was read from, for the terminal submit path
@@ -89,7 +96,10 @@ pub fn emptyResult(aa: std.mem.Allocator, identity: []const u8, tag: []const u8,
         .selected_id = try aa.dupe(u8, selected_id),
         .open = .empty,
         .closed = .empty,
-        .view = view,
+        // a description url shows a status list; the issue's own status picks
+        // it once the issue is read.
+        .view = if (view == .description) .open else view,
+        .description_page = view == .description,
         .tags = &.{},
     };
 }
@@ -221,6 +231,7 @@ pub fn init(
         .open = open_window,
         .closed = closed_window,
         .view = resolved_view,
+        .description_page = empty.description_page,
         .tags = tags.items,
     };
 }
@@ -350,6 +361,8 @@ pub const View = struct {
             .closed => closed_view_index,
             .tags => tags_view_index,
             .new, .edit => form_view_index,
+            // init resolves a description url to its issue's status list
+            .description => unreachable,
         };
     }
 
@@ -683,7 +696,10 @@ pub const View = struct {
             self.session.data.current_page = (if (index == form_view_index and self.data.view == .edit)
                 ui.RoutablePage.repoIssuesEditRoute(self.data.identity, self.data.selected_id)
             else if (index == viewIndex(self.data.view) and self.data.selected_id.len != 0)
-                ui.RoutablePage.repoIssuesRoute(self.data.identity, .open, self.data.tag, self.data.selected_id)
+                (if (self.data.description_page)
+                    ui.RoutablePage.repoIssuesDescriptionRoute(self.data.identity, self.data.selected_id)
+                else
+                    ui.RoutablePage.repoIssuesRoute(self.data.identity, .open, self.data.tag, self.data.selected_id))
             else if (index == tags_view_index)
                 ui.RoutablePage.repoIssuesTagsRoute(self.data.identity, self.data.tag)
             else if (index == form_view_index)
@@ -702,8 +718,14 @@ pub const View = struct {
             if (root_focus.grandchild_id) |g| {
                 if (self.resultsBox(i).getFocus().children.contains(g)) {
                     if (self.selectedIssueIndex(i)) |sel| {
-                        if (ui.RoutablePage.repoIssuesRoute(self.data.identity, splitStatus(i), "", self.window(i).issues[sel].id)) |route|
-                            self.session.data.current_page = route;
+                        // selecting another issue leaves the description page
+                        // behind, like it leaves the tag filter behind.
+                        const id = self.window(i).issues[sel].id;
+                        const mirrored = if (self.data.description_page and std.mem.eql(u8, id, self.data.selected_id))
+                            ui.RoutablePage.repoIssuesDescriptionRoute(self.data.identity, id)
+                        else
+                            ui.RoutablePage.repoIssuesRoute(self.data.identity, splitStatus(i), "", id);
+                        if (mirrored) |route| self.session.data.current_page = route;
                     }
                 }
             }
@@ -772,20 +794,29 @@ pub const View = struct {
     fn populateDetail(self: *View, allocator: std.mem.Allocator, index: usize, sel: usize) !void {
         const entry = self.window(index).issues[sel];
         const inner = self.detailInner(index);
+        // the /description page replaces its issue's detail with a back link
+        // and the whole description; other issues keep their normal detail.
+        const description_page = self.data.description_page and std.mem.eql(u8, entry.id, self.data.selected_id);
 
         for (inner.children.values()) |*child| child.widget.deinit(allocator);
         inner.children.clearAndFree(allocator);
         inner.getFocus().child_id = null;
 
-        // the open/close button
+        // the tool row: the open/close and edit buttons; the description page
+        // shows none.
         {
+            const row = self.toolRow(index);
+            for (row.children.values()) |*child| child.widget.deinit(allocator);
+            row.children.clearAndFree(allocator);
+            row.getFocus().child_id = null;
+            row.getFocus().kind = .container;
+        }
+        if (!description_page) {
             const action: []const u8 = switch (entry.issue.status) {
                 .open => "close",
                 .closed => "open",
             };
             const row = self.toolRow(index);
-            for (row.children.values()) |*child| child.widget.deinit(allocator);
-            row.children.clearAndFree(allocator);
             const pa = self.session.page_arena.allocator();
             row.getFocus().kind = .{ .custom = if (self.data.identity.len == 0)
                 try std.fmt.allocPrint(pa, "form:/issues/{s}/{s}", .{ entry.id, action })
@@ -821,38 +852,64 @@ pub const View = struct {
             row.getFocus().child_id = row.children.keys()[button_in_row_index];
         }
 
-        // the issue's title as a focusable word-wrapped text box.
-        {
-            var tb = try wgt.TextBox(ui.Widget).init(allocator, entry.issue.title, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .word, .label = " title " });
+        if (description_page) {
+            // the back link, in the title slot so the pane's input handling
+            // applies to it unchanged.
+            var tb = try wgt.TextBox(ui.Widget).init(allocator, "← back to issue", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer tb.deinit(allocator);
             tb.getFocus().focusable = true;
+            tb.getFocus().kind = .{ .custom = try issuesLink(self.session.page_arena, self.data.identity, entry.issue.status, "", entry.id) };
             try inner.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
+        } else {
+            // the issue's title as a focusable word-wrapped text box.
+            {
+                var tb = try wgt.TextBox(ui.Widget).init(allocator, entry.issue.title, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .word, .label = " title " });
+                errdefer tb.deinit(allocator);
+                tb.getFocus().focusable = true;
+                try inner.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
+            }
+
+            // the issue's tags, each linking to this status's list filtered to
+            // that tag.
+            {
+                var items: std.ArrayList(ui.TagFlow.Item) = .empty;
+                defer items.deinit(allocator);
+                var tag_iter = evt.Issue.tagIterator(entry.issue.tags);
+                while (tag_iter.next()) |tag| {
+                    if (tag.len == 0) continue;
+                    try items.append(allocator, .{ .text = tag, .link = try tagLink(self.session.page_arena, self.data.identity, splitStatus(index), tag) });
+                }
+                if (items.items.len > 0) {
+                    var tf = try ui.TagFlow.init(allocator);
+                    errdefer tf.deinit(allocator);
+                    try tf.setItems(allocator, items.items);
+                    try inner.children.put(allocator, tf.getFocus().id, .{ .widget = .{ .tag_flow = tf }, .rect = null, .min_size = null });
+                }
+            }
         }
 
-        // the issue's tags, each linking to this status's list filtered to
-        // that tag.
-        {
-            var items: std.ArrayList(ui.TagFlow.Item) = .empty;
-            defer items.deinit(allocator);
-            var tag_iter = evt.Issue.tagIterator(entry.issue.tags);
-            while (tag_iter.next()) |tag| {
-                if (tag.len == 0) continue;
-                try items.append(allocator, .{ .text = tag, .link = try tagLink(self.session.page_arena, self.data.identity, splitStatus(index), tag) });
-            }
-            if (items.items.len > 0) {
-                var tf = try ui.TagFlow.init(allocator);
-                errdefer tf.deinit(allocator);
-                try tf.setItems(allocator, items.items);
-                try inner.children.put(allocator, tf.getFocus().id, .{ .widget = .{ .tag_flow = tf }, .rect = null, .min_size = null });
-            }
-        }
-
-        // the description as a focusable word-wrapped text box.
+        // the description as a focusable word-wrapped text box. past the limit
+        // it's cut at the last whole line and links to the /description page,
+        // which shows the whole thing.
         self.description_id[index] = blk: {
-            const description = if (entry.issue.description.len == 0) "(no description)" else entry.issue.description;
-            var tb = try wgt.TextBox(ui.Widget).init(allocator, description, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .word, .label = " description " });
+            const whole = entry.issue.description;
+            const cut_short = !description_page and whole.len > max_description_size;
+            const shown = if (cut_short)
+                std.mem.trimEnd(u8, whole[0 .. std.mem.lastIndexOfScalar(u8, whole[0..max_description_size], '\n') orelse 0], " \t\r\n")
+            else if (whole.len == 0)
+                "(no description)"
+            else
+                whole;
+            var tb = try wgt.TextBox(ui.Widget).init(allocator, shown, .{
+                .border_style = .single,
+                .rounded_corners = true,
+                .wrap_kind = .word,
+                .label = " description ",
+                .bottom_label = if (cut_short) " click or press enter to see more " else "",
+            });
             errdefer tb.deinit(allocator);
             tb.getFocus().focusable = true;
+            if (cut_short) tb.getFocus().kind = .{ .custom = try descriptionLink(self.session.page_arena, self.data.identity, entry.id) };
             try inner.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
             break :blk tb.getFocus().id;
         };
@@ -1297,9 +1354,10 @@ pub const View = struct {
         if (self.description_id[index]) |id| root_focus.setFocus(id);
     }
 
-    // return to the tool row's last-focused button.
+    // return to the tool row's last-focused button (the header when the
+    // description page shows no row).
     fn focusToolRow(self: *View, index: usize, root_focus: *Focus) void {
-        const cid = self.toolRow(index).getFocus().child_id orelse return;
+        const cid = self.toolRow(index).getFocus().child_id orelse return self.focusHeader(root_focus);
         root_focus.setFocus(cid);
     }
 
@@ -1355,6 +1413,13 @@ fn issueRowLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, id: 
     const route = ui.RoutablePage.repoIssuesRoute(identity, .open, "", id) orelse return error.RouteTooLong;
     const url = try route.toUrl(page_arena);
     return std.fmt.allocPrint(page_arena.allocator(), "ai:{s}", .{url});
+}
+
+// the "a:" link to the whole-description page of issue `id` within `identity`.
+fn descriptionLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, id: []const u8) ![]const u8 {
+    const route = ui.RoutablePage.repoIssuesDescriptionRoute(identity, id) orelse return error.RouteTooLong;
+    const url = try route.toUrl(page_arena);
+    return std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{url});
 }
 
 // the "a:" link to `status`'s issues list filtered to `tag` (raw; encoded here).

@@ -101,7 +101,7 @@ pub const RoutablePage = union(enum) {
 
     pub const RefKind = enum { branch, tag };
 
-    pub const IssuesView = enum { open, closed, tags, new, edit };
+    pub const IssuesView = enum { open, closed, tags, new, edit, description };
 
     pub const RefOrOid = enum {
         branch,
@@ -364,6 +364,17 @@ pub const RoutablePage = union(enum) {
         } };
     }
 
+    // build a `.repo_issues` route showing the whole description of the issue
+    // with hex event id `selected`.
+    pub fn repoIssuesDescriptionRoute(identity: []const u8, selected: []const u8) ?RoutablePage {
+        if (selected.len == 0) return null;
+        return .{ .repo_issues = .{
+            .name = Array(repo_route_max_len).from(identity) orelse return null,
+            .selected = Array(evt.event_id_size * 2).from(selected) orelse return null,
+            .view = .description,
+        } };
+    }
+
     // an inline, owned array of data. keeping it in the route (rather than a
     // borrowed slice) makes RoutablePage a plain value: it can be copied, stored
     // in history, and serialized without any arena tracking.
@@ -442,6 +453,7 @@ pub const RoutablePage = union(enum) {
             .repo_issues => |i| blk: {
                 const prefix = try repoUrlPrefix(arena, i.name.slice());
                 if (i.view == .edit) break :blk try std.fmt.allocPrint(arena.allocator(), "{s}/issues/{s}/edit", .{ prefix, i.selected.slice() });
+                if (i.view == .description) break :blk try std.fmt.allocPrint(arena.allocator(), "{s}/issues/{s}/description", .{ prefix, i.selected.slice() });
                 // a selected issue's url carries its id instead of a view
                 // name, so it survives status changes
                 const word = if (i.selected.len != 0) i.selected.slice() else @tagName(i.view);
@@ -549,12 +561,18 @@ pub const RoutablePage = union(enum) {
             return repoRefsRoute(pair, kind, ref.value);
         }
         if (std.mem.eql(u8, tab, "issues")) {
-            // "<id>/edit" is the edit form for that issue, with no params.
+            // "<id>/edit" is the edit form for that issue, with no params;
+            // "<id>/description" is its whole-description page.
             const after_tab = segments.rest();
             if (std.mem.endsWith(u8, after_tab, "/edit")) {
                 const id = after_tab[0 .. after_tab.len - "/edit".len];
                 if (id.len == 0 or std.mem.indexOfScalar(u8, id, '/') != null) return null;
                 return repoIssuesEditRoute(pair, id);
+            }
+            if (std.mem.endsWith(u8, after_tab, "/description")) {
+                const id = after_tab[0 .. after_tab.len - "/description".len];
+                if (id.len == 0 or std.mem.indexOfScalar(u8, id, '/') != null) return null;
+                return repoIssuesDescriptionRoute(pair, id);
             }
             // the word is a view name or an issue event id (whose status
             // picks the view); a filter with neither is never emitted.
