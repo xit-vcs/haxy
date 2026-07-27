@@ -740,11 +740,15 @@ pub const View = struct {
         return self.box.getFocus();
     }
 
-    // for the parent's "scroll up at the top jumps to the header" check. inside
-    // the detail pane up-arrow stays in the pane (scrolling); when the list holds
-    // focus, report its selection directly so up-arrow at the top row ascends.
+    // for the parent's "up at the top jumps to the header" check: report 0
+    // whenever up would otherwise do nothing here.
     pub fn getSelectedIndex(self: *View) ?usize {
-        if (self.detailActive()) return 1;
+        if (self.detailActive()) {
+            if (self.detailOuter().getFocus().child_id == self.navBox().getFocus().id) return 0;
+            if (self.navBox().children.count() == 0 and
+                (!self.session.is_terminal or self.detailScroll().y == 0)) return 0;
+            return 1;
+        }
         const lb = self.listBox();
         const cid = lb.getFocus().child_id orelse return null;
         return lb.children.getIndex(cid);
