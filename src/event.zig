@@ -12,6 +12,9 @@ pub const Issue = @import("event/Issue.zig");
 
 pub const event_id_size: usize = 32;
 
+// the most bytes an event's serialized form may hold
+pub const max_event_size: usize = 100 * 1024;
+
 // the branch haxy events are committed to before being consumed
 pub const events_ref: rf.Ref = .{ .kind = .head, .name = "haxy/events" };
 
@@ -206,6 +209,7 @@ fn commitEvents(
     for (events) |event| {
         json.clearRetainingCapacity();
         try std.json.Stringify.value(event, .{ .whitespace = .indent_2 }, &json.writer);
+        if (json.written().len > max_event_size) return error.EventTooLarge;
         _ = try obj.writeCommit(repo_kind, repo_opts, state, io, allocator, .{ .author = "haxy <user@haxy>", .message = json.written(), .timestamp = event.timestamp, .parent_oids = parent_oids }, null, ref);
         // later events parent on the ref's new tip
         parent_oids = null;
@@ -568,7 +572,7 @@ pub fn consumeInTransaction(
 
             // read the message from the commit
             var message: std.ArrayList(u8) = .empty;
-            try commit_object.readMessage(arena.allocator(), &message, .unlimited);
+            try commit_object.readMessage(arena.allocator(), &message, .limited(max_event_size));
 
             const event_with_id = try EventWithId.fromString(&arena, message.items);
 
