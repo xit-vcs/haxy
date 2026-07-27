@@ -173,7 +173,7 @@ pub fn init(
                     switch (any_repo) {
                         inline else => |*opened| {
                             // local mode: bring the event db up to date with the events branch
-                            if (session.local != null) try evt.consume(repo_kind, opened.self_repo_opts, io, gpa, opened, evt.events_ref);
+                            if (session.local != null) try evt.consume(repo_kind, opened.self_repo_opts, io, gpa, opened, evt.events_ref, &.{});
                             break :blk .{
                                 try Files.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, repo_identity.identity, requested_ref_or_oid, requested_ref_value, files_dir, files_line),
                                 try Commits.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, repo_identity.identity, requested_ref_or_oid, requested_ref_value, commits_content),

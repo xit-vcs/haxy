@@ -380,7 +380,7 @@ fn servePack(
 
     switch (service) {
         .upload_pack => try repo.uploadPack(io, allocator, &session_reader.interface, &session_writer.interface, .{}),
-        .receive_pack => try repo.receivePack(io, allocator, &session_reader.interface, &session_writer.interface, .{}),
+        .receive_pack => try evt.receivePackAndConsume(repo_opts, io, allocator, repo, &session_reader.interface, &session_writer.interface, .{}),
     }
 
     // flush whatever the pack op buffered into our writer adapter

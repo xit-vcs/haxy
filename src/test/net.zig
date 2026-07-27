@@ -37,6 +37,14 @@ test "push creates missing repo under serve" {
     }
 }
 
+test "push events" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    if (.windows != builtin.os.tag) {
+        try testPushEvents(.xit, .{ .wire = .ssh }, io, allocator);
+    }
+}
+
 test "clone small" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
@@ -583,6 +591,165 @@ fn testPushCreatesMissingRepo(
 
     const oid_master = (try server_repo.readRef(io, .{ .kind = .head, .name = "master" })).?;
     try std.testing.expectEqualStrings(&commit1, &oid_master);
+}
+
+fn testPushEvents(
+    comptime repo_kind: rp.RepoKind,
+    comptime transport_def: net.TransportDefinition,
+    io: std.Io,
+    allocator: std.mem.Allocator,
+) !void {
+    const temp_dir_name = "temp-testnet-push-events";
+
+    // create the temp dir
+    const cwd = std.Io.Dir.cwd();
+    var temp_dir_or_err = cwd.openDir(io, temp_dir_name, .{});
+    if (temp_dir_or_err) |*temp_dir| {
+        temp_dir.close(io);
+        try cwd.deleteTree(io, temp_dir_name);
+    } else |_| {}
+    var temp_dir = try cwd.createDirPathOpen(io, temp_dir_name, .{});
+    defer cwd.deleteTree(io, temp_dir_name) catch {};
+    defer temp_dir.close(io);
+
+    // init server
+    var server_process = try runServer(io, allocator, temp_dir_name);
+    defer _ = server_process.kill(io);
+
+    // register the repo under admin and locate its on-disk directory
+    const server_path = (try repoOnDiskPath(io, allocator, temp_dir_name, "testrepo", true)).?;
+    defer allocator.free(server_path);
+
+    const repo_opts: rp.RepoOpts(.xit) = .{ .is_test = true };
+    const ServerRepo = rp.Repo(.xit, repo_opts);
+    var server_repo = try ServerRepo.init(io, allocator, .{ .path = server_path });
+    defer server_repo.deinit(io, allocator);
+
+    const cwd_path = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(cwd_path);
+
+    const client_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "client" });
+    defer allocator.free(client_path);
+
+    var client_repo = try rp.Repo(repo_kind, .{ .is_test = true }).init(io, allocator, .{ .path = client_path });
+    defer client_repo.deinit(io, allocator);
+
+    // add remote
+    {
+        const remote_url = try remoteUrl(transport_def, allocator, "testrepo");
+        defer allocator.free(remote_url);
+
+        try client_repo.addRemote(io, allocator, .{ .name = "origin", .value = remote_url });
+    }
+
+    const is_ssh = switch (transport_def) {
+        .file => false,
+        .wire => |wire_kind| .ssh == wire_kind,
+    };
+    const ssh_cmd_maybe = try sshCommand(is_ssh, allocator, cwd_path, temp_dir_name);
+    defer if (ssh_cmd_maybe) |ssh_cmd| allocator.free(ssh_cmd);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    //
+    // define test events
+    //
+
+    var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
+    const issue_event_id = evt.EventWithId.randomId(prng.random());
+
+    const events_to_push = [_]evt.EventWithId{
+        .{
+            .id = std.fmt.bytesToHex(issue_event_id, .lower),
+            .event = .{
+                .issue = .{
+                    .title = "Login form clears password on validation error",
+                    .description = "Submitting an invalid email address resets the password field. Preserve the field value and show an inline validation message.",
+                    .tags = "bug priority-high ui",
+                },
+            },
+        },
+    };
+
+    // commit the issue on the client and push it to the server
+    try evt.consume(repo_kind, .{ .is_test = true }, io, allocator, &client_repo, evt.events_ref, &events_to_push);
+    try client_repo.push(
+        io,
+        allocator,
+        "origin",
+        "haxy/events",
+        false,
+        .{ .wire = .{ .ssh = .{
+            .command = ssh_cmd_maybe,
+        } } },
+    );
+
+    // the push consumed the issue into the server repo's db
+    {
+        const haxy_moment = try evt.currentMoment(repo_opts, &server_repo);
+
+        // get the map of issues
+        const event_id_to_issue_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, "event-id->issue")) orelse return error.NotFound;
+        const event_id_to_issue = try ServerRepo.DB.HashMap(.read_only).init(event_id_to_issue_cursor);
+
+        // get the issue out of the map
+        const issue_cursor = try event_id_to_issue.getCursor(hash.hashInt(repo_opts.hash, &issue_event_id)) orelse return error.NotFound;
+        const issue_map = try ServerRepo.DB.HashMap(.read_only).init(issue_cursor);
+        const issue = try evt.read(evt.Issue, ServerRepo.DB, repo_opts.hash, &arena, issue_map);
+
+        try std.testing.expectEqualStrings(events_to_push[0].event.issue.?.description, issue.description);
+        try std.testing.expectEqualStrings(events_to_push[0].event.issue.?.tags, issue.tags);
+    }
+
+    //
+    // edit the issue
+    //
+
+    // this event edits the previous one because it has the same id
+    const events_to_push2 = [_]evt.EventWithId{
+        .{
+            .id = std.fmt.bytesToHex(issue_event_id, .lower),
+            .event = .{
+                .issue = .{
+                    .title = "Login form clears password on validation error",
+                    .description = "Submitting an invalid email address resets the password field and removes typed input. Preserve the field value and show an inline validation message.",
+                    .tags = "bug priority-low ui",
+                },
+            },
+        },
+    };
+
+    // commit the edit on the client and push it to the server
+    try evt.consume(repo_kind, .{ .is_test = true }, io, allocator, &client_repo, evt.events_ref, &events_to_push2);
+    try client_repo.push(
+        io,
+        allocator,
+        "origin",
+        "haxy/events",
+        false,
+        .{ .wire = .{ .ssh = .{
+            .command = ssh_cmd_maybe,
+        } } },
+    );
+
+    // the push consumed the edit into the server repo's db
+    {
+        const haxy_moment = try evt.currentMoment(repo_opts, &server_repo);
+
+        // get the map of issues
+        const event_id_to_issue_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, "event-id->issue")) orelse return error.NotFound;
+        const event_id_to_issue = try ServerRepo.DB.HashMap(.read_only).init(event_id_to_issue_cursor);
+
+        // get the issue out of the map that was edited
+        const issue_cursor = try event_id_to_issue.getCursor(hash.hashInt(repo_opts.hash, &issue_event_id)) orelse return error.NotFound;
+        const issue_map = try ServerRepo.DB.HashMap(.read_only).init(issue_cursor);
+        const issue = try evt.read(evt.Issue, ServerRepo.DB, repo_opts.hash, &arena, issue_map);
+
+        // the description and tags were correctly edited
+        try std.testing.expectEqualStrings(events_to_push2[0].event.issue.?.description, issue.description);
+        try std.testing.expectEqualStrings(events_to_push2[0].event.issue.?.tags, issue.tags);
+    }
 }
 
 fn testClone(
@@ -1237,7 +1404,7 @@ fn setupAdmin(io: std.Io, allocator: std.mem.Allocator, data_dir_name: []const u
     var password_hash_buf: [evt.User.password_hash_max_len]u8 = undefined;
     const password_hash = try evt.User.hashPassword("password", &password_hash_buf, io);
 
-    try evt.commitAndConsume(.xit, evt.admin_repo_opts, io, allocator, &repo, evt.events_ref, &[_]evt.EventWithId{.{
+    try evt.consume(.xit, evt.admin_repo_opts, io, allocator, &repo, evt.events_ref, &[_]evt.EventWithId{.{
         .id = std.fmt.bytesToHex(user_id, .lower),
         .event = .{ .user = .{
             .name = "admin",

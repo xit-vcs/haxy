@@ -115,7 +115,7 @@ test "rebase" {
     //
 
     {
-        try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref);
+        try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &.{});
 
         const haxy_moment = try evt.currentMoment(repo_opts, &repo);
 
@@ -153,7 +153,7 @@ test "rebase" {
     };
 
     // commit and consume the new event
-    try evt.commitAndConsume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &events_to_consume2);
+    try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &events_to_consume2);
 
     //
     // rebase the branch so it no longer includes the edit event
@@ -196,7 +196,7 @@ test "rebase" {
     //
 
     {
-        try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref);
+        try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &.{});
 
         const haxy_moment = try evt.currentMoment(repo_opts, &repo);
 
@@ -255,7 +255,7 @@ test "rebase" {
     //
 
     {
-        try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref);
+        try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &.{});
 
         const haxy_moment = try evt.currentMoment(repo_opts, &repo);
 
@@ -367,7 +367,7 @@ test "merge" {
     //
 
     {
-        try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref);
+        try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &.{});
 
         const haxy_moment = try evt.currentMoment(repo_opts, &repo);
 
@@ -469,7 +469,7 @@ test "merge" {
     //
 
     {
-        try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref);
+        try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &.{});
 
         const haxy_moment = try evt.currentMoment(repo_opts, &repo);
 
@@ -561,7 +561,7 @@ test "merge" {
     //
 
     {
-        try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref);
+        try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &.{});
 
         const haxy_moment = try evt.currentMoment(repo_opts, &repo);
 
@@ -661,10 +661,10 @@ test "merge" {
     _ = try std.fmt.hexToBytes(&issue_id, &events_to_consume[0].id);
 
     {
-        try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref);
+        try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &.{});
 
         // consuming the merge again must be a no-op rather than replaying it
-        try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref);
+        try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &.{});
 
         const haxy_moment = try evt.currentMoment(repo_opts, &repo);
 
@@ -746,7 +746,7 @@ test "merge" {
             try std.testing.expect(.success == merge.result);
         }
 
-        try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref);
+        try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &.{});
 
         const haxy_moment = try evt.currentMoment(repo_opts, &repo);
 
@@ -818,7 +818,7 @@ test "merge" {
             try std.testing.expect(.success == merge.result);
         }
 
-        try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref);
+        try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &.{});
 
         const haxy_moment = try evt.currentMoment(repo_opts, &repo);
 
@@ -896,7 +896,7 @@ test "merge" {
     }
 
     {
-        try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref);
+        try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &.{});
 
         const haxy_moment = try evt.currentMoment(repo_opts, &repo);
 
@@ -981,7 +981,7 @@ test "merge" {
             try std.testing.expect(.success == merge.result);
         }
 
-        try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref);
+        try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &.{});
 
         const haxy_moment = try evt.currentMoment(repo_opts, &repo);
 
@@ -1116,7 +1116,7 @@ test "user and repo" {
     };
 
     // commit and consume the seed events
-    try evt.commitAndConsume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &events_to_consume);
+    try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &events_to_consume);
 
     {
         const haxy_moment = try evt.currentMoment(repo_opts, &repo);
@@ -1171,7 +1171,7 @@ test "user and repo" {
     };
 
     // commit and consume the removal
-    try evt.commitAndConsume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &events_to_consume2);
+    try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &events_to_consume2);
 
     {
         const haxy_moment = try evt.currentMoment(repo_opts, &repo);
@@ -1205,7 +1205,7 @@ test "user and repo" {
     };
 
     // commit and consume the removal
-    try evt.commitAndConsume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &events_to_consume3);
+    try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &events_to_consume3);
 
     {
         const haxy_moment = try evt.currentMoment(repo_opts, &repo);
@@ -1284,7 +1284,7 @@ test "repos and users paginate newest first" {
         .{ .id = std.fmt.bytesToHex(repo_ids[2], .lower), .timestamp = 103, .event = .{ .repo = .{ .user_id = &user_id, .name = "repo2", .description = "d2" } } },
         .{ .id = std.fmt.bytesToHex(repo_ids[3], .lower), .timestamp = 104, .event = .{ .repo = .{ .user_id = &user_id, .name = "repo3", .description = "d3" } } },
     };
-    try evt.commitAndConsume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &events);
+    try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &events);
 
     {
         const moment = try evt.currentMoment(repo_opts, &repo);
@@ -1297,7 +1297,7 @@ test "repos and users paginate newest first" {
     }
 
     // delete repo1 -> dense order (no tombstone)
-    try evt.commitAndConsume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &[_]evt.EventWithId{
+    try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &[_]evt.EventWithId{
         .{ .id = std.fmt.bytesToHex(repo_ids[1], .lower), .timestamp = 200, .event = .{ .repo = null } },
     });
     {
@@ -1306,7 +1306,7 @@ test "repos and users paginate newest first" {
     }
 
     // update repo0 at a later timestamp -> keeps its original place
-    try evt.commitAndConsume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &[_]evt.EventWithId{
+    try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &[_]evt.EventWithId{
         .{ .id = std.fmt.bytesToHex(repo_ids[0], .lower), .timestamp = 300, .event = .{ .repo = .{ .user_id = &user_id, .name = "repo0", .description = "updated" } } },
     });
     {

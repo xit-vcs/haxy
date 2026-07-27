@@ -423,7 +423,7 @@ fn handleIssue(
 
             var repo = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = repo_path });
             defer repo.deinit(io, allocator);
-            try evt.commitAndConsume(.xit, .{}, io, allocator, &repo, evt.events_ref, &[_]evt.EventWithId{event});
+            try evt.consume(.xit, .{}, io, allocator, &repo, evt.events_ref, &[_]evt.EventWithId{event});
         },
         .local => |src| {
             // the local form posts to "/issue", so base is empty
@@ -439,7 +439,7 @@ fn handleIssue(
                     var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, .{ .path = src.path });
                     defer any_repo.deinit(io, allocator);
                     switch (any_repo) {
-                        inline else => |*repo| try evt.commitAndConsume(repo_kind, repo.self_repo_opts, io, allocator, repo, evt.events_ref, &[_]evt.EventWithId{event}),
+                        inline else => |*repo| try evt.consume(repo_kind, repo.self_repo_opts, io, allocator, repo, evt.events_ref, &[_]evt.EventWithId{event}),
                     }
                 },
             }
