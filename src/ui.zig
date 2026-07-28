@@ -1056,6 +1056,63 @@ pub fn crossPageLink(root_focus: *Focus, focus_id: usize, data: Session.Data) ?R
     return null;
 }
 
+// a display author, resolved against the admin db at read time
+pub const Author = union(enum) {
+    unknown,
+    email: []const u8, // an email no user matches
+    user_name: []const u8,
+
+    // the commit author line's email, resolved like initFromDb
+    pub fn init(
+        haxy_moment: ?evt.AdminDB.HashMap(.read_only),
+        arena: *std.heap.ArenaAllocator,
+        author_line: []const u8,
+    ) !Author {
+        return initFromDb(haxy_moment, arena, evt.authorEmail(author_line));
+    }
+
+    // from a record's stored author email: it resolves to the user currently
+    // holding it, else stays the email. the result is allocated in `arena`,
+    // so the email may borrow transient memory.
+    pub fn initFromDb(
+        haxy_moment: ?evt.AdminDB.HashMap(.read_only),
+        arena: *std.heap.ArenaAllocator,
+        author_email: ?[]const u8,
+    ) !Author {
+        const email = author_email orelse return .unknown;
+        if (haxy_moment) |moment| {
+            if (try evt.User.readByEmail(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, email)) |user| {
+                return .{ .user_name = user.name };
+            }
+        }
+        return .{ .email = try arena.allocator().dupe(u8, email) };
+    }
+};
+
+// the "a:" link to user `name`'s page.
+pub fn userLink(page_arena: *std.heap.ArenaAllocator, name: []const u8) ![]const u8 {
+    const parsed = RoutablePage.Array(evt.User.name_max_len).from(name) orelse return error.RouteTooLong;
+    const url = try (RoutablePage{ .user_repos = .{ .name = parsed } }).toUrl(page_arena);
+    return std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{url});
+}
+
+// a focusable " author " box showing `author`, linking to their user page
+// when it is a known user
+pub fn authorBox(allocator: std.mem.Allocator, page_arena: *std.heap.ArenaAllocator, author: Author) !wgt.TextBox(Widget) {
+    const text = switch (author) {
+        .unknown => "",
+        .email, .user_name => |t| t,
+    };
+    var tb = try wgt.TextBox(Widget).init(allocator, text, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none, .label = " author " });
+    errdefer tb.deinit(allocator);
+    tb.getFocus().focusable = true;
+    switch (author) {
+        .user_name => |name| tb.getFocus().kind = .{ .custom = try userLink(page_arena, name) },
+        else => {},
+    }
+    return tb;
+}
+
 // native-TUI navigation
 pub const Nav = struct {
     root: Widget,

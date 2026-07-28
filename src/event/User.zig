@@ -50,12 +50,11 @@ pub fn validateName(name: []const u8) !void {
     }
 }
 
-// `created_ts` comes from the commit timestamp, not the event
-// payload, so it must not appear in the JSON we output
+// the commit-derived fields must not appear in the JSON we output
 pub fn jsonStringify(self: @This(), jw: anytype) !void {
     try jw.beginObject();
     inline for (std.meta.fields(@This())) |field| {
-        if (comptime std.mem.eql(u8, field.name, "created_ts")) continue;
+        if (comptime evt.derivedField(field.name)) continue;
         try jw.objectField(field.name);
         try jw.write(@field(self, field.name));
     }
@@ -79,7 +78,6 @@ pub fn consume(
     event_id: *const [evt.event_id_size]u8,
     event_maybe: ?@This(),
     arena: *std.heap.ArenaAllocator,
-    created_ts: u64,
     // the commit this event came from, recorded against every field it
     // changes. null from `merge`, which sets oids and conflicts itself.
     event_oid: ?[]const u8,
@@ -128,9 +126,6 @@ pub fn consume(
             if (event_oid != null) {
                 _ = try conflicts.remove(&evt.orderKeyDesc(existing_event.created_ts, event_id));
             }
-        } else {
-            // first time we've seen this user: stamp it with the commit timestamp
-            event_to_write.created_ts = created_ts;
         }
 
         try evt.writeOid(@This(), DB, hash_kind, user_id_to_field_to_oid, user_key, existing_event_maybe, event, event_oid);
@@ -243,6 +238,23 @@ pub fn readById(
     const user_cursor = try event_id_to_user.getCursor(hash.hashInt(hash_kind, user_id)) orelse return null;
     const user_map = try DB.HashMap(.read_only).init(user_cursor);
     return try evt.read(@This(), DB, hash_kind, arena, user_map);
+}
+
+// read a user by email via the email->user-id index, or null when no user has
+// the email. field byte slices are allocated in `arena`.
+pub fn readByEmail(
+    comptime DB: type,
+    comptime hash_kind: hash.HashKind,
+    haxy_moment: DB.HashMap(.read_only),
+    arena: *std.heap.ArenaAllocator,
+    email: []const u8,
+) !?@This() {
+    const email_to_user_id_cursor = (try haxy_moment.getCursor(hash.hashInt(hash_kind, email_to_user_id_key))) orelse return null;
+    const email_to_user_id = try DB.HashMap(.read_only).init(email_to_user_id_cursor);
+    const user_id_cursor = (try email_to_user_id.getCursor(hash.hashInt(hash_kind, email))) orelse return null;
+    var user_id: [evt.event_id_size]u8 = undefined;
+    _ = try user_id_cursor.readBytes(&user_id);
+    return try readById(DB, hash_kind, haxy_moment, arena, &user_id);
 }
 
 // read a user by name from the admin event store, or null if the admin repo or

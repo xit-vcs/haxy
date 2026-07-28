@@ -346,27 +346,27 @@ fn handleAnsi(
     });
 }
 
-// the email the request's session authors event commits as
-fn authorEmail(
+// the logged-in user the request's session cookie names, or null for local
+// mode / no session / an unknown token
+fn sessionUser(
     io: std.Io,
     allocator: std.mem.Allocator,
     arena: *std.heap.ArenaAllocator,
     request: *std.http.Server.Request,
     host: Host,
-) ![]const u8 {
+) !?evt.User {
     const remote = switch (host) {
         .remote => |remote| remote,
-        .local => return "user@haxy",
+        .local => return null,
     };
-    const token = getCookieValue(request, cookie_name) orelse return "user@haxy";
+    const token = getCookieValue(request, cookie_name) orelse return null;
     var user_id: [evt.event_id_size]u8 = undefined;
-    if (!remote.session_store.lookup(token, &user_id)) return "user@haxy";
+    if (!remote.session_store.lookup(token, &user_id)) return null;
 
     var repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = remote.admin_repo_path });
     defer repo.deinit(io, allocator);
     const moment = try evt.currentMoment(evt.admin_repo_opts, &repo);
-    const user = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, &user_id)) orelse unreachable;
-    return user.email;
+    return (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, &user_id)) orelse unreachable;
 }
 
 // create an issue in the repo the form's page names (base is
@@ -414,7 +414,7 @@ fn handleIssue(
     const event = evt.EventWithId{
         .id = event_id_hex,
         .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
-        .author_email = try authorEmail(io, allocator, &author_arena, request, host),
+        .author_email = if (try sessionUser(io, allocator, &author_arena, request, host)) |author| author.email else "user@haxy",
         .event = .{ .issue = .{
             .title = title,
             .description = description,
@@ -562,7 +562,7 @@ fn handleIssueStatus(
 
     var author_arena = std.heap.ArenaAllocator.init(allocator);
     defer author_arena.deinit();
-    const author_email = try authorEmail(io, allocator, &author_arena, request, host);
+    const author_email = if (try sessionUser(io, allocator, &author_arena, request, host)) |author| author.email else "user@haxy";
 
     updateIssue(io, allocator, host, parts, .{ .status = status }, author_email) catch |err| switch (err) {
         error.NotFound => {
@@ -633,7 +633,7 @@ fn handleIssueEdit(
 
     var author_arena = std.heap.ArenaAllocator.init(allocator);
     defer author_arena.deinit();
-    const author_email = try authorEmail(io, allocator, &author_arena, request, host);
+    const author_email = if (try sessionUser(io, allocator, &author_arena, request, host)) |author| author.email else "user@haxy";
 
     updateIssue(io, allocator, host, parts, .{ .fields = .{
         .title = title,

@@ -31,6 +31,18 @@ pub fn EventDB(comptime hash_kind: hash.HashKind) type {
     return rp.Repo(.xit, .{ .hash = hash_kind }).DB;
 }
 
+// fields derived from the commit rather than carried by the event payload
+pub fn derivedField(comptime field_name: []const u8) bool {
+    return std.mem.eql(u8, field_name, "created_ts") or std.mem.eql(u8, field_name, "author_email");
+}
+
+// the email between a commit author line's angle brackets, or null
+pub fn authorEmail(author_line: []const u8) ?[]const u8 {
+    const open_bracket = std.mem.indexOfScalar(u8, author_line, '<') orelse return null;
+    const close_bracket = std.mem.indexOfScalarPos(u8, author_line, open_bracket + 1, '>') orelse return null;
+    return author_line[open_bracket + 1 .. close_bracket];
+}
+
 pub const EventKind = enum {
     user,
     repo,
@@ -579,18 +591,28 @@ pub fn consumeInTransaction(
             var message: std.ArrayList(u8) = .empty;
             try commit_object.readMessage(arena.allocator(), &message, .limited(max_event_size));
 
-            const event_with_id = try EventWithId.fromString(&arena, message.items);
+            var event_with_id = try EventWithId.fromString(&arena, message.items);
 
             // get the id of the current event as bytes
             var current_event_id: [event_id_size]u8 = undefined;
             _ = try std.fmt.hexToBytes(&current_event_id, &event_with_id.id);
 
-            const created_ts = commit_object.content.commit.metadata.timestamp;
+            // set the derived fields
+            switch (event_with_id.event) {
+                .issue => |*event_maybe| if (event_maybe.*) |*event| {
+                    event.created_ts = commit_object.content.commit.metadata.timestamp;
+                    event.author_email = authorEmail(commit_object.content.commit.metadata.author orelse "");
+                },
+                inline else => |*event_maybe| if (event_maybe.*) |*event| {
+                    event.created_ts = commit_object.content.commit.metadata.timestamp;
+                },
+            }
 
             switch (event_with_id.event) {
-                .user => |event_maybe| try User.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, event_maybe, &arena, created_ts, &repo_event_oid),
-                .repo => |event_maybe| try Repo.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, event_maybe, &arena, created_ts, &repo_event_oid),
-                .issue => |event_maybe| try Issue.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, event_maybe, &arena, created_ts, &repo_event_oid),
+                inline else => |event_maybe| {
+                    const T = @typeInfo(@TypeOf(event_maybe)).optional.child;
+                    try T.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, event_maybe, &arena, &repo_event_oid);
+                },
             }
         }
 
@@ -643,7 +665,7 @@ pub fn writeOid(
     var field_oids: ?DB.SortedMap(.read_write) = null;
 
     inline for (std.meta.fields(T)) |field| {
-        if (comptime !std.mem.eql(u8, field.name, "created_ts")) {
+        if (comptime !derivedField(field.name)) {
             const changed = if (existing_maybe) |existing|
                 !fieldEqual(field.type, @field(existing, field.name), @field(event, field.name))
             else
@@ -687,7 +709,7 @@ fn mergeFields(
     var merged = target;
 
     inline for (std.meta.fields(T), 0..) |field, i| {
-        if (comptime !std.mem.eql(u8, field.name, "created_ts")) {
+        if (comptime !derivedField(field.name)) {
             const target_value = @field(target, field.name);
             const parent_value = @field(parent, field.name);
 
@@ -784,7 +806,7 @@ pub fn merge(
                 if (!fieldsEqual(T, target_record, baseline_record)) continue;
             }
 
-            try T.consume(DB, hash_kind, haxy_moment, &event_id, null, &arena, 0, null);
+            try T.consume(DB, hash_kind, haxy_moment, &event_id, null, &arena, null);
         }
     }
 
@@ -849,7 +871,7 @@ pub fn merge(
 
         // `consume` sets no oids, since each field's winner may come from
         // a different side
-        try T.consume(DB, hash_kind, haxy_moment, &event_id, merged, &arena, merged.created_ts, null);
+        try T.consume(DB, hash_kind, haxy_moment, &event_id, merged, &arena, null);
 
         const conflicts_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, T.conflicts_key));
         const conflicts = try DB.SortedMap(.read_write).init(conflicts_cursor);
@@ -871,27 +893,25 @@ pub fn merge(
         var conflicted_len: usize = 0;
 
         inline for (std.meta.fields(T), 0..) |field, i| {
-            if (comptime !std.mem.eql(u8, field.name, "created_ts")) {
-                switch (outcome[i]) {
-                    // the target's value stands, so its oid does too
-                    .kept => {},
-                    .parent => if (parent_field_oids) |parent_map| {
-                        if (try parent_map.getCursor(field.name)) |oid_cursor| {
-                            if (field_oids == null) {
-                                field_oids = try DB.SortedMap(.read_write).init(try id_to_field_to_oid.putCursor(record_key));
-                            }
-                            if (field_oids) |map| try map.put(field.name, .{ .slot = oid_cursor.slot() });
+            switch (outcome[i]) {
+                // the target's value stands, so its oid does too
+                .kept => {},
+                .parent => if (parent_field_oids) |parent_map| {
+                    if (try parent_map.getCursor(field.name)) |oid_cursor| {
+                        if (field_oids == null) {
+                            field_oids = try DB.SortedMap(.read_write).init(try id_to_field_to_oid.putCursor(record_key));
                         }
-                    },
-                    .conflicted => {
-                        if (conflicted_len > 0) {
-                            conflicted_fields[conflicted_len] = ' ';
-                            conflicted_len += 1;
-                        }
-                        @memcpy(conflicted_fields[conflicted_len..][0..field.name.len], field.name);
-                        conflicted_len += field.name.len;
-                    },
-                }
+                        if (field_oids) |map| try map.put(field.name, .{ .slot = oid_cursor.slot() });
+                    }
+                },
+                .conflicted => {
+                    if (conflicted_len > 0) {
+                        conflicted_fields[conflicted_len] = ' ';
+                        conflicted_len += 1;
+                    }
+                    @memcpy(conflicted_fields[conflicted_len..][0..field.name.len], field.name);
+                    conflicted_len += field.name.len;
+                },
             }
         }
 
@@ -1099,6 +1119,14 @@ pub fn read(
                         const bytes = try readBytes(DB, hash_kind, arena.allocator(), map, field.name);
                         @field(event, field.name) = std.meta.stringToEnum(field.type, bytes) orelse return error.InvalidEnumTag;
                     },
+                    .optional => |optional_info| {
+                        if (optional_info.child != []const u8) @compileError("unsupported read field type: " ++ @typeName(field.type));
+                        // a missing key is null
+                        @field(event, field.name) = if (try map.getCursor(hash.hashInt(hash_kind, field.name))) |cursor|
+                            try cursor.readBytesAlloc(arena.allocator(), null)
+                        else
+                            null;
+                    },
                     else => @compileError("unsupported read field type: " ++ @typeName(field.type)),
                 }
             }
@@ -1109,13 +1137,13 @@ pub fn read(
     return event;
 }
 
-// whether two events carry the same data. `created_ts` comes from the commit
-// rather than the payload, so it isn't compared.
+// whether two events carry the same payload data (commit-derived fields
+// aren't compared)
 fn fieldsEqual(comptime T: type, a: T, b: T) bool {
     switch (@typeInfo(T)) {
         .@"struct" => |struct_info| {
             inline for (struct_info.fields) |field| {
-                if (comptime std.mem.eql(u8, field.name, "created_ts")) continue;
+                if (comptime derivedField(field.name)) continue;
                 if (!fieldEqual(field.type, @field(a, field.name), @field(b, field.name))) return false;
             }
         },
@@ -1274,6 +1302,15 @@ fn upsertField(
             try map.put(key, .{ .bytes_object = .{ .value = bytes, .format_tag = "bl".* } });
         },
         .@"enum" => try upsertBytes(DB, hash_kind, map, key, @tagName(value)),
+        .optional => |optional_info| {
+            if (optional_info.child != []const u8) @compileError("unsupported upsert field type: " ++ @typeName(Field));
+            // a missing key is null
+            if (value) |bytes| {
+                try upsertBytes(DB, hash_kind, map, key, bytes);
+            } else {
+                _ = try map.remove(key);
+            }
+        },
         else => @compileError("unsupported upsert field type: " ++ @typeName(Field)),
     }
 }

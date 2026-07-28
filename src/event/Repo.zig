@@ -36,12 +36,11 @@ pub fn validateName(name: []const u8) !void {
     }
 }
 
-// `created_ts` comes from the commit timestamp, not the event
-// payload, so it must not appear in the JSON we output
+// the commit-derived fields must not appear in the JSON we output
 pub fn jsonStringify(self: @This(), jw: anytype) !void {
     try jw.beginObject();
     inline for (std.meta.fields(@This())) |field| {
-        if (comptime std.mem.eql(u8, field.name, "created_ts")) continue;
+        if (comptime evt.derivedField(field.name)) continue;
         try jw.objectField(field.name);
         try jw.write(@field(self, field.name));
     }
@@ -55,7 +54,6 @@ pub fn consume(
     event_id: *const [evt.event_id_size]u8,
     event_maybe: ?@This(),
     arena: *std.heap.ArenaAllocator,
-    created_ts: u64,
     // the commit this event came from, recorded against every field it
     // changes. null from `merge`, which sets oids and conflicts itself.
     event_oid: ?[]const u8,
@@ -110,9 +108,6 @@ pub fn consume(
                 const order_key = evt.orderKeyDesc(existing_event.created_ts, event_id);
                 _ = try old_user_repos.remove(&order_key);
             }
-        } else {
-            // first time we've seen this repo: stamp it with the commit timestamp
-            event_to_write.created_ts = created_ts;
         }
 
         try evt.writeOid(@This(), DB, hash_kind, repo_id_to_field_to_oid, repo_key, existing_event_maybe, event, event_oid);

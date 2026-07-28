@@ -37,6 +37,7 @@ pub const Commit = struct {
     message: []const u8, // trimmed, may be multi-line
     // whether `message` is only the first line of a message too big to read.
     message_truncated: bool = false,
+    author: ui.Author = .unknown,
     hunks: []const Hunk,
     // the hunk index this window starts at (0 = the first window).
     window_start: usize,
@@ -84,6 +85,9 @@ pub fn init(
     repo: *rp.Repo(repo_kind, repo_opts),
     io: std.Io,
     gpa: std.mem.Allocator,
+    // the admin db's moment, for resolving author emails to user names (null
+    // in local mode, which has no users)
+    admin_moment: ?evt.AdminDB.HashMap(.read_only),
     identity: []const u8,
     requested_ref_or_oid: ?ui.RoutablePage.RefOrOid,
     requested_value: []const u8,
@@ -139,6 +143,7 @@ pub fn init(
                 .date = try formatDate(aa, md.timestamp),
                 .message = text,
                 .message_truncated = truncated,
+                .author = try ui.Author.init(admin_moment, arena, md.author orelse ""),
                 .hunks = &.{},
                 .window_start = 0,
                 .has_prev = false,
@@ -700,6 +705,11 @@ pub const View = struct {
                     try self.addNavLink(allocator, inner, "← all files", commit.oid, 0, "");
                 } else {
                     try self.addMessageBox(allocator, inner, commit, .preview);
+                    if (commit.author != .unknown) {
+                        var tb = try ui.authorBox(allocator, self.session.page_arena, commit.author);
+                        errdefer tb.deinit(allocator);
+                        try inner.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
+                    }
                     try self.addViewFilesLink(allocator, inner, commit.oid);
                 }
 

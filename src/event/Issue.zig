@@ -8,6 +8,7 @@ title: []const u8,
 description: []const u8,
 tags: []const u8, // space-separated
 status: Status = .open,
+author_email: ?[]const u8 = null,
 created_ts: u64 = 0, // the commit timestamp of the event that first created this issue
 
 pub const Status = enum {
@@ -52,12 +53,11 @@ pub fn fieldsValid(title: []const u8, tags: []const u8) bool {
     return true;
 }
 
-// `created_ts` comes from the commit timestamp, not the event
-// payload, so it must not appear in the JSON we output
+// the commit-derived fields must not appear in the JSON we output
 pub fn jsonStringify(self: @This(), jw: anytype) !void {
     try jw.beginObject();
     inline for (std.meta.fields(@This())) |field| {
-        if (comptime std.mem.eql(u8, field.name, "created_ts")) continue;
+        if (comptime evt.derivedField(field.name)) continue;
         try jw.objectField(field.name);
         try jw.write(@field(self, field.name));
     }
@@ -71,7 +71,6 @@ pub fn consume(
     event_id: *const [evt.event_id_size]u8,
     event_maybe: ?@This(),
     arena: *std.heap.ArenaAllocator,
-    created_ts: u64,
     // the commit this event came from, recorded against every field it
     // changes. null from `merge`, which sets oids and conflicts itself.
     event_oid: ?[]const u8,
@@ -102,11 +101,12 @@ pub fn consume(
         var existing_event_maybe: ?@This() = null;
         const existing_cursor_maybe = try event_id_to_issue.getCursor(issue_key);
         if (existing_cursor_maybe) |existing_cursor| {
-            // updates preserve the original creation timestamp
+            // updates preserve the original creation timestamp and author
             const existing_issue = try DB.HashMap(.read_only).init(existing_cursor);
             const existing_event = try evt.read(@This(), DB, hash_kind, arena, existing_issue);
             existing_event_maybe = existing_event;
             event_to_write.created_ts = existing_event.created_ts;
+            event_to_write.author_email = existing_event.author_email;
 
             // drop the old status's and tags' entries; the current ones are re-added below
             const order_key = evt.orderKeyDesc(existing_event.created_ts, event_id);
@@ -117,9 +117,6 @@ pub fn consume(
             // any event settles the conflict, since resolving in the ui may
             // keep our own values and so change nothing to detect
             if (event_oid != null) _ = try conflicts.remove(&order_key);
-        } else {
-            // first time we've seen this issue: stamp it with the commit timestamp
-            event_to_write.created_ts = created_ts;
         }
 
         try evt.writeOid(@This(), DB, hash_kind, issue_id_to_field_to_oid, issue_key, existing_event_maybe, event, event_oid);

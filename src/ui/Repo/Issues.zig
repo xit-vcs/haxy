@@ -30,6 +30,8 @@ pub const max_tags = 1000;
 pub const IssueWithId = struct {
     id: []const u8,
     issue: evt.Issue,
+    // the creation commit's author
+    author: ui.Author = .unknown,
 };
 
 // one status's windowed listing.
@@ -115,6 +117,9 @@ pub fn init(
     arena: *std.heap.ArenaAllocator,
     repo: *rp.Repo(repo_kind, repo_opts),
     io: std.Io,
+    // the admin db's moment, for resolving author emails to user names (null
+    // in local mode, which has no users)
+    admin_moment: ?evt.AdminDB.HashMap(.read_only),
     identity: []const u8,
     tag: []const u8,
     selected_id: []const u8,
@@ -201,8 +206,8 @@ pub fn init(
         };
     }
 
-    const open_window = try loadWindow(repo_opts.hash, arena, event_id_to_issue, open_set, open_root);
-    const closed_window = try loadWindow(repo_opts.hash, arena, event_id_to_issue, closed_set, closed_root);
+    const open_window = try loadWindow(repo_opts.hash, arena, admin_moment, event_id_to_issue, open_set, open_root);
+    const closed_window = try loadWindow(repo_opts.hash, arena, admin_moment, event_id_to_issue, closed_set, closed_root);
 
     // every tag in the repo, in the tag map's sorted order. the keys are
     // "tag,status", so a tag's entries are adjacent and dedup by prefix.
@@ -265,6 +270,7 @@ fn tagStatusSet(
 fn loadWindow(
     comptime hash_kind: hash.HashKind,
     arena: *std.heap.ArenaAllocator,
+    admin_moment: ?evt.AdminDB.HashMap(.read_only),
     event_id_to_issue: evt.EventDB(hash_kind).HashMap(.read_only),
     set_maybe: ?evt.EventDB(hash_kind).SortedSet(.read_only),
     root_key: ?[]const u8,
@@ -308,9 +314,11 @@ fn loadWindow(
         }
         const issue_cursor = try event_id_to_issue.getCursor(hash.hashInt(hash_kind, order_key[@sizeOf(u64)..])) orelse continue;
         const issue_map = try DB.HashMap(.read_only).init(issue_cursor);
+        const issue_event = try evt.read(evt.Issue, DB, hash_kind, arena, issue_map);
         try issues.append(aa, .{
             .id = try aa.dupe(u8, &id_hex),
-            .issue = try evt.read(evt.Issue, DB, hash_kind, arena, issue_map),
+            .issue = issue_event,
+            .author = try ui.Author.initFromDb(admin_moment, arena, issue_event.author_email),
         });
     }
 
@@ -330,9 +338,10 @@ pub const View = struct {
     data: *const Self,
     session: *ui.Session,
     // per-split state, indexed like the stack's split children: the issue the
-    // pane shows, and its description text box's focus id.
+    // pane shows, and its description and author text boxes' focus ids.
     detailed_index: [split_count]?usize,
     description_id: [split_count]?usize,
+    author_id: [split_count]?usize,
 
     const header_index: usize = 0;
     const stack_index: usize = 1;
@@ -446,6 +455,7 @@ pub const View = struct {
             .session = session,
             .detailed_index = .{ null, null },
             .description_id = .{ null, null },
+            .author_id = .{ null, null },
         };
     }
 
@@ -801,6 +811,7 @@ pub const View = struct {
         for (inner.children.values()) |*child| child.widget.deinit(allocator);
         inner.children.clearAndFree(allocator);
         inner.getFocus().child_id = null;
+        self.author_id[index] = null;
 
         // the tool row: the open/close and edit buttons; the description page
         // shows none.
@@ -868,6 +879,13 @@ pub const View = struct {
                 tb.getFocus().focusable = true;
                 try inner.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
             }
+
+            self.author_id[index] = blk: {
+                var tb = try ui.authorBox(allocator, self.session.page_arena, entry.author);
+                errdefer tb.deinit(allocator);
+                try inner.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
+                break :blk tb.getFocus().id;
+            };
 
             // the issue's tags, each linking to this status's list filtered to
             // that tag.
@@ -997,6 +1015,8 @@ pub const View = struct {
             try self.toolRowInput(allocator, index, key, root_focus);
         } else if (self.titleFocused(index)) {
             try self.titleInput(index, key, root_focus);
+        } else if (self.authorFocused(index)) {
+            try self.authorInput(index, key, root_focus);
         } else if (self.tagsFocused(index)) {
             try self.tagsInput(index, key, root_focus);
         } else {
@@ -1035,6 +1055,25 @@ pub const View = struct {
         switch (key) {
             .arrow_left => try self.focusList(index, root_focus),
             .arrow_up => self.focusToolRow(index, root_focus),
+            .arrow_down => if (self.authorPresent(index)) self.focusAuthor(index, root_focus) else try self.focusDescription(index, root_focus),
+            .mouse => |mouse| switch (mouse.action) {
+                .scroll => |dir| {
+                    sc.y += if (dir == .up) @as(isize, -1) else 1;
+                    sc.clampToContent();
+                },
+                else => {},
+            },
+            else => {},
+        }
+    }
+
+    // the author box's a: link (when it has one) is followed by the host on
+    // enter / a click; arrows cross to the neighboring widgets.
+    fn authorInput(self: *View, index: usize, key: Key, root_focus: *Focus) !void {
+        const sc = self.detailScroll(index);
+        switch (key) {
+            .arrow_left => try self.focusList(index, root_focus),
+            .arrow_up => self.focusTitle(index, root_focus),
             .arrow_down => if (self.tagFlow(index) != null) try self.focusTags(index, root_focus) else try self.focusDescription(index, root_focus),
             .mouse => |mouse| switch (mouse.action) {
                 .scroll => |dir| {
@@ -1058,7 +1097,12 @@ pub const View = struct {
                 sc.y -= 1;
                 sc.clampToContent();
                 if (sc.y == before) {
-                    if (self.tagFlow(index) != null) try self.focusTags(index, root_focus) else self.focusTitle(index, root_focus);
+                    if (self.tagFlow(index) != null)
+                        try self.focusTags(index, root_focus)
+                    else if (self.authorPresent(index))
+                        self.focusAuthor(index, root_focus)
+                    else
+                        self.focusTitle(index, root_focus);
                 }
                 return;
             },
@@ -1267,7 +1311,7 @@ pub const View = struct {
         switch (key) {
             .arrow_left => if (cur > 0) self.focusTag(index, tf, root_focus, cur - 1) else try self.focusList(index, root_focus),
             .arrow_right => if (cur + 1 < count) self.focusTag(index, tf, root_focus, cur + 1),
-            .arrow_up => if (tf.rowStep(cur, false)) |i| self.focusTag(index, tf, root_focus, i) else self.focusTitle(index, root_focus),
+            .arrow_up => if (tf.rowStep(cur, false)) |i| self.focusTag(index, tf, root_focus, i) else self.focusAuthor(index, root_focus),
             .arrow_down => if (tf.rowStep(cur, true)) |i| self.focusTag(index, tf, root_focus, i) else try self.focusDescription(index, root_focus),
             .home => self.focusTag(index, tf, root_focus, 0),
             .end => self.focusTag(index, tf, root_focus, count - 1),
@@ -1285,7 +1329,7 @@ pub const View = struct {
     const button_in_row_index: usize = 1;
     const edit_in_row_index: usize = 2;
     const title_child_index: usize = 0;
-    const tags_child_index: usize = 1;
+    const tags_child_index: usize = 2;
 
     fn tagFlow(self: *View, index: usize) ?*ui.TagFlow {
         const inner = self.detailInner(index);
@@ -1333,6 +1377,24 @@ pub const View = struct {
         const inner = self.detailInner(index);
         const cid = inner.getFocus().child_id orelse return false;
         return inner.children.getIndex(cid) == title_child_index;
+    }
+
+    fn authorPresent(self: *View, index: usize) bool {
+        return self.author_id[index] != null;
+    }
+
+    fn authorFocused(self: *View, index: usize) bool {
+        const inner = self.detailInner(index);
+        const cid = inner.getFocus().child_id orelse return false;
+        return cid == self.author_id[index];
+    }
+
+    // the author sits right under the title at the top of the pane, so
+    // focusing it scrolls there.
+    fn focusAuthor(self: *View, index: usize, root_focus: *Focus) void {
+        const id = self.author_id[index] orelse return;
+        root_focus.setFocus(id);
+        self.detailScroll(index).y = 0;
     }
 
     // the title sits at the top of the pane, so focusing it scrolls there.

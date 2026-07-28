@@ -175,7 +175,7 @@ pub fn main(init: std.process.Init) !void {
                 .id = std.fmt.bytesToHex(user_ids[i], .lower),
                 // stepped timestamps so the seeded users/repos list in a stable order
                 .timestamp = @intCast(slot + 1),
-                .author_email = "admin@haxy",
+                .author_email = "admin@example.test",
                 .event = .{
                     .user = .{
                         .name = u.name,
@@ -214,7 +214,7 @@ pub fn main(init: std.process.Init) !void {
             defer template_repo.deinit(io, allocator);
 
             try template_repo.addConfig(io, allocator, .{ .name = "user.name", .value = "haxy" });
-            try template_repo.addConfig(io, allocator, .{ .name = "user.email", .value = "admin@haxy" });
+            try template_repo.addConfig(io, allocator, .{ .name = "user.email", .value = "admin@example.test" });
 
             // a README plus a nested doc so the file tree has a directory to
             // descend into
