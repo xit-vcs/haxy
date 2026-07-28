@@ -6,7 +6,18 @@ const hash = xit.hash;
 user_id: []const u8,
 name: []const u8,
 description: []const u8,
-created_ts: u64 = 0, // the commit timestamp of the event that first created this repo
+
+// what the db stores: the event's data plus the commit-derived fields
+pub const Record = struct {
+    event: Self,
+    created_ts: u64 = 0, // the commit timestamp of the event that first created this repo
+
+    // a repo's key in the name index. it's unique per owner, so the read side
+    // resolves the url's username to its user id first.
+    pub fn indexKey(self: Record, allocator: std.mem.Allocator) ![]const u8 {
+        return std.fmt.allocPrint(allocator, "{s}/{s}", .{ self.event.user_id, self.event.name });
+    }
+};
 
 const Self = @This();
 
@@ -19,12 +30,6 @@ pub const name_index_key = "name->repo-id";
 pub const conflicts_key = "conflicted-repo-id->conflict";
 pub const id_to_field_to_oid_key = "repo-id->field->oid";
 
-// a repo's key in the name index. it's unique per owner, so the read side
-// resolves the url's username to its user id first.
-pub fn indexKey(self: Self, allocator: std.mem.Allocator) ![]const u8 {
-    return std.fmt.allocPrint(allocator, "{s}/{s}", .{ self.user_id, self.name });
-}
-
 pub fn validateName(name: []const u8) !void {
     if (name.len == 0) return error.NameEmpty;
     if (name.len > name_max_len) return error.NameTooLong;
@@ -36,23 +41,12 @@ pub fn validateName(name: []const u8) !void {
     }
 }
 
-// the commit-derived fields must not appear in the JSON we output
-pub fn jsonStringify(self: @This(), jw: anytype) !void {
-    try jw.beginObject();
-    inline for (std.meta.fields(@This())) |field| {
-        if (comptime evt.derivedField(field.name)) continue;
-        try jw.objectField(field.name);
-        try jw.write(@field(self, field.name));
-    }
-    try jw.endObject();
-}
-
 pub fn consume(
     comptime DB: type,
     comptime hash_kind: hash.HashKind,
     haxy_moment: DB.HashMap(.read_write),
     event_id: *const [evt.event_id_size]u8,
-    event_maybe: ?@This(),
+    record_maybe: ?Record,
     arena: *std.heap.ArenaAllocator,
     // the commit this event came from, recorded against every field it
     // changes. null from `merge`, which sets oids and conflicts itself.
@@ -72,49 +66,49 @@ pub fn consume(
     const repo_id_to_field_to_oid_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, id_to_field_to_oid_key));
     const repo_id_to_field_to_oid = try DB.HashMap(.read_write).init(repo_id_to_field_to_oid_cursor);
 
-    if (event_maybe) |event| {
-        try validateName(event.name);
+    if (record_maybe) |record| {
+        try validateName(record.event.name);
 
-        var event_to_write = event;
+        var record_to_write = record;
 
-        const repo_path = try event.indexKey(arena.allocator());
+        const repo_path = try record.indexKey(arena.allocator());
 
         const user_id_to_repo_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, "user-id->repo-id-set"));
         const user_id_to_repo_id_set = try DB.HashMap(.read_write).init(user_id_to_repo_id_set_cursor);
 
         // if this event_id already maps to a repo under a different key (its
         // name or owner changed), drop the stale index entries first
-        var existing_event_maybe: ?@This() = null;
+        var existing_record_maybe: ?Record = null;
         const existing_cursor_maybe = try event_id_to_repo.getCursor(repo_key);
         if (existing_cursor_maybe) |existing_cursor| {
             const existing_repo = try DB.HashMap(.read_only).init(existing_cursor);
-            const existing_event = try evt.read(@This(), DB, hash_kind, arena, existing_repo);
-            existing_event_maybe = existing_event;
+            const existing_record = try evt.read(Record, DB, hash_kind, arena, existing_repo);
+            existing_record_maybe = existing_record;
             // updates preserve the original creation timestamp
-            event_to_write.created_ts = existing_event.created_ts;
+            record_to_write.created_ts = existing_record.created_ts;
 
             // any event settles the conflict, since resolving in the ui may
             // keep our own values and so change nothing to detect
             if (event_oid != null) {
-                _ = try conflicts.remove(&evt.orderKeyDesc(existing_event.created_ts, event_id));
+                _ = try conflicts.remove(&evt.orderKeyDesc(existing_record.created_ts, event_id));
             }
-            const existing_path = try existing_event.indexKey(arena.allocator());
+            const existing_path = try existing_record.indexKey(arena.allocator());
             if (!std.mem.eql(u8, existing_path, repo_path)) {
                 _ = try name_to_repo_id.remove(hash.hashInt(hash_kind, existing_path));
             }
-            if (!std.mem.eql(u8, existing_event.user_id, event.user_id)) {
-                const old_user_repos_cursor = try user_id_to_repo_id_set.putCursor(hash.hashInt(hash_kind, existing_event.user_id));
+            if (!std.mem.eql(u8, existing_record.event.user_id, record.event.user_id)) {
+                const old_user_repos_cursor = try user_id_to_repo_id_set.putCursor(hash.hashInt(hash_kind, existing_record.event.user_id));
                 const old_user_repos = try DB.SortedSet(.read_write).init(old_user_repos_cursor);
-                const order_key = evt.orderKeyDesc(existing_event.created_ts, event_id);
+                const order_key = evt.orderKeyDesc(existing_record.created_ts, event_id);
                 _ = try old_user_repos.remove(&order_key);
             }
         }
 
-        try evt.writeOid(@This(), DB, hash_kind, repo_id_to_field_to_oid, repo_key, existing_event_maybe, event, event_oid);
+        try evt.writeOid(Self, DB, hash_kind, repo_id_to_field_to_oid, repo_key, if (existing_record_maybe) |existing| existing.event else null, record.event, event_oid);
 
         const repo_cursor = try event_id_to_repo.putCursor(repo_key);
         const repo = try DB.HashMap(.read_write).init(repo_cursor);
-        try evt.upsert(@This(), DB, hash_kind, repo, event_to_write);
+        try evt.upsert(Record, DB, hash_kind, repo, record_to_write);
 
         try name_to_repo_id.put(hash.hashInt(hash_kind, repo_path), .{ .bytes = event_id });
 
@@ -124,34 +118,34 @@ pub fn consume(
         if (existing_cursor_maybe == null) {
             const repo_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, "repo-id-set"));
             const repo_id_set = try DB.SortedSet(.read_write).init(repo_id_set_cursor);
-            const order_key = evt.orderKeyDesc(event_to_write.created_ts, event_id);
+            const order_key = evt.orderKeyDesc(record_to_write.created_ts, event_id);
             try repo_id_set.put(&order_key);
         }
 
         // each user's repos are a set ordered by creation time (newest first), so
         // the user page paginates them the same way the home repos list does.
-        const user_repos_cursor = try user_id_to_repo_id_set.putCursor(hash.hashInt(hash_kind, event.user_id));
+        const user_repos_cursor = try user_id_to_repo_id_set.putCursor(hash.hashInt(hash_kind, record.event.user_id));
         const user_repos = try DB.SortedSet(.read_write).init(user_repos_cursor);
-        const user_repo_order_key = evt.orderKeyDesc(event_to_write.created_ts, event_id);
+        const user_repo_order_key = evt.orderKeyDesc(record_to_write.created_ts, event_id);
         try user_repos.put(&user_repo_order_key);
     } else {
         if (try event_id_to_repo.getCursor(repo_key)) |existing_repo_cursor| {
             const existing_repo = try DB.HashMap(.read_only).init(existing_repo_cursor);
-            const existing_repo_event = try evt.read(@This(), DB, hash_kind, arena, existing_repo);
+            const existing_repo_record = try evt.read(Record, DB, hash_kind, arena, existing_repo);
 
-            const existing_path = try existing_repo_event.indexKey(arena.allocator());
+            const existing_path = try existing_repo_record.indexKey(arena.allocator());
             _ = try name_to_repo_id.remove(hash.hashInt(hash_kind, existing_path));
 
             // drop it from the ordered set using its recorded creation timestamp
             const repo_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, "repo-id-set"));
             const repo_id_set = try DB.SortedSet(.read_write).init(repo_id_set_cursor);
-            const order_key = evt.orderKeyDesc(existing_repo_event.created_ts, event_id);
+            const order_key = evt.orderKeyDesc(existing_repo_record.created_ts, event_id);
             _ = try repo_id_set.remove(&order_key);
 
             const user_id_to_repo_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, "user-id->repo-id-set"));
             const user_id_to_repo_id_set = try DB.HashMap(.read_write).init(user_id_to_repo_id_set_cursor);
 
-            const user_key = hash.hashInt(hash_kind, existing_repo_event.user_id);
+            const user_key = hash.hashInt(hash_kind, existing_repo_record.event.user_id);
             const user_repos_cursor = try user_id_to_repo_id_set.putCursor(user_key);
             const user_repos = try DB.SortedSet(.read_write).init(user_repos_cursor);
             _ = try user_repos.remove(&order_key);
@@ -166,7 +160,7 @@ pub fn consume(
 // a repo plus its event id (the id is the on-disk repo directory name, so the
 // caller can locate the working repo under <server>/repos/<hex event id>).
 pub const RepoWithId = struct {
-    repo: Self,
+    repo: Record,
     event_id: [evt.event_id_size]u8,
 };
 
@@ -189,7 +183,7 @@ pub fn readByOwnerAndName(
     _ = try user_id_cursor.readBytes(&user_id);
 
     // "user-id/repo-name" -> repo event id
-    const repo_path = try (Self{ .user_id = user_id[0..], .name = repo_name, .description = "" }).indexKey(arena.allocator());
+    const repo_path = try (Record{ .event = .{ .user_id = user_id[0..], .name = repo_name, .description = "" } }).indexKey(arena.allocator());
     const name_to_repo_id_cursor = try haxy_moment.getCursor(hash.hashInt(hash_kind, "name->repo-id")) orelse return null;
     const name_to_repo_id = try DB.HashMap(.read_only).init(name_to_repo_id_cursor);
     const repo_id_cursor = try name_to_repo_id.getCursor(hash.hashInt(hash_kind, repo_path)) orelse return null;
@@ -200,5 +194,5 @@ pub fn readByOwnerAndName(
     const event_id_to_repo = try DB.HashMap(.read_only).init(event_id_to_repo_cursor);
     const repo_cursor = try event_id_to_repo.getCursor(hash.hashInt(hash_kind, &repo_id)) orelse return null;
     const repo_map = try DB.HashMap(.read_only).init(repo_cursor);
-    return .{ .repo = try evt.read(@This(), DB, hash_kind, arena, repo_map), .event_id = repo_id };
+    return .{ .repo = try evt.read(Record, DB, hash_kind, arena, repo_map), .event_id = repo_id };
 }

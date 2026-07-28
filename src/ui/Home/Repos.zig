@@ -12,7 +12,7 @@ const Focus = xitui.focus.Focus;
 
 pub const page_size = 20; // how many repos one window shows
 
-repos: []const evt.Repo,
+repos: []const evt.Repo.Record,
 owner_names: []const []const u8,
 start: usize, // the window start this page was built with, mirrored into the url
 next_start: ?usize, // the `start` for the "next" row, or null when this is the last window
@@ -27,7 +27,7 @@ pub fn init(
     const DB = evt.AdminDB;
     const hash_kind = evt.admin_repo_opts.hash;
 
-    var repos: std.ArrayList(evt.Repo) = .empty;
+    var repos: std.ArrayList(evt.Repo.Record) = .empty;
     var owner_names: std.ArrayList([]const u8) = .empty;
 
     const empty: Self = .{ .repos = &.{}, .owner_names = &.{}, .start = start, .next_start = null };
@@ -55,11 +55,11 @@ pub fn init(
         const event_id = order_key[@sizeOf(u64)..];
         const repo_cursor = try event_id_to_repo.getCursor(hash.hashInt(hash_kind, event_id)) orelse continue;
         const repo_map = try DB.HashMap(.read_only).init(repo_cursor);
-        const repo_event = try evt.read(evt.Repo, DB, hash_kind, arena, repo_map);
+        const repo_event = try evt.read(evt.Repo.Record, DB, hash_kind, arena, repo_map);
         try repos.append(arena.allocator(), repo_event);
 
-        const owner = try evt.User.readById(DB, hash_kind, haxy_moment, arena, repo_event.user_id);
-        try owner_names.append(arena.allocator(), if (owner) |o| o.name else "");
+        const owner = try evt.User.readById(DB, hash_kind, haxy_moment, arena, repo_event.event.user_id);
+        try owner_names.append(arena.allocator(), if (owner) |o| o.event.name else "");
     }
 
     return .{
@@ -102,8 +102,8 @@ pub const View = struct {
             // when the owner is unknown so it isn't a dead route.
             const owner = data.owner_names[i];
             try items.append(aa, .{
-                .text = try std.fmt.allocPrint(aa, "{s} - {s}", .{ repo.name, repo.description }),
-                .link = if (owner.len > 0) try std.fmt.allocPrint(aa, "a:/repo/{s}/{s}", .{ owner, repo.name }) else "",
+                .text = try std.fmt.allocPrint(aa, "{s} - {s}", .{ repo.event.name, repo.event.description }),
+                .link = if (owner.len > 0) try std.fmt.allocPrint(aa, "a:/repo/{s}/{s}", .{ owner, repo.event.name }) else "",
             });
         }
         if (data.next_start) |next_start|

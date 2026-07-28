@@ -862,7 +862,7 @@ pub const Session = struct {
         const user_id = self.data.user_id orelse return;
         const moment = self.haxy_moment orelse return;
         if (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, self.arena, user_id)) |user| {
-            self.data.enable_ansi = user.enable_ansi;
+            self.data.enable_ansi = user.event.enable_ansi;
         }
     }
 
@@ -871,7 +871,7 @@ pub const Session = struct {
         const user_id = self.data.user_id orelse return "user@haxy";
         const moment = self.haxy_moment orelse return "user@haxy";
         const user = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, self.page_arena, user_id)) orelse unreachable;
-        return user.email;
+        return user.event.email;
     }
 
     // queue an action for the host to drain this frame.
@@ -1082,7 +1082,7 @@ pub const Author = union(enum) {
         const email = author_email orelse return .unknown;
         if (haxy_moment) |moment| {
             if (try evt.User.readByEmail(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, email)) |user| {
-                return .{ .user_name = user.name };
+                return .{ .user_name = user.event.name };
             }
         }
         return .{ .email = try arena.allocator().dupe(u8, email) };

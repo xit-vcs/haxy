@@ -31,16 +31,20 @@ pub fn EventDB(comptime hash_kind: hash.HashKind) type {
     return rp.Repo(.xit, .{ .hash = hash_kind }).DB;
 }
 
-// fields derived from the commit rather than carried by the event payload
-pub fn derivedField(comptime field_name: []const u8) bool {
-    return std.mem.eql(u8, field_name, "created_ts") or std.mem.eql(u8, field_name, "author_email");
-}
-
 // the email between a commit author line's angle brackets, or null
 pub fn authorEmail(author_line: []const u8) ?[]const u8 {
     const open_bracket = std.mem.indexOfScalar(u8, author_line, '<') orelse return null;
     const close_bracket = std.mem.indexOfScalarPos(u8, author_line, open_bracket + 1, '>') orelse return null;
     return author_line[open_bracket + 1 .. close_bracket];
+}
+
+// build a `T` by copying its fields, by name, out of `source`
+pub fn project(comptime T: type, source: anytype) T {
+    var result: T = undefined;
+    inline for (std.meta.fields(T)) |field| {
+        @field(result, field.name) = @field(source, field.name);
+    }
+    return result;
 }
 
 pub const EventKind = enum {
@@ -591,27 +595,32 @@ pub fn consumeInTransaction(
             var message: std.ArrayList(u8) = .empty;
             try commit_object.readMessage(arena.allocator(), &message, .limited(max_event_size));
 
-            var event_with_id = try EventWithId.fromString(&arena, message.items);
+            const event_with_id = try EventWithId.fromString(&arena, message.items);
 
             // get the id of the current event as bytes
             var current_event_id: [event_id_size]u8 = undefined;
             _ = try std.fmt.hexToBytes(&current_event_id, &event_with_id.id);
 
-            // set the derived fields
+            // wrap the payload into the record `consume` stores, with its
+            // commit-derived fields; on update, `consume` preserves the
+            // existing record's
+            const created_ts = commit_object.content.commit.metadata.timestamp;
             switch (event_with_id.event) {
-                .issue => |*event_maybe| if (event_maybe.*) |*event| {
-                    event.created_ts = commit_object.content.commit.metadata.timestamp;
-                    event.author_email = authorEmail(commit_object.content.commit.metadata.author orelse "");
+                .user => |event_maybe| {
+                    const record_maybe: ?User.Record = if (event_maybe) |event| .{ .event = event, .created_ts = created_ts } else null;
+                    try User.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, record_maybe, &arena, &repo_event_oid);
                 },
-                inline else => |*event_maybe| if (event_maybe.*) |*event| {
-                    event.created_ts = commit_object.content.commit.metadata.timestamp;
+                .repo => |event_maybe| {
+                    const record_maybe: ?Repo.Record = if (event_maybe) |event| .{ .event = event, .created_ts = created_ts } else null;
+                    try Repo.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, record_maybe, &arena, &repo_event_oid);
                 },
-            }
-
-            switch (event_with_id.event) {
-                inline else => |event_maybe| {
-                    const T = @typeInfo(@TypeOf(event_maybe)).optional.child;
-                    try T.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, event_maybe, &arena, &repo_event_oid);
+                .issue => |event_maybe| {
+                    const record_maybe: ?Issue.Record = if (event_maybe) |event| .{
+                        .event = event,
+                        .author_email = authorEmail(commit_object.content.commit.metadata.author orelse ""),
+                        .created_ts = created_ts,
+                    } else null;
+                    try Issue.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, record_maybe, &arena, &repo_event_oid);
                 },
             }
         }
@@ -665,17 +674,15 @@ pub fn writeOid(
     var field_oids: ?DB.SortedMap(.read_write) = null;
 
     inline for (std.meta.fields(T)) |field| {
-        if (comptime !derivedField(field.name)) {
-            const changed = if (existing_maybe) |existing|
-                !fieldEqual(field.type, @field(existing, field.name), @field(event, field.name))
-            else
-                true;
-            if (changed) {
-                if (field_oids == null) {
-                    field_oids = try DB.SortedMap(.read_write).init(try id_to_field_to_oid.putCursor(record_key));
-                }
-                if (field_oids) |map| try map.put(field.name, .{ .bytes = oid });
+        const changed = if (existing_maybe) |existing|
+            !fieldEqual(field.type, @field(existing, field.name), @field(event, field.name))
+        else
+            true;
+        if (changed) {
+            if (field_oids == null) {
+                field_oids = try DB.SortedMap(.read_write).init(try id_to_field_to_oid.putCursor(record_key));
             }
+            if (field_oids) |map| try map.put(field.name, .{ .bytes = oid });
         }
     }
 }
@@ -709,22 +716,20 @@ fn mergeFields(
     var merged = target;
 
     inline for (std.meta.fields(T), 0..) |field, i| {
-        if (comptime !derivedField(field.name)) {
-            const target_value = @field(target, field.name);
-            const parent_value = @field(parent, field.name);
+        const target_value = @field(target, field.name);
+        const parent_value = @field(parent, field.name);
 
-            if (!fieldEqual(field.type, target_value, parent_value)) {
-                outcome[i] = if (baseline_maybe) |baseline| blk: {
-                    const baseline_value = @field(baseline, field.name);
-                    if (fieldEqual(field.type, target_value, baseline_value)) {
-                        @field(merged, field.name) = parent_value;
-                        break :blk .parent;
-                    }
-                    // only the target changed it
-                    if (fieldEqual(field.type, parent_value, baseline_value)) break :blk .kept;
-                    break :blk .conflicted;
-                } else .conflicted;
-            }
+        if (!fieldEqual(field.type, target_value, parent_value)) {
+            outcome[i] = if (baseline_maybe) |baseline| blk: {
+                const baseline_value = @field(baseline, field.name);
+                if (fieldEqual(field.type, target_value, baseline_value)) {
+                    @field(merged, field.name) = parent_value;
+                    break :blk .parent;
+                }
+                // only the target changed it
+                if (fieldEqual(field.type, parent_value, baseline_value)) break :blk .kept;
+                break :blk .conflicted;
+            } else .conflicted;
         }
     }
 
@@ -801,9 +806,9 @@ pub fn merge(
             if (!target_record_cursor.slot().eql(baseline_record_cursor.slot())) {
                 // every write copies the record's block, so only a content
                 // change means the target kept it
-                const target_record = try read(T, DB, hash_kind, &arena, try DB.HashMap(.read_only).init(target_record_cursor));
-                const baseline_record = try read(T, DB, hash_kind, &arena, try DB.HashMap(.read_only).init(baseline_record_cursor));
-                if (!fieldsEqual(T, target_record, baseline_record)) continue;
+                const target_record = try read(T.Record, DB, hash_kind, &arena, try DB.HashMap(.read_only).init(target_record_cursor));
+                const baseline_record = try read(T.Record, DB, hash_kind, &arena, try DB.HashMap(.read_only).init(baseline_record_cursor));
+                if (!fieldsEqual(T, target_record.event, baseline_record.event)) continue;
             }
 
             try T.consume(DB, hash_kind, haxy_moment, &event_id, null, &arena, null);
@@ -826,7 +831,7 @@ pub fn merge(
             if (slot.eql(parent_slot)) continue;
         }
 
-        const parent_record = try read(T, DB, hash_kind, &arena, try DB.HashMap(.read_only).init(parent_record_cursor));
+        const parent_record = try read(T.Record, DB, hash_kind, &arena, try DB.HashMap(.read_only).init(parent_record_cursor));
 
         // re-derived every iteration, since `consume` writes through its own
         // handles
@@ -842,17 +847,18 @@ pub fn merge(
             // both sides share the change
             if (target_record_cursor.slot().eql(parent_slot)) continue;
 
-            const target_record = try read(T, DB, hash_kind, &arena, try DB.HashMap(.read_only).init(target_record_cursor));
+            const target_record = try read(T.Record, DB, hash_kind, &arena, try DB.HashMap(.read_only).init(target_record_cursor));
 
-            var baseline_record: ?T = null;
+            var baseline_event: ?T = null;
             if (baseline_records) |map| {
                 if (try map.getCursor(record_key)) |baseline_record_cursor| {
-                    baseline_record = try read(T, DB, hash_kind, &arena, try DB.HashMap(.read_only).init(baseline_record_cursor));
+                    baseline_event = (try read(T.Record, DB, hash_kind, &arena, try DB.HashMap(.read_only).init(baseline_record_cursor))).event;
                 }
             }
 
             outcome = @splat(.kept);
-            merged = mergeFields(T, baseline_record, target_record, parent_record, &outcome);
+            merged = target_record;
+            merged.event = mergeFields(T, baseline_event, target_record.event, parent_record.event, &outcome);
         }
 
         // the index is unique, so a key the target gave to a different record
@@ -1066,7 +1072,7 @@ pub fn resolveOrCreateRepo(
     try consume(.xit, admin_repo_opts, io, allocator, &repo, events_ref, &[_]EventWithId{.{
         .id = event_id_hex,
         .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
-        .author_email = owner.email,
+        .author_email = owner.event.email,
         .event = .{ .repo = .{
             .user_id = &owner_user_id,
             .name = repo_name,
@@ -1081,6 +1087,20 @@ pub fn resolveOrCreateRepo(
 // reading from xitdb
 //
 
+// a struct field's fields share its container's map, so their names must not
+// collide with the container's or two fields would silently share a key
+fn validateFlattenedFields(comptime T: type) void {
+    comptime {
+        for (std.meta.fields(T)) |field| {
+            if (@typeInfo(field.type) != .@"struct") continue;
+            for (std.meta.fields(field.type)) |nested| {
+                if (@hasField(T, nested.name))
+                    @compileError("flattened field name collision in " ++ @typeName(T) ++ ": " ++ nested.name);
+            }
+        }
+    }
+}
+
 pub fn read(
     comptime T: type,
     comptime DB: type,
@@ -1092,6 +1112,7 @@ pub fn read(
 
     switch (@typeInfo(T)) {
         .@"struct" => |struct_info| {
+            comptime validateFlattenedFields(T);
             inline for (struct_info.fields) |field| {
                 switch (@typeInfo(field.type)) {
                     .pointer => |pointer_info| {
@@ -1127,6 +1148,8 @@ pub fn read(
                         else
                             null;
                     },
+                    // a struct field's own fields are read from the same map
+                    .@"struct" => @field(event, field.name) = try read(field.type, DB, hash_kind, arena, map),
                     else => @compileError("unsupported read field type: " ++ @typeName(field.type)),
                 }
             }
@@ -1137,13 +1160,11 @@ pub fn read(
     return event;
 }
 
-// whether two events carry the same payload data (commit-derived fields
-// aren't compared)
+// whether two events carry the same data
 fn fieldsEqual(comptime T: type, a: T, b: T) bool {
     switch (@typeInfo(T)) {
         .@"struct" => |struct_info| {
             inline for (struct_info.fields) |field| {
-                if (comptime derivedField(field.name)) continue;
                 if (!fieldEqual(field.type, @field(a, field.name), @field(b, field.name))) return false;
             }
         },
@@ -1234,6 +1255,7 @@ pub fn upsert(
 ) !void {
     switch (@typeInfo(T)) {
         .@"struct" => |struct_info| {
+            comptime validateFlattenedFields(T);
             inline for (struct_info.fields) |field| {
                 try upsertField(DB, hash_kind, map, field.name, field.type, @field(event, field.name));
             }
@@ -1311,6 +1333,8 @@ fn upsertField(
                 _ = try map.remove(key);
             }
         },
+        // a struct field's own fields are stored in the same map
+        .@"struct" => try upsert(Field, DB, hash_kind, map, value),
         else => @compileError("unsupported upsert field type: " ++ @typeName(Field)),
     }
 }

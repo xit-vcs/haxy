@@ -418,7 +418,7 @@ fn isKeyAuthorized(
 
     const user = (try evt.User.readByName(io, allocator, admin_repo_path, &arena, owner_name)) orelse return false;
 
-    var it = std.mem.splitScalar(u8, user.ssh_keys, '\n');
+    var it = std.mem.splitScalar(u8, user.event.ssh_keys, '\n');
     while (it.next()) |line| {
         const fp = fingerprintOfAuthorizedKey(line) orelse continue;
         if (std.mem.eql(u8, &fp, fingerprint)) return true;

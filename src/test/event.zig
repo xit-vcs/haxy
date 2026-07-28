@@ -132,13 +132,13 @@ test "rebase" {
         // get the issue out of the map that was edited
         const first_issue_cursor = try event_id_to_issue.getCursor(hash.hashInt(repo_opts.hash, &first_event_id)) orelse return error.NotFound;
         const first_issue_map = try Repo.DB.HashMap(.read_only).init(first_issue_cursor);
-        const first_issue = try evt.read(evt.Issue, Repo.DB, repo_opts.hash, &arena, first_issue_map);
+        const first_issue = try evt.read(evt.Issue.Record, Repo.DB, repo_opts.hash, &arena, first_issue_map);
 
         // the description was correctly edited
-        try std.testing.expectEqualStrings(events_to_consume[1].event.issue.?.description, first_issue.description);
+        try std.testing.expectEqualStrings(events_to_consume[1].event.issue.?.description, first_issue.event.description);
 
         // the tags were correctly edited
-        try std.testing.expectEqualStrings(events_to_consume[1].event.issue.?.tags, first_issue.tags);
+        try std.testing.expectEqualStrings(events_to_consume[1].event.issue.?.tags, first_issue.event.tags);
     }
 
     //
@@ -214,13 +214,13 @@ test "rebase" {
         // get the issue out of the map that was edited
         const first_issue_cursor = try event_id_to_issue.getCursor(hash.hashInt(repo_opts.hash, &first_event_id)) orelse return error.NotFound;
         const first_issue_map = try Repo.DB.HashMap(.read_only).init(first_issue_cursor);
-        const first_issue = try evt.read(evt.Issue, Repo.DB, repo_opts.hash, &arena, first_issue_map);
+        const first_issue = try evt.read(evt.Issue.Record, Repo.DB, repo_opts.hash, &arena, first_issue_map);
 
         // the description is no longer edited
-        try std.testing.expectEqualStrings(events_to_consume[0].event.issue.?.description, first_issue.description);
+        try std.testing.expectEqualStrings(events_to_consume[0].event.issue.?.description, first_issue.event.description);
 
         // the tags are no longer edited
-        try std.testing.expectEqualStrings(events_to_consume[0].event.issue.?.tags, first_issue.tags);
+        try std.testing.expectEqualStrings(events_to_consume[0].event.issue.?.tags, first_issue.event.tags);
 
         // an event added by the second push is no longer there because it was wiped out by the rebase
         try std.testing.expect(null == try event_id_to_issue.getCursor(hash.hashInt(repo_opts.hash, &events_to_consume2[0].id)));
@@ -390,10 +390,10 @@ test "merge" {
         _ = try std.fmt.hexToBytes(&first_issue_id, &events_to_consume[0].id);
         const first_issue_cursor = try event_id_to_issue.getCursor(hash.hashInt(repo_opts.hash, &first_issue_id)) orelse return error.NotFound;
         const first_issue_map = try Repo.DB.HashMap(.read_only).init(first_issue_cursor);
-        const first_issue = try evt.read(evt.Issue, Repo.DB, repo_opts.hash, &arena, first_issue_map);
+        const first_issue = try evt.read(evt.Issue.Record, Repo.DB, repo_opts.hash, &arena, first_issue_map);
 
-        try std.testing.expectEqualStrings(events_to_consume[0].event.issue.?.description, first_issue.description);
-        try std.testing.expectEqualStrings(events_to_consume[0].event.issue.?.tags, first_issue.tags);
+        try std.testing.expectEqualStrings(events_to_consume[0].event.issue.?.description, first_issue.event.description);
+        try std.testing.expectEqualStrings(events_to_consume[0].event.issue.?.tags, first_issue.event.tags);
     }
 
     //
@@ -497,10 +497,10 @@ test "merge" {
             _ = try std.fmt.hexToBytes(&first_issue_id, &events_to_consume[0].id);
             const first_issue_cursor = try event_id_to_issue.getCursor(hash.hashInt(repo_opts.hash, &first_issue_id)) orelse return error.NotFound;
             const first_issue_map = try Repo.DB.HashMap(.read_only).init(first_issue_cursor);
-            const first_issue = try evt.read(evt.Issue, Repo.DB, repo_opts.hash, &arena, first_issue_map);
+            const first_issue = try evt.read(evt.Issue.Record, Repo.DB, repo_opts.hash, &arena, first_issue_map);
 
-            try std.testing.expectEqualStrings(events_to_consume[0].event.issue.?.description, first_issue.description);
-            try std.testing.expectEqualStrings(events_to_consume[0].event.issue.?.tags, first_issue.tags);
+            try std.testing.expectEqualStrings(events_to_consume[0].event.issue.?.description, first_issue.event.description);
+            try std.testing.expectEqualStrings(events_to_consume[0].event.issue.?.tags, first_issue.event.tags);
         }
 
         // make sure one of the new issues is there
@@ -510,10 +510,10 @@ test "merge" {
             _ = try std.fmt.hexToBytes(&first_issue_id, &events_to_consume2[0].id);
             const first_issue_cursor = try event_id_to_issue.getCursor(hash.hashInt(repo_opts.hash, &first_issue_id)) orelse return error.NotFound;
             const first_issue_map = try Repo.DB.HashMap(.read_only).init(first_issue_cursor);
-            const first_issue = try evt.read(evt.Issue, Repo.DB, repo_opts.hash, &arena, first_issue_map);
+            const first_issue = try evt.read(evt.Issue.Record, Repo.DB, repo_opts.hash, &arena, first_issue_map);
 
-            try std.testing.expectEqualStrings(events_to_consume2[0].event.issue.?.description, first_issue.description);
-            try std.testing.expectEqualStrings(events_to_consume2[0].event.issue.?.tags, first_issue.tags);
+            try std.testing.expectEqualStrings(events_to_consume2[0].event.issue.?.description, first_issue.event.description);
+            try std.testing.expectEqualStrings(events_to_consume2[0].event.issue.?.tags, first_issue.event.tags);
         }
 
         // the ordered issue set unions both branches' additions
@@ -685,7 +685,7 @@ test "merge" {
 
         // the first parent is the events branch, so its version stays live
         const issue = try readIssue(Repo.DB, repo_opts.hash, haxy_moment, &arena, &issue_id);
-        try std.testing.expectEqualStrings("bug priority-low ui", issue.tags);
+        try std.testing.expectEqualStrings("bug priority-low ui", issue.event.tags);
 
         // the issue is listed as conflicted, with the merge base recorded
         const conflicts_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Issue.conflicts_key)) orelse return error.NotFound;
@@ -697,8 +697,8 @@ test "merge" {
         const conflict = try Repo.DB.HashMap(.read_only).init(conflict_cursor);
 
         const base_cursor = try conflict.getCursor(hash.hashInt(repo_opts.hash, evt.base_record_key)) orelse return error.NotFound;
-        const base = try evt.read(evt.Issue, Repo.DB, repo_opts.hash, &arena, try Repo.DB.HashMap(.read_only).init(base_cursor));
-        try std.testing.expectEqualStrings("bug priority-high ui", base.tags);
+        const base = try evt.read(evt.Issue.Record, Repo.DB, repo_opts.hash, &arena, try Repo.DB.HashMap(.read_only).init(base_cursor));
+        try std.testing.expectEqualStrings("bug priority-high ui", base.event.tags);
 
         // tags is the one field both sides changed differently
         const fields_cursor = try conflict.getCursor(hash.hashInt(repo_opts.hash, evt.conflicted_fields_key)) orelse return error.NotFound;
@@ -707,10 +707,10 @@ test "merge" {
 
         // their whole version is recorded, not just the conflicting field
         const their_cursor = try conflict.getCursor(hash.hashInt(repo_opts.hash, evt.their_record_key)) orelse return error.NotFound;
-        const theirs = try evt.read(evt.Issue, Repo.DB, repo_opts.hash, &arena, try Repo.DB.HashMap(.read_only).init(their_cursor));
-        try std.testing.expectEqualStrings("bug priority-medium ui", theirs.tags);
-        try std.testing.expectEqualStrings(issue.title, theirs.title);
-        try std.testing.expectEqualStrings(issue.description, theirs.description);
+        const theirs = try evt.read(evt.Issue.Record, Repo.DB, repo_opts.hash, &arena, try Repo.DB.HashMap(.read_only).init(their_cursor));
+        try std.testing.expectEqualStrings("bug priority-medium ui", theirs.event.tags);
+        try std.testing.expectEqualStrings(issue.event.title, theirs.event.title);
+        try std.testing.expectEqualStrings(issue.event.description, theirs.event.description);
 
         // their value is attributed to the commit that set it on their branch
         const oids_cursor = try conflict.getCursor(hash.hashInt(repo_opts.hash, evt.their_field_to_oid_key)) orelse return error.NotFound;
@@ -767,7 +767,7 @@ test "merge" {
 
         // their edit came over, so the merge really did touch the issue
         const issue = try readIssue(Repo.DB, repo_opts.hash, haxy_moment, &arena, &issue_id);
-        try std.testing.expectEqualStrings("Rewritten on a branch that never merged.", issue.description);
+        try std.testing.expectEqualStrings("Rewritten on a branch that never merged.", issue.event.description);
 
         // and the conflict is still waiting to be resolved
         const conflicts_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Issue.conflicts_key)) orelse return error.NotFound;
@@ -843,7 +843,7 @@ test "merge" {
 
         // and the resolution stands
         const issue = try readIssue(Repo.DB, repo_opts.hash, haxy_moment, &arena, &issue_id);
-        try std.testing.expectEqualStrings("bug priority-medium ui", issue.tags);
+        try std.testing.expectEqualStrings("bug priority-medium ui", issue.event.tags);
     }
 
     //
@@ -920,9 +920,9 @@ test "merge" {
 
         // each side's edit to a different field survives, without conflicting
         const merged = try readIssue(Repo.DB, repo_opts.hash, haxy_moment, &arena, &second_id);
-        try std.testing.expectEqualStrings("Search results ignore the archived project filter", merged.title);
-        try std.testing.expectEqualStrings("Archived projects are ranked before the flag is applied.", merged.description);
-        try std.testing.expectEqualStrings("bug search", merged.tags);
+        try std.testing.expectEqualStrings("Search results ignore the archived project filter", merged.event.title);
+        try std.testing.expectEqualStrings("Archived projects are ranked before the flag is applied.", merged.event.description);
+        try std.testing.expectEqualStrings("bug search", merged.event.tags);
 
         // each merged field is attributed to the branch it came from
         try std.testing.expectEqualSlices(u8, &retitle_oid, &try readOid(Repo.DB, repo_opts.hash, haxy_moment, &second_id, "title"));
@@ -940,7 +940,7 @@ test "merge" {
         var third_id: [evt.event_id_size]u8 = undefined;
         _ = try std.fmt.hexToBytes(&third_id, &events_to_consume[2].id);
         const retagged = try readIssue(Repo.DB, repo_opts.hash, haxy_moment, &arena, &third_id);
-        try std.testing.expectEqualStrings("enhancement roadmap", retagged.tags);
+        try std.testing.expectEqualStrings("enhancement roadmap", retagged.event.tags);
 
         try std.testing.expect(null == try tag_to_issues.getCursor("backend open"));
         try std.testing.expect(null == try tag_to_issues.getCursor("preferences open"));
@@ -1013,7 +1013,7 @@ test "merge" {
         var kept_id: [evt.event_id_size]u8 = undefined;
         _ = try std.fmt.hexToBytes(&kept_id, &events_to_consume2[1].id);
         const kept = try readIssue(Repo.DB, repo_opts.hash, haxy_moment, &arena, &kept_id);
-        try std.testing.expectEqualStrings("Kept by the edit", kept.title);
+        try std.testing.expectEqualStrings("Kept by the edit", kept.event.title);
     }
 }
 
@@ -1042,12 +1042,12 @@ fn readIssue(
     haxy_moment: DB.HashMap(.read_only),
     arena: *std.heap.ArenaAllocator,
     id: *const [evt.event_id_size]u8,
-) !evt.Issue {
+) !evt.Issue.Record {
     const event_id_to_issue_cursor = try haxy_moment.getCursor(hash.hashInt(hash_kind, "event-id->issue")) orelse return error.NotFound;
     const event_id_to_issue = try DB.HashMap(.read_only).init(event_id_to_issue_cursor);
     const issue_cursor = try event_id_to_issue.getCursor(hash.hashInt(hash_kind, id)) orelse return error.NotFound;
     const issue_map = try DB.HashMap(.read_only).init(issue_cursor);
-    return try evt.read(evt.Issue, DB, hash_kind, arena, issue_map);
+    return try evt.read(evt.Issue.Record, DB, hash_kind, arena, issue_map);
 }
 
 test "user and repo" {
@@ -1146,10 +1146,10 @@ test "user and repo" {
         // get the user out of the map that was edited
         const user_cursor = try event_id_to_user.getCursor(hash.hashInt(repo_opts.hash, &user_event_id)) orelse return error.NotFound;
         const user_map = try Repo.DB.HashMap(.read_only).init(user_cursor);
-        const user_event = try evt.read(evt.User, Repo.DB, repo_opts.hash, &arena, user_map);
+        const user_event = try evt.read(evt.User.Record, Repo.DB, repo_opts.hash, &arena, user_map);
 
         // the password was correctly edited
-        try std.testing.expectEqualStrings(events_to_consume[1].event.user.?.password_hash, user_event.password_hash);
+        try std.testing.expectEqualStrings(events_to_consume[1].event.user.?.password_hash, user_event.event.password_hash);
 
         // get the map of repos
         const event_id_to_repo_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, "event-id->repo")) orelse return error.NotFound;
@@ -1158,10 +1158,10 @@ test "user and repo" {
         // get the repo out of the map
         const repo_cursor = try event_id_to_repo.getCursor(hash.hashInt(repo_opts.hash, &repo_event_id)) orelse return error.NotFound;
         const repo_map = try Repo.DB.HashMap(.read_only).init(repo_cursor);
-        const repo_event = try evt.read(evt.Repo, Repo.DB, repo_opts.hash, &arena, repo_map);
+        const repo_event = try evt.read(evt.Repo.Record, Repo.DB, repo_opts.hash, &arena, repo_map);
 
-        try std.testing.expectEqualSlices(u8, &user_event_id, repo_event.user_id);
-        try std.testing.expectEqualStrings("ziglings", repo_event.name);
+        try std.testing.expectEqualSlices(u8, &user_event_id, repo_event.event.user_id);
+        try std.testing.expectEqualStrings("ziglings", repo_event.event.name);
 
         // get the repos created by the user
         const user_id_to_repo_id_set_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, "user-id->repo-id-set")) orelse return error.NotFound;
@@ -1338,7 +1338,7 @@ test "repos and users paginate newest first" {
         const e2r = try Repo.DB.HashMap(.read_only).init(e2r_cur);
         const rc = try e2r.getCursor(hash.hashInt(repo_opts.hash, &repo_ids[0])) orelse return error.NotFound;
         const rm = try Repo.DB.HashMap(.read_only).init(rc);
-        const re = try evt.read(evt.Repo, Repo.DB, repo_opts.hash, &arena, rm);
-        try std.testing.expectEqualStrings("updated", re.description);
+        const re = try evt.read(evt.Repo.Record, Repo.DB, repo_opts.hash, &arena, rm);
+        try std.testing.expectEqualStrings("updated", re.event.description);
     }
 }

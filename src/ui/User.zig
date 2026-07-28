@@ -19,8 +19,8 @@ pub const Quit = @import("./Quit.zig");
 pub const page_size = 20; // how many repos one window of the repos tab shows
 
 header: Header,
-user: evt.User.Safe,
-repos: []const evt.Repo,
+user: evt.User.Public,
+repos: []const evt.Repo.Record,
 repos_start: usize, // the repos window this page was built with, mirrored into the url
 repos_next_start: ?usize, // the `start` for the "next" row, or null on the last window
 settings: Settings,
@@ -50,7 +50,7 @@ pub fn init(
 
     const user = (try evt.User.readById(DB, hash_kind, haxy_moment, arena, user_id)) orelse return error.NotFound;
 
-    var repos: std.ArrayList(evt.Repo) = .empty;
+    var repos: std.ArrayList(evt.Repo.Record) = .empty;
     var repos_next_start: ?usize = null;
 
     // the user-id->repo-id-set index maps each user to a set of their repo event
@@ -80,7 +80,7 @@ pub fn init(
                 const event_id = order_key[@sizeOf(u64)..];
                 const repo_cursor = try event_id_to_repo.getCursor(hash.hashInt(hash_kind, event_id)) orelse continue;
                 const repo_map = try DB.HashMap(.read_only).init(repo_cursor);
-                const repo_event = try evt.read(evt.Repo, DB, hash_kind, arena, repo_map);
+                const repo_event = try evt.read(evt.Repo.Record, DB, hash_kind, arena, repo_map);
                 try repos.append(arena.allocator(), repo_event);
             }
             repos_next_start = if (end < count) end else null;
@@ -88,8 +88,8 @@ pub fn init(
     }
 
     return .{
-        .header = try Header.init(arena, user.name),
-        .user = evt.User.Safe.init(user),
+        .header = try Header.init(arena, user.event.name),
+        .user = evt.project(evt.User.Public, user.event),
         .repos = repos.items,
         .repos_start = start,
         .repos_next_start = repos_next_start,
@@ -145,8 +145,8 @@ pub const View = struct {
                     // clicking a repo opens its page; the "a:" prefix makes the web
                     // renderer emit an <a href="/repo/alice/foo"> anchor.
                     try items.append(aa, .{
-                        .text = try std.fmt.allocPrint(aa, "{s} - {s}", .{ repo.name, repo.description }),
-                        .link = try std.fmt.allocPrint(aa, "a:/repo/{s}/{s}", .{ data.user.name, repo.name }),
+                        .text = try std.fmt.allocPrint(aa, "{s} - {s}", .{ repo.event.name, repo.event.description }),
+                        .link = try std.fmt.allocPrint(aa, "a:/repo/{s}/{s}", .{ data.user.name, repo.event.name }),
                     });
                 if (data.repos_next_start) |next_start|
                     try items.append(aa, .{ .text = "next →", .link = try std.fmt.allocPrint(aa, "a:/user/{s}/repos/start:{d}", .{ data.user.name, next_start }) });

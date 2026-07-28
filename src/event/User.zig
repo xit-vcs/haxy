@@ -11,7 +11,24 @@ email: []const u8,
 password_hash: []const u8,
 enable_ansi: bool = true,
 ssh_keys: []const u8 = "", // newline-separated authorized_keys lines (one OpenSSH public key per line)
-created_ts: u64 = 0, // the commit timestamp of the event that first created this user
+
+// what the db stores: the event's data plus the commit-derived fields
+pub const Record = struct {
+    event: Self,
+    created_ts: u64 = 0, // the commit timestamp of the event that first created this user
+
+    // a user's key in the name index
+    pub fn indexKey(self: Record, allocator: std.mem.Allocator) ![]const u8 {
+        _ = allocator;
+        return self.event.name;
+    }
+};
+
+// the subset of a user that anyone may see
+pub const Public = struct {
+    name: []const u8,
+    display_name: []const u8,
+};
 
 const Self = @This();
 
@@ -26,12 +43,6 @@ pub const id_to_field_to_oid_key = "user-id->field->oid";
 
 // resolves a commit's author email to its user at read time
 pub const email_to_user_id_key = "email->user-id";
-
-// a user's key in the name index
-pub fn indexKey(self: Self, allocator: std.mem.Allocator) ![]const u8 {
-    _ = allocator;
-    return self.name;
-}
 
 pub fn validateName(name: []const u8) !void {
     if (name.len == 0) return error.NameEmpty;
@@ -50,33 +61,12 @@ pub fn validateName(name: []const u8) !void {
     }
 }
 
-// the commit-derived fields must not appear in the JSON we output
-pub fn jsonStringify(self: @This(), jw: anytype) !void {
-    try jw.beginObject();
-    inline for (std.meta.fields(@This())) |field| {
-        if (comptime evt.derivedField(field.name)) continue;
-        try jw.objectField(field.name);
-        try jw.write(@field(self, field.name));
-    }
-    try jw.endObject();
-}
-
-// the subset of a user that's safe to hand to clients
-pub const Safe = struct {
-    name: []const u8,
-    display_name: []const u8,
-
-    pub fn init(user: Self) Safe {
-        return .{ .name = user.name, .display_name = user.display_name };
-    }
-};
-
 pub fn consume(
     comptime DB: type,
     comptime hash_kind: hash.HashKind,
     haxy_moment: DB.HashMap(.read_write),
     event_id: *const [evt.event_id_size]u8,
-    event_maybe: ?@This(),
+    record_maybe: ?Record,
     arena: *std.heap.ArenaAllocator,
     // the commit this event came from, recorded against every field it
     // changes. null from `merge`, which sets oids and conflicts itself.
@@ -99,43 +89,43 @@ pub fn consume(
     const user_id_to_field_to_oid_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, id_to_field_to_oid_key));
     const user_id_to_field_to_oid = try DB.HashMap(.read_write).init(user_id_to_field_to_oid_cursor);
 
-    if (event_maybe) |event| {
-        try validateName(event.name);
+    if (record_maybe) |record| {
+        try validateName(record.event.name);
 
-        var event_to_write = event;
+        var record_to_write = record;
 
         // if this event_id already maps to a user with a different name or
         // email, drop the stale index entries first
-        var existing_event_maybe: ?@This() = null;
+        var existing_record_maybe: ?Record = null;
         const existing_cursor_maybe = try event_id_to_user.getCursor(user_key);
         if (existing_cursor_maybe) |existing_cursor| {
             const existing_user = try DB.HashMap(.read_only).init(existing_cursor);
-            const existing_event = try evt.read(@This(), DB, hash_kind, arena, existing_user);
-            existing_event_maybe = existing_event;
+            const existing_record = try evt.read(Record, DB, hash_kind, arena, existing_user);
+            existing_record_maybe = existing_record;
             // updates preserve the original creation timestamp
-            event_to_write.created_ts = existing_event.created_ts;
-            if (!std.mem.eql(u8, existing_event.name, event.name)) {
-                _ = try name_to_user_id.remove(hash.hashInt(hash_kind, existing_event.name));
+            record_to_write.created_ts = existing_record.created_ts;
+            if (!std.mem.eql(u8, existing_record.event.name, record.event.name)) {
+                _ = try name_to_user_id.remove(hash.hashInt(hash_kind, existing_record.event.name));
             }
-            if (!std.mem.eql(u8, existing_event.email, event.email)) {
-                _ = try email_to_user_id.remove(hash.hashInt(hash_kind, existing_event.email));
+            if (!std.mem.eql(u8, existing_record.event.email, record.event.email)) {
+                _ = try email_to_user_id.remove(hash.hashInt(hash_kind, existing_record.event.email));
             }
 
             // any event settles the conflict, since resolving in the ui may
             // keep our own values and so change nothing to detect
             if (event_oid != null) {
-                _ = try conflicts.remove(&evt.orderKeyDesc(existing_event.created_ts, event_id));
+                _ = try conflicts.remove(&evt.orderKeyDesc(existing_record.created_ts, event_id));
             }
         }
 
-        try evt.writeOid(@This(), DB, hash_kind, user_id_to_field_to_oid, user_key, existing_event_maybe, event, event_oid);
+        try evt.writeOid(Self, DB, hash_kind, user_id_to_field_to_oid, user_key, if (existing_record_maybe) |existing| existing.event else null, record.event, event_oid);
 
         const user_cursor = try event_id_to_user.putCursor(user_key);
         const user = try DB.HashMap(.read_write).init(user_cursor);
-        try evt.upsert(@This(), DB, hash_kind, user, event_to_write);
+        try evt.upsert(Record, DB, hash_kind, user, record_to_write);
 
-        try name_to_user_id.put(hash.hashInt(hash_kind, event.name), .{ .bytes = event_id });
-        try email_to_user_id.put(hash.hashInt(hash_kind, event.email), .{ .bytes = event_id });
+        try name_to_user_id.put(hash.hashInt(hash_kind, record.event.name), .{ .bytes = event_id });
+        try email_to_user_id.put(hash.hashInt(hash_kind, record.event.email), .{ .bytes = event_id });
 
         // first time we've seen this user: add it to the ordered set the users
         // view paginates through. the key embeds the event id, so the set needs
@@ -143,21 +133,21 @@ pub fn consume(
         if (existing_cursor_maybe == null) {
             const user_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, "user-id-set"));
             const user_id_set = try DB.SortedSet(.read_write).init(user_id_set_cursor);
-            const order_key = evt.orderKeyDesc(event_to_write.created_ts, event_id);
+            const order_key = evt.orderKeyDesc(record_to_write.created_ts, event_id);
             try user_id_set.put(&order_key);
         }
     } else {
         // read the user so we can drop its name and email index entries
         if (try event_id_to_user.getCursor(user_key)) |existing_cursor| {
             const existing_user = try DB.HashMap(.read_only).init(existing_cursor);
-            const existing_event = try evt.read(@This(), DB, hash_kind, arena, existing_user);
-            _ = try name_to_user_id.remove(hash.hashInt(hash_kind, existing_event.name));
-            _ = try email_to_user_id.remove(hash.hashInt(hash_kind, existing_event.email));
+            const existing_record = try evt.read(Record, DB, hash_kind, arena, existing_user);
+            _ = try name_to_user_id.remove(hash.hashInt(hash_kind, existing_record.event.name));
+            _ = try email_to_user_id.remove(hash.hashInt(hash_kind, existing_record.event.email));
 
             // drop it from the ordered set using its recorded creation timestamp
             const user_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, "user-id-set"));
             const user_id_set = try DB.SortedSet(.read_write).init(user_id_set_cursor);
-            const order_key = evt.orderKeyDesc(existing_event.created_ts, event_id);
+            const order_key = evt.orderKeyDesc(existing_record.created_ts, event_id);
             _ = try user_id_set.remove(&order_key);
 
             _ = try conflicts.remove(&order_key);
@@ -215,9 +205,9 @@ pub fn verifyCredentials(
 
     const user_cursor = try event_id_to_user.getCursor(user_key) orelse return .unknown_user;
     const user_map = try DB.HashMap(.read_only).init(user_cursor);
-    const user_event = try evt.read(@This(), DB, hash_kind, arena, user_map);
+    const user_event = try evt.read(Record, DB, hash_kind, arena, user_map);
 
-    bcrypt.strVerify(user_event.password_hash, password, .{ .silently_truncate_password = false }) catch {
+    bcrypt.strVerify(user_event.event.password_hash, password, .{ .silently_truncate_password = false }) catch {
         return .wrong_password;
     };
 
@@ -232,12 +222,12 @@ pub fn readById(
     haxy_moment: DB.HashMap(.read_only),
     arena: *std.heap.ArenaAllocator,
     user_id: []const u8,
-) !?@This() {
+) !?Record {
     const event_id_to_user_cursor = try haxy_moment.getCursor(hash.hashInt(hash_kind, "event-id->user")) orelse return null;
     const event_id_to_user = try DB.HashMap(.read_only).init(event_id_to_user_cursor);
     const user_cursor = try event_id_to_user.getCursor(hash.hashInt(hash_kind, user_id)) orelse return null;
     const user_map = try DB.HashMap(.read_only).init(user_cursor);
-    return try evt.read(@This(), DB, hash_kind, arena, user_map);
+    return try evt.read(Record, DB, hash_kind, arena, user_map);
 }
 
 // read a user by email via the email->user-id index, or null when no user has
@@ -248,7 +238,7 @@ pub fn readByEmail(
     haxy_moment: DB.HashMap(.read_only),
     arena: *std.heap.ArenaAllocator,
     email: []const u8,
-) !?@This() {
+) !?Record {
     const email_to_user_id_cursor = (try haxy_moment.getCursor(hash.hashInt(hash_kind, email_to_user_id_key))) orelse return null;
     const email_to_user_id = try DB.HashMap(.read_only).init(email_to_user_id_cursor);
     const user_id_cursor = (try email_to_user_id.getCursor(hash.hashInt(hash_kind, email))) orelse return null;
@@ -265,7 +255,7 @@ pub fn readByName(
     admin_repo_path: []const u8,
     arena: *std.heap.ArenaAllocator,
     name: []const u8,
-) !?Self {
+) !?Record {
     var repo = rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = admin_repo_path }) catch |err| switch (err) {
         error.RepoNotFound => return null,
         else => |e| return e,
@@ -299,12 +289,12 @@ pub fn toggleAnsi(
     const moment = try evt.currentMoment(repo_opts, repo);
     const user = (try readById(DB, repo_opts.hash, moment, &arena, user_id)) orelse return;
 
-    var updated = user;
-    updated.enable_ansi = !user.enable_ansi;
+    var updated = user.event;
+    updated.enable_ansi = !updated.enable_ansi;
     try evt.consume(.xit, repo_opts, io, allocator, repo, evt.events_ref, &[_]evt.EventWithId{.{
         .id = std.fmt.bytesToHex(user_id[0..evt.event_id_size].*, .lower),
         .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
-        .author_email = user.email,
+        .author_email = user.event.email,
         .event = .{ .user = updated },
     }});
 }

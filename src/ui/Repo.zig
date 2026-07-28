@@ -23,7 +23,7 @@ pub const Quit = @import("./Quit.zig");
 const Array = ui.RoutablePage.Array(ui.RoutablePage.repo_identity_max_len);
 
 header: Header,
-repo: evt.Repo,
+repo: evt.Repo.Record,
 files: Files,
 commits: Commits,
 refs: Refs,
@@ -124,17 +124,17 @@ pub fn init(
     // the repo and owner-name metadata the header shows. local mode already
     // knows all three; the server paths resolve them from the admin db.
     var source: ?ui.RepoSource = null;
-    var repo: evt.Repo = undefined;
+    var repo: evt.Repo.Record = undefined;
     var owner_name: []const u8 = undefined;
     if (session.local) |local| {
         source = local;
         // local routes elide the identity, so the display name comes from the
         // repo's directory rather than the route.
-        repo = .{
+        repo = .{ .event = .{
             .user_id = "",
             .name = try arena.allocator().dupe(u8, std.fs.path.basename(local.path)),
             .description = "",
-        };
+        } };
         owner_name = "";
     } else {
         const haxy_moment = session.haxy_moment orelse return error.NoMoment;
@@ -143,8 +143,8 @@ pub fn init(
 
         // resolve the creating user so the header can show their name to the left
         // of the repo title.
-        const owner = (try evt.User.readById(DB, hash_kind, haxy_moment, arena, repo.user_id)) orelse return error.NotFound;
-        owner_name = owner.name;
+        const owner = (try evt.User.readById(DB, hash_kind, haxy_moment, arena, repo.event.user_id)) orelse return error.NotFound;
+        owner_name = owner.event.name;
 
         // the repo's working copy lives at <repos_dir>/<hex event id>.
         if (session.repos_dir) |repos_dir| {
@@ -214,7 +214,7 @@ pub fn init(
     return .{
         // files and commits resolve the same ref, so either's serves the header,
         // which points both tabs at it.
-        .header = try Header.init(arena, repo.name, owner_name, files.ref_or_oid, files.ref_or_oid_value, issues_tag),
+        .header = try Header.init(arena, repo.event.name, owner_name, files.ref_or_oid, files.ref_or_oid_value, issues_tag),
         .repo = repo,
         .files = files,
         .commits = commits,

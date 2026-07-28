@@ -8,8 +8,15 @@ title: []const u8,
 description: []const u8,
 tags: []const u8, // space-separated
 status: Status = .open,
-author_email: ?[]const u8 = null,
-created_ts: u64 = 0, // the commit timestamp of the event that first created this issue
+
+// what the db stores: the event's data plus the commit-derived fields
+pub const Record = struct {
+    event: Self,
+    author_email: ?[]const u8 = null,
+    created_ts: u64 = 0, // the commit timestamp of the event that first created this issue
+};
+
+const Self = @This();
 
 pub const Status = enum {
     open,
@@ -53,23 +60,12 @@ pub fn fieldsValid(title: []const u8, tags: []const u8) bool {
     return true;
 }
 
-// the commit-derived fields must not appear in the JSON we output
-pub fn jsonStringify(self: @This(), jw: anytype) !void {
-    try jw.beginObject();
-    inline for (std.meta.fields(@This())) |field| {
-        if (comptime evt.derivedField(field.name)) continue;
-        try jw.objectField(field.name);
-        try jw.write(@field(self, field.name));
-    }
-    try jw.endObject();
-}
-
 pub fn consume(
     comptime DB: type,
     comptime hash_kind: hash.HashKind,
     haxy_moment: DB.HashMap(.read_write),
     event_id: *const [evt.event_id_size]u8,
-    event_maybe: ?@This(),
+    record_maybe: ?Record,
     arena: *std.heap.ArenaAllocator,
     // the commit this event came from, recorded against every field it
     // changes. null from `merge`, which sets oids and conflicts itself.
@@ -95,37 +91,37 @@ pub fn consume(
     const issue_id_to_field_to_oid_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, id_to_field_to_oid_key));
     const issue_id_to_field_to_oid = try DB.HashMap(.read_write).init(issue_id_to_field_to_oid_cursor);
 
-    if (event_maybe) |event| {
-        var event_to_write = event;
+    if (record_maybe) |record| {
+        var record_to_write = record;
 
-        var existing_event_maybe: ?@This() = null;
+        var existing_record_maybe: ?Record = null;
         const existing_cursor_maybe = try event_id_to_issue.getCursor(issue_key);
         if (existing_cursor_maybe) |existing_cursor| {
             // updates preserve the original creation timestamp and author
             const existing_issue = try DB.HashMap(.read_only).init(existing_cursor);
-            const existing_event = try evt.read(@This(), DB, hash_kind, arena, existing_issue);
-            existing_event_maybe = existing_event;
-            event_to_write.created_ts = existing_event.created_ts;
-            event_to_write.author_email = existing_event.author_email;
+            const existing_record = try evt.read(Record, DB, hash_kind, arena, existing_issue);
+            existing_record_maybe = existing_record;
+            record_to_write.created_ts = existing_record.created_ts;
+            record_to_write.author_email = existing_record.author_email;
 
             // drop the old status's and tags' entries; the current ones are re-added below
-            const order_key = evt.orderKeyDesc(existing_event.created_ts, event_id);
-            const status_set = try statusSet(DB, status_to_issues, existing_event.status);
+            const order_key = evt.orderKeyDesc(existing_record.created_ts, event_id);
+            const status_set = try statusSet(DB, status_to_issues, existing_record.event.status);
             _ = try status_set.remove(&order_key);
-            try removeFromTagSets(DB, tag_to_issues, existing_event.tags, existing_event.status, &order_key);
+            try removeFromTagSets(DB, tag_to_issues, existing_record.event.tags, existing_record.event.status, &order_key);
 
             // any event settles the conflict, since resolving in the ui may
             // keep our own values and so change nothing to detect
             if (event_oid != null) _ = try conflicts.remove(&order_key);
         }
 
-        try evt.writeOid(@This(), DB, hash_kind, issue_id_to_field_to_oid, issue_key, existing_event_maybe, event, event_oid);
+        try evt.writeOid(Self, DB, hash_kind, issue_id_to_field_to_oid, issue_key, if (existing_record_maybe) |existing| existing.event else null, record.event, event_oid);
 
         const issue_cursor = try event_id_to_issue.putCursor(issue_key);
         const issue = try DB.HashMap(.read_write).init(issue_cursor);
-        try evt.upsert(@This(), DB, hash_kind, issue, event_to_write);
+        try evt.upsert(Record, DB, hash_kind, issue, record_to_write);
 
-        const order_key = evt.orderKeyDesc(event_to_write.created_ts, event_id);
+        const order_key = evt.orderKeyDesc(record_to_write.created_ts, event_id);
 
         // first time we've seen this issue: add it to the set that enumerates
         // every issue regardless of status
@@ -135,15 +131,15 @@ pub fn consume(
             try issue_id_set.put(&order_key);
         }
 
-        const status_set = try statusSet(DB, status_to_issues, event.status);
+        const status_set = try statusSet(DB, status_to_issues, record.event.status);
         try status_set.put(&order_key);
 
-        var tag_iter = tagIterator(event.tags);
+        var tag_iter = tagIterator(record.event.tags);
         while (tag_iter.next()) |tag| {
             if (tag.len == 0) continue;
             if (tag.len > tag_max_len) return error.TagTooLong;
             var key_buffer: TagStatusKey = undefined;
-            const tag_set_cursor = try tag_to_issues.putCursor(try tagStatusKey(&key_buffer, tag, event.status));
+            const tag_set_cursor = try tag_to_issues.putCursor(try tagStatusKey(&key_buffer, tag, record.event.status));
             const tag_set = try DB.SortedSet(.read_write).init(tag_set_cursor);
             try tag_set.put(&order_key);
         }
@@ -151,13 +147,13 @@ pub fn consume(
         // drop it from the ordered sets using its recorded creation timestamp and status
         if (try event_id_to_issue.getCursor(issue_key)) |existing_cursor| {
             const existing_issue = try DB.HashMap(.read_only).init(existing_cursor);
-            const existing_event = try evt.read(@This(), DB, hash_kind, arena, existing_issue);
-            const order_key = evt.orderKeyDesc(existing_event.created_ts, event_id);
+            const existing_record = try evt.read(Record, DB, hash_kind, arena, existing_issue);
+            const order_key = evt.orderKeyDesc(existing_record.created_ts, event_id);
 
-            const status_set = try statusSet(DB, status_to_issues, existing_event.status);
+            const status_set = try statusSet(DB, status_to_issues, existing_record.event.status);
             _ = try status_set.remove(&order_key);
 
-            try removeFromTagSets(DB, tag_to_issues, existing_event.tags, existing_event.status, &order_key);
+            try removeFromTagSets(DB, tag_to_issues, existing_record.event.tags, existing_record.event.status, &order_key);
 
             const issue_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, id_set_key));
             const issue_id_set = try DB.SortedSet(.read_write).init(issue_id_set_cursor);
@@ -204,10 +200,10 @@ pub fn update(
 
     const issue = (try readById(repo_kind, repo_opts, io, allocator, &arena, repo, id_bytes)) orelse return error.NotFound;
 
-    var updated = issue;
+    var updated = issue.event;
     switch (change) {
         .status => |status| {
-            if (issue.status == status) return;
+            if (updated.status == status) return;
             updated.status = status;
         },
         .fields => |fields| {
@@ -235,7 +231,7 @@ fn readById(
     arena: *std.heap.ArenaAllocator,
     repo: *rp.Repo(repo_kind, repo_opts),
     id_bytes: *const [evt.event_id_size]u8,
-) !?@This() {
+) !?Record {
     const DB = evt.EventDB(repo_opts.hash);
     var event_db_maybe: ?evt.LocalEventDB(repo_opts.hash) = if (repo_kind == .git) try evt.LocalEventDB(repo_opts.hash).openReadOnly(io, allocator, repo.core.repo_dir) else null;
     defer if (event_db_maybe) |*event_db| event_db.deinit(io, allocator);
@@ -249,7 +245,7 @@ fn readById(
     const event_id_to_issue = try DB.HashMap(.read_only).init(event_id_to_issue_cursor);
     const issue_cursor = (try event_id_to_issue.getCursor(hash.hashInt(repo_opts.hash, id_bytes))) orelse return null;
     const issue_map = try DB.HashMap(.read_only).init(issue_cursor);
-    return try evt.read(@This(), DB, repo_opts.hash, arena, issue_map);
+    return try evt.read(Record, DB, repo_opts.hash, arena, issue_map);
 }
 
 // remove an issue's order key from its tags' `status` sets, pruning entries

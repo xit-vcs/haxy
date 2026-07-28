@@ -12,7 +12,7 @@ const Focus = xitui.focus.Focus;
 
 pub const page_size = 20; // how many users one window shows
 
-users: []const evt.User.Safe,
+users: []const evt.User.Public,
 start: usize, // the window start this page was built with, mirrored into the url
 next_start: ?usize, // the `start` for the "next" row, or null when this is the last window
 
@@ -26,7 +26,7 @@ pub fn init(
     const DB = evt.AdminDB;
     const hash_kind = evt.admin_repo_opts.hash;
 
-    var users: std.ArrayList(evt.User.Safe) = .empty;
+    var users: std.ArrayList(evt.User.Public) = .empty;
 
     // the users ordered by creation time (newest first); absent until the first
     // user exists. keyed by orderKey ([timestamp][event-id]); the trailing bytes
@@ -53,8 +53,8 @@ pub fn init(
         const event_id = order_key[@sizeOf(u64)..];
         const user_cursor = try event_id_to_user.getCursor(hash.hashInt(hash_kind, event_id)) orelse continue;
         const user_map = try DB.HashMap(.read_only).init(user_cursor);
-        const user_event = try evt.read(evt.User, DB, hash_kind, arena, user_map);
-        try users.append(arena.allocator(), evt.User.Safe.init(user_event));
+        const user_event = try evt.read(evt.User.Record, DB, hash_kind, arena, user_map);
+        try users.append(arena.allocator(), evt.project(evt.User.Public, user_event.event));
     }
 
     return .{
