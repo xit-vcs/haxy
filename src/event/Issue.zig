@@ -200,6 +200,7 @@ pub fn update(
     repo: *rp.Repo(repo_kind, repo_opts),
     id_bytes: *const [evt.event_id_size]u8,
     change: Update,
+    author_email: []const u8,
 ) !void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -222,6 +223,7 @@ pub fn update(
     try evt.consume(repo_kind, repo_opts, io, allocator, repo, evt.events_ref, &[_]evt.EventWithId{.{
         .id = std.fmt.bytesToHex(id_bytes.*, .lower),
         .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
+        .author_email = author_email,
         .event = .{ .issue = updated },
     }});
 }

@@ -1153,6 +1153,7 @@ pub const View = struct {
         const event = evt.EventWithId{
             .id = event_id_hex,
             .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
+            .author_email = try self.session.userEmail(),
             .event = .{ .issue = .{
                 .title = title,
                 .description = description,
@@ -1214,7 +1215,7 @@ pub const View = struct {
                         .title = title,
                         .tags = tags,
                         .description = description,
-                    } }),
+                    } }, try self.session.userEmail()),
                 }
             },
         }
@@ -1246,7 +1247,7 @@ pub const View = struct {
                 var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, .{ .path = src.path });
                 defer any_repo.deinit(io, allocator);
                 switch (any_repo) {
-                    inline else => |*repo| try evt.Issue.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &id_bytes, .{ .status = status }),
+                    inline else => |*repo| try evt.Issue.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &id_bytes, .{ .status = status }, try self.session.userEmail()),
                 }
             },
         }

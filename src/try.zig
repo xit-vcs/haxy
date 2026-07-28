@@ -175,6 +175,7 @@ pub fn main(init: std.process.Init) !void {
                 .id = std.fmt.bytesToHex(user_ids[i], .lower),
                 // stepped timestamps so the seeded users/repos list in a stable order
                 .timestamp = @intCast(slot + 1),
+                .author_email = "admin@haxy",
                 .event = .{
                     .user = .{
                         .name = u.name,
@@ -190,6 +191,7 @@ pub fn main(init: std.process.Init) !void {
             events_to_consume[user_data.len + i] = .{
                 .id = std.fmt.bytesToHex(repo_event_ids[i], .lower),
                 .timestamp = @intCast(user_data.len + i + 1),
+                .author_email = user_data[r.user_index].email,
                 .event = .{
                     .repo = .{
                         .user_id = &user_ids[r.user_index],
@@ -530,6 +532,7 @@ pub fn main(init: std.process.Init) !void {
                     .id = std.fmt.bytesToHex(evt.EventWithId.randomId(prng.random()), .lower),
                     // stepped timestamps so the issues list in a stable order
                     .timestamp = @intCast(i + 1),
+                    .author_email = user_data[i % user_data.len].email,
                     .event = .{
                         .issue = .{
                             .title = issue.title,

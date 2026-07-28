@@ -346,6 +346,29 @@ fn handleAnsi(
     });
 }
 
+// the email the request's session authors event commits as
+fn authorEmail(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    arena: *std.heap.ArenaAllocator,
+    request: *std.http.Server.Request,
+    host: Host,
+) ![]const u8 {
+    const remote = switch (host) {
+        .remote => |remote| remote,
+        .local => return "user@haxy",
+    };
+    const token = getCookieValue(request, cookie_name) orelse return "user@haxy";
+    var user_id: [evt.event_id_size]u8 = undefined;
+    if (!remote.session_store.lookup(token, &user_id)) return "user@haxy";
+
+    var repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = remote.admin_repo_path });
+    defer repo.deinit(io, allocator);
+    const moment = try evt.currentMoment(evt.admin_repo_opts, &repo);
+    const user = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, &user_id)) orelse unreachable;
+    return user.email;
+}
+
 // create an issue in the repo the form's page names (base is
 // "/repo/<owner>/<name>", or "" in local mode) and redirect to it
 fn handleIssue(
@@ -385,9 +408,13 @@ fn handleIssue(
     io.random(&id_bytes);
     const event_id_hex = std.fmt.bytesToHex(id_bytes, .lower);
 
+    var author_arena = std.heap.ArenaAllocator.init(allocator);
+    defer author_arena.deinit();
+
     const event = evt.EventWithId{
         .id = event_id_hex,
         .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
+        .author_email = try authorEmail(io, allocator, &author_arena, request, host),
         .event = .{ .issue = .{
             .title = title,
             .description = description,
@@ -478,6 +505,7 @@ fn updateIssue(
     host: Host,
     parts: IssueBaseParts,
     update: evt.Issue.Update,
+    author_email: []const u8,
 ) !void {
     switch (host) {
         .remote => |remote| {
@@ -493,7 +521,7 @@ fn updateIssue(
 
             var repo = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = repo_path });
             defer repo.deinit(io, allocator);
-            try evt.Issue.update(.xit, .{}, io, allocator, &repo, &parts.id_bytes, update);
+            try evt.Issue.update(.xit, .{}, io, allocator, &repo, &parts.id_bytes, update, author_email);
         },
         .local => |src| {
             // the local forms post to "/issues/<id>/...", so the repo base
@@ -504,7 +532,7 @@ fn updateIssue(
                     var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, .{ .path = src.path });
                     defer any_repo.deinit(io, allocator);
                     switch (any_repo) {
-                        inline else => |*repo| try evt.Issue.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &parts.id_bytes, update),
+                        inline else => |*repo| try evt.Issue.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &parts.id_bytes, update, author_email),
                     }
                 },
             }
@@ -532,7 +560,11 @@ fn handleIssueStatus(
         return;
     };
 
-    updateIssue(io, allocator, host, parts, .{ .status = status }) catch |err| switch (err) {
+    var author_arena = std.heap.ArenaAllocator.init(allocator);
+    defer author_arena.deinit();
+    const author_email = try authorEmail(io, allocator, &author_arena, request, host);
+
+    updateIssue(io, allocator, host, parts, .{ .status = status }, author_email) catch |err| switch (err) {
         error.NotFound => {
             try request.respond(not_found, .{
                 .status = .not_found,
@@ -599,11 +631,15 @@ fn handleIssueEdit(
         return;
     };
 
+    var author_arena = std.heap.ArenaAllocator.init(allocator);
+    defer author_arena.deinit();
+    const author_email = try authorEmail(io, allocator, &author_arena, request, host);
+
     updateIssue(io, allocator, host, parts, .{ .fields = .{
         .title = title,
         .tags = tags,
         .description = description,
-    } }) catch |err| switch (err) {
+    } }, author_email) catch |err| switch (err) {
         error.NotFound => {
             try request.respond(not_found, .{
                 .status = .not_found,

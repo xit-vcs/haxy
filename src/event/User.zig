@@ -24,6 +24,9 @@ pub const name_index_key = "name->user-id";
 pub const conflicts_key = "conflicted-user-id->conflict";
 pub const id_to_field_to_oid_key = "user-id->field->oid";
 
+// resolves a commit's author email to its user at read time
+pub const email_to_user_id_key = "email->user-id";
+
 // a user's key in the name index
 pub fn indexKey(self: Self, allocator: std.mem.Allocator) ![]const u8 {
     _ = allocator;
@@ -89,6 +92,9 @@ pub fn consume(
     const name_to_user_id_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, "name->user-id"));
     const name_to_user_id = try DB.HashMap(.read_write).init(name_to_user_id_cursor);
 
+    const email_to_user_id_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, email_to_user_id_key));
+    const email_to_user_id = try DB.HashMap(.read_write).init(email_to_user_id_cursor);
+
     const conflicts_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, conflicts_key));
     const conflicts = try DB.SortedMap(.read_write).init(conflicts_cursor);
 
@@ -100,8 +106,8 @@ pub fn consume(
 
         var event_to_write = event;
 
-        // if this event_id already maps to a user with a different name,
-        // drop the stale name->id entry first
+        // if this event_id already maps to a user with a different name or
+        // email, drop the stale index entries first
         var existing_event_maybe: ?@This() = null;
         const existing_cursor_maybe = try event_id_to_user.getCursor(user_key);
         if (existing_cursor_maybe) |existing_cursor| {
@@ -112,6 +118,9 @@ pub fn consume(
             event_to_write.created_ts = existing_event.created_ts;
             if (!std.mem.eql(u8, existing_event.name, event.name)) {
                 _ = try name_to_user_id.remove(hash.hashInt(hash_kind, existing_event.name));
+            }
+            if (!std.mem.eql(u8, existing_event.email, event.email)) {
+                _ = try email_to_user_id.remove(hash.hashInt(hash_kind, existing_event.email));
             }
 
             // any event settles the conflict, since resolving in the ui may
@@ -131,6 +140,7 @@ pub fn consume(
         try evt.upsert(@This(), DB, hash_kind, user, event_to_write);
 
         try name_to_user_id.put(hash.hashInt(hash_kind, event.name), .{ .bytes = event_id });
+        try email_to_user_id.put(hash.hashInt(hash_kind, event.email), .{ .bytes = event_id });
 
         // first time we've seen this user: add it to the ordered set the users
         // view paginates through. the key embeds the event id, so the set needs
@@ -142,11 +152,12 @@ pub fn consume(
             try user_id_set.put(&order_key);
         }
     } else {
-        // read the user's name so we can drop its name->id index entry
+        // read the user so we can drop its name and email index entries
         if (try event_id_to_user.getCursor(user_key)) |existing_cursor| {
             const existing_user = try DB.HashMap(.read_only).init(existing_cursor);
             const existing_event = try evt.read(@This(), DB, hash_kind, arena, existing_user);
             _ = try name_to_user_id.remove(hash.hashInt(hash_kind, existing_event.name));
+            _ = try email_to_user_id.remove(hash.hashInt(hash_kind, existing_event.email));
 
             // drop it from the ordered set using its recorded creation timestamp
             const user_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, "user-id-set"));
@@ -281,6 +292,7 @@ pub fn toggleAnsi(
     try evt.consume(.xit, repo_opts, io, allocator, repo, evt.events_ref, &[_]evt.EventWithId{.{
         .id = std.fmt.bytesToHex(user_id[0..evt.event_id_size].*, .lower),
         .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
+        .author_email = user.email,
         .event = .{ .user = updated },
     }});
 }

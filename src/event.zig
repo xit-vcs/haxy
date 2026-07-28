@@ -48,6 +48,7 @@ pub const EventWithId = struct {
     id: [event_id_size * 2]u8,
     event: Event,
     timestamp: u64 = 0, // not serialized, because it comes from the commit timestamp
+    author_email: []const u8, // not serialized, because it goes in the commit author
 
     pub fn jsonStringify(self: EventWithId, jw: anytype) !void {
         try jw.beginObject();
@@ -71,6 +72,8 @@ pub const EventWithId = struct {
         const json_event = try std.json.parseFromSliceLeaky(JsonEvent, arena.allocator(), message, .{ .ignore_unknown_fields = true });
         return .{
             .id = json_event.id,
+            // unused when reading; the author lives in the commit
+            .author_email = "",
             .event = switch (json_event.kind) {
                 .user => .{
                     .user = if (json_event.data) |value|
@@ -210,7 +213,9 @@ fn commitEvents(
         json.clearRetainingCapacity();
         try std.json.Stringify.value(event, .{ .whitespace = .indent_2 }, &json.writer);
         if (json.written().len > max_event_size) return error.EventTooLarge;
-        _ = try obj.writeCommit(repo_kind, repo_opts, state, io, allocator, .{ .author = "haxy <user@haxy>", .message = json.written(), .timestamp = event.timestamp, .parent_oids = parent_oids }, null, ref);
+        const author = try std.fmt.allocPrint(allocator, "haxy <{s}>", .{event.author_email});
+        defer allocator.free(author);
+        _ = try obj.writeCommit(repo_kind, repo_opts, state, io, allocator, .{ .author = author, .message = json.written(), .timestamp = event.timestamp, .parent_oids = parent_oids }, null, ref);
         // later events parent on the ref's new tip
         parent_oids = null;
     }
@@ -1032,6 +1037,8 @@ pub fn resolveOrCreateRepo(
     var owner_user_id: [event_id_size]u8 = undefined;
     _ = try owner_id_cursor.readBytes(&owner_user_id);
 
+    const owner = (try User.readById(AdminDB, admin_repo_opts.hash, moment, &arena, &owner_user_id)) orelse unreachable;
+
     var id_bytes: [event_id_size]u8 = undefined;
     io.random(&id_bytes);
     const event_id_hex = std.fmt.bytesToHex(id_bytes, .lower);
@@ -1039,6 +1046,7 @@ pub fn resolveOrCreateRepo(
     try consume(.xit, admin_repo_opts, io, allocator, &repo, events_ref, &[_]EventWithId{.{
         .id = event_id_hex,
         .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
+        .author_email = owner.email,
         .event = .{ .repo = .{
             .user_id = &owner_user_id,
             .name = repo_name,

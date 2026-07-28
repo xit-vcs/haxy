@@ -866,6 +866,14 @@ pub const Session = struct {
         }
     }
 
+    // the user's email, for authoring event commits
+    pub fn userEmail(self: *Self) ![]const u8 {
+        const user_id = self.data.user_id orelse return "user@haxy";
+        const moment = self.haxy_moment orelse return "user@haxy";
+        const user = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, self.page_arena, user_id)) orelse unreachable;
+        return user.email;
+    }
+
     // queue an action for the host to drain this frame.
     pub fn push(self: *Self, action: Action) !void {
         try self.pending.append(self.arena.allocator(), action);
