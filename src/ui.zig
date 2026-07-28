@@ -1062,19 +1062,19 @@ pub const Author = union(enum) {
     email: []const u8, // an email no user matches
     user_name: []const u8,
 
-    // the commit author line's email, resolved like initFromDb
+    // the commit author line's email, resolved like initFromEmail
     pub fn init(
         haxy_moment: ?evt.AdminDB.HashMap(.read_only),
         arena: *std.heap.ArenaAllocator,
         author_line: []const u8,
     ) !Author {
-        return initFromDb(haxy_moment, arena, evt.authorEmail(author_line));
+        return initFromEmail(haxy_moment, arena, evt.authorEmail(author_line));
     }
 
     // from a record's stored author email: it resolves to the user currently
     // holding it, else stays the email. the result is allocated in `arena`,
     // so the email may borrow transient memory.
-    pub fn initFromDb(
+    pub fn initFromEmail(
         haxy_moment: ?evt.AdminDB.HashMap(.read_only),
         arena: *std.heap.ArenaAllocator,
         author_email: ?[]const u8,

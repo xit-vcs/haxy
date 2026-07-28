@@ -318,7 +318,7 @@ fn loadWindow(
         try issues.append(aa, .{
             .id = try aa.dupe(u8, &id_hex),
             .issue = issue_event,
-            .author = try ui.Author.initFromDb(admin_moment, arena, issue_event.author_email),
+            .author = try ui.Author.initFromEmail(admin_moment, arena, issue_event.author_email),
         });
     }
 
