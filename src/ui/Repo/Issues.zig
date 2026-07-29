@@ -422,8 +422,9 @@ pub const View = struct {
         }
 
         // the new-issue form, or — on an edit url — the edit form in its
-        // place, prefilled with the selected issue's content.
-        {
+        // place, prefilled with the selected issue's content. a logged-out
+        // session can't create events, so the unauthorized view stands in.
+        if (session.data.is_local or session.data.user_id != null) {
             const aa = session.page_arena.allocator();
             const action = if (data.view == .edit)
                 (if (data.identity.len == 0)
@@ -441,6 +442,10 @@ pub const View = struct {
             var form = try initIssueForm(allocator, action, issue);
             errdefer form.deinit(allocator);
             try stack.children.put(allocator, form.getFocus().id, .{ .box = form });
+        } else {
+            var message = try ui.Unauthorized.View.init(allocator);
+            errdefer message.deinit(allocator);
+            try stack.children.put(allocator, message.getFocus().id, .{ .unauthorized = message });
         }
 
         // the stack starts on the page's view.
@@ -610,9 +615,13 @@ pub const View = struct {
         return &self.viewStack().children.values()[tags_view_index].tag_flow;
     }
 
-    // the new-issue (or edit) form inside the stack.
-    fn issueForm(self: *View) *wgt.Box(ui.Widget) {
-        return &self.viewStack().children.values()[form_view_index].box;
+    // the new-issue (or edit) form inside the stack, or null when the
+    // unauthorized view stands in for it.
+    fn issueForm(self: *View) ?*wgt.Box(ui.Widget) {
+        return switch (self.viewStack().children.values()[form_view_index]) {
+            .box => |*box| box,
+            else => null,
+        };
     }
 
     fn listScroll(self: *View, index: usize) *wgt.Scroll(ui.Widget) {
@@ -772,22 +781,23 @@ pub const View = struct {
         // refresh the form inputs' entries in the session's focus-id -> input
         // map with this frame's addresses, so the web/wasm form handling can
         // find them by focus id
-        const form = self.issueForm();
-        const inputs_arena = self.session.arena.allocator();
-        for (form.children.values()) |*child| switch (child.widget) {
-            .text_input => |*ti| try self.session.text_inputs.put(inputs_arena, ti.getFocus().id, ti),
-            else => {},
-        };
+        if (self.issueForm()) |form| {
+            const inputs_arena = self.session.arena.allocator();
+            for (form.children.values()) |*child| switch (child.widget) {
+                .text_input => |*ti| try self.session.text_inputs.put(inputs_arena, ti.getFocus().id, ti),
+                else => {},
+            };
 
-        // on an edit page, register the issue's content as the inputs'
-        // page-constant initial values, which the web overlay renders
-        // into them.
-        if (self.data.view == .edit) {
-            if (self.data.selectedIssue()) |entry| {
-                const fields = form.children.values();
-                try self.session.input_values.put(inputs_arena, fields[title_field_index].widget.text_input.getFocus().id, entry.issue.event.title);
-                try self.session.input_values.put(inputs_arena, fields[tags_field_index].widget.text_input.getFocus().id, entry.issue.event.tags);
-                try self.session.input_values.put(inputs_arena, fields[description_field_index].widget.text_input.getFocus().id, entry.issue.event.description);
+            // on an edit page, register the issue's content as the inputs'
+            // page-constant initial values, which the web overlay renders
+            // into them.
+            if (self.data.view == .edit) {
+                if (self.data.selectedIssue()) |entry| {
+                    const fields = form.children.values();
+                    try self.session.input_values.put(inputs_arena, fields[title_field_index].widget.text_input.getFocus().id, entry.issue.event.title);
+                    try self.session.input_values.put(inputs_arena, fields[tags_field_index].widget.text_input.getFocus().id, entry.issue.event.tags);
+                    try self.session.input_values.put(inputs_arena, fields[description_field_index].widget.text_input.getFocus().id, entry.issue.event.description);
+                }
             }
         }
 
@@ -823,16 +833,8 @@ pub const View = struct {
             row.getFocus().kind = .container;
         }
         if (!description_page) {
-            const action: []const u8 = switch (entry.issue.event.status) {
-                .open => "close",
-                .closed => "open",
-            };
             const row = self.toolRow(index);
             const pa = self.session.page_arena.allocator();
-            row.getFocus().kind = .{ .custom = if (self.data.identity.len == 0)
-                try std.fmt.allocPrint(pa, "form:/issues/{s}/{s}", .{ entry.id, action })
-            else
-                try std.fmt.allocPrint(pa, "form:/repo/{s}/issues/{s}/{s}", .{ self.data.identity, entry.id, action }) };
 
             {
                 var spacer = try ui.Spacer.init(allocator);
@@ -840,7 +842,18 @@ pub const View = struct {
                 try row.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null });
             }
 
-            {
+            // a logged-out session can't flip the status, so it gets no
+            // open/close button (and no form action on the row)
+            if (self.session.data.is_local or self.session.data.user_id != null) {
+                const action: []const u8 = switch (entry.issue.event.status) {
+                    .open => "close",
+                    .closed => "open",
+                };
+                row.getFocus().kind = .{ .custom = if (self.data.identity.len == 0)
+                    try std.fmt.allocPrint(pa, "form:/issues/{s}/{s}", .{ entry.id, action })
+                else
+                    try std.fmt.allocPrint(pa, "form:/repo/{s}/issues/{s}/{s}", .{ self.data.identity, entry.id, action }) };
+
                 var button = try wgt.TextBox(ui.Widget).init(allocator, action, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
                 errdefer button.deinit(allocator);
                 button.getFocus().focusable = true;
@@ -860,6 +873,7 @@ pub const View = struct {
                 try row.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = .{ .width = "edit".len + 2, .height = null } });
             }
 
+            // the open/close button when present, the edit button otherwise
             row.getFocus().child_id = row.children.keys()[button_in_row_index];
         }
 
@@ -951,6 +965,8 @@ pub const View = struct {
             if (inp.vertDirection(key) == .down) {
                 const enterable = if (self.viewStack().getSelected()) |selected| switch (selected.*) {
                     .tag_flow => |*tf| tf.text_boxes.items.len > 0,
+                    // nothing focusable in the unauthorized view
+                    .unauthorized => false,
                     else => true,
                 } else false;
                 if (enterable) root_focus.setFocus(self.box.children.keys()[stack_index]);
@@ -1029,10 +1045,13 @@ pub const View = struct {
     // arrows cross between the buttons and to the neighboring widgets.
     fn toolRowInput(self: *View, allocator: std.mem.Allocator, index: usize, key: Key, root_focus: *Focus) !void {
         const row = self.toolRow(index);
-        const on_edit = if (row.getFocus().child_id) |cid| row.children.getIndex(cid) == edit_in_row_index else false;
+        // the edit button is always the row's last child; the open/close
+        // button before it is only there when the session may author events
+        const edit_index = row.children.count() - 1;
+        const on_edit = if (row.getFocus().child_id) |cid| row.children.getIndex(cid) == edit_index else false;
         switch (key) {
-            .arrow_left => if (on_edit) root_focus.setFocus(row.children.keys()[button_in_row_index]) else try self.focusList(index, root_focus),
-            .arrow_right => if (!on_edit) root_focus.setFocus(row.children.keys()[edit_in_row_index]),
+            .arrow_left => if (on_edit and self.statusButton(index) != null) root_focus.setFocus(row.children.keys()[button_in_row_index]) else try self.focusList(index, root_focus),
+            .arrow_right => if (!on_edit) root_focus.setFocus(row.children.keys()[edit_index]),
             .arrow_up => self.focusHeader(root_focus),
             .arrow_down => self.focusTitle(index, root_focus),
             .enter => if (!on_edit) try self.toggleIssueStatus(allocator, index),
@@ -1124,7 +1143,7 @@ pub const View = struct {
     // title crosses into the header tabs. the multiline description keeps
     // enter and any up/down that has a row to move to.
     fn formInput(self: *View, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
-        const form = self.issueForm();
+        const form = self.issueForm() orelse return;
         const cid = form.getFocus().child_id orelse return;
         const cur = form.children.getIndex(cid) orelse return;
 
@@ -1177,7 +1196,7 @@ pub const View = struct {
         const src = self.data.repo_source orelse return;
         const author_email = (try self.session.eventAuthorEmail()) orelse return;
 
-        const form = self.issueForm();
+        const form = self.issueForm() orelse return;
         const title_input = &form.children.values()[title_field_index].widget.text_input;
         const tags_input = &form.children.values()[tags_field_index].widget.text_input;
         const description_input = &form.children.values()[description_field_index].widget.text_input;
@@ -1235,7 +1254,7 @@ pub const View = struct {
         const entry = self.data.selectedIssue() orelse return;
         const author_email = (try self.session.eventAuthorEmail()) orelse return;
 
-        const form = self.issueForm();
+        const form = self.issueForm() orelse return;
         const title_input = &form.children.values()[title_field_index].widget.text_input;
         const tags_input = &form.children.values()[tags_field_index].widget.text_input;
         const description_input = &form.children.values()[description_field_index].widget.text_input;
@@ -1330,7 +1349,6 @@ pub const View = struct {
     }
 
     const button_in_row_index: usize = 1;
-    const edit_in_row_index: usize = 2;
     const title_child_index: usize = 0;
     const tags_child_index: usize = 2;
 
@@ -1349,10 +1367,12 @@ pub const View = struct {
         return inner.children.getIndex(cid) == tags_child_index and self.tagFlow(index) != null;
     }
 
-    // the open/close button inside the detail frame's tool row.
+    // the open/close button inside the detail frame's tool row. the full row
+    // is spacer + open/close + edit; a logged-out session's row has no
+    // open/close button, and the description page has no row at all.
     fn statusButton(self: *View, index: usize) ?*wgt.TextBox(ui.Widget) {
         const row = self.toolRow(index);
-        if (row.children.count() == 0) return null;
+        if (row.children.count() != 3) return null;
         return &row.children.values()[button_in_row_index].widget.text_box;
     }
 

@@ -79,7 +79,9 @@ pub const View = struct {
                 try stack.children.put(allocator, repos_view.getFocus().id, .{ .home_repos = repos_view });
             }
 
-            {
+            // the header has no settings tab without a login, so keep the
+            // stack's children 1:1 with the tabs by skipping the view too
+            if (session.data.user_id != null) {
                 var settings_view = try Settings.View.init(allocator, session);
                 errdefer settings_view.deinit(allocator);
                 try stack.children.put(allocator, settings_view.getFocus().id, .{ .home_settings = settings_view });

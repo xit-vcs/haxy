@@ -274,14 +274,15 @@ pub const View = struct {
                 try stack.children.put(allocator, issues_view.getFocus().id, .{ .repo_issues = issues_view });
             }
 
-            {
+            // the header only shows the settings tab with a login and the auth
+            // tab outside local mode, so keep the stack's children 1:1 with
+            // the tabs by skipping the same views.
+            if (session.data.user_id != null) {
                 var settings_view = try Settings.View.init(allocator, session);
                 errdefer settings_view.deinit(allocator);
                 try stack.children.put(allocator, settings_view.getFocus().id, .{ .home_settings = settings_view });
             }
 
-            // the header has no auth tab in local mode, so keep the stack's
-            // children 1:1 with the tabs by skipping the auth view too.
             if (!session.data.is_local) {
                 var auth_view = try Auth.View.init(allocator, &data.auth, session);
                 errdefer auth_view.deinit(allocator);

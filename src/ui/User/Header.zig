@@ -110,8 +110,8 @@ pub const View = struct {
             });
         }
 
-        // settings tab
-        {
+        // settings tab. settings are account preferences, so it needs a login.
+        if (session.data.user_id != null) {
             var text_box = try wgt.TextBox(ui.Widget).init(allocator, "settings", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().focusable = true;
@@ -171,7 +171,11 @@ pub const View = struct {
         for (self.box.children.keys(), self.box.children.values()) |id, *child| {
             const tb: ?*wgt.TextBox(ui.Widget) = switch (child.widget) {
                 .text_box => |*x| x,
-                .auth_tab => |*at| &at.text_box,
+                .auth_tab => |*at| blk: {
+                    // the label tracks login state per frame, so the width must too
+                    child.min_size = .{ .width = at.minWidth(), .height = null };
+                    break :blk &at.text_box;
+                },
                 else => null,
             };
             if (tb) |t| {

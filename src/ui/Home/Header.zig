@@ -69,47 +69,73 @@ pub const View = struct {
         };
         var selected_tab: ?usize = null;
 
-        // tabs
-        for (
-            [_][]const u8{ "users", "repos", "", "settings", "" },
-            [_][]const u8{ "ai:/users", "ai:/repos", "", "ai:/settings", "ai:/auth" },
-        ) |name, focus_name| {
-            // spacer
-            if (focus_name.len == 0) {
-                var spacer = try ui.Spacer.init(allocator);
-                errdefer spacer.deinit(allocator);
-                try box.children.put(allocator, spacer.getFocus().id, .{
-                    .widget = .{ .spacer = spacer },
-                    .rect = null,
-                    .min_size = null,
-                });
-            }
-            // auth
-            else if (std.mem.eql(u8, "ai:/auth", focus_name)) {
-                var auth_tab = try AuthTab.View.init(allocator, session);
-                errdefer auth_tab.deinit(allocator);
-                try tab_ids.put(allocator, auth_tab.getFocus().id, {});
-                if (std.mem.eql(u8, focus_name, current_link)) selected_tab = auth_tab.getFocus().id;
-                try box.children.put(allocator, auth_tab.getFocus().id, .{
-                    .widget = .{ .auth_tab = auth_tab },
-                    .rect = null,
-                    .min_size = .{ .width = auth_tab.minWidth(), .height = null },
-                });
-            }
-            // other tabs
-            else {
-                var text_box = try wgt.TextBox(ui.Widget).init(allocator, name, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
-                errdefer text_box.deinit(allocator);
-                text_box.getFocus().focusable = true;
-                text_box.getFocus().kind = .{ .custom = focus_name };
-                try tab_ids.put(allocator, text_box.getFocus().id, {});
-                if (std.mem.eql(u8, focus_name, current_link)) selected_tab = text_box.getFocus().id;
-                try box.children.put(allocator, text_box.getFocus().id, .{
-                    .widget = .{ .text_box = text_box },
-                    .rect = null,
-                    .min_size = .{ .width = name.len + 2, .height = null },
-                });
-            }
+        // users tab
+        {
+            var text_box = try wgt.TextBox(ui.Widget).init(allocator, "users", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            errdefer text_box.deinit(allocator);
+            text_box.getFocus().focusable = true;
+            text_box.getFocus().kind = .{ .custom = "ai:/users" };
+            try tab_ids.put(allocator, text_box.getFocus().id, {});
+            if (std.mem.eql(u8, "ai:/users", current_link)) selected_tab = text_box.getFocus().id;
+            try box.children.put(allocator, text_box.getFocus().id, .{
+                .widget = .{ .text_box = text_box },
+                .rect = null,
+                .min_size = .{ .width = "users".len + 2, .height = null },
+            });
+        }
+
+        // repos tab
+        {
+            var text_box = try wgt.TextBox(ui.Widget).init(allocator, "repos", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            errdefer text_box.deinit(allocator);
+            text_box.getFocus().focusable = true;
+            text_box.getFocus().kind = .{ .custom = "ai:/repos" };
+            try tab_ids.put(allocator, text_box.getFocus().id, {});
+            if (std.mem.eql(u8, "ai:/repos", current_link)) selected_tab = text_box.getFocus().id;
+            try box.children.put(allocator, text_box.getFocus().id, .{
+                .widget = .{ .text_box = text_box },
+                .rect = null,
+                .min_size = .{ .width = "repos".len + 2, .height = null },
+            });
+        }
+
+        // spacer pushes settings + auth to the right
+        {
+            var spacer = try ui.Spacer.init(allocator);
+            errdefer spacer.deinit(allocator);
+            try box.children.put(allocator, spacer.getFocus().id, .{
+                .widget = .{ .spacer = spacer },
+                .rect = null,
+                .min_size = null,
+            });
+        }
+
+        // settings tab. settings are account preferences, so it needs a login.
+        if (session.data.user_id != null) {
+            var text_box = try wgt.TextBox(ui.Widget).init(allocator, "settings", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            errdefer text_box.deinit(allocator);
+            text_box.getFocus().focusable = true;
+            text_box.getFocus().kind = .{ .custom = "ai:/settings" };
+            try tab_ids.put(allocator, text_box.getFocus().id, {});
+            if (std.mem.eql(u8, "ai:/settings", current_link)) selected_tab = text_box.getFocus().id;
+            try box.children.put(allocator, text_box.getFocus().id, .{
+                .widget = .{ .text_box = text_box },
+                .rect = null,
+                .min_size = .{ .width = "settings".len + 2, .height = null },
+            });
+        }
+
+        // auth tab (login / logout)
+        {
+            var auth_tab = try AuthTab.View.init(allocator, session);
+            errdefer auth_tab.deinit(allocator);
+            try tab_ids.put(allocator, auth_tab.getFocus().id, {});
+            if (std.mem.eql(u8, "ai:/auth", current_link)) selected_tab = auth_tab.getFocus().id;
+            try box.children.put(allocator, auth_tab.getFocus().id, .{
+                .widget = .{ .auth_tab = auth_tab },
+                .rect = null,
+                .min_size = .{ .width = auth_tab.minWidth(), .height = null },
+            });
         }
 
         // quit tab
@@ -142,7 +168,11 @@ pub const View = struct {
         for (self.box.children.keys(), self.box.children.values()) |id, *child| {
             const tb: ?*wgt.TextBox(ui.Widget) = switch (child.widget) {
                 .text_box => |*x| x,
-                .auth_tab => |*at| &at.text_box,
+                .auth_tab => |*at| blk: {
+                    // the label tracks login state per frame, so the width must too
+                    child.min_size = .{ .width = at.minWidth(), .height = null };
+                    break :blk &at.text_box;
+                },
                 else => null,
             };
             if (tb) |t| {

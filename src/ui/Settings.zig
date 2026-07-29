@@ -16,23 +16,18 @@ pub fn init() Self {
 }
 
 pub const View = struct {
-    center: ui.Center,
+    // own container focus so callers see a stable id while login/logout swap
+    // the shown view
+    focus: *Focus,
+    // the settings controls, shown when logged in
+    authorized: ui.Center,
+    unauthorized: ui.Unauthorized.View,
     session: *ui.Session,
     button_id: usize,
 
-    // the stack switches between two whole views; build() selects one based on
-    // whether a user is logged in. the logged-in view holds the settings
-    // controls (currently just the ANSI toggle, but it will grow).
-    const logged_in_index: usize = 0;
-    const logged_out_index: usize = 1;
-
     pub fn init(allocator: std.mem.Allocator, session: *ui.Session) !View {
-        var stack = try wgt.Stack(ui.Widget).init(allocator);
-        errdefer stack.deinit(allocator);
-
         var button_id: usize = undefined;
-        // the logged-in view: the controls shown to a signed-in user.
-        {
+        var authorized = blk: {
             var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert });
             errdefer box.deinit(allocator);
 
@@ -51,49 +46,47 @@ pub const View = struct {
             }
 
             box.getFocus().child_id = button_id;
-            try stack.children.put(allocator, box.getFocus().id, .{ .box = box });
-        }
+            break :blk try ui.Center.init(allocator, .{ .box = box });
+        };
+        errdefer authorized.deinit(allocator);
 
-        // the logged-out view: shown when no user is signed in.
-        {
-            const logged_out_message =
-                \\you must be logged in to see settings.
-                \\
-                \\here's an emoticon from the early 2000s instead:
-                \\
-                \\<('o'<) ^( '-' )^ (>'o')>
-                \\
-                \\hope it helps.
-            ;
-
-            var message = try wgt.TextBox(ui.Widget).init(allocator, logged_out_message, .{ .border_style = null, .rounded_corners = false, .wrap_kind = .word });
-            errdefer message.deinit(allocator);
-            try stack.children.put(allocator, message.getFocus().id, .{ .text_box = message });
-        }
+        var unauthorized = try ui.Unauthorized.View.init(allocator);
+        errdefer unauthorized.deinit(allocator);
 
         return .{
-            .center = try ui.Center.init(allocator, .{ .stack = stack }),
+            .focus = try Focus.create(allocator, .container),
+            .authorized = authorized,
+            .unauthorized = unauthorized,
             .session = session,
             .button_id = button_id,
         };
     }
 
     pub fn deinit(self: *View, allocator: std.mem.Allocator) void {
-        self.center.deinit(allocator);
+        self.focus.destroy(allocator);
+        self.authorized.deinit(allocator);
+        self.unauthorized.deinit(allocator);
     }
 
     pub fn build(self: *View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
-        // select the logged-in view when logged in, else the logged-out view.
-        // decided per-frame since the tty doesn't rebuild the page on login.
-        const logged_in = self.session.data.user_id != null;
-        const stack = &self.center.child.stack;
-        if (logged_in) {
-            const box = &stack.children.values()[logged_in_index].box;
+        // decided per-frame since the tty doesn't rebuild the page on login
+        self.focus.clear();
+        if (self.session.data.user_id != null) {
+            const box = &self.authorized.child.box;
             const button = &box.children.values()[0].widget.text_box;
             button.box.children.values()[0].widget.text.content = ansiLabel(self.session);
+            try self.authorized.build(allocator, constraint, root_focus);
+            if (self.authorized.getGrid()) |inner_grid| {
+                try self.focus.addChild(allocator, self.authorized.getFocus(), inner_grid.size, 0, 0);
+            }
+            self.focus.child_id = self.authorized.getFocus().id;
+        } else {
+            try self.unauthorized.build(allocator, constraint, root_focus);
+            if (self.unauthorized.getGrid()) |inner_grid| {
+                try self.focus.addChild(allocator, self.unauthorized.getFocus(), inner_grid.size, 0, 0);
+            }
+            self.focus.child_id = self.unauthorized.getFocus().id;
         }
-        stack.getFocus().child_id = stack.children.keys()[if (logged_in) logged_in_index else logged_out_index];
-        try self.center.build(allocator, constraint, root_focus);
     }
 
     pub fn input(self: *View, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
@@ -115,15 +108,17 @@ pub const View = struct {
     }
 
     pub fn clearGrid(self: *View) void {
-        self.center.clearGrid();
+        self.authorized.clearGrid();
+        self.unauthorized.clearGrid();
     }
 
     pub fn getGrid(self: View) ?Grid {
-        return self.center.getGrid();
+        if (self.session.data.user_id != null) return self.authorized.getGrid();
+        return self.unauthorized.getGrid();
     }
 
     pub fn getFocus(self: *View) *Focus {
-        return self.center.getFocus();
+        return self.focus;
     }
 
     pub fn getSelectedIndex(self: View) ?usize {

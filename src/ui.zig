@@ -18,6 +18,7 @@ pub const Repo = @import("./ui/Repo.zig");
 pub const Title = @import("./ui/Title.zig");
 pub const SubTitle = @import("./ui/SubTitle.zig");
 pub const Quit = @import("./ui/Quit.zig");
+pub const Unauthorized = @import("./ui/Unauthorized.zig");
 
 pub const PageKind = enum {
     home,
@@ -1357,6 +1358,7 @@ pub const Widget = union(enum) {
     user: User.View,
     repo: Repo.View,
     quit: Quit.View,
+    unauthorized: Unauthorized.View,
     title: Title.View,
     sub_title: SubTitle.View,
     home_header: Home.Header.View,
