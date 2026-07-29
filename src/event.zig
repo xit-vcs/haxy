@@ -1006,7 +1006,7 @@ pub fn orderKeyDesc(timestamp: u64, event_id: *const [event_id_size]u8) [@sizeOf
 }
 
 // the event id embedded in a set entry's order key
-fn readOrderKeyId(comptime DB: type, kv_pair_cursor: DB.Cursor(.read_only)) ![event_id_size]u8 {
+pub fn readOrderKeyId(comptime DB: type, kv_pair_cursor: DB.Cursor(.read_only)) ![event_id_size]u8 {
     var cursor = kv_pair_cursor;
     const kv_pair = try cursor.readKeyValuePair();
     var order_key: [@sizeOf(u64) + event_id_size]u8 = undefined;

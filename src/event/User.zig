@@ -156,8 +156,24 @@ pub fn consume(
 
         if (!try event_id_to_user.remove(user_key)) return error.EventNotFound;
 
+        // the user's repos go with them: the repo name index is keyed by owner
+        // id, so one left behind is listed but can never be resolved again
         const user_id_to_repo_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, "user-id->repo-id-set"));
         const user_id_to_repo_id_set = try DB.HashMap(.read_write).init(user_id_to_repo_id_set_cursor);
+        if (try user_id_to_repo_id_set.getCursor(user_key)) |user_repos_cursor| {
+            const user_repos = try DB.SortedSet(.read_only).init(user_repos_cursor);
+
+            // collected up front, since deleting a repo removes it from this set
+            var repo_ids: std.ArrayList([evt.event_id_size]u8) = .empty;
+            var repo_iter = try user_repos.iteratorFromIndex(0);
+            while (try repo_iter.next()) |kv_pair_cursor| {
+                try repo_ids.append(arena.allocator(), try evt.readOrderKeyId(DB, kv_pair_cursor));
+            }
+
+            for (repo_ids.items) |*repo_id| {
+                try evt.Repo.consume(DB, hash_kind, haxy_moment, repo_id, null, arena, event_oid);
+            }
+        }
         _ = try user_id_to_repo_id_set.remove(user_key);
     }
 }
