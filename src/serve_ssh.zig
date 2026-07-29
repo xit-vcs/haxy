@@ -29,7 +29,7 @@ pub const SessionHandler = struct {
     err: *std.Io.Writer,
 
     pub fn handleSession(self: *const SessionHandler, sess: *ssh.SessionCtx, request: ssh.Request) !void {
-        serve_common.logError(self.err, "ssh session: kind={s} key={s}\n", .{ @tagName(request), sess.fingerprint });
+        serve_common.logError(sess.conn.io, self.err, "ssh session: kind={s} key={s}\n", .{ @tagName(request), sess.fingerprint });
         switch (request) {
             .shell => |pty_maybe| {
                 const pty = pty_maybe orelse {
@@ -74,13 +74,13 @@ pub fn runListener(
             const prev_count = active_connections.fetchAdd(1, .monotonic);
             defer _ = active_connections.fetchSub(1, .monotonic);
             if (prev_count >= max_connections) {
-                serve_common.logError(ctx.err, "ssh: connection limit reached, dropping\n", .{});
+                serve_common.logError(ctx.io, ctx.err, "ssh: connection limit reached, dropping\n", .{});
                 return;
             }
 
             var idle_state = ssh.IdleState{};
             var watchdog_future = std.Io.concurrent(ctx.io, watchdog, .{ ctx.io, &stream, &idle_state }) catch |spawn_err| {
-                serve_common.logError(ctx.err, "ssh: watchdog spawn failed: {s}\n", .{@errorName(spawn_err)});
+                serve_common.logError(ctx.io, ctx.err, "ssh: watchdog spawn failed: {s}\n", .{@errorName(spawn_err)});
                 return;
             };
             defer watchdog_future.cancel(ctx.io);
@@ -98,7 +98,7 @@ pub fn runListener(
                 &idle_state,
                 ctx.session_handler,
             ) catch |session_err| {
-                serve_common.logError(ctx.err, "ssh session failed: {s}\n", .{@errorName(session_err)});
+                serve_common.logError(ctx.io, ctx.err, "ssh session failed: {s}\n", .{@errorName(session_err)});
             };
         }
     }.h;
@@ -162,7 +162,7 @@ fn runTuiSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh
     // runs as the function unwinds — so any error it returns leaves the TUI torn
     // down and we can surface the failure on the restored screen before exiting.
     runTui(handler, sess, pty) catch |err| {
-        serve_common.logError(handler.err, "ssh tui session failed: {s}\n", .{@errorName(err)});
+        serve_common.logError(sess.conn.io, handler.err, "ssh tui session failed: {s}\n", .{@errorName(err)});
         var buf: [256]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "haxy ssh: {s}\r\n", .{@errorName(err)}) catch "haxy ssh: internal error\r\n";
         sess.writeBytes(msg) catch {};

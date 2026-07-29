@@ -67,8 +67,7 @@ pub fn handleConnection(
         };
 
         handleRequest(io, &request, allocator, host) catch |request_err| {
-            try err.print("web ui request failed: {s}\n", .{@errorName(request_err)});
-            try err.flush();
+            serve_common.logError(io, err, "web ui request failed: {s}\n", .{@errorName(request_err)});
             // best-effort 500. if handleRequest already started writing a
             // response before throwing, this respond may fail too, but at
             // that point the connection is unrecoverable anyway.

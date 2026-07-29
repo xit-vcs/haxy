@@ -174,7 +174,7 @@ fn runWebListener(
         fn h(ctx: Context, stream: std.Io.net.Stream) void {
             defer stream.close(ctx.io);
             web.handleConnection(ctx.io, ctx.allocator, stream, ctx.host, ctx.err) catch |request_err| {
-                serve_common.logError(ctx.err, "web ui request failed: {s}\n", .{@errorName(request_err)});
+                serve_common.logError(ctx.io, ctx.err, "web ui request failed: {s}\n", .{@errorName(request_err)});
             };
         }
     }.h;

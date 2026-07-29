@@ -24,7 +24,13 @@ pub fn resolveRepoPath(
     return .{ .ok = try std.fs.path.join(allocator, &.{ repo_root_path, &event_id_hex }) };
 }
 
-pub fn logError(err: *std.Io.Writer, comptime fmt: []const u8, args: anytype) void {
+// every connection task shares one error writer, so writing to it takes a
+// lock. uncancelable, since a log line shouldn't be a cancelation point.
+var log_mutex: std.Io.Mutex = .init;
+
+pub fn logError(io: std.Io, err: *std.Io.Writer, comptime fmt: []const u8, args: anytype) void {
+    log_mutex.lockUncancelable(io);
+    defer log_mutex.unlock(io);
     err.print(fmt, args) catch return;
     err.flush() catch {};
 }
@@ -64,7 +70,7 @@ pub fn runListener(
             while (true) {
                 const stream = self.net_server.accept(self.io) catch |accept_err| {
                     if (accept_err == error.Canceled) return;
-                    logError(self.err, "{s} accept failed: {s}\n", .{ self.name, @errorName(accept_err) });
+                    logError(self.io, self.err, "{s} accept failed: {s}\n", .{ self.name, @errorName(accept_err) });
                     continue;
                 };
                 self.tasks.async(self.io, Conn.run, .{Conn{ .context = self.context, .stream = stream }});

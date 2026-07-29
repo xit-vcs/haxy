@@ -26,7 +26,7 @@ pub fn runListener(
         fn h(ctx: Context, stream: std.Io.net.Stream) void {
             defer stream.close(ctx.io);
             handleConnection(repo_kind, any_repo_opts, ctx.io, ctx.allocator, ctx.repo_root_path, ctx.admin_repo_path, stream, ctx.err) catch |request_err| {
-                serve_common.logError(ctx.err, "connection failed: {s}\n", .{@errorName(request_err)});
+                serve_common.logError(ctx.io, ctx.err, "connection failed: {s}\n", .{@errorName(request_err)});
             };
         }
     }.h;
@@ -64,8 +64,7 @@ fn handleConnection(
         };
 
         handleGitRequest(repo_kind, any_repo_opts, io, allocator, repo_root_path, admin_repo_path, &http_server, &request) catch |request_err| {
-            try err.print("request failed: {s}\n", .{@errorName(request_err)});
-            try err.flush();
+            serve_common.logError(io, err, "request failed: {s}\n", .{@errorName(request_err)});
             if (http_server.reader.state == .received_head) {
                 http_server.reader.state = .ready;
             }
