@@ -235,7 +235,7 @@ pub const View = struct {
             try box.children.put(allocator, auth_tab.getFocus().id, .{
                 .widget = .{ .auth_tab = auth_tab },
                 .rect = null,
-                .min_size = .{ .width = AuthTab.min_width, .height = null },
+                .min_size = .{ .width = auth_tab.minWidth(), .height = null },
             });
         }
 

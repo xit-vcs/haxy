@@ -114,11 +114,9 @@ pub const View = struct {
 
         // build the header first so we can grab the repos-tab id for the auth
         // view (it focuses there after login).
-        var repos_tab_id: usize = undefined;
         {
             var header_view = try Header.View.init(allocator, &data.header, session);
             errdefer header_view.deinit(allocator);
-            repos_tab_id = header_view.tab_ids.keys()[0];
             try box.children.put(allocator, header_view.getFocus().id, .{ .widget = .{ .user_header = header_view }, .rect = null, .min_size = null });
         }
 
@@ -162,7 +160,7 @@ pub const View = struct {
             }
 
             {
-                var auth_view = try Auth.View.init(allocator, &data.auth, session, repos_tab_id);
+                var auth_view = try Auth.View.init(allocator, &data.auth, session);
                 errdefer auth_view.deinit(allocator);
                 try stack.children.put(allocator, auth_view.getFocus().id, .{ .home_auth = auth_view });
             }

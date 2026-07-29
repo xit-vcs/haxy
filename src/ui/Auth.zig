@@ -32,10 +32,10 @@ pub const View = struct {
     logout: Logout.View,
     session: *ui.Session,
 
-    pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session, users_tab_id: usize) !View {
-        var login_view = try Login.View.init(allocator, &data.login, session, users_tab_id);
+    pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !View {
+        var login_view = try Login.View.init(allocator, &data.login, session);
         errdefer login_view.deinit(allocator);
-        var logout_view = try Logout.View.init(allocator, &data.logout, session, users_tab_id);
+        var logout_view = try Logout.View.init(allocator, &data.logout, session);
         errdefer logout_view.deinit(allocator);
         return .{
             .focus = try Focus.create(allocator, .container),

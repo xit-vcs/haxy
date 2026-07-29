@@ -70,6 +70,9 @@ pub fn main(init: std.process.Init) !void {
     var session_arena = std.heap.ArenaAllocator.init(allocator);
     defer session_arena.deinit();
 
+    // the seeded admin's event id, so both uis start logged in as them
+    var admin_user_id: [evt.event_id_size]u8 = undefined;
+
     var session: ui.Session = blk: {
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
@@ -155,6 +158,8 @@ pub fn main(init: std.process.Init) !void {
 
         var user_ids: [user_data.len][evt.event_id_size]u8 = undefined;
         for (&user_ids) |*id| id.* = evt.EventWithId.randomId(prng.random());
+        // admin is the first entry of user_data above
+        admin_user_id = user_ids[0];
 
         var repo_event_ids: [repo_data.len][evt.event_id_size]u8 = undefined;
         for (&repo_event_ids) |*id| id.* = evt.EventWithId.randomId(prng.random());
@@ -562,7 +567,7 @@ pub fn main(init: std.process.Init) !void {
             }
         }
 
-        break :blk try ui.Session.init(&session_arena, &repo, .{});
+        break :blk try ui.Session.init(&session_arena, &repo, .{ .user_id = &admin_user_id });
     };
     session.is_terminal = true;
     // try uses the default serve options below, so the footer's url points at
@@ -588,6 +593,17 @@ pub fn main(init: std.process.Init) !void {
     // let the native TUI's page builders open the on-disk repos for the file tree
     session.io = io;
     session.repos_dir = try std.fs.path.join(session_arena.allocator(), &.{ server_path, "repos" });
+
+    // leave a one-shot session for the first browser to hit the web ui, so it
+    // starts logged in as admin
+    {
+        var data_dir = try cwd.createDirPathOpen(io, server_path, .{});
+        defer data_dir.close(io);
+        const store = try hx.web.SessionStore.init(io, data_dir);
+        defer store.deinit();
+        const token = try store.create(&admin_user_id);
+        try store.offerAutoLogin(&token);
+    }
 
     if (cli) {
         var stdout_writer = std.Io.File.stdout().writer(io, &.{});

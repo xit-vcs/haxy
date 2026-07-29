@@ -31,15 +31,12 @@ pub const View = struct {
     data: *const Self,
     session: *ui.Session,
     nav_ids: [3]usize,
-    // focus id of the header's "users" tab; on a successful submit we jump
-    // focus there so the user isn't stranded on the login button.
-    success_redirect_tab_id: usize,
 
     const username_index: usize = 0;
     const password_index: usize = 1;
     const button_index: usize = 2;
 
-    pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session, success_redirect_tab_id: usize) !View {
+    pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !View {
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .rounded_corners = true, .direction = .vert });
         errdefer box.deinit(allocator);
         // marks this subtree as an HTML form scope for the web overlay
@@ -93,7 +90,6 @@ pub const View = struct {
             .data = data,
             .session = session,
             .nav_ids = nav_ids,
-            .success_redirect_tab_id = success_redirect_tab_id,
         };
     }
 
@@ -152,12 +148,12 @@ pub const View = struct {
         if (current == button_index) {
             switch (key) {
                 .enter => {
-                    try self.submit(allocator, root_focus);
+                    try self.submit(allocator);
                     return;
                 },
                 .mouse => |mouse| {
                     if (inp.leftClickOn(root_focus, child_id, mouse)) {
-                        try self.submit(allocator, root_focus);
+                        try self.submit(allocator);
                         return;
                     }
                 },
@@ -207,7 +203,7 @@ pub const View = struct {
         return null;
     }
 
-    fn submit(self: *View, allocator: std.mem.Allocator, root_focus: *Focus) !void {
+    fn submit(self: *View, allocator: std.mem.Allocator) !void {
         if (comptime wasm) {
             // no DB cursor available on the wasm render path
             self.session.data.login_failure = .unknown_user;
@@ -246,17 +242,17 @@ pub const View = struct {
                 self.session.data.user_id = user_id_stable;
                 self.session.data.login_failure = null;
 
-                // adopt the user's persisted prefs
-                try self.session.loadUserPrefs();
+                // adopt the user's name and persisted prefs
+                try self.session.loadUser();
 
                 // wipe the entered credentials so they don't linger if the
                 // user returns to this page after logging out
                 username_input.clear(allocator);
                 password_input.clear(allocator);
 
-                // jump focus back to the users tab — the login button we
-                // just pressed is about to be hidden by the tab-label swap
-                root_focus.setFocus(self.success_redirect_tab_id);
+                // leave the auth tab for the page it belongs to, where the
+                // web's /login redirect also lands
+                try self.session.navigate(self.session.data.current_page.pageRoot());
             },
         }
     }

@@ -20,14 +20,11 @@ pub const View = struct {
     data: *const Self,
     session: *ui.Session,
     button_id: usize,
-    // focus id of the header's "users" tab; on logout we jump there so the
-    // user isn't stranded on a button that's about to be hidden.
-    users_tab_id: usize,
 
     const prompt_index: usize = 0;
     const button_index: usize = 1;
 
-    pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session, users_tab_id: usize) !View {
+    pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !View {
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .rounded_corners = true, .direction = .vert });
         errdefer box.deinit(allocator);
         // marks this subtree as an HTML form scope for the web overlay
@@ -66,7 +63,6 @@ pub const View = struct {
             .data = data,
             .session = session,
             .button_id = button_id,
-            .users_tab_id = users_tab_id,
         };
     }
 
@@ -82,12 +78,12 @@ pub const View = struct {
         _ = allocator;
         switch (key) {
             .enter => {
-                try self.logout(root_focus);
+                try self.logout();
                 return;
             },
             .mouse => |mouse| {
                 if (inp.leftClickOn(root_focus, self.button_id, mouse)) {
-                    try self.logout(root_focus);
+                    try self.logout();
                     return;
                 }
             },
@@ -95,11 +91,12 @@ pub const View = struct {
         }
     }
 
-    fn logout(self: *View, root_focus: *Focus) !void {
+    fn logout(self: *View) !void {
         self.session.data.user_id = null;
-        // jump focus back to the users tab — the logout button is about to
-        // be hidden by the tab-label swap.
-        root_focus.setFocus(self.users_tab_id);
+        self.session.data.user_name = null;
+        // leave the auth tab for the page it belongs to, where the web's
+        // /logout redirect also lands
+        try self.session.navigate(self.session.data.current_page.pageRoot());
     }
 
     pub fn clearGrid(self: *View) void {

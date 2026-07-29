@@ -52,14 +52,7 @@ pub fn init(
 
     // every repo route stores its identity as "owner/name" (or elides it in
     // local mode); files and commits carry their remaining fields directly.
-    const name_str: []const u8 = switch (route) {
-        .repo_files => |f| f.name.slice(),
-        .repo_commits => |c| c.name.slice(),
-        .repo_settings, .repo_auth => |n| n.slice(),
-        .repo_refs => |r| r.name.slice(),
-        .repo_issues => |i| i.name.slice(),
-        else => return error.UnexpectedRoute,
-    };
+    const name_str = route.repoIdentity() orelse return error.UnexpectedRoute;
     const repo_identity = ui.RoutablePage.RepoIdentity.parse(name_str) orelse return error.NotFound;
     // the files and commits tabs share one ref/oid: whichever the incoming route
     // names (it rides on the route's target tab), or the default branch when
@@ -243,11 +236,9 @@ pub const View = struct {
 
         // build the header first so we can grab the files-tab id for the auth
         // view (it focuses there after login).
-        var files_tab_id: usize = undefined;
         {
             var header_view = try Header.View.init(allocator, &data.header, session);
             errdefer header_view.deinit(allocator);
-            files_tab_id = header_view.tab_ids.keys()[0];
             try box.children.put(allocator, header_view.getFocus().id, .{ .widget = .{ .repo_header = header_view }, .rect = null, .min_size = null });
         }
 
@@ -292,7 +283,7 @@ pub const View = struct {
             // the header has no auth tab in local mode, so keep the stack's
             // children 1:1 with the tabs by skipping the auth view too.
             if (!session.data.is_local) {
-                var auth_view = try Auth.View.init(allocator, &data.auth, session, files_tab_id);
+                var auth_view = try Auth.View.init(allocator, &data.auth, session);
                 errdefer auth_view.deinit(allocator);
                 try stack.children.put(allocator, auth_view.getFocus().id, .{ .home_auth = auth_view });
             }

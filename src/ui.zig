@@ -519,6 +519,34 @@ pub const RoutablePage = union(enum) {
         return std.fmt.allocPrint(arena.allocator(), repo_segment ++ "{s}", .{identity});
     }
 
+    // the "owner/name" a repo route carries, null for any other route. the
+    // result borrows the route, so it must outlive the slice.
+    pub fn repoIdentity(self: *const RoutablePage) ?[]const u8 {
+        return switch (self.*) {
+            .repo_files => |*f| f.name.slice(),
+            .repo_commits => |*c| c.name.slice(),
+            .repo_refs => |*r| r.name.slice(),
+            .repo_issues => |*i| i.name.slice(),
+            .repo_settings, .repo_auth => |*name| name.slice(),
+            else => null,
+        };
+    }
+
+    // the route this route's page lands on, with no tab or params: the users
+    // list, a user's repos, or a repo's files root.
+    pub fn pageRoot(self: RoutablePage) RoutablePage {
+        return switch (self.parent()) {
+            .home => .default,
+            .user => switch (self) {
+                .user_repos => |u| .{ .user_repos = .{ .name = u.name } },
+                .user_settings, .user_auth => |name| .{ .user_repos = .{ .name = name } },
+                else => self,
+            },
+            // every repo route stores the same identity, so it always fits
+            .repo => repoFilesRoute(self.repoIdentity() orelse return self, null, "", "", 0) orelse self,
+        };
+    }
+
     pub fn parent(self: RoutablePage) PageKind {
         return switch (self) {
             .home_users, .home_repos, .home_settings, .home_auth => .home,
@@ -818,6 +846,8 @@ pub const Session = struct {
     // serializable data sent down to web client
     pub const Data = struct {
         user_id: ?[]const u8 = null,
+        // the logged-in user's name, for the views that show it
+        user_name: ?[]const u8 = null,
         // a transient outcome to surface from the last /login POST attempt
         login_failure: ?Home.Auth.Login.Failure = null,
         current_page: RoutablePage = .default,
@@ -853,24 +883,27 @@ pub const Session = struct {
             .page_arena = arena,
             .haxy_moment = try evt.currentMoment(evt.admin_repo_opts, repo),
         };
-        try session.loadUserPrefs();
+        try session.loadUser();
         return session;
     }
 
-    // load the logged-in user's persisted preferences from the db
-    pub fn loadUserPrefs(self: *Self) !void {
+    // load the logged-in user's name and persisted preferences from the db
+    pub fn loadUser(self: *Self) !void {
         const user_id = self.data.user_id orelse return;
         const moment = self.haxy_moment orelse return;
         if (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, self.arena, user_id)) |user| {
+            self.data.user_name = user.event.name;
             self.data.enable_ansi = user.event.enable_ansi;
         }
     }
 
-    // the user's email, for authoring event commits
-    pub fn userEmail(self: *Self) ![]const u8 {
-        const user_id = self.data.user_id orelse return "user@haxy";
-        const moment = self.haxy_moment orelse return "user@haxy";
-        const user = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, self.page_arena, user_id)) orelse unreachable;
+    // the author for an event this session creates, or null when it may not
+    // create one. local mode has no accounts, so it authors anonymously.
+    pub fn eventAuthorEmail(self: *Self) !?[]const u8 {
+        if (self.data.is_local) return "user@haxy"; // TODO: try the repo's git config user.email first
+        const user_id = self.data.user_id orelse return null;
+        const moment = self.haxy_moment orelse return null;
+        const user = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, self.page_arena, user_id)) orelse return null;
         return user.event.email;
     }
 

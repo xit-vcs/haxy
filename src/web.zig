@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const xit = @import("xit");
 const rp = xit.repo;
 const evt = @import("./event.zig");
@@ -10,6 +11,9 @@ const Focus = xitui.focus.Focus;
 const Grid = xitui.grid.Grid;
 
 const cookie_name = "haxy_session";
+// the session cookie a login or a claimed auto-login sets; both must scope
+// it the same way.
+const session_cookie_fmt = cookie_name ++ "={s}; Path=/; HttpOnly; SameSite=Strict";
 // flash cookie for surfacing the outcome of the most recent /login POST.
 // set on the failure redirect, read and immediately expired on the next
 // GET / so refreshing the page doesn't keep showing the error.
@@ -156,6 +160,9 @@ fn handleRequest(
         var user_id_buf: [evt.event_id_size]u8 = undefined;
         var user_id: ?[]const u8 = null;
         var login_failure: ?ui.Home.Auth.Login.Failure = null;
+        // backs the cookie a claimed auto-login sets
+        var cookie_buf: [256]u8 = undefined;
+        var session_cookie: ?[]const u8 = null;
         switch (host) {
             .remote => |remote| {
                 user_id = blk: {
@@ -163,6 +170,14 @@ fn handleRequest(
                     if (!remote.session_store.lookup(token, &user_id_buf)) break :blk null;
                     break :blk user_id_buf[0..evt.event_id_size];
                 };
+                // whoever seeded the store may have left a session to claim
+                if (user_id == null) {
+                    var token: [SessionStore.token_hex_len]u8 = undefined;
+                    if (remote.session_store.claimAutoLogin(&token) and remote.session_store.lookup(&token, &user_id_buf)) {
+                        session_cookie = try std.fmt.bufPrint(&cookie_buf, session_cookie_fmt, .{token});
+                        user_id = user_id_buf[0..evt.event_id_size];
+                    }
+                }
                 login_failure = if (getCookieValue(request, login_failure_cookie)) |raw|
                     if (std.mem.eql(u8, raw, "unknown_user"))
                         .unknown_user
@@ -193,16 +208,14 @@ fn handleRequest(
         };
         defer allocator.free(html);
 
+        var header_buf: [3]std.http.Header = undefined;
+        var headers: std.ArrayList(std.http.Header) = .initBuffer(&header_buf);
+        headers.appendAssumeCapacity(.{ .name = "content-type", .value = "text/html; charset=utf-8" });
         // expire the flash cookie on the way out so a refresh doesn't keep
-        // showing the failure label.
-        var headers: [2]std.http.Header = undefined;
-        headers[0] = .{ .name = "content-type", .value = "text/html; charset=utf-8" };
-        var headers_slice: []const std.http.Header = headers[0..1];
-        if (login_failure != null) {
-            headers[1] = .{ .name = "set-cookie", .value = login_failure_cookie ++ "=; Path=/; Max-Age=0" };
-            headers_slice = headers[0..2];
-        }
-        try request.respond(html, .{ .extra_headers = headers_slice });
+        // showing the failure label
+        if (login_failure != null) headers.appendAssumeCapacity(.{ .name = "set-cookie", .value = login_failure_cookie ++ "=; Path=/; Max-Age=0" });
+        if (session_cookie) |cookie| headers.appendAssumeCapacity(.{ .name = "set-cookie", .value = cookie });
+        try request.respond(html, .{ .extra_headers = headers.items });
         return;
     }
 
@@ -261,7 +274,7 @@ fn handleLogin(
         .success => |user_id| {
             const token = try session_store.create(&user_id);
             var cookie_buf: [256]u8 = undefined;
-            const cookie = try std.fmt.bufPrint(&cookie_buf, cookie_name ++ "={s}; Path=/; HttpOnly; SameSite=Strict", .{token});
+            const cookie = try std.fmt.bufPrint(&cookie_buf, session_cookie_fmt, .{token});
             try request.respond("", .{
                 .status = .see_other,
                 .extra_headers = &.{
@@ -320,15 +333,17 @@ fn handleAnsi(
     admin_repo_path: []const u8,
     session_store: SessionStore,
 ) !void {
+    // the toggle re-emits the user's own event, so it takes a logged-in user
     var user_id: [evt.event_id_size]u8 = undefined;
-    if (getCookieValue(request, cookie_name)) |token| {
-        if (session_store.lookup(token, &user_id)) {
-            const Repo = rp.Repo(.xit, evt.admin_repo_opts);
-            var repo = try Repo.open(io, allocator, .{ .path = admin_repo_path });
-            defer repo.deinit(io, allocator);
+    const token = getCookieValue(request, cookie_name) orelse return respondLoginRequired(request);
+    if (!session_store.lookup(token, &user_id)) return respondLoginRequired(request);
 
-            try evt.User.toggleAnsi(evt.admin_repo_opts, io, allocator, &repo, &user_id);
-        }
+    {
+        const Repo = rp.Repo(.xit, evt.admin_repo_opts);
+        var repo = try Repo.open(io, allocator, .{ .path = admin_repo_path });
+        defer repo.deinit(io, allocator);
+
+        try evt.User.toggleAnsi(evt.admin_repo_opts, io, allocator, &repo, &user_id);
     }
 
     // return to the settings tab the toggle came from so the change is visible.
@@ -346,18 +361,18 @@ fn handleAnsi(
     });
 }
 
-// the logged-in user the request's session cookie names, or null for local
-// mode / no session / an unknown token
-fn sessionUser(
+// the author for an event created by this request, or null when the request
+// may not create one. local mode has no accounts, so it authors anonymously.
+fn eventAuthorEmail(
     io: std.Io,
     allocator: std.mem.Allocator,
     arena: *std.heap.ArenaAllocator,
     request: *std.http.Server.Request,
     host: Host,
-) !?evt.User.Record {
+) !?[]const u8 {
     const remote = switch (host) {
         .remote => |remote| remote,
-        .local => return null,
+        .local => return "user@haxy", // TODO: try the repo's git config user.email first
     };
     const token = getCookieValue(request, cookie_name) orelse return null;
     var user_id: [evt.event_id_size]u8 = undefined;
@@ -366,7 +381,18 @@ fn sessionUser(
     var repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = remote.admin_repo_path });
     defer repo.deinit(io, allocator);
     const moment = try evt.currentMoment(evt.admin_repo_opts, &repo);
-    return (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, &user_id)) orelse unreachable;
+    const user = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, &user_id)) orelse return null;
+    return user.event.email;
+}
+
+// refuse a write from a request with no logged-in user. the body goes unread,
+// so the connection closes.
+fn respondLoginRequired(request: *std.http.Server.Request) !void {
+    try request.respond("log in to make changes", .{
+        .status = .forbidden,
+        .keep_alive = false,
+        .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+    });
 }
 
 // create an issue in the repo the form's page names (base is
@@ -378,6 +404,10 @@ fn handleIssue(
     base: []const u8,
     host: Host,
 ) !void {
+    var author_arena = std.heap.ArenaAllocator.init(allocator);
+    defer author_arena.deinit();
+    const author_email = (try eventAuthorEmail(io, allocator, &author_arena, request, host)) orelse return respondLoginRequired(request);
+
     var body_buf: [256]u8 = undefined;
     const reader = request.readerExpectNone(&body_buf);
     const body = reader.allocRemaining(allocator, .limited(65536)) catch &[_]u8{};
@@ -408,13 +438,10 @@ fn handleIssue(
     io.random(&id_bytes);
     const event_id_hex = std.fmt.bytesToHex(id_bytes, .lower);
 
-    var author_arena = std.heap.ArenaAllocator.init(allocator);
-    defer author_arena.deinit();
-
     const event = evt.EventWithId{
         .id = event_id_hex,
         .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
-        .author_email = if (try sessionUser(io, allocator, &author_arena, request, host)) |author| author.event.email else "user@haxy",
+        .author_email = author_email,
         .event = .{ .issue = .{
             .title = title,
             .description = description,
@@ -562,7 +589,7 @@ fn handleIssueStatus(
 
     var author_arena = std.heap.ArenaAllocator.init(allocator);
     defer author_arena.deinit();
-    const author_email = if (try sessionUser(io, allocator, &author_arena, request, host)) |author| author.event.email else "user@haxy";
+    const author_email = (try eventAuthorEmail(io, allocator, &author_arena, request, host)) orelse return respondLoginRequired(request);
 
     updateIssue(io, allocator, host, parts, .{ .status = status }, author_email) catch |err| switch (err) {
         error.NotFound => {
@@ -595,6 +622,10 @@ fn handleIssueEdit(
     base: []const u8,
     host: Host,
 ) !void {
+    var author_arena = std.heap.ArenaAllocator.init(allocator);
+    defer author_arena.deinit();
+    const author_email = (try eventAuthorEmail(io, allocator, &author_arena, request, host)) orelse return respondLoginRequired(request);
+
     var body_buf: [256]u8 = undefined;
     const reader = request.readerExpectNone(&body_buf);
     const body = reader.allocRemaining(allocator, .limited(65536)) catch &[_]u8{};
@@ -630,10 +661,6 @@ fn handleIssueEdit(
         });
         return;
     };
-
-    var author_arena = std.heap.ArenaAllocator.init(allocator);
-    defer author_arena.deinit();
-    const author_email = if (try sessionUser(io, allocator, &author_arena, request, host)) |author| author.event.email else "user@haxy";
 
     updateIssue(io, allocator, host, parts, .{ .fields = .{
         .title = title,
@@ -1225,6 +1252,33 @@ pub const SessionStore = struct {
         if (!isToken(token_hex)) return;
         self.dir.deleteFile(self.io, token_hex) catch {};
     }
+
+    // leave `token_hex`'s session for the next visitor arriving without one.
+    // only the `try` fixture writes one, and only a debug build honors it. the
+    // name isn't token-shaped, so it can't collide with a session file.
+    pub fn offerAutoLogin(self: SessionStore, token_hex: *const [token_hex_len]u8) !void {
+        const file = try self.dir.createFile(self.io, auto_login_name, .{});
+        defer file.close(self.io);
+        try file.writeStreamingAll(self.io, token_hex);
+    }
+
+    // claim the offered session, if one is there. the delete picks the winner
+    // of a race, so the offer is only ever taken once. a release build never
+    // looks, because that would be an extra syscall for every GET request.
+    pub fn claimAutoLogin(self: SessionStore, out: *[token_hex_len]u8) bool {
+        if (builtin.mode != .Debug) return false;
+        {
+            const file = self.dir.openFile(self.io, auto_login_name, .{ .mode = .read_only }) catch return false;
+            defer file.close(self.io);
+            var storage: [token_hex_len]u8 = undefined;
+            var file_reader = file.reader(self.io, &storage);
+            file_reader.interface.readSliceAll(out) catch return false;
+        }
+        self.dir.deleteFile(self.io, auto_login_name) catch return false;
+        return true;
+    }
+
+    const auto_login_name = "auto-login";
 
     // a token is exactly token_hex_len hex chars. validating before using the
     // value as a path keeps attacker-supplied cookies from escaping the
