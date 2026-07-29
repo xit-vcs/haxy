@@ -66,12 +66,12 @@ pub fn init(
         else => null,
     };
     const requested_ref_value: []const u8 = switch (route) {
-        .repo_files => |f| f.ref_value.slice(),
-        .repo_commits => |c| c.value.slice(),
+        .repo_files => |*f| f.ref_value.slice(),
+        .repo_commits => |*c| c.value.slice(),
         else => "",
     };
     const files_dir = switch (route) {
-        .repo_files => |f| f.path.slice(),
+        .repo_files => |*f| f.path.slice(),
         else => "",
     };
     const files_line = switch (route) {
@@ -95,17 +95,17 @@ pub fn init(
         else => .branch,
     };
     const refs_from: []const u8 = switch (route) {
-        .repo_refs => |r| r.from.slice(),
+        .repo_refs => |*r| r.from.slice(),
         else => "",
     };
     // the issues tab's tag filter, the issue its window is rooted at, and the
     // view it shows.
     const issues_tag: []const u8 = switch (route) {
-        .repo_issues => |i| i.tag.slice(),
+        .repo_issues => |*i| i.tag.slice(),
         else => "",
     };
     const issues_selected: []const u8 = switch (route) {
-        .repo_issues => |i| i.selected.slice(),
+        .repo_issues => |*i| i.selected.slice(),
         else => "",
     };
     const issues_view: ui.RoutablePage.IssuesView = switch (route) {

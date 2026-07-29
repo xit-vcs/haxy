@@ -104,7 +104,7 @@ pub fn init(
         .message => 0,
     };
     const root_path: []const u8 = switch (content) {
-        .diff => |d| d.path.slice(),
+        .diff => |*d| d.path.slice(),
         .message => "",
     };
 
