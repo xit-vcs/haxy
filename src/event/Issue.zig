@@ -49,8 +49,7 @@ pub fn tagIterator(tags: []const u8) std.mem.SplitIterator(u8, .scalar) {
     return std.mem.splitScalar(u8, tags, ' ');
 }
 
-// a title is required, and a too-long tag would fail consumption after the
-// event is already committed
+// a title is required, and a too-long tag would go unindexed once consumed
 pub fn fieldsValid(title: []const u8, tags: []const u8) bool {
     if (title.len == 0) return false;
     var tag_iter = tagIterator(tags);
@@ -136,8 +135,9 @@ pub fn consume(
 
         var tag_iter = tagIterator(record.event.tags);
         while (tag_iter.next()) |tag| {
-            if (tag.len == 0) continue;
-            if (tag.len > tag_max_len) return error.TagTooLong;
+            // an over-long tag goes unindexed rather than failing the consume,
+            // which would wedge the branch it arrived on
+            if (tag.len == 0 or tag.len > tag_max_len) continue;
             var key_buffer: TagStatusKey = undefined;
             const tag_set_cursor = try tag_to_issues.putCursor(try tagStatusKey(&key_buffer, tag, record.event.status));
             const tag_set = try DB.SortedSet(.read_write).init(tag_set_cursor);
@@ -259,7 +259,8 @@ fn removeFromTagSets(
 ) !void {
     var tag_iter = tagIterator(tags);
     while (tag_iter.next()) |tag| {
-        if (tag.len == 0) continue;
+        // skipped the same way consume skipped it, so it was never indexed
+        if (tag.len == 0 or tag.len > tag_max_len) continue;
         var key_buffer: TagStatusKey = undefined;
         const key = try tagStatusKey(&key_buffer, tag, status);
         const tag_set_cursor = try tag_to_issues.putCursor(key);
