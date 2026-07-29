@@ -885,13 +885,13 @@ pub fn merge(
         const id_to_field_to_oid = try DB.HashMap(.read_write).init(id_to_field_to_oid_cursor);
         const merged_key = orderKeyDesc(merged.created_ts, &event_id);
 
-        // both created only once a field actually comes from the parent
         var parent_field_oids: ?DB.SortedMap(.read_only) = null;
         if (parent_id_to_field_to_oid) |map| {
             if (try map.getCursor(record_key)) |field_oids_cursor| {
                 parent_field_oids = try DB.SortedMap(.read_only).init(field_oids_cursor);
             }
         }
+        // created only once a field actually comes from the parent
         var field_oids: ?DB.SortedMap(.read_write) = null;
 
         // the fields both sides changed differently, space separated
@@ -902,12 +902,20 @@ pub fn merge(
             switch (outcome[i]) {
                 // the target's value stands, so its oid does too
                 .kept => {},
-                .parent => if (parent_field_oids) |parent_map| {
-                    if (try parent_map.getCursor(field.name)) |oid_cursor| {
-                        if (field_oids == null) {
-                            field_oids = try DB.SortedMap(.read_write).init(try id_to_field_to_oid.putCursor(record_key));
-                        }
-                        if (field_oids) |map| try map.put(field.name, .{ .slot = oid_cursor.slot() });
+                // the parent set this value, so its commit takes the field. a
+                // parent with no oid took its own value from a merge, leaving
+                // the field unattributed rather than crediting the target's
+                // commit for a value it no longer holds.
+                .parent => {
+                    if (field_oids == null) {
+                        field_oids = try DB.SortedMap(.read_write).init(try id_to_field_to_oid.putCursor(record_key));
+                    }
+                    const map = field_oids orelse unreachable;
+                    const parent_oid = if (parent_field_oids) |parent_map| try parent_map.getCursor(field.name) else null;
+                    if (parent_oid) |oid_cursor| {
+                        try map.put(field.name, .{ .slot = oid_cursor.slot() });
+                    } else {
+                        _ = try map.remove(field.name);
                     }
                 },
                 .conflicted => {
