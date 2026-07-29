@@ -350,7 +350,11 @@ pub const SessionCtx = struct {
                 try self.maybeRefillRecvWindowForBufferedInput();
             },
             SSH_MSG_CHANNEL_EXTENDED_DATA => {
-                try discardChannelData(conn, self.channel, packet, true);
+                // discarded, but the window is still credited against what the
+                // incoming buffer can take, since CHANNEL_DATA may be sitting
+                // in it unread
+                try discardChannelData(self.channel, packet, true);
+                try self.maybeRefillRecvWindowForBufferedInput();
             },
             SSH_MSG_CHANNEL_WINDOW_ADJUST => try handleWindowAdjust(self.channel, packet),
             SSH_MSG_CHANNEL_REQUEST => {
@@ -1767,8 +1771,10 @@ fn runChannelLayer(
             SSH_MSG_CHANNEL_DATA, SSH_MSG_CHANNEL_EXTENDED_DATA => {
                 const ch = if (channel) |*c| c else continue;
                 // before shell/exec the client shouldn't be sending data, but
-                // some clients are chatty; discard and refill window.
-                try discardChannelData(conn, ch, packet, msg_type == SSH_MSG_CHANNEL_EXTENDED_DATA);
+                // some clients are chatty; discard and refill window. nothing
+                // is buffered yet, so the whole window is available to credit.
+                try discardChannelData(ch, packet, msg_type == SSH_MSG_CHANNEL_EXTENDED_DATA);
+                try maybeRefillRecvWindow(conn, ch, initial_recv_window);
             },
 
             SSH_MSG_CHANNEL_EOF => {
@@ -1948,7 +1954,9 @@ fn handleWindowAdjust(ch: *Channel, packet: []const u8) !void {
     ch.remote_window +|= add;
 }
 
-fn discardChannelData(conn: *Conn, ch: *Channel, packet: []const u8, extended: bool) !void {
+// charge a payload's bytes against the receive window without keeping them.
+// the caller credits the window back, choosing the budget that suits it.
+fn discardChannelData(ch: *Channel, packet: []const u8, extended: bool) !void {
     // byte SSH_MSG_CHANNEL_DATA/EXTENDED_DATA
     // uint32 recipient_channel
     // [if extended: uint32 type_code]
@@ -1958,7 +1966,6 @@ fn discardChannelData(conn: *Conn, ch: *Channel, packet: []const u8, extended: b
 
     if (data_len > ch.local_window) return error.WindowExceeded;
     ch.local_window -= data_len;
-    try maybeRefillRecvWindow(conn, ch, initial_recv_window);
 }
 
 pub fn parseChannelData(packet: []const u8, extended: bool, expected_channel: u32) ![]const u8 {
