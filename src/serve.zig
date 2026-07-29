@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const xit = @import("xit");
 const rp = xit.repo;
 const ui = @import("./ui.zig");
@@ -13,11 +14,6 @@ pub const Options = struct {
     ssh_listen: []const u8 = "127.0.0.1:8022",
     wui_listen: []const u8 = "127.0.0.1:8000",
     data_dir: []const u8 = ".",
-
-    // the port from `wui_listen`, for the TUI footer's url.
-    pub fn wuiPort(self: Options) !u16 {
-        return (try parseListenAddress(self.wui_listen)).port;
-    }
 };
 
 const ListenAddress = struct {
@@ -55,18 +51,21 @@ pub fn run(
     const admin_repo_path = try std.fs.path.resolve(allocator, &.{ data_dir_path, "admin" });
     defer allocator.free(admin_repo_path);
 
+    // a debug build is a dev run, so a taken port falls back to a random one;
+    // a release build fails, since whatever points at the configured port
+    // would silently break.
+    const fallback = builtin.mode == .Debug;
+
     // create http listener
 
     const http_listen_address = try parseListenAddress(options.http_listen);
-    const http_address = try std.Io.net.IpAddress.parseIp4(http_listen_address.host, http_listen_address.port);
-    var http_server = try http_address.listen(io, .{ .reuse_address = true });
+    var http_server = try listenWithFallback(io, http_listen_address, fallback);
     defer http_server.deinit(io);
 
     // create ssh listener
 
     const ssh_listen_address = try parseListenAddress(options.ssh_listen);
-    const ssh_address = try std.Io.net.IpAddress.parseIp4(ssh_listen_address.host, ssh_listen_address.port);
-    var ssh_server = try ssh_address.listen(io, .{ .reuse_address = true });
+    var ssh_server = try listenWithFallback(io, ssh_listen_address, fallback);
     defer ssh_server.deinit(io);
 
     // load or generate the SSH host key
@@ -79,8 +78,7 @@ pub fn run(
     // create wui listener
 
     const wui_listen_address = try parseListenAddress(options.wui_listen);
-    const wui_address = try std.Io.net.IpAddress.parseIp4(wui_listen_address.host, wui_listen_address.port);
-    var wui_server = try wui_address.listen(io, .{ .reuse_address = true });
+    var wui_server = try listenWithFallback(io, wui_listen_address, fallback);
     defer wui_server.deinit(io);
 
     // start task group
@@ -88,25 +86,25 @@ pub fn run(
     var tasks: std.Io.Group = .init;
     defer tasks.cancel(io);
 
-    // run listeners
+    // run listeners, printing the ports actually bound
 
-    try err.print("serving HTTP on {s}, repo root {s}\n", .{ options.http_listen, repo_root_path });
+    try err.print("serving HTTP on {s}:{d}, repo root {s}\n", .{ http_listen_address.host, http_server.socket.address.getPort(), repo_root_path });
     try err.flush();
 
     serve_http.runListener(repo_kind, any_repo_opts, io, allocator, repo_root_path, admin_repo_path, &http_server, &tasks, err);
 
-    try err.print("serving SSH on {s}\n", .{options.ssh_listen});
+    try err.print("serving SSH on {s}:{d}\n", .{ ssh_listen_address.host, ssh_server.socket.address.getPort() });
     try err.flush();
 
     const ssh_session_handler = serve_ssh.SessionHandler{
         .admin_repo_path = admin_repo_path,
         .repo_root_path = repo_root_path,
-        .wui_port = wui_listen_address.port,
+        .wui_port = wui_server.socket.address.getPort(),
         .err = err,
     };
     serve_ssh.runListener(io, allocator, &host_key, &ssh_session_handler, &ssh_server, &tasks, err);
 
-    try err.print("serving web UI on http://{s}/\n", .{options.wui_listen});
+    try err.print("serving web UI on http://{s}:{d}/\n", .{ wui_listen_address.host, wui_server.socket.address.getPort() });
     try err.flush();
 
     runWebListener(io, allocator, &wui_server, &tasks, .{ .remote = .{
@@ -115,7 +113,7 @@ pub fn run(
     } }, err);
 
     if (@TypeOf(runnable) != void) {
-        try runnable.run();
+        try runnable.run(wui_server.socket.address.getPort(), ssh_server.socket.address.getPort());
     } else {
         try tasks.await(io);
     }
@@ -132,19 +130,10 @@ pub fn runLocal(
     err: *std.Io.Writer,
     runnable: anytype,
 ) !void {
-    // no reuse_address here: on linux it also sets SO_REUSEPORT, which would
-    // let this bind silently share a port an already-running server holds
-    // instead of failing over to a random one.
+    // always fall back, so another instance viewing a second repo just binds
+    // its own port
     const wui_listen_address = try parseListenAddress((Options{}).wui_listen);
-    const wui_address = try std.Io.net.IpAddress.parseIp4(wui_listen_address.host, wui_listen_address.port);
-    var wui_server = wui_address.listen(io, .{}) catch |listen_err| switch (listen_err) {
-        // the default port is taken; bind port 0 so the OS assigns a free one
-        error.AddressInUse => blk: {
-            const any_port = try std.Io.net.IpAddress.parseIp4(wui_listen_address.host, 0);
-            break :blk try any_port.listen(io, .{});
-        },
-        else => |e| return e,
-    };
+    var wui_server = try listenWithFallback(io, wui_listen_address, true);
     defer wui_server.deinit(io);
 
     var tasks: std.Io.Group = .init;
@@ -185,6 +174,22 @@ fn runWebListener(
         .host = host,
         .err = err,
     }, handle);
+}
+
+// bind the address. when it's taken, fall back to an OS-assigned port, or
+// fail without `fallback`. no reuse_address: on linux it also sets
+// SO_REUSEPORT, which would let this bind silently share a port an
+// already-running server holds rather than seeing it as taken.
+fn listenWithFallback(io: std.Io, listen_address: ListenAddress, fallback: bool) !std.Io.net.Server {
+    const address = try std.Io.net.IpAddress.parseIp4(listen_address.host, listen_address.port);
+    return address.listen(io, .{}) catch |listen_err| switch (listen_err) {
+        error.AddressInUse => blk: {
+            if (!fallback) return listen_err;
+            const any_port = try std.Io.net.IpAddress.parseIp4(listen_address.host, 0);
+            break :blk try any_port.listen(io, .{});
+        },
+        else => |e| return e,
+    };
 }
 
 fn parseListenAddress(value: []const u8) !ListenAddress {

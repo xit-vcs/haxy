@@ -570,9 +570,6 @@ pub fn main(init: std.process.Init) !void {
         break :blk try ui.Session.init(&session_arena, &repo, .{ .user_id = &admin_user_id });
     };
     session.is_terminal = true;
-    // try uses the default serve options below, so the footer's url points at
-    // the default web UI port.
-    session.web_port = try (srv.Options{}).wuiPort();
 
     // start the server
 
@@ -617,11 +614,12 @@ pub fn main(init: std.process.Init) !void {
             io: std.Io,
             key_path: []const u8,
 
-            pub fn run(self: @This()) !void {
+            pub fn run(self: @This(), web_port: u16, ssh_port: u16) !void {
+                _ = web_port;
                 std.debug.print(
                     \\
                     \\connect to the TUI with:
-                    \\  ssh -p 8022 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null localhost
+                    \\  ssh -p {d} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null localhost
                     \\
                     \\create a git repo and push over SSH:
                     \\  mkdir -p temp-try/client/test
@@ -630,11 +628,11 @@ pub fn main(init: std.process.Init) !void {
                     \\  echo "hello" > hello.txt
                     \\  git add hello.txt
                     \\  git commit -m "let there be light"
-                    \\  GIT_SSH_COMMAND='ssh -p 8022 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -i {s}' git push localhost:admin/test HEAD:master
+                    \\  GIT_SSH_COMMAND='ssh -p {d} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -i {s}' git push localhost:admin/test HEAD:master
                     \\
                     \\to quit, press enter.
                     \\
-                , .{self.key_path});
+                , .{ ssh_port, ssh_port, self.key_path });
                 // portable stdin read via std.Io — equivalent to the
                 // std.posix.read(STDIN_FILENO, ...) that doesn't compile
                 // on windows.
@@ -657,8 +655,10 @@ pub fn main(init: std.process.Init) !void {
             session: *ui.Session,
             repo: *Repo,
 
-            pub fn run(self: @This()) !void {
-                // launch the TUI
+            pub fn run(self: @This(), web_port: u16, ssh_port: u16) !void {
+                _ = ssh_port;
+                // launch the TUI; the footer points at whatever port was bound
+                self.session.web_port = web_port;
                 try hx.ui.run(self.io, self.allocator, self.session, self.repo);
             }
         };
