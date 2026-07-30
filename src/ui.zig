@@ -1001,12 +1001,15 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, session: *Session, repo_may
             try inputKey(allocator, &nav.root, key, session);
         }
 
-        // local run has no repo to persist to, so just apply in-memory
-        session.applyPending();
-
-        // pick up data written by other handles so the next navigation
-        // builds its page from a current moment (local mode has no admin repo)
-        if (repo_maybe) |repo| try session.reloadMoment(repo);
+        // persist queued actions when there's a repo; local mode has none,
+        // so just apply in-memory
+        if (repo_maybe) |repo| {
+            try session.applyAndWritePending(io, allocator, repo);
+            // reload so the next navigation builds its page from the current moment
+            try session.reloadMoment(allocator, repo);
+        } else {
+            session.applyPending();
+        }
 
         // reconcile navigation: forward to a new page, or back on escape.
         try nav.sync(allocator, session);
