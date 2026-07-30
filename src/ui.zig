@@ -946,9 +946,17 @@ pub const Session = struct {
         }
     }
 
-    // reload the moment from the admin repo
-    pub fn reloadMoment(self: *Self, repo: *rp.Repo(.xit, evt.admin_repo_opts)) !void {
-        self.haxy_moment = try evt.currentMoment(evt.admin_repo_opts, repo);
+    // reload the moment from the admin repo and re-read user preferences
+    pub fn reloadMoment(self: *Self, allocator: std.mem.Allocator, repo: *rp.Repo(.xit, evt.admin_repo_opts)) !void {
+        const moment = try evt.currentMoment(evt.admin_repo_opts, repo);
+        self.haxy_moment = moment;
+
+        const user_id = self.data.user_id orelse return;
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        if (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, &arena, user_id)) |user| {
+            self.data.enable_ansi = user.event.enable_ansi;
+        }
     }
 
     // request a forward navigation to `route`; the host consumes next_page
