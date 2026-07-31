@@ -62,27 +62,12 @@ pub const View = struct {
         // the tab matching the current page is focused initially; matching by
         // link (rather than position) keeps this robust to tab changes.
         const current_link: []const u8 = switch (session.data.current_page) {
-            .home_repos => "ai:/repos",
+            .home_users => "ai:/users",
             .home_settings => "ai:/settings",
             .home_auth => "ai:/auth",
-            else => "ai:/users",
+            else => "ai:/repos",
         };
         var selected_tab: ?usize = null;
-
-        // users tab
-        {
-            var text_box = try wgt.TextBox(ui.Widget).init(allocator, "users", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
-            errdefer text_box.deinit(allocator);
-            text_box.getFocus().focusable = true;
-            text_box.getFocus().kind = .{ .custom = "ai:/users" };
-            try tab_ids.put(allocator, text_box.getFocus().id, {});
-            if (std.mem.eql(u8, "ai:/users", current_link)) selected_tab = text_box.getFocus().id;
-            try box.children.put(allocator, text_box.getFocus().id, .{
-                .widget = .{ .text_box = text_box },
-                .rect = null,
-                .min_size = .{ .width = "users".len + 2, .height = null },
-            });
-        }
 
         // repos tab
         {
@@ -96,6 +81,21 @@ pub const View = struct {
                 .widget = .{ .text_box = text_box },
                 .rect = null,
                 .min_size = .{ .width = "repos".len + 2, .height = null },
+            });
+        }
+
+        // users tab
+        {
+            var text_box = try wgt.TextBox(ui.Widget).init(allocator, "users", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            errdefer text_box.deinit(allocator);
+            text_box.getFocus().focusable = true;
+            text_box.getFocus().kind = .{ .custom = "ai:/users" };
+            try tab_ids.put(allocator, text_box.getFocus().id, {});
+            if (std.mem.eql(u8, "ai:/users", current_link)) selected_tab = text_box.getFocus().id;
+            try box.children.put(allocator, text_box.getFocus().id, .{
+                .widget = .{ .text_box = text_box },
+                .rect = null,
+                .min_size = .{ .width = "users".len + 2, .height = null },
             });
         }
 

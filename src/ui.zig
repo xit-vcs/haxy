@@ -98,7 +98,7 @@ pub const RoutablePage = union(enum) {
     repo_settings: Array(repo_route_max_len),
     repo_auth: Array(repo_route_max_len),
 
-    pub const default: RoutablePage = .{ .home_users = 0 };
+    pub const default: RoutablePage = .{ .home_repos = 0 };
 
     pub const RefKind = enum { branch, tag };
 

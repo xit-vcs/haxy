@@ -68,15 +68,15 @@ pub const View = struct {
             errdefer stack.deinit(allocator);
 
             {
-                var users_view = try Users.View.init(allocator, &data.users, !session.is_terminal);
-                errdefer users_view.deinit(allocator);
-                try stack.children.put(allocator, users_view.getFocus().id, .{ .home_users = users_view });
-            }
-
-            {
                 var repos_view = try Repos.View.init(allocator, &data.repos, !session.is_terminal);
                 errdefer repos_view.deinit(allocator);
                 try stack.children.put(allocator, repos_view.getFocus().id, .{ .home_repos = repos_view });
+            }
+
+            {
+                var users_view = try Users.View.init(allocator, &data.users, !session.is_terminal);
+                errdefer users_view.deinit(allocator);
+                try stack.children.put(allocator, users_view.getFocus().id, .{ .home_users = users_view });
             }
 
             // the header has no settings tab without a login, so keep the
