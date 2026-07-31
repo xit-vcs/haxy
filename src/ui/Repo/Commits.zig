@@ -363,9 +363,26 @@ fn readMessage(
     };
     // the cut lands wherever the limit falls, so a truncated message keeps
     // only its whole lines: a line break can't fall inside a codepoint, and
-    // the widgets need valid utf-8. a first line past the limit keeps none.
-    const text = if (truncated) message.items[0 .. std.mem.lastIndexOfScalar(u8, message.items, '\n') orelse 0] else message.items;
+    // the widgets need valid utf-8. a first line past the limit is instead
+    // cut at the last codepoint boundary.
+    const text = if (truncated)
+        (if (std.mem.lastIndexOfScalar(u8, message.items, '\n')) |nl| message.items[0..nl] else trimIncompleteCodepoint(message.items))
+    else
+        message.items;
     return .{ std.mem.trim(u8, text, " \t\r\n"), truncated };
+}
+
+/// drop any incomplete UTF data from the end of a byte array
+fn trimIncompleteCodepoint(bytes: []const u8) []const u8 {
+    var i = bytes.len;
+    while (i > 0 and bytes.len - i < 4) {
+        i -= 1;
+        const byte = bytes[i];
+        if (byte & 0b1100_0000 == 0b1000_0000) continue; // continuation byte
+        const seq_len = std.unicode.utf8ByteSequenceLength(byte) catch return bytes;
+        return if (i + seq_len > bytes.len) bytes[0..i] else bytes;
+    }
+    return bytes;
 }
 
 // a focusable, word-wrapping box holding a commit message. `bottom_label`
