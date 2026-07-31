@@ -227,7 +227,7 @@ fn commitEvents(
 
     for (events) |event| {
         json.clearRetainingCapacity();
-        try std.json.Stringify.value(event, .{ .whitespace = .indent_2 }, &json.writer);
+        try std.json.Stringify.value(event, .{}, &json.writer);
         if (json.written().len > max_event_size) return error.EventTooLarge;
         const author = try std.fmt.allocPrint(allocator, "haxy <{s}>", .{event.author_email});
         defer allocator.free(author);
