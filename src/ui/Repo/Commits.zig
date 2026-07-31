@@ -440,7 +440,7 @@ pub const View = struct {
         // the commit list (one focusable row each), plus a "next" link
         {
             var list_scroll = blk: {
-                var list_box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert });
+                var list_box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert, .stretch = true });
                 errdefer list_box.deinit(allocator);
                 for (data.commits) |commit| {
                     // an in-page "ai:" anchor so a commit row is clickable with

@@ -250,7 +250,7 @@ pub const View = struct {
         // the directory listing on the left (one focusable row each).
         {
             var list_scroll = blk: {
-                var list_box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert });
+                var list_box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert, .stretch = true });
                 errdefer list_box.deinit(allocator);
 
                 // labels and link kinds are borrowed by the rows, so they live in

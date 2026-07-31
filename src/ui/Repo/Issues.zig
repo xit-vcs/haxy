@@ -475,7 +475,7 @@ pub const View = struct {
         // reloads the page rooted at the following issue.
         {
             var list_scroll = blk: {
-                var list_box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert });
+                var list_box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert, .stretch = true });
                 errdefer list_box.deinit(allocator);
                 if (win.prev_id) |prev|
                     try addRow(allocator, &list_box, "← previous", try issuesLink(session.page_arena, data.identity, status, data.tag, prev));
