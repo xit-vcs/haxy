@@ -95,7 +95,7 @@ fn handleRequest(
     if (method == .POST) {
         switch (host) {
             .remote => |remote| {
-                const PostRoute = enum { login, logout, ansi, issue, open, close, edit };
+                const PostRoute = enum { login, logout, ansi, issue, open, close, edit, resolve };
                 inline for (@typeInfo(PostRoute).@"enum".fields) |field| {
                     const suffix = "/" ++ field.name;
                     if (std.mem.endsWith(u8, path, suffix)) {
@@ -108,12 +108,13 @@ fn handleRequest(
                             .open => handleIssueStatus(io, request, allocator, base, host, .open),
                             .close => handleIssueStatus(io, request, allocator, base, host, .closed),
                             .edit => handleIssueEdit(io, request, allocator, base, host),
+                            .resolve => handleIssueResolve(io, request, allocator, base, host),
                         };
                     }
                 }
             },
             .local => {
-                const PostRoute = enum { issue, open, close, edit };
+                const PostRoute = enum { issue, open, close, edit, resolve };
                 inline for (@typeInfo(PostRoute).@"enum".fields) |field| {
                     const suffix = "/" ++ field.name;
                     if (std.mem.endsWith(u8, path, suffix)) {
@@ -123,6 +124,7 @@ fn handleRequest(
                             .open => handleIssueStatus(io, request, allocator, base, host, .open),
                             .close => handleIssueStatus(io, request, allocator, base, host, .closed),
                             .edit => handleIssueEdit(io, request, allocator, base, host),
+                            .resolve => handleIssueResolve(io, request, allocator, base, host),
                         };
                     }
                 }
@@ -670,6 +672,81 @@ fn handleIssueEdit(
             try request.respond(not_found, .{
                 .status = .not_found,
                 .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+            });
+            return;
+        },
+        else => |e| return e,
+    };
+
+    try request.respond("", .{
+        .status = .see_other,
+        .extra_headers = &.{.{ .name = "location", .value = base }},
+    });
+}
+
+// resolve the conflict of the issue the url names (base is
+// "/repo/<owner>/<name>/issues/<id>", identity elided in local mode; the
+// form posts to "<base>/resolve")
+fn handleIssueResolve(
+    io: std.Io,
+    request: *std.http.Server.Request,
+    allocator: std.mem.Allocator,
+    base: []const u8,
+    host: Host,
+) !void {
+    var author_arena = std.heap.ArenaAllocator.init(allocator);
+    defer author_arena.deinit();
+    const author_email = (try eventAuthorEmail(io, allocator, &author_arena, request, host)) orelse return respondLoginRequired(request);
+
+    var body_buf: [256]u8 = undefined;
+    const reader = request.readerExpectNone(&body_buf);
+    const body = reader.allocRemaining(allocator, .limited(65536)) catch &[_]u8{};
+    defer allocator.free(body);
+
+    var field_arena = std.heap.ArenaAllocator.init(allocator);
+    defer field_arena.deinit();
+    const aa = field_arena.allocator();
+    const title = try parseFormField(aa, body, "title");
+    const tags = try parseFormField(aa, body, "tags");
+
+    // the hunk inputs post as d0, d1, ...; form submission normalizes their
+    // textarea line breaks to CRLF
+    var hunks: std.ArrayList([]const u8) = .empty;
+    var hunk_index: usize = 0;
+    while (true) : (hunk_index += 1) {
+        const name = try std.fmt.allocPrint(aa, "d{d}", .{hunk_index});
+        const posted = (try parseFormField(aa, body, name)) orelse break;
+        try hunks.append(aa, try std.mem.replaceOwned(u8, aa, posted, "\r\n", "\n"));
+    }
+
+    const not_found = "issue not found";
+    const parts = issueBaseParts(base) orelse {
+        try request.respond(not_found, .{
+            .status = .not_found,
+            .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+        });
+        return;
+    };
+
+    updateIssue(io, allocator, host, parts, .{ .resolve = .{
+        .title = title,
+        .tags = tags,
+        .hunks = hunks.items,
+    } }, author_email) catch |err| switch (err) {
+        error.NotFound => {
+            try request.respond(not_found, .{
+                .status = .not_found,
+                .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+            });
+            return;
+        },
+        // invalid fields send the user back to the resolve form
+        error.InvalidFields => {
+            const form_location = try std.fmt.allocPrint(allocator, "{s}/resolve", .{base});
+            defer allocator.free(form_location);
+            try request.respond("", .{
+                .status = .see_other,
+                .extra_headers = &.{.{ .name = "location", .value = form_location }},
             });
             return;
         },

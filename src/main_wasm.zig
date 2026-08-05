@@ -53,12 +53,15 @@ fn tick(min_height: u32, max_width: u32) !void {
     // in-memory only; logged-in web persistence goes through the /ansi POST.
     session.applyPending();
 
+    // bind the UI to the browser viewport (cols x rows) like the terminal:
+    // min == max height fills it exactly, and each Scroll clips to its
+    // viewport while handing its full content to a native-scrollable element.
+    // a full-height page instead grows to its content and the browser scrolls
+    // the whole page, which the overlay's absolute positions track.
+    const max_height: ?u32 = if (session.data.current_page.fullHeight()) null else min_height;
     try root_ptr.build(allocator, .{
-        // bind the UI to the browser viewport (cols x rows) like the terminal:
-        // min == max height fills it exactly, and each Scroll clips to its
-        // viewport while handing its full content to a native-scrollable element.
         .min_size = .{ .width = null, .height = min_height },
-        .max_size = .{ .width = max_width, .height = min_height },
+        .max_size = .{ .width = max_width, .height = max_height },
     }, root_ptr.getFocus());
 
     // mirror the page Header settled on into the browser URL. these are

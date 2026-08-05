@@ -381,6 +381,13 @@ pub fn main(init: std.process.Init) !void {
                 }
             }
 
+            // the timestamps issue's description, in paragraphs, so the
+            // seeded conflict below can insert and delete among them
+            const tz_p1 = "All timestamps in the activity feed render in UTC regardless of the system timezone.";
+            const tz_p2 = "The tooltip on each entry repeats the same UTC value, so there is no way to see the local time without converting by hand.";
+            const tz_p3 = "A quick survey of other clients shows every one of them rendering local time by default.";
+            const tz_p4 = "Convert to local time and include the offset in tooltips.";
+
             // seed issues so every repo's issue tracker has content
             const issue_data = [_]struct {
                 title: []const u8,
@@ -508,7 +515,7 @@ pub fn main(init: std.process.Init) !void {
                 },
                 .{
                     .title = "Timestamps display in UTC instead of local time",
-                    .description = "All timestamps in the activity feed render in UTC regardless of the system timezone. Convert to local time and include the offset in tooltips.",
+                    .description = tz_p1 ++ "\n\n" ++ tz_p2 ++ "\n\n" ++ tz_p3 ++ "\n\n" ++ tz_p4,
                     .tags = "bug i18n time",
                 },
                 .{
@@ -549,6 +556,98 @@ pub fn main(init: std.process.Init) !void {
                 };
             }
             try evt.consume(.xit, .{}, io, allocator, &template_repo, evt.events_ref, &issue_events);
+            // the tip is the branch point for the conflicting edits below
+            const seed_tip = (try template_repo.readRef(io, evt.events_ref)) orelse unreachable;
+
+            // two divergent edits per conflicted issue: ours on the events
+            // branch, theirs on a temp branch rooted at the seed tip, then a
+            // merge. the 4th-newest issue conflicts on title and tags; the
+            // 2nd-newest on its description, with a deletion conflict (ours
+            // removes a paragraph theirs rewords) and an insertion conflict
+            // (each side appends a different closing paragraph).
+            {
+                const other_ref: xit.ref.Ref = .{ .kind = .head, .name = "haxy/other" };
+                const title_issue = issue_data[issue_data.len - 4];
+                const desc_issue = issue_data[issue_data.len - 2];
+
+                const ours = [_]evt.EventWithId{ .{
+                    .id = issue_events[issue_data.len - 4].id,
+                    .timestamp = 100,
+                    .author_email = user_data[1].email,
+                    .event = .{ .issue = .{
+                        .title = "Crash when resizing the window during the splash animation",
+                        .description = title_issue.description,
+                        .tags = "bug crash ui priority-high",
+                    } },
+                }, .{
+                    .id = issue_events[issue_data.len - 2].id,
+                    .timestamp = 101,
+                    .author_email = user_data[1].email,
+                    .event = .{ .issue = .{
+                        .title = desc_issue.title,
+                        .description = tz_p1 ++ "\n\n" ++ tz_p2 ++ "\n\n" ++ tz_p4 ++ "\n\n" ++
+                            "The confusion is worst for teams spread across timezones, who each read a different wall-clock time from the same feed.",
+                        .tags = desc_issue.tags,
+                    } },
+                } };
+                const theirs = [_]evt.EventWithId{ .{
+                    .id = issue_events[issue_data.len - 4].id,
+                    .timestamp = 102,
+                    .author_email = user_data[2].email,
+                    .event = .{ .issue = .{
+                        .title = "Segfault on early window resize",
+                        .description = title_issue.description,
+                        .tags = "bug crash rendering",
+                    } },
+                }, .{
+                    .id = issue_events[issue_data.len - 2].id,
+                    .timestamp = 103,
+                    .author_email = user_data[2].email,
+                    .event = .{ .issue = .{
+                        .title = desc_issue.title,
+                        .description = tz_p1 ++ "\n\n" ++ tz_p2 ++ "\n\n" ++
+                            "Most other clients already render local time by default, which makes our UTC output stand out as a bug." ++ "\n\n" ++ tz_p4 ++ "\n\n" ++
+                            "Log exports inherit the same UTC rendering, so downstream tooling has to guess the source timezone.",
+                        .tags = desc_issue.tags,
+                    } },
+                } };
+
+                try evt.consume(.xit, .{}, io, allocator, &template_repo, evt.events_ref, &ours);
+
+                // consume can't root a new branch, so theirs commits by hand
+                var json: std.Io.Writer.Allocating = .init(allocator);
+                defer json.deinit();
+                for (theirs, 0..) |event, i| {
+                    json.clearRetainingCapacity();
+                    try std.json.Stringify.value(event, .{}, &json.writer);
+                    const author = try std.fmt.allocPrint(allocator, "haxy <{s}>", .{event.author_email});
+                    defer allocator.free(author);
+                    _ = try template_repo.commitAtRef(io, allocator, .{
+                        .author = author,
+                        .message = json.written(),
+                        .timestamp = event.timestamp,
+                        // root the branch at the shared seed tip
+                        .parent_oids = if (i == 0) &.{seed_tip} else null,
+                    }, null, other_ref);
+                }
+
+                {
+                    var to_events = try template_repo.switchDir(io, allocator, .{ .target = .{ .ref = evt.events_ref } });
+                    defer to_events.deinit();
+                }
+                {
+                    var merge = try template_repo.merge(io, allocator, .{ .kind = .full, .action = .{ .new = .{ .source = &.{.{ .ref = other_ref }} } } }, null);
+                    defer merge.deinit();
+                    if (merge.result != .success) return error.MergeFailed;
+                }
+                {
+                    var to_master = try template_repo.switchDir(io, allocator, .{ .target = .{ .ref = .{ .kind = .head, .name = "master" } } });
+                    defer to_master.deinit();
+                }
+                try template_repo.removeBranch(io, .{ .name = other_ref.name });
+            }
+
+            try evt.consume(.xit, .{}, io, allocator, &template_repo, evt.events_ref, &.{});
         }
 
         // copy the template to each repo's on-disk location, named by its

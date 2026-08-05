@@ -1,5 +1,6 @@
 const std = @import("std");
 const evt = @import("../event.zig");
+const diff3 = @import("../diff3.zig");
 const xit = @import("xit");
 const rp = xit.repo;
 const hash = xit.hash;
@@ -176,15 +177,27 @@ fn statusSet(
     return DB.SortedSet(.read_write).init(cursor);
 }
 
-// what an update replaces on an issue: its status, or its content
+// the resolve form's inputs: null fields keep the live values, `hunks` holds
+// the description conflict hunks' resolutions in chunk order (absent
+// trailing ones keep our side)
+pub const Resolve = struct {
+    title: ?[]const u8 = null,
+    tags: ?[]const u8 = null,
+    hunks: []const []const u8 = &.{},
+};
+
+// what an update replaces on an issue: its status, its content, or — for a
+// conflicted issue — the resolution of its conflict
 pub const Update = union(enum) {
     status: Status,
     fields: struct { title: []const u8, tags: []const u8, description: []const u8 },
+    resolve: Resolve,
 };
 
 // re-emit the issue `id_bytes` names with `change` applied, preserving the
-// rest of its current state. error.NotFound when the id names no issue.
-// `repo` must be writable.
+// rest of its current state. error.NotFound when the id names no issue,
+// error.InvalidFields when a resolve composes invalid fields. `repo` must be
+// writable.
 pub fn update(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
@@ -211,6 +224,10 @@ pub fn update(
             updated.tags = fields.tags;
             updated.description = fields.description;
         },
+        .resolve => |resolve| {
+            updated = try resolveFields(repo_kind, repo_opts, io, allocator, &arena, repo, id_bytes, issue, resolve);
+            if (!fieldsValid(updated.title, updated.tags)) return error.InvalidFields;
+        },
     }
 
     try evt.consume(repo_kind, repo_opts, io, allocator, repo, evt.events_ref, &[_]evt.EventWithId{.{
@@ -219,6 +236,71 @@ pub fn update(
         .author_email = author_email,
         .event = .{ .issue = updated },
     }});
+}
+
+// the live fields with `resolve` applied: posted title/tags stand in for the
+// live ones, and a conflicted description is reassembled from the hunk
+// resolutions against the conflict entry. the chunking is deterministic: the
+// entry holds immutable slots and any event since would have removed it, so
+// the hunks match what the resolve form was built from. a settled or
+// unreadable entry keeps the live description.
+fn resolveFields(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    arena: *std.heap.ArenaAllocator,
+    repo: *rp.Repo(repo_kind, repo_opts),
+    id_bytes: *const [evt.event_id_size]u8,
+    live: Record,
+    resolve: Resolve,
+) !Self {
+    const DB = evt.EventDB(repo_opts.hash);
+    const aa = arena.allocator();
+
+    var updated = live.event;
+    if (resolve.title) |title| updated.title = title;
+    if (resolve.tags) |tags| updated.tags = tags;
+
+    var event_db_maybe: ?evt.LocalEventDB(repo_opts.hash) = if (repo_kind == .git) try evt.LocalEventDB(repo_opts.hash).openReadOnly(io, allocator, repo.core.repo_dir) else null;
+    defer if (event_db_maybe) |*event_db| event_db.deinit(io, allocator);
+    const moment = (if (event_db_maybe) |*event_db|
+        evt.currentMomentFromDb(repo_opts.hash, event_db.db)
+    else if (repo_kind == .git)
+        return updated
+    else
+        evt.currentMoment(repo_opts, repo)) catch return updated;
+
+    const conflicts_cursor = (try moment.getCursor(hash.hashInt(repo_opts.hash, conflicts_key))) orelse return updated;
+    const conflicts = try DB.SortedMap(.read_only).init(conflicts_cursor);
+    const order_key = evt.orderKeyDesc(live.created_ts, id_bytes);
+    const conflict_cursor = (try conflicts.getCursor(&order_key)) orelse return updated;
+    const entry = try DB.HashMap(.read_only).init(conflict_cursor);
+
+    const fields_cursor = (try entry.getCursor(hash.hashInt(repo_opts.hash, evt.conflicted_fields_key))) orelse return updated;
+    const conflicted_fields = try fields_cursor.readBytesAlloc(aa, null);
+    if (std.mem.indexOf(u8, conflicted_fields, "description") == null) return updated;
+
+    const their_cursor = (try entry.getCursor(hash.hashInt(repo_opts.hash, evt.their_record_key))) orelse return updated;
+    const theirs = try evt.read(Record, DB, repo_opts.hash, arena, try DB.HashMap(.read_only).init(their_cursor));
+
+    // absent when both sides created the issue independently
+    var base_description: []const u8 = "";
+    if (try entry.getCursor(hash.hashInt(repo_opts.hash, evt.base_record_key))) |base_cursor| {
+        const base = try evt.read(Record, DB, repo_opts.hash, arena, try DB.HashMap(.read_only).init(base_cursor));
+        base_description = base.event.description;
+    }
+
+    const chunks = try diff3.chunks(io, allocator, arena, base_description, live.event.description, theirs.event.description);
+    var resolutions: std.ArrayList([]const u8) = .empty;
+    var hunk_index: usize = 0;
+    for (chunks) |chunk| {
+        if (chunk != .conflict) continue;
+        try resolutions.append(aa, if (hunk_index < resolve.hunks.len) resolve.hunks[hunk_index] else (chunk.conflict.ours orelse ""));
+        hunk_index += 1;
+    }
+    updated.description = try diff3.assemble(aa, chunks, resolutions.items);
+    return updated;
 }
 
 // the issue `id_bytes` names in the repo's consumed event db (the repo's own

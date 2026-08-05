@@ -108,6 +108,10 @@ pub fn init(
         .repo_issues => |*i| i.selected.slice(),
         else => "",
     };
+    const issues_theirs: []const u8 = switch (route) {
+        .repo_issues => |*i| i.theirs.slice(),
+        else => "",
+    };
     const issues_view: ui.RoutablePage.IssuesView = switch (route) {
         .repo_issues => |i| i.view,
         else => .open,
@@ -171,7 +175,7 @@ pub fn init(
                                 try Files.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, repo_identity.identity, requested_ref_or_oid, requested_ref_value, files_dir, files_line),
                                 try Commits.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, session.haxy_moment, repo_identity.identity, requested_ref_or_oid, requested_ref_value, commits_content),
                                 try Refs.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, repo_identity.identity, refs_kind, refs_from),
-                                try Issues.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, issues_tag, issues_selected, issues_view),
+                                try Issues.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, issues_tag, issues_selected, issues_theirs, issues_view),
                             };
                         },
                     }
@@ -183,7 +187,7 @@ pub fn init(
             try Files.emptyResult(aa, repo_identity.identity, requested_ref_or_oid orelse .branch, requested_ref_value, files_dir),
             try Commits.emptyResult(aa, repo_identity.identity, requested_ref_or_oid orelse .branch, requested_ref_value, commits_content),
             try Refs.emptyResult(arena, repo_identity.identity, refs_kind, refs_from),
-            try Issues.emptyResult(aa, repo_identity.identity, issues_tag, issues_selected, issues_view),
+            try Issues.emptyResult(aa, repo_identity.identity, issues_tag, issues_selected, issues_theirs, issues_view),
         };
     };
     issues.repo_source = source;

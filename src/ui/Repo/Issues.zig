@@ -12,6 +12,7 @@ const Key = xitui.input.Key;
 const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
 const inp = @import("../input.zig");
+const diff3 = @import("../../diff3.zig");
 
 const wasm = builtin.target.cpu.arch == .wasm32;
 
@@ -32,6 +33,31 @@ pub const IssueWithId = struct {
     issue: evt.Issue.Record,
     // the creation commit's author
     author: ui.Author = .unknown,
+    // whether the issue has an unresolved merge conflict
+    conflicted: bool = false,
+};
+
+// one side of a conflicted field: its value and who set it
+pub const Side = struct {
+    text: []const u8,
+    author: ui.Author = .unknown,
+};
+
+pub const FieldConflict = struct {
+    ours: Side,
+    theirs: Side,
+};
+
+// the selected issue's conflict, read for the resolve view. ours is the live
+// record; the chunks split the description against the merge base.
+pub const Conflict = struct {
+    title: ?FieldConflict = null,
+    tags: ?FieldConflict = null,
+    description: ?struct {
+        chunks: []const diff3.Chunk,
+        ours_author: ui.Author = .unknown,
+        theirs_author: ui.Author = .unknown,
+    } = null,
 };
 
 // one status's windowed listing.
@@ -58,6 +84,13 @@ tag: []const u8,
 selected_id: []const u8,
 open: Window,
 closed: Window,
+// the conflicted issues' listing; its count also gates the conflicts tab.
+conflicts: Window,
+// the selected issue's conflict, set when the page shows the resolve view.
+conflict: ?Conflict = null,
+// the resolve view's comma-separated fields prefilled from their side,
+// mirrored from the url.
+theirs_picks: []const u8 = "",
 // the view the page shows initially (a selected issue's status overrides the route's)
 view: ui.RoutablePage.IssuesView,
 // the /description page: the detail pane shows the selected issue's whole
@@ -79,6 +112,16 @@ pub fn window(self: *const Self, status: evt.Issue.Status) *const Window {
     };
 }
 
+// whether `field` (a field name or "d<n>" hunk name) is listed in the url's
+// theirs: picks.
+pub fn theirsPicked(self: *const Self, field: []const u8) bool {
+    var it = std.mem.splitScalar(u8, self.theirs_picks, ',');
+    while (it.next()) |pick| {
+        if (std.mem.eql(u8, pick, field)) return true;
+    }
+    return false;
+}
+
 // the issue `selected_id` names, in whichever window holds it.
 pub fn selectedIssue(self: *const Self) ?*const IssueWithId {
     if (self.selected_id.len == 0) return null;
@@ -91,16 +134,22 @@ pub fn selectedIssue(self: *const Self) ?*const IssueWithId {
 }
 
 // an empty listing, for the wasm / no-repo paths.
-pub fn emptyResult(aa: std.mem.Allocator, identity: []const u8, tag: []const u8, selected_id: []const u8, view: ui.RoutablePage.IssuesView) !Self {
+pub fn emptyResult(aa: std.mem.Allocator, identity: []const u8, tag: []const u8, selected_id: []const u8, theirs_picks: []const u8, view: ui.RoutablePage.IssuesView) !Self {
     return .{
         .identity = try aa.dupe(u8, identity),
         .tag = try aa.dupe(u8, tag),
         .selected_id = try aa.dupe(u8, selected_id),
         .open = .empty,
         .closed = .empty,
-        // a description url shows a status list; the issue's own status picks
-        // it once the issue is read.
-        .view = if (view == .description) .open else view,
+        .conflicts = .empty,
+        .theirs_picks = try aa.dupe(u8, theirs_picks),
+        // a description url shows a status list, the issue's own status
+        // picking it once the issue is read; conflicts and resolve urls also
+        // start there, upgraded by init when the conflict data exists.
+        .view = switch (view) {
+            .description, .conflicts, .resolve => .open,
+            else => view,
+        },
         .description_page = view == .description,
         .tags = &.{},
     };
@@ -123,9 +172,10 @@ pub fn init(
     identity: []const u8,
     tag: []const u8,
     selected_id: []const u8,
+    theirs_picks: []const u8,
     view: ui.RoutablePage.IssuesView,
 ) !Self {
-    const empty = try emptyResult(arena.allocator(), identity, tag, selected_id, view);
+    const empty = try emptyResult(arena.allocator(), identity, tag, selected_id, theirs_picks, view);
 
     const aa = arena.allocator();
     const DB = evt.EventDB(repo_opts.hash);
@@ -173,11 +223,22 @@ pub fn init(
     };
     const event_id_to_issue = try DB.HashMap(.read_only).init(event_id_to_issue_cursor);
 
-    // a named issue roots its own status's window at itself; the other window
-    // starts at the beginning.
+    // the conflicted issues' container: a set view for membership and
+    // windowing, a map view for the resolve entry, over the same cursor.
+    var conflict_set: ?DB.SortedSet(.read_only) = null;
+    var conflicts_map: ?DB.SortedMap(.read_only) = null;
+    if (try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Issue.conflicts_key))) |cursor| {
+        conflict_set = try DB.SortedSet(.read_only).init(cursor);
+        conflicts_map = try DB.SortedMap(.read_only).init(cursor);
+    }
+
+    // a named issue roots its own status's window at itself (the conflicts
+    // view's window instead); the other windows start at the beginning.
     var resolved_view = empty.view;
     var open_root: ?[]const u8 = null;
     var closed_root: ?[]const u8 = null;
+    var conflicts_root: ?[]const u8 = null;
+    var conflict_data: ?Conflict = null;
     if (rooted) {
         if (empty.selected_id.len != evt.event_id_size * 2) return error.NotFound;
         var id_bytes: [evt.event_id_size]u8 = undefined;
@@ -187,27 +248,52 @@ pub fn init(
         const issue_event = try evt.read(evt.Issue.Record, DB, repo_opts.hash, arena, issue_map);
         const order_key = try aa.dupe(u8, &evt.orderKeyDesc(issue_event.created_ts, &id_bytes));
 
-        // the named issue must be in its windowed set (a tag url can name an
-        // issue that doesn't carry the tag).
-        const set = (switch (issue_event.event.status) {
-            .open => open_set,
-            .closed => closed_set,
-        }) orelse return error.NotFound;
-        if (!try set.contains(order_key)) return error.NotFound;
+        if (view == .conflicts) {
+            // the id roots the conflicts window, so it must be conflicted
+            const set = conflict_set orelse return error.NotFound;
+            if (!try set.contains(order_key)) return error.NotFound;
+            conflicts_root = order_key;
+        } else {
+            // the named issue must be in its windowed set (a tag url can name
+            // an issue that doesn't carry the tag).
+            const set = (switch (issue_event.event.status) {
+                .open => open_set,
+                .closed => closed_set,
+            }) orelse return error.NotFound;
+            if (!try set.contains(order_key)) return error.NotFound;
 
-        switch (issue_event.event.status) {
-            .open => open_root = order_key,
-            .closed => closed_root = order_key,
+            switch (issue_event.event.status) {
+                .open => open_root = order_key,
+                .closed => closed_root = order_key,
+            }
+            // an edit url keeps its view; otherwise the issue's status picks it.
+            if (view != .edit) resolved_view = switch (issue_event.event.status) {
+                .open => .open,
+                .closed => .closed,
+            };
+
+            // a resolve url shows the resolve view only while the issue still
+            // has a conflict entry; otherwise the status list stands. the
+            // wasm client renders from the snapshot, so the diff machinery
+            // this pulls in is gated out of its build.
+            if (comptime !wasm) {
+                if (view == .resolve) {
+                    if (conflicts_map) |map| {
+                        if (try map.getCursor(order_key)) |conflict_cursor| {
+                            const conflict_entry = try DB.HashMap(.read_only).init(conflict_cursor);
+                            conflict_data = try readConflict(repo_kind, repo_opts, arena, repo, io, admin_moment, haxy_moment, &id_bytes, issue_event, conflict_entry);
+                            resolved_view = .resolve;
+                        }
+                    }
+                }
+            }
         }
-        // an edit url keeps its view; otherwise the issue's status picks it.
-        if (empty.view != .edit) resolved_view = switch (issue_event.event.status) {
-            .open => .open,
-            .closed => .closed,
-        };
     }
 
-    const open_window = try loadWindow(repo_opts.hash, arena, admin_moment, event_id_to_issue, open_set, open_root);
-    const closed_window = try loadWindow(repo_opts.hash, arena, admin_moment, event_id_to_issue, closed_set, closed_root);
+    const open_window = try loadWindow(repo_opts.hash, arena, admin_moment, event_id_to_issue, open_set, open_root, conflict_set);
+    const closed_window = try loadWindow(repo_opts.hash, arena, admin_moment, event_id_to_issue, closed_set, closed_root, conflict_set);
+    const conflicts_window = try loadWindow(repo_opts.hash, arena, admin_moment, event_id_to_issue, conflict_set, conflicts_root, conflict_set);
+    if (view == .conflicts and conflicts_window.count > 0) resolved_view = .conflicts;
 
     // every tag in the repo, in the tag map's sorted order. the keys are
     // "tag,status", so a tag's entries are adjacent and dedup by prefix.
@@ -235,6 +321,9 @@ pub fn init(
         .selected_id = empty.selected_id,
         .open = open_window,
         .closed = closed_window,
+        .conflicts = conflicts_window,
+        .conflict = conflict_data,
+        .theirs_picks = empty.theirs_picks,
         .view = resolved_view,
         .description_page = empty.description_page,
         .tags = tags.items,
@@ -274,6 +363,7 @@ fn loadWindow(
     event_id_to_issue: evt.EventDB(hash_kind).HashMap(.read_only),
     set_maybe: ?evt.EventDB(hash_kind).SortedSet(.read_only),
     root_key: ?[]const u8,
+    conflict_set: ?evt.EventDB(hash_kind).SortedSet(.read_only),
 ) !Window {
     const set = set_maybe orelse return .empty;
     const DB = evt.EventDB(hash_kind);
@@ -319,6 +409,7 @@ fn loadWindow(
             .id = try aa.dupe(u8, &id_hex),
             .issue = issue_event,
             .author = try ui.Author.initFromEmail(admin_moment, arena, issue_event.author_email),
+            .conflicted = if (conflict_set) |cs| try cs.contains(&order_key) else false,
         });
     }
 
@@ -330,6 +421,109 @@ fn loadWindow(
     };
 }
 
+// the selected issue's conflict entry, shaped for the resolve view. `ours` is
+// the live record.
+fn readConflict(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    arena: *std.heap.ArenaAllocator,
+    repo: *rp.Repo(repo_kind, repo_opts),
+    io: std.Io,
+    admin_moment: ?evt.AdminDB.HashMap(.read_only),
+    haxy_moment: evt.EventDB(repo_opts.hash).HashMap(.read_only),
+    id_bytes: *const [evt.event_id_size]u8,
+    ours: evt.Issue.Record,
+    conflict_entry: evt.EventDB(repo_opts.hash).HashMap(.read_only),
+) !Conflict {
+    const DB = evt.EventDB(repo_opts.hash);
+    const aa = arena.allocator();
+    const gpa = arena.child_allocator;
+
+    const fields_cursor = (try conflict_entry.getCursor(hash.hashInt(repo_opts.hash, evt.conflicted_fields_key))) orelse return error.NotFound;
+    const conflicted_fields = try fields_cursor.readBytesAlloc(aa, null);
+
+    const their_cursor = (try conflict_entry.getCursor(hash.hashInt(repo_opts.hash, evt.their_record_key))) orelse return error.NotFound;
+    const theirs = try evt.read(evt.Issue.Record, DB, repo_opts.hash, arena, try DB.HashMap(.read_only).init(their_cursor));
+
+    // absent when both sides created the issue independently
+    var base: ?evt.Issue.Record = null;
+    if (try conflict_entry.getCursor(hash.hashInt(repo_opts.hash, evt.base_record_key))) |base_cursor| {
+        base = try evt.read(evt.Issue.Record, DB, repo_opts.hash, arena, try DB.HashMap(.read_only).init(base_cursor));
+    }
+
+    // each side's field->oid map, for attributing the versions; a field a
+    // merge left unattributed reads as an unknown author
+    var their_field_oids: ?DB.SortedMap(.read_only) = null;
+    if (try conflict_entry.getCursor(hash.hashInt(repo_opts.hash, evt.their_field_to_oid_key))) |cursor| {
+        their_field_oids = try DB.SortedMap(.read_only).init(cursor);
+    }
+    var our_field_oids: ?DB.SortedMap(.read_only) = null;
+    if (try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Issue.id_to_field_to_oid_key))) |map_cursor| {
+        const id_to_field_to_oid = try DB.HashMap(.read_only).init(map_cursor);
+        if (try id_to_field_to_oid.getCursor(hash.hashInt(repo_opts.hash, id_bytes))) |cursor| {
+            our_field_oids = try DB.SortedMap(.read_only).init(cursor);
+        }
+    }
+
+    var conflict = Conflict{};
+    var field_iter = std.mem.splitScalar(u8, conflicted_fields, ' ');
+    while (field_iter.next()) |field| {
+        // status can't conflict (two changes of a two-value field agree)
+        const known = std.meta.stringToEnum(enum { title, tags, description }, field) orelse continue;
+        const our_author = try oidAuthor(repo_kind, repo_opts, arena, repo, io, admin_moment, try readFieldOid(repo_opts.hash, our_field_oids, field));
+        const their_author = try oidAuthor(repo_kind, repo_opts, arena, repo, io, admin_moment, try readFieldOid(repo_opts.hash, their_field_oids, field));
+        switch (known) {
+            .title => conflict.title = .{
+                .ours = .{ .text = ours.event.title, .author = our_author },
+                .theirs = .{ .text = theirs.event.title, .author = their_author },
+            },
+            .tags => conflict.tags = .{
+                .ours = .{ .text = ours.event.tags, .author = our_author },
+                .theirs = .{ .text = theirs.event.tags, .author = their_author },
+            },
+            .description => conflict.description = .{
+                .chunks = try diff3.chunks(io, gpa, arena, if (base) |b| b.event.description else "", ours.event.description, theirs.event.description),
+                .ours_author = our_author,
+                .theirs_author = their_author,
+            },
+        }
+    }
+    return conflict;
+}
+
+// the oid `field` maps to in a field->oid map, or null
+fn readFieldOid(
+    comptime hash_kind: hash.HashKind,
+    field_oids_maybe: ?evt.EventDB(hash_kind).SortedMap(.read_only),
+    field: []const u8,
+) !?[hash.byteLen(hash_kind)]u8 {
+    const field_oids = field_oids_maybe orelse return null;
+    const cursor = (try field_oids.getCursor(field)) orelse return null;
+    var oid: [hash.byteLen(hash_kind)]u8 = undefined;
+    _ = try cursor.readBytes(&oid);
+    return oid;
+}
+
+// the author of the event commit `oid_maybe` names
+fn oidAuthor(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    arena: *std.heap.ArenaAllocator,
+    repo: *rp.Repo(repo_kind, repo_opts),
+    io: std.Io,
+    admin_moment: ?evt.AdminDB.HashMap(.read_only),
+    oid_maybe: ?[hash.byteLen(repo_opts.hash)]u8,
+) !ui.Author {
+    const oid = oid_maybe orelse return .unknown;
+    const gpa = arena.child_allocator;
+    var start_oids = [_][hash.hexLen(repo_opts.hash)]u8{std.fmt.bytesToHex(oid, .lower)};
+    var commit_iter = repo.log(io, gpa, start_oids[0..1]) catch return .unknown;
+    defer commit_iter.deinit();
+    const commit_object = (commit_iter.next(gpa) catch return .unknown) orelse return .unknown;
+    defer commit_object.deinit();
+    return try ui.Author.init(admin_moment, arena, commit_object.content.commit.metadata.author orelse "");
+}
+
 pub const View = struct {
     // a vertical box: the header tabs on top, then a stack holding a
     // master-detail split (issue list + description pane) per status list,
@@ -339,9 +533,9 @@ pub const View = struct {
     session: *ui.Session,
     // per-split state, indexed like the stack's split children: the issue the
     // pane shows, and its description and author text boxes' focus ids.
-    detailed_index: [split_count]?usize,
-    description_id: [split_count]?usize,
-    author_id: [split_count]?usize,
+    detailed_index: [stack_child_max]?usize,
+    description_id: [stack_child_max]?usize,
+    author_id: [stack_child_max]?usize,
 
     const header_index: usize = 0;
     const stack_index: usize = 1;
@@ -349,9 +543,15 @@ pub const View = struct {
     const open_view_index: usize = 0;
     const closed_view_index: usize = 1;
     const tags_view_index: usize = 2;
-    // the new-issue form, or the edit form when the page was loaded at an
-    // edit url.
+    // the new-issue form, or the edit or resolve form when the page was
+    // loaded at one of their urls.
     const form_view_index: usize = 3;
+    // the conflicts split; the tab and stack child exist only when the repo
+    // has conflicted issues.
+    const conflicts_view_index: usize = 4;
+    const stack_child_max: usize = conflicts_view_index + 1;
+    // the leading stack children that are status splits; the conflicts split
+    // sits apart at conflicts_view_index.
     const split_count: usize = 2;
     // indices within a split (the horizontal box inside the stack).
     const list_index: usize = 0;
@@ -369,12 +569,15 @@ pub const View = struct {
             .open => open_view_index,
             .closed => closed_view_index,
             .tags => tags_view_index,
-            .new, .edit => form_view_index,
+            .new, .edit, .resolve => form_view_index,
+            .conflicts => conflicts_view_index,
             // init resolves a description url to its issue's status list
             .description => unreachable,
         };
     }
 
+    // the status a status split lists; the conflicts split has none (its
+    // issues carry their own).
     fn splitStatus(index: usize) evt.Issue.Status {
         return if (index == open_view_index) .open else .closed;
     }
@@ -421,31 +624,56 @@ pub const View = struct {
             try stack.children.put(allocator, tf.getFocus().id, .{ .tag_flow = tf });
         }
 
-        // the new-issue form, or — on an edit url — the edit form in its
-        // place, prefilled with the selected issue's content. a logged-out
-        // session can't create events, so the unauthorized view stands in.
+        // the new-issue form, or — on an edit or resolve url — that form in
+        // its place, prefilled with the selected issue's content. a
+        // logged-out session can't create events, so the unauthorized view
+        // stands in.
         if (session.data.is_local or session.data.user_id != null) {
-            const aa = session.page_arena.allocator();
-            const action = if (data.view == .edit)
-                (if (data.identity.len == 0)
-                    try std.fmt.allocPrint(aa, "form:/issues/{s}/edit", .{data.selected_id})
+            if (data.view == .resolve) {
+                // on the web the page grows to the form's height and the
+                // browser scrolls it; the terminal scrolls the form itself
+                var form_widget: ui.Widget = blk: {
+                    var form = try initResolveForm(allocator, session, data);
+                    errdefer form.deinit(allocator);
+                    break :blk if (session.is_terminal)
+                        .{ .scroll = try wgt.Scroll(ui.Widget).init(allocator, .{ .box = form }, .{ .direction = .vert }) }
+                    else
+                        .{ .box = form };
+                };
+                errdefer form_widget.deinit(allocator);
+                try stack.children.put(allocator, form_widget.getFocus().id, form_widget);
+            } else {
+                const aa = session.page_arena.allocator();
+                const action = if (data.view == .edit)
+                    (if (data.identity.len == 0)
+                        try std.fmt.allocPrint(aa, "form:/issues/{s}/edit", .{data.selected_id})
+                    else
+                        try std.fmt.allocPrint(aa, "form:/repo/{s}/issues/{s}/edit", .{ data.identity, data.selected_id }))
+                else if (data.identity.len == 0)
+                    "form:/issue"
                 else
-                    try std.fmt.allocPrint(aa, "form:/repo/{s}/issues/{s}/edit", .{ data.identity, data.selected_id }))
-            else if (data.identity.len == 0)
-                "form:/issue"
-            else
-                try std.fmt.allocPrint(aa, "form:/repo/{s}/issue", .{data.identity});
-            const issue = if (data.view == .edit)
-                (if (data.selectedIssue()) |entry| &entry.issue else null)
-            else
-                null;
-            var form = try initIssueForm(allocator, session, action, issue);
-            errdefer form.deinit(allocator);
-            try stack.children.put(allocator, form.getFocus().id, .{ .box = form });
+                    try std.fmt.allocPrint(aa, "form:/repo/{s}/issue", .{data.identity});
+                const issue = if (data.view == .edit)
+                    (if (data.selectedIssue()) |entry| &entry.issue else null)
+                else
+                    null;
+                var form = try initIssueForm(allocator, session, action, issue);
+                errdefer form.deinit(allocator);
+                try stack.children.put(allocator, form.getFocus().id, .{ .box = form });
+            }
         } else {
             var message = try ui.Unauthorized.View.init(allocator);
             errdefer message.deinit(allocator);
             try stack.children.put(allocator, message.getFocus().id, .{ .unauthorized = message });
+        }
+
+        // the conflicts split; its tab exists only when the repo has
+        // conflicts, so skip the child too to keep the stack 1:1 with the
+        // tabs.
+        if (data.conflicts.count > 0) {
+            var split = try initSplit(allocator, session, data, null);
+            errdefer split.deinit(allocator);
+            try stack.children.put(allocator, split.getFocus().id, .{ .box = split });
         }
 
         // the stack starts on the page's view.
@@ -458,18 +686,19 @@ pub const View = struct {
             .box = outer,
             .data = data,
             .session = session,
-            .detailed_index = .{ null, null },
-            .description_id = .{ null, null },
-            .author_id = .{ null, null },
+            .detailed_index = @splat(null),
+            .description_id = @splat(null),
+            .author_id = @splat(null),
         };
     }
 
-    // the master-detail split showing `status`'s window.
-    fn initSplit(allocator: std.mem.Allocator, session: *ui.Session, data: *const Self, status: evt.Issue.Status) !wgt.Box(ui.Widget) {
+    // the master-detail split showing `status`'s window, or the conflicts
+    // window when null.
+    fn initSplit(allocator: std.mem.Allocator, session: *ui.Session, data: *const Self, status_maybe: ?evt.Issue.Status) !wgt.Box(ui.Widget) {
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
         errdefer box.deinit(allocator);
 
-        const win = data.window(status);
+        const win = if (status_maybe) |status| data.window(status) else &data.conflicts;
 
         // the issue list (one focusable row per title), plus a "next" link that
         // reloads the page rooted at the following issue.
@@ -478,11 +707,14 @@ pub const View = struct {
                 var list_box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert, .stretch = true });
                 errdefer list_box.deinit(allocator);
                 if (win.prev_id) |prev|
-                    try addRow(allocator, &list_box, "← previous", try issuesLink(session.page_arena, data.identity, status, data.tag, prev));
-                for (win.issues) |entry|
-                    try addRow(allocator, &list_box, entry.issue.event.title, try issueRowLink(session.page_arena, data.identity, entry.id));
+                    try addRow(allocator, &list_box, "← previous", "", try windowLink(session.page_arena, data, status_maybe, prev));
+                for (win.issues) |entry| {
+                    // conflicted issues carry a marker in the status lists
+                    const label: []const u8 = if (entry.conflicted and status_maybe != null) "[conflict]" else "";
+                    try addRow(allocator, &list_box, entry.issue.event.title, label, try issueRowLink(session.page_arena, data.identity, entry.id));
+                }
                 if (win.next_id) |next|
-                    try addRow(allocator, &list_box, "next →", try issuesLink(session.page_arena, data.identity, status, data.tag, next));
+                    try addRow(allocator, &list_box, "next →", "", try windowLink(session.page_arena, data, status_maybe, next));
                 // select the window's first issue (past a leading "previous"
                 // row) so its description shows on load.
                 if (win.issues.len > 0)
@@ -563,6 +795,16 @@ pub const View = struct {
             try box.children.put(allocator, description.getFocus().id, .{ .widget = .{ .text_input = description }, .rect = null, .min_size = null });
         }
 
+        try addSubmitButton(allocator, &box);
+
+        box.getFocus().child_id = box.children.keys()[title_field_index];
+        return box;
+    }
+
+    // a form's submit button, then a spacer absorbing the leftover
+    // min-height the box hands its last child, so the button keeps its
+    // natural height
+    fn addSubmitButton(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget)) !void {
         {
             var button = try wgt.TextBox(ui.Widget).init(allocator, "submit", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer button.deinit(allocator);
@@ -572,21 +814,202 @@ pub const View = struct {
             button.getFocus().kind = .{ .custom = "submit" };
             try box.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
         }
-
-        // absorbs the leftover min-height the box hands its last child, so
-        // the button keeps its natural height
         {
             var spacer = try ui.Spacer.init(allocator);
             errdefer spacer.deinit(allocator);
             try box.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null });
         }
+    }
 
-        box.getFocus().child_id = box.children.keys()[title_field_index];
+    // the conflict resolve form. the "use this" links are navigations that
+    // flip the url's theirs: pick, reloading the prefills; one submit
+    // settles every conflict. the form: subtree makes the web overlay POST
+    // to the resolve route.
+    fn initResolveForm(allocator: std.mem.Allocator, session: *ui.Session, data: *const Self) !wgt.Box(ui.Widget) {
+        const aa = session.page_arena.allocator();
+        // init only picks the resolve view once it has read the conflict
+        const conflict = if (data.conflict) |*c| c else unreachable;
+
+        var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert });
+        errdefer box.deinit(allocator);
+        box.getFocus().kind = .{ .custom = if (data.identity.len == 0)
+            try std.fmt.allocPrint(aa, "form:/issues/{s}/resolve", .{data.selected_id})
+        else
+            try std.fmt.allocPrint(aa, "form:/repo/{s}/issues/{s}/resolve", .{ data.identity, data.selected_id }) };
+
+        if (conflict.title) |*fc| {
+            try addLabel(allocator, &box, "title conflict:");
+            try addFieldConflict(allocator, &box, session, data, "title", fc);
+        }
+        if (conflict.tags) |*fc| {
+            try addLabel(allocator, &box, "tags conflict:");
+            try addFieldConflict(allocator, &box, session, data, "tags", fc);
+        }
+
+        if (conflict.description) |*desc| {
+            try addLabel(allocator, &box, "description conflict:");
+            var hunk_index: usize = 0;
+            for (desc.chunks, 0..) |*chunk, chunk_index| {
+                if (chunk_index > 0) try addGap(allocator, &box);
+                switch (chunk.*) {
+                    .same => |text| {
+                        var tb = try wgt.TextBox(ui.Widget).init(allocator, text, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .word });
+                        errdefer tb.deinit(allocator);
+                        tb.getFocus().focusable = true;
+                        try box.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
+                    },
+                    // an auto-resolved chunk: only one side changed it, so its
+                    // version stands, shown distinctly with its author
+                    .auto => |auto| {
+                        const author = if (auto.theirs) desc.theirs_author else desc.ours_author;
+                        const verb: []const u8 = if (auto.text == null) "removed" else "edited";
+                        const label = switch (author) {
+                            .user_name, .email => |name| try std.fmt.allocPrint(aa, " {s} by {s} ", .{ verb, name }),
+                            .unknown => try std.fmt.allocPrint(aa, " {s} by {s} ", .{ verb, if (auto.theirs) @as([]const u8, "them") else "us" }),
+                        };
+                        var tb = try wgt.TextBox(ui.Widget).init(allocator, auto.text orelse "(removed)", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .word, .label = label });
+                        errdefer tb.deinit(allocator);
+                        tb.getFocus().focusable = true;
+                        try box.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
+                    },
+                    .conflict => |hunk| {
+                        const name = try std.fmt.allocPrint(aa, "d{d}", .{hunk_index});
+                        hunk_index += 1;
+                        const picked_theirs = data.theirsPicked(name);
+                        try addVersionRow(allocator, &box, try sideLabel(aa, desc.ours_author, true), hunk.ours orelse "", try useThisLink(session, data, name, false));
+                        try addVersionRow(allocator, &box, try sideLabel(aa, desc.theirs_author, false), hunk.theirs orelse "", try useThisLink(session, data, name, true));
+                        var resolution_input = try wgt.TextInput(ui.Widget).init(allocator, .{ .label = " resolution ", .name = name, .visible_width = null, .rounded_corners = true, .render_content = session.is_terminal, .multiline = true });
+                        errdefer resolution_input.deinit(allocator);
+                        resolution_input.getFocus().focusable = true;
+                        try resolution_input.setContent(allocator, (if (picked_theirs) hunk.theirs else hunk.ours) orelse "");
+                        try box.children.put(allocator, resolution_input.getFocus().id, .{ .widget = .{ .text_input = resolution_input }, .rect = null, .min_size = null });
+                    },
+                }
+            }
+        }
+
+        try addSubmitButton(allocator, &box);
+
+        box.getFocus().child_id = box.children.keys()[0];
         return box;
     }
 
-    fn addRow(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8, link: []const u8) !void {
-        var row = try wgt.TextBox(ui.Widget).init(allocator, label, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .word });
+    // one conflicted scalar field: both sides' version rows, then the
+    // resolution input prefilled from the picked side.
+    fn addFieldConflict(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), session: *ui.Session, data: *const Self, comptime name: []const u8, fc: *const FieldConflict) !void {
+        const aa = session.page_arena.allocator();
+        try addVersionRow(allocator, box, try sideLabel(aa, fc.ours.author, true), fc.ours.text, try useThisLink(session, data, name, false));
+        try addVersionRow(allocator, box, try sideLabel(aa, fc.theirs.author, false), fc.theirs.text, try useThisLink(session, data, name, true));
+
+        var resolution_input = try wgt.TextInput(ui.Widget).init(allocator, .{ .label = " resolution ", .name = name, .visible_width = null, .rounded_corners = true, .render_content = session.is_terminal });
+        errdefer resolution_input.deinit(allocator);
+        resolution_input.getFocus().focusable = true;
+        try resolution_input.setContent(allocator, if (data.theirsPicked(name)) fc.theirs.text else fc.ours.text);
+        try box.children.put(allocator, resolution_input.getFocus().id, .{ .widget = .{ .text_input = resolution_input }, .rect = null, .min_size = null });
+    }
+
+    // a blank row separating adjacent chunks
+    fn addGap(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget)) !void {
+        var text = try wgt.Text(ui.Widget).init(allocator, " ");
+        errdefer text.deinit(allocator);
+        try box.children.put(allocator, text.getFocus().id, .{ .widget = .{ .text = text }, .rect = null, .min_size = null });
+    }
+
+    // a section label
+    fn addLabel(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), content: []const u8) !void {
+        var tb = try wgt.TextBox(ui.Widget).init(allocator, content, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+        errdefer tb.deinit(allocator);
+        tb.getFocus().focusable = true;
+        try box.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
+    }
+
+    // one side of a conflict: the "use this" link on the left, the version
+    // itself as a labeled read-only box.
+    fn addVersionRow(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8, text: []const u8, link: []const u8) !void {
+        var row = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
+        errdefer row.deinit(allocator);
+
+        {
+            var use = try wgt.TextBox(ui.Widget).init(allocator, "use this", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            errdefer use.deinit(allocator);
+            use.getFocus().focusable = true;
+            use.getFocus().kind = .{ .custom = link };
+            try row.children.put(allocator, use.getFocus().id, .{
+                .widget = .{ .text_box = use },
+                .rect = null,
+                .min_size = .{ .width = "use this".len + 2, .height = null },
+                .max_size = .{ .width = "use this".len + 2, .height = null },
+            });
+        }
+
+        {
+            var tb = try wgt.TextBox(ui.Widget).init(allocator, if (text.len > 0) text else "(removed)", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .word, .label = label });
+            errdefer tb.deinit(allocator);
+            tb.getFocus().focusable = true;
+            try row.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
+        }
+
+        row.getFocus().child_id = row.children.keys()[0];
+        try box.children.put(allocator, row.getFocus().id, .{ .widget = .{ .box = row }, .rect = null, .min_size = null });
+    }
+
+    // the label of one side's version box, naming its author
+    fn sideLabel(aa: std.mem.Allocator, author: ui.Author, ours: bool) ![]const u8 {
+        return switch (author) {
+            .user_name, .email => |name| try std.fmt.allocPrint(aa, " edited by {s} ", .{name}),
+            .unknown => if (ours) " current version " else " their version ",
+        };
+    }
+
+    // the a: link that reloads the resolve page with `name` picked from ours
+    // or theirs, reprefilling its resolution input
+    fn useThisLink(session: *ui.Session, data: *const Self, name: []const u8, theirs: bool) ![]const u8 {
+        const aa = session.page_arena.allocator();
+        var picks: std.ArrayList(u8) = .empty;
+        var it = std.mem.splitScalar(u8, data.theirs_picks, ',');
+        while (it.next()) |pick| {
+            if (pick.len == 0 or std.mem.eql(u8, pick, name)) continue;
+            if (picks.items.len > 0) try picks.append(aa, ',');
+            try picks.appendSlice(aa, pick);
+        }
+        if (theirs) {
+            if (picks.items.len > 0) try picks.append(aa, ',');
+            try picks.appendSlice(aa, name);
+        }
+        const route = ui.RoutablePage.repoIssuesResolveRoute(data.identity, data.selected_id, picks.items) orelse return error.RouteTooLong;
+        return std.fmt.allocPrint(aa, "a:{s}", .{try route.toUrl(session.page_arena)});
+    }
+
+    // the resolve form's page-constant initial value for the input `name`:
+    // the picked side of its conflicted field or hunk
+    fn resolvePrefill(self: *View, name: []const u8) ?[]const u8 {
+        const conflict = if (self.data.conflict) |*c| c else return null;
+        const theirs = self.data.theirsPicked(name);
+        if (std.mem.eql(u8, name, "title")) {
+            const fc = if (conflict.title) |*f| f else return null;
+            return if (theirs) fc.theirs.text else fc.ours.text;
+        }
+        if (std.mem.eql(u8, name, "tags")) {
+            const fc = if (conflict.tags) |*f| f else return null;
+            return if (theirs) fc.theirs.text else fc.ours.text;
+        }
+        if (std.mem.startsWith(u8, name, "d")) {
+            const desc = if (conflict.description) |*d| d else return null;
+            const hunk_index = std.fmt.parseInt(usize, name[1..], 10) catch return null;
+            var seen: usize = 0;
+            for (desc.chunks) |chunk| switch (chunk) {
+                .conflict => |hunk| {
+                    if (seen == hunk_index) return (if (theirs) hunk.theirs else hunk.ours) orelse "";
+                    seen += 1;
+                },
+                else => {},
+            };
+        }
+        return null;
+    }
+
+    fn addRow(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), text: []const u8, bottom_label: []const u8, link: []const u8) !void {
+        var row = try wgt.TextBox(ui.Widget).init(allocator, text, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .word, .bottom_label = bottom_label });
         errdefer row.deinit(allocator);
         row.getFocus().focusable = true;
         if (link.len != 0) row.getFocus().kind = .{ .custom = link };
@@ -615,11 +1038,21 @@ pub const View = struct {
         return &self.viewStack().children.values()[tags_view_index].tag_flow;
     }
 
-    // the new-issue (or edit) form inside the stack, or null when the
+    // the new-issue, edit, or resolve form inside the stack, or null when the
     // unauthorized view stands in for it.
     fn issueForm(self: *View) ?*wgt.Box(ui.Widget) {
         return switch (self.viewStack().children.values()[form_view_index]) {
             .box => |*box| box,
+            // the resolve form sits inside a scroll on the terminal
+            .scroll => |*scroll| &scroll.child.box,
+            else => null,
+        };
+    }
+
+    // the resolve form's scroll on the terminal (the web page scrolls itself)
+    fn resolveScroll(self: *View) ?*wgt.Scroll(ui.Widget) {
+        return switch (self.viewStack().children.values()[form_view_index]) {
+            .scroll => |*scroll| scroll,
             else => null,
         };
     }
@@ -653,6 +1086,7 @@ pub const View = struct {
     }
 
     fn window(self: *View, index: usize) *const Window {
+        if (index == conflicts_view_index) return &self.data.conflicts;
         return self.data.window(splitStatus(index));
     }
 
@@ -666,7 +1100,7 @@ pub const View = struct {
     // new-issue form shows).
     fn selectedSplitIndex(self: *View) ?usize {
         const idx = self.stackSelectedIndex() orelse return null;
-        return if (idx < split_count) idx else null;
+        return if (idx < split_count or idx == conflicts_view_index) idx else null;
     }
 
     fn detailActive(self: *View, index: usize) bool {
@@ -712,8 +1146,14 @@ pub const View = struct {
         if (self.header().getSelectedIndex()) |index| {
             const stack = self.viewStack();
             stack.getFocus().child_id = stack.children.keys()[index];
-            self.session.data.current_page = (if (index == form_view_index and self.data.view == .edit)
-                ui.RoutablePage.repoIssuesEditRoute(self.data.identity, self.data.selected_id)
+            self.session.data.current_page = (if (index == form_view_index)
+                (switch (self.data.view) {
+                    .edit => ui.RoutablePage.repoIssuesEditRoute(self.data.identity, self.data.selected_id),
+                    .resolve => ui.RoutablePage.repoIssuesResolveRoute(self.data.identity, self.data.selected_id, self.data.theirs_picks),
+                    else => ui.RoutablePage.repoIssuesNewRoute(self.data.identity),
+                })
+            else if (index == conflicts_view_index)
+                ui.RoutablePage.repoIssuesConflictsRoute(self.data.identity, if (self.data.view == .conflicts) self.data.selected_id else "")
             else if (index == viewIndex(self.data.view) and self.data.selected_id.len != 0)
                 (if (self.data.description_page)
                     ui.RoutablePage.repoIssuesDescriptionRoute(self.data.identity, self.data.selected_id)
@@ -721,8 +1161,6 @@ pub const View = struct {
                     ui.RoutablePage.repoIssuesRoute(self.data.identity, .open, self.data.tag, self.data.selected_id))
             else if (index == tags_view_index)
                 ui.RoutablePage.repoIssuesTagsRoute(self.data.identity, self.data.tag)
-            else if (index == form_view_index)
-                ui.RoutablePage.repoIssuesNewRoute(self.data.identity)
             else
                 ui.RoutablePage.repoIssuesRoute(self.data.identity, splitStatus(index), self.data.tag, "")) orelse self.session.data.current_page;
         }
@@ -739,11 +1177,11 @@ pub const View = struct {
                     if (self.selectedIssueIndex(i)) |sel| {
                         // selecting another issue leaves the description page
                         // behind, like it leaves the tag filter behind.
-                        const id = self.window(i).issues[sel].id;
-                        const mirrored = if (self.data.description_page and std.mem.eql(u8, id, self.data.selected_id))
-                            ui.RoutablePage.repoIssuesDescriptionRoute(self.data.identity, id)
+                        const entry = &self.window(i).issues[sel];
+                        const mirrored = if (self.data.description_page and std.mem.eql(u8, entry.id, self.data.selected_id))
+                            ui.RoutablePage.repoIssuesDescriptionRoute(self.data.identity, entry.id)
                         else
-                            ui.RoutablePage.repoIssuesRoute(self.data.identity, splitStatus(i), "", id);
+                            ui.RoutablePage.repoIssuesRoute(self.data.identity, entry.issue.event.status, "", entry.id);
                         if (mirrored) |route| self.session.data.current_page = route;
                     }
                 }
@@ -799,6 +1237,17 @@ pub const View = struct {
                     try self.session.input_values.put(inputs_arena, fields[description_field_index].widget.text_input.getFocus().id, entry.issue.event.description);
                 }
             }
+
+            // the resolve form's inputs prefill from the picked side, which
+            // is url state and so page-constant like the edit values above
+            if (self.data.view == .resolve) {
+                for (form.children.values()) |*child| switch (child.widget) {
+                    .text_input => |*ti| if (self.resolvePrefill(ti.options.name)) |value| {
+                        try self.session.input_values.put(inputs_arena, ti.getFocus().id, value);
+                    },
+                    else => {},
+                };
+            }
         }
 
         try self.box.build(allocator, constraint, root_focus);
@@ -842,38 +1291,51 @@ pub const View = struct {
                 try row.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null });
             }
 
-            // a logged-out session can't flip the status, so it gets no
-            // open/close button (and no form action on the row)
-            if (self.session.data.is_local or self.session.data.user_id != null) {
-                const action: []const u8 = switch (entry.issue.event.status) {
-                    .open => "close",
-                    .closed => "open",
-                };
-                row.getFocus().kind = .{ .custom = if (self.data.identity.len == 0)
-                    try std.fmt.allocPrint(pa, "form:/issues/{s}/{s}", .{ entry.id, action })
-                else
-                    try std.fmt.allocPrint(pa, "form:/repo/{s}/issues/{s}/{s}", .{ self.data.identity, entry.id, action }) };
-
-                var button = try wgt.TextBox(ui.Widget).init(allocator, action, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            // a conflicted issue's only action is resolving it. the button
+            // stays visible logged out; the resolve page shows the
+            // unauthorized view then.
+            if (entry.conflicted) {
+                var button = try wgt.TextBox(ui.Widget).init(allocator, "resolve", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
                 errdefer button.deinit(allocator);
                 button.getFocus().focusable = true;
-                // the renderer distinguishes plain clickables from buttons that
-                // should POST to a server route by this kind.
-                button.getFocus().kind = .{ .custom = "submit" };
-                try row.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = .{ .width = action.len + 2, .height = null } });
-            }
-
-            // the edit button links to the issue's edit page.
-            {
-                var button = try wgt.TextBox(ui.Widget).init(allocator, "edit", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
-                errdefer button.deinit(allocator);
-                button.getFocus().focusable = true;
-                const route = ui.RoutablePage.repoIssuesEditRoute(self.data.identity, entry.id) orelse return error.RouteTooLong;
+                const route = ui.RoutablePage.repoIssuesResolveRoute(self.data.identity, entry.id, "") orelse return error.RouteTooLong;
                 button.getFocus().kind = .{ .custom = try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}) };
-                try row.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = .{ .width = "edit".len + 2, .height = null } });
+                try row.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = .{ .width = "resolve".len + 2, .height = null } });
+            } else {
+                // a logged-out session can't flip the status, so it gets no
+                // open/close button (and no form action on the row)
+                if (self.session.data.is_local or self.session.data.user_id != null) {
+                    const action: []const u8 = switch (entry.issue.event.status) {
+                        .open => "close",
+                        .closed => "open",
+                    };
+                    row.getFocus().kind = .{ .custom = if (self.data.identity.len == 0)
+                        try std.fmt.allocPrint(pa, "form:/issues/{s}/{s}", .{ entry.id, action })
+                    else
+                        try std.fmt.allocPrint(pa, "form:/repo/{s}/issues/{s}/{s}", .{ self.data.identity, entry.id, action }) };
+
+                    var button = try wgt.TextBox(ui.Widget).init(allocator, action, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+                    errdefer button.deinit(allocator);
+                    button.getFocus().focusable = true;
+                    // the renderer distinguishes plain clickables from buttons that
+                    // should POST to a server route by this kind.
+                    button.getFocus().kind = .{ .custom = "submit" };
+                    try row.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = .{ .width = action.len + 2, .height = null } });
+                }
+
+                // the edit button links to the issue's edit page.
+                {
+                    var button = try wgt.TextBox(ui.Widget).init(allocator, "edit", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+                    errdefer button.deinit(allocator);
+                    button.getFocus().focusable = true;
+                    const route = ui.RoutablePage.repoIssuesEditRoute(self.data.identity, entry.id) orelse return error.RouteTooLong;
+                    button.getFocus().kind = .{ .custom = try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}) };
+                    try row.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = .{ .width = "edit".len + 2, .height = null } });
+                }
             }
 
-            // the open/close button when present, the edit button otherwise
+            // the resolve button on a conflicted issue, else the open/close
+            // button when present, the edit button otherwise
             row.getFocus().child_id = row.children.keys()[button_in_row_index];
         }
 
@@ -909,7 +1371,7 @@ pub const View = struct {
                 var tag_iter = evt.Issue.tagIterator(entry.issue.event.tags);
                 while (tag_iter.next()) |tag| {
                     if (tag.len == 0) continue;
-                    try items.append(allocator, .{ .text = tag, .link = try tagLink(self.session.page_arena, self.data.identity, splitStatus(index), tag) });
+                    try items.append(allocator, .{ .text = tag, .link = try tagLink(self.session.page_arena, self.data.identity, entry.issue.event.status, tag) });
                 }
                 if (items.items.len > 0) {
                     var tf = try ui.TagFlow.init(allocator);
@@ -980,7 +1442,11 @@ pub const View = struct {
             return;
         }
         if (self.formViewActive()) {
-            try self.formInput(allocator, key, root_focus);
+            if (self.data.view == .resolve) {
+                try self.resolveInput(allocator, key, root_focus);
+            } else {
+                try self.formInput(allocator, key, root_focus);
+            }
             return;
         }
         const i = self.selectedSplitIndex() orelse return;
@@ -1041,20 +1507,19 @@ pub const View = struct {
     }
 
     // the tool row: enter or a click on the open/close button flips the
-    // issue's status; the edit button is an a: link the host follows.
-    // arrows cross between the buttons and to the neighboring widgets.
+    // issue's status; the edit and resolve buttons are a: links the host
+    // follows. arrows cross between the buttons and to the neighboring
+    // widgets.
     fn toolRowInput(self: *View, allocator: std.mem.Allocator, index: usize, key: Key, root_focus: *Focus) !void {
         const row = self.toolRow(index);
-        // the edit button is always the row's last child; the open/close
-        // button before it is only there when the session may author events
-        const edit_index = row.children.count() - 1;
-        const on_edit = if (row.getFocus().child_id) |cid| row.children.getIndex(cid) == edit_index else false;
+        const cur = if (row.getFocus().child_id) |cid| row.children.getIndex(cid) orelse return else return;
+        const on_status = cur == button_in_row_index and self.statusButton(index) != null;
         switch (key) {
-            .arrow_left => if (on_edit and self.statusButton(index) != null) root_focus.setFocus(row.children.keys()[button_in_row_index]) else try self.focusList(index, root_focus),
-            .arrow_right => if (!on_edit) root_focus.setFocus(row.children.keys()[edit_index]),
+            .arrow_left => if (cur > button_in_row_index) root_focus.setFocus(row.children.keys()[cur - 1]) else try self.focusList(index, root_focus),
+            .arrow_right => if (cur + 1 < row.children.count()) root_focus.setFocus(row.children.keys()[cur + 1]),
             .arrow_up => self.focusHeader(root_focus),
             .arrow_down => self.focusTitle(index, root_focus),
-            .enter => if (!on_edit) try self.toggleIssueStatus(allocator, index),
+            .enter => if (on_status) try self.toggleIssueStatus(allocator, index),
             .mouse => |mouse| switch (mouse.action) {
                 .scroll => |dir| {
                     const sc = self.detailScroll(index);
@@ -1149,15 +1614,8 @@ pub const View = struct {
 
         if (cur == description_field_index) {
             const child = &form.children.values()[cur];
-            const description = &child.widget.text_input;
-            switch (key) {
-                .enter => return child.widget.input(allocator, key, root_focus),
-                .arrow_up => if (!try description.cursorOnFirstRow(allocator))
-                    return child.widget.input(allocator, key, root_focus),
-                .arrow_down => if (!try description.cursorOnLastRow(allocator))
-                    return child.widget.input(allocator, key, root_focus),
-                else => {},
-            }
+            if (try multilineKeepsKey(&child.widget.text_input, allocator, key))
+                return child.widget.input(allocator, key, root_focus);
         }
 
         switch (key) {
@@ -1174,6 +1632,167 @@ pub const View = struct {
             },
             else => try form.children.values()[cur].widget.input(allocator, key, root_focus),
         }
+    }
+
+    // the multiline hunk inputs keep enter and any up/down that has a row to
+    // move to; enter on a "use this" link is a navigation the host follows
+    // before this runs.
+    fn resolveInput(self: *View, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
+        const form = self.issueForm() orelse return;
+        const cid = form.getFocus().child_id orelse return;
+        const cur = form.children.getIndex(cid) orelse return;
+        const child = &form.children.values()[cur];
+
+        if (child.widget == .text_input) {
+            const ti = &child.widget.text_input;
+            if (ti.options.multiline and try multilineKeepsKey(ti, allocator, key))
+                return child.widget.input(allocator, key, root_focus);
+        }
+
+        const on_submit = isSubmitButton(&child.widget);
+
+        switch (key) {
+            .arrow_up, .back_tab => if (resolveStep(form, cur, false)) |i| self.focusResolveChild(form, i, root_focus) else self.focusHeader(root_focus),
+            .arrow_down, .tab => if (resolveStep(form, cur, true)) |i| self.focusResolveChild(form, i, root_focus),
+            .arrow_left, .arrow_right => switch (child.widget) {
+                .box => |*row| {
+                    const row_cid = row.getFocus().child_id orelse return;
+                    const row_index = row.children.getIndex(row_cid) orelse return;
+                    if (key == .arrow_left) {
+                        if (row_index > 0) root_focus.setFocus(row.children.keys()[row_index - 1]);
+                    } else if (row_index + 1 < row.children.count()) {
+                        root_focus.setFocus(row.children.keys()[row_index + 1]);
+                    }
+                },
+                else => try child.widget.input(allocator, key, root_focus),
+            },
+            .enter => if (on_submit) try self.submitResolution(allocator),
+            .mouse => |mouse| if (on_submit and inp.leftClickOn(root_focus, cid, mouse)) {
+                try self.submitResolution(allocator);
+            } else if (mouse.action == .scroll) {
+                if (self.resolveScroll()) |sc| {
+                    sc.y += if (mouse.action.scroll == .up) @as(isize, -1) else 1;
+                    sc.clampToContent();
+                }
+            },
+            else => try child.widget.input(allocator, key, root_focus),
+        }
+    }
+
+    // a multiline input keeps enter and any up/down that has a row to move to
+    fn multilineKeepsKey(text_input: *wgt.TextInput(ui.Widget), allocator: std.mem.Allocator, key: Key) !bool {
+        return switch (key) {
+            .enter => true,
+            .arrow_up => !try text_input.cursorOnFirstRow(allocator),
+            .arrow_down => !try text_input.cursorOnLastRow(allocator),
+            else => false,
+        };
+    }
+
+    // whether the widget is a button that posts its form
+    fn isSubmitButton(widget: *const ui.Widget) bool {
+        return switch (widget.*) {
+            .text_box => |*tb| switch (tb.box.focus.kind) {
+                .custom => |custom| std.mem.eql(u8, custom, "submit"),
+                else => false,
+            },
+            else => false,
+        };
+    }
+
+    // the neighboring focusable resolve-form child, skipping the spacer and
+    // the blank gap rows
+    fn resolveStep(form: *wgt.Box(ui.Widget), cur: usize, down: bool) ?usize {
+        var i = cur;
+        while (true) {
+            if (down) {
+                i += 1;
+                if (i >= form.children.count()) return null;
+            } else {
+                if (i == 0) return null;
+                i -= 1;
+            }
+            switch (form.children.values()[i].widget) {
+                .spacer, .text => continue,
+                else => return i,
+            }
+        }
+    }
+
+    // focus the resolve-form child at `i` (a version row focuses its selected
+    // child) and keep it visible on the terminal
+    fn focusResolveChild(self: *View, form: *wgt.Box(ui.Widget), i: usize, root_focus: *Focus) void {
+        const child = &form.children.values()[i];
+        switch (child.widget) {
+            .box => |*row| root_focus.setFocus(row.getFocus().child_id orelse form.children.keys()[i]),
+            else => root_focus.setFocus(form.children.keys()[i]),
+        }
+        if (self.session.is_terminal) {
+            if (self.resolveScroll()) |sc| {
+                if (child.rect) |rect| sc.scrollToRect(rect);
+            }
+        }
+    }
+
+    // re-emit the conflicted issue's event with the resolved content; any
+    // event on the issue settles its conflict entry. this is the terminal
+    // path; the web posts the form to the resolve route.
+    fn submitResolution(self: *View, allocator: std.mem.Allocator) !void {
+        if (comptime wasm) return;
+        const io = self.session.io orelse return;
+        const src = self.data.repo_source orelse return;
+        const entry = self.data.selectedIssue() orelse return;
+        const author_email = (try self.session.eventAuthorEmail()) orelse return;
+        const form = self.issueForm() orelse return;
+
+        // gather the inputs by name; the d<n> hunk inputs appear in chunk order
+        var title: ?[]u8 = null;
+        var tags: ?[]u8 = null;
+        var hunks: std.ArrayList([]const u8) = .empty;
+        defer {
+            if (title) |t| allocator.free(t);
+            if (tags) |t| allocator.free(t);
+            for (hunks.items) |h| allocator.free(h);
+            hunks.deinit(allocator);
+        }
+        for (form.children.values()) |*child| switch (child.widget) {
+            .text_input => |*ti| {
+                const text = try ti.text(allocator);
+                errdefer allocator.free(text);
+                if (std.mem.eql(u8, ti.options.name, "title")) {
+                    title = text;
+                } else if (std.mem.eql(u8, ti.options.name, "tags")) {
+                    tags = text;
+                } else {
+                    try hunks.append(allocator, text);
+                }
+            },
+            else => {},
+        };
+
+        var id_bytes: [evt.event_id_size]u8 = undefined;
+        _ = try std.fmt.hexToBytes(&id_bytes, entry.id[0 .. evt.event_id_size * 2]);
+
+        switch (src.repo_kind) {
+            inline else => |repo_kind| {
+                var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, .{ .path = src.path });
+                defer any_repo.deinit(io, allocator);
+                switch (any_repo) {
+                    inline else => |*repo| evt.Issue.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &id_bytes, .{ .resolve = .{
+                        .title = title,
+                        .tags = tags,
+                        .hunks = hunks.items,
+                    } }, author_email) catch |err| switch (err) {
+                        // leave the form up for correction
+                        error.InvalidFields => return,
+                        else => |e| return e,
+                    },
+                }
+            },
+        }
+
+        const route = ui.RoutablePage.repoIssuesRoute(self.data.identity, entry.issue.event.status, "", entry.id) orelse return;
+        try self.session.navigate(route);
     }
 
     // the terminal submit paths: the new form commits a new-issue event, the
@@ -1367,13 +1986,14 @@ pub const View = struct {
         return inner.children.getIndex(cid) == tags_child_index and self.tagFlow(index) != null;
     }
 
-    // the open/close button inside the detail frame's tool row. the full row
-    // is spacer + open/close + edit; a logged-out session's row has no
-    // open/close button, and the description page has no row at all.
+    // the open/close button inside the detail frame's tool row; a logged-out
+    // session's or conflicted issue's row has none.
     fn statusButton(self: *View, index: usize) ?*wgt.TextBox(ui.Widget) {
         const row = self.toolRow(index);
-        if (row.children.count() != 3) return null;
-        return &row.children.values()[button_in_row_index].widget.text_box;
+        if (row.children.count() <= button_in_row_index) return null;
+        const child = &row.children.values()[button_in_row_index].widget;
+        if (!isSubmitButton(child)) return null;
+        return &child.text_box;
     }
 
     fn toolRowFocused(self: *View, index: usize) bool {
@@ -1501,6 +2121,21 @@ fn issueRowLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, id: 
     return std.fmt.allocPrint(page_arena.allocator(), "ai:{s}", .{url});
 }
 
+// the "a:" link to the window `status_maybe` names, keeping the tag filter,
+// or the conflicts window when null, rooted at issue `id`.
+fn windowLink(page_arena: *std.heap.ArenaAllocator, data: *const Self, status_maybe: ?evt.Issue.Status, id: []const u8) ![]const u8 {
+    if (status_maybe) |status| return issuesLink(page_arena, data.identity, status, data.tag, id);
+    return conflictsLink(page_arena, data.identity, id);
+}
+
+// the "a:" link to the conflicts list rooted at issue `start` ("" = the
+// first window).
+fn conflictsLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, start: []const u8) ![]const u8 {
+    const route = ui.RoutablePage.repoIssuesConflictsRoute(identity, start) orelse return error.RouteTooLong;
+    const url = try route.toUrl(page_arena);
+    return std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{url});
+}
+
 // the "a:" link to the whole-description page of issue `id` within `identity`.
 fn descriptionLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, id: []const u8) ![]const u8 {
     const route = ui.RoutablePage.repoIssuesDescriptionRoute(identity, id) orelse return error.RouteTooLong;
@@ -1535,16 +2170,7 @@ pub const Header = struct {
             const route = ui.RoutablePage.repoIssuesRoute(data.identity, status, data.tag, "") orelse return error.RouteTooLong;
             const link = try std.fmt.allocPrint(aa, "ai:{s}", .{try route.toUrl(session.page_arena)});
             const label = try std.fmt.allocPrint(aa, "{s} ({d})", .{ @tagName(status), data.window(status).count });
-            var text_box = try wgt.TextBox(ui.Widget).init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
-            errdefer text_box.deinit(allocator);
-            text_box.getFocus().focusable = true;
-            text_box.getFocus().kind = .{ .custom = link };
-            try tab_ids.put(allocator, text_box.getFocus().id, {});
-            try box.children.put(allocator, text_box.getFocus().id, .{
-                .widget = .{ .text_box = text_box },
-                .rect = null,
-                .min_size = .{ .width = label.len + 2, .height = null },
-            });
+            try addTab(allocator, &box, &tab_ids, label, link);
         }
 
         // tags tab, labeled with the active tag filter
@@ -1555,42 +2181,50 @@ pub const Header = struct {
                 const decoded = std.Uri.percentDecodeInPlace(try aa.dupe(u8, data.tag));
                 break :blk try std.fmt.allocPrint(aa, "tags ({s})", .{decoded});
             };
-            var text_box = try wgt.TextBox(ui.Widget).init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
-            errdefer text_box.deinit(allocator);
-            text_box.getFocus().focusable = true;
-            text_box.getFocus().kind = .{ .custom = tags_link };
-            try tab_ids.put(allocator, text_box.getFocus().id, {});
-            try box.children.put(allocator, text_box.getFocus().id, .{
-                .widget = .{ .text_box = text_box },
-                .rect = null,
-                .min_size = .{ .width = label.len + 2, .height = null },
-            });
+            try addTab(allocator, &box, &tab_ids, label, tags_link);
         }
 
-        // new-issue tab; an edit url shows the edit tab in its place
+        // new-issue tab; an edit or resolve url shows its tab in this place
         {
-            const route = if (data.view == .edit)
-                ui.RoutablePage.repoIssuesEditRoute(data.identity, data.selected_id) orelse return error.RouteTooLong
-            else
-                ui.RoutablePage.repoIssuesNewRoute(data.identity) orelse return error.RouteTooLong;
+            const route = switch (data.view) {
+                .edit => ui.RoutablePage.repoIssuesEditRoute(data.identity, data.selected_id) orelse return error.RouteTooLong,
+                .resolve => ui.RoutablePage.repoIssuesResolveRoute(data.identity, data.selected_id, data.theirs_picks) orelse return error.RouteTooLong,
+                else => ui.RoutablePage.repoIssuesNewRoute(data.identity) orelse return error.RouteTooLong,
+            };
             const link = try std.fmt.allocPrint(aa, "ai:{s}", .{try route.toUrl(session.page_arena)});
-            const label: []const u8 = if (data.view == .edit) "edit" else "new";
-            var text_box = try wgt.TextBox(ui.Widget).init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
-            errdefer text_box.deinit(allocator);
-            text_box.getFocus().focusable = true;
-            text_box.getFocus().kind = .{ .custom = link };
-            try tab_ids.put(allocator, text_box.getFocus().id, {});
-            try box.children.put(allocator, text_box.getFocus().id, .{
-                .widget = .{ .text_box = text_box },
-                .rect = null,
-                .min_size = .{ .width = label.len + 2, .height = null },
-            });
+            const label: []const u8 = switch (data.view) {
+                .edit => "edit",
+                .resolve => "resolve",
+                else => "new",
+            };
+            try addTab(allocator, &box, &tab_ids, label, link);
+        }
+
+        // conflicts tab, labeled with the conflict count
+        if (data.conflicts.count > 0) {
+            const route = ui.RoutablePage.repoIssuesConflictsRoute(data.identity, "") orelse return error.RouteTooLong;
+            const link = try std.fmt.allocPrint(aa, "ai:{s}", .{try route.toUrl(session.page_arena)});
+            const label = try std.fmt.allocPrint(aa, "conflicts ({d})", .{data.conflicts.count});
+            try addTab(allocator, &box, &tab_ids, label, link);
         }
 
         var self = Header{ .box = box, .tab_ids = tab_ids };
         // the tab matching the page's view is selected initially.
         self.getFocus().child_id = self.tab_ids.keys()[View.viewIndex(data.view)];
         return self;
+    }
+
+    fn addTab(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), tab_ids: *std.AutoArrayHashMapUnmanaged(usize, void), label: []const u8, link: []const u8) !void {
+        var text_box = try wgt.TextBox(ui.Widget).init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+        errdefer text_box.deinit(allocator);
+        text_box.getFocus().focusable = true;
+        text_box.getFocus().kind = .{ .custom = link };
+        try tab_ids.put(allocator, text_box.getFocus().id, {});
+        try box.children.put(allocator, text_box.getFocus().id, .{
+            .widget = .{ .text_box = text_box },
+            .rect = null,
+            .min_size = .{ .width = label.len + 2, .height = null },
+        });
     }
 
     pub fn deinit(self: *Header, allocator: std.mem.Allocator) void {

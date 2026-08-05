@@ -90,7 +90,12 @@ pub const RoutablePage = union(enum) {
         name: Array(repo_route_max_len),
         // the tag the list is filtered to, url-encoded ("" = unfiltered).
         tag: Array(issue_tag_route_max_len) = .{},
+        // the issue the route names: the list's window root, or the issue the
+        // edit/description/resolve view shows.
         selected: Array(evt.event_id_size * 2) = .{},
+        // the resolve view's comma-separated list of fields prefilled from
+        // their side of the conflict.
+        theirs: Array(theirs_route_max_len) = .{},
         // the view the url names; a route with `selected` derives its view
         // from that issue's status instead.
         view: IssuesView = .open,
@@ -102,7 +107,7 @@ pub const RoutablePage = union(enum) {
 
     pub const RefKind = enum { branch, tag };
 
-    pub const IssuesView = enum { open, closed, tags, new, edit, description };
+    pub const IssuesView = enum { open, closed, tags, new, edit, description, conflicts, resolve };
 
     pub const RefOrOid = enum {
         branch,
@@ -112,7 +117,7 @@ pub const RoutablePage = union(enum) {
 
     // the "key:value" segments of a url tail, collected in any order
     const Params = struct {
-        const ParamKey = enum { start, line, branch, tag, object };
+        const ParamKey = enum { start, line, branch, tag, object, theirs };
 
         // a branch:/tag:/object: param; the value stays url-encoded
         const RefParam = struct { kind: RefOrOid, value: []const u8 };
@@ -189,6 +194,7 @@ pub const RoutablePage = union(enum) {
     const tag_filter_seg = @tagName(Params.ParamKey.tag) ++ ":";
     const start_seg = @tagName(Params.ParamKey.start) ++ ":";
     const line_seg = @tagName(Params.ParamKey.line) ++ ":";
+    const theirs_seg = @tagName(Params.ParamKey.theirs) ++ ":";
     // marks a files or commits route's trailing path: the value is the raw
     // remainder of the url, so it must come last
     const path_seg = "path:";
@@ -208,6 +214,9 @@ pub const RoutablePage = union(enum) {
 
     // a url-encoded tag can grow to three bytes per source byte.
     pub const issue_tag_route_max_len = evt.Issue.tag_max_len * 3;
+
+    // caps the resolve view's theirs: field list (a longer one doesn't route).
+    pub const theirs_route_max_len = 512;
 
     // caps a url-encoded ref name in a route (a longer name doesn't route).
     pub const ref_route_max_len = 512;
@@ -376,6 +385,29 @@ pub const RoutablePage = union(enum) {
         } };
     }
 
+    // build a `.repo_issues` route showing the conflicts list, rooted at the
+    // issue with hex event id `start` ("" = the first window).
+    pub fn repoIssuesConflictsRoute(identity: []const u8, start: []const u8) ?RoutablePage {
+        return .{ .repo_issues = .{
+            .name = Array(repo_route_max_len).from(identity) orelse return null,
+            .selected = Array(evt.event_id_size * 2).from(start) orelse return null,
+            .view = .conflicts,
+        } };
+    }
+
+    // build a `.repo_issues` route showing the conflict resolve form for the
+    // issue with hex event id `selected`; `theirs` is the comma-separated list
+    // of fields prefilled from their side.
+    pub fn repoIssuesResolveRoute(identity: []const u8, selected: []const u8, theirs: []const u8) ?RoutablePage {
+        if (selected.len == 0) return null;
+        return .{ .repo_issues = .{
+            .name = Array(repo_route_max_len).from(identity) orelse return null,
+            .selected = Array(evt.event_id_size * 2).from(selected) orelse return null,
+            .theirs = Array(theirs_route_max_len).from(theirs) orelse return null,
+            .view = .resolve,
+        } };
+    }
+
     // an inline, owned array of data. keeping it in the route (rather than a
     // borrowed slice) makes RoutablePage a plain value: it can be copied, stored
     // in history, and serialized without any arena tracking.
@@ -455,6 +487,14 @@ pub const RoutablePage = union(enum) {
                 const prefix = try repoUrlPrefix(arena, i.name.slice());
                 if (i.view == .edit) break :blk try std.fmt.allocPrint(arena.allocator(), "{s}/issues/{s}/edit", .{ prefix, i.selected.slice() });
                 if (i.view == .description) break :blk try std.fmt.allocPrint(arena.allocator(), "{s}/issues/{s}/description", .{ prefix, i.selected.slice() });
+                if (i.view == .resolve) break :blk if (i.theirs.len == 0)
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/issues/{s}/resolve", .{ prefix, i.selected.slice() })
+                else
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/issues/" ++ theirs_seg ++ "{s}/{s}/resolve", .{ prefix, i.theirs.slice(), i.selected.slice() });
+                if (i.view == .conflicts) break :blk if (i.selected.len == 0)
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/issues/conflicts", .{prefix})
+                else
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/issues/" ++ start_seg ++ "{s}/conflicts", .{ prefix, i.selected.slice() });
                 // a selected issue's url carries its id instead of a view
                 // name, so it survives status changes
                 const word = if (i.selected.len != 0) i.selected.slice() else @tagName(i.view);
@@ -518,6 +558,15 @@ pub const RoutablePage = union(enum) {
     fn repoUrlPrefix(arena: *std.heap.ArenaAllocator, identity: []const u8) ![]const u8 {
         if (identity.len == 0) return "";
         return std.fmt.allocPrint(arena.allocator(), repo_segment ++ "{s}", .{identity});
+    }
+
+    // true when the page builds at its content height on the web, letting the
+    // browser scroll the whole page, rather than being pinned to the viewport
+    pub fn fullHeight(self: RoutablePage) bool {
+        return switch (self) {
+            .repo_issues => |i| i.view == .resolve,
+            else => false,
+        };
     }
 
     // the "owner/name" a repo route carries, null for any other route. the
@@ -603,12 +652,25 @@ pub const RoutablePage = union(enum) {
                 if (id.len == 0 or std.mem.indexOfScalar(u8, id, '/') != null) return null;
                 return repoIssuesDescriptionRoute(pair, id);
             }
+            // "[theirs:<list>/]<id>/resolve" is the conflict resolve form.
+            if (std.mem.endsWith(u8, after_tab, "/resolve")) {
+                var resolve_segments = std.mem.splitScalar(u8, after_tab[0 .. after_tab.len - "/resolve".len], '/');
+                const id = (params.scanTail(&resolve_segments) catch return null) orelse return null;
+                if (!params.only(&.{.theirs})) return null;
+                return repoIssuesResolveRoute(pair, id, params.values.get(.theirs) orelse "");
+            }
             // the word is a view name or an issue event id (whose status
             // picks the view); a filter with neither is never emitted.
             const word = params.scanTail(&segments) catch return null;
-            if (!params.only(&.{.tag})) return null;
             const tag_value = params.values.get(.tag) orelse "";
-            const w = word orelse return if (tag_value.len == 0) repoIssuesRoute(pair, .open, "", "") else null;
+            const w = word orelse return if (params.only(&.{})) repoIssuesRoute(pair, .open, "", "") else null;
+            // the conflicts list windows by an issue id, not a number, so it
+            // reads the start param raw
+            if (std.mem.eql(u8, w, "conflicts")) {
+                if (!params.only(&.{.start})) return null;
+                return repoIssuesConflictsRoute(pair, params.values.get(.start) orelse "");
+            }
+            if (!params.only(&.{.tag})) return null;
             if (std.meta.stringToEnum(evt.Issue.Status, w)) |status| return repoIssuesRoute(pair, status, tag_value, "");
             if (std.mem.eql(u8, w, "tags")) return repoIssuesTagsRoute(pair, tag_value);
             if (std.mem.eql(u8, w, "new")) return if (tag_value.len == 0) repoIssuesNewRoute(pair) else null;
@@ -667,6 +729,7 @@ pub const RoutablePage = union(enum) {
             .repo_issues => |a_i| std.mem.eql(u8, a_i.name.slice(), b.repo_issues.name.slice()) and
                 std.mem.eql(u8, a_i.tag.slice(), b.repo_issues.tag.slice()) and
                 std.mem.eql(u8, a_i.selected.slice(), b.repo_issues.selected.slice()) and
+                std.mem.eql(u8, a_i.theirs.slice(), b.repo_issues.theirs.slice()) and
                 a_i.view == b.repo_issues.view,
             .repo_settings => |a_name| std.mem.eql(u8, a_name.slice(), b.repo_settings.slice()),
             .repo_auth => |a_name| std.mem.eql(u8, a_name.slice(), b.repo_auth.slice()),
