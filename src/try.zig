@@ -388,6 +388,12 @@ pub fn main(init: std.process.Init) !void {
             const tz_p3 = "A quick survey of other clients shows every one of them rendering local time by default.";
             const tz_p4 = "Convert to local time and include the offset in tooltips.";
 
+            // the sync issue's description, in paragraphs, so each side of its
+            // seeded conflict can rework a different one
+            const sync_p1 = "The sync engine only has unit tests with mocked transports.";
+            const sync_p2 = "Failures seen in production involve reconnects and partial writes, which the mocks can't reproduce.";
+            const sync_p3 = "Add end-to-end tests that run two instances against a real local server.";
+
             // seed issues so every repo's issue tracker has content
             const issue_data = [_]struct {
                 title: []const u8,
@@ -510,7 +516,7 @@ pub fn main(init: std.process.Init) !void {
                 },
                 .{
                     .title = "Add integration tests for the sync engine",
-                    .description = "The sync engine only has unit tests with mocked transports. Add end-to-end tests that run two instances against a real local server.",
+                    .description = sync_p1 ++ "\n\n" ++ sync_p2 ++ "\n\n" ++ sync_p3,
                     .tags = "testing sync",
                 },
                 .{
@@ -562,12 +568,15 @@ pub fn main(init: std.process.Init) !void {
             // two divergent edits per conflicted issue: ours on the events
             // branch, theirs on a temp branch rooted at the seed tip, then a
             // merge. the 4th-newest issue conflicts on title and tags; the
-            // 2nd-newest on its description, with a deletion conflict (ours
-            // removes a paragraph theirs rewords) and an insertion conflict
-            // (each side appends a different closing paragraph).
+            // 3rd-newest on its description with every hunk auto-resolving
+            // (each side reworks a different paragraph); the 2nd-newest on
+            // its description with a deletion conflict (ours removes a
+            // paragraph theirs rewords) and an insertion conflict (each side
+            // appends a different closing paragraph).
             {
                 const other_ref: xit.ref.Ref = .{ .kind = .head, .name = "haxy/other" };
                 const title_issue = issue_data[issue_data.len - 4];
+                const sync_issue = issue_data[issue_data.len - 3];
                 const desc_issue = issue_data[issue_data.len - 2];
 
                 const ours = [_]evt.EventWithId{ .{
@@ -580,8 +589,18 @@ pub fn main(init: std.process.Init) !void {
                         .tags = "bug crash ui priority-high",
                     } },
                 }, .{
-                    .id = issue_events[issue_data.len - 2].id,
+                    .id = issue_events[issue_data.len - 3].id,
                     .timestamp = 101,
+                    .author_email = user_data[1].email,
+                    .event = .{ .issue = .{
+                        .title = sync_issue.title,
+                        .description = "The sync engine's coverage is unit tests only, with every transport mocked out." ++ "\n\n" ++
+                            sync_p2 ++ "\n\n" ++ sync_p3,
+                        .tags = sync_issue.tags,
+                    } },
+                }, .{
+                    .id = issue_events[issue_data.len - 2].id,
+                    .timestamp = 102,
                     .author_email = user_data[1].email,
                     .event = .{ .issue = .{
                         .title = desc_issue.title,
@@ -592,7 +611,7 @@ pub fn main(init: std.process.Init) !void {
                 } };
                 const theirs = [_]evt.EventWithId{ .{
                     .id = issue_events[issue_data.len - 4].id,
-                    .timestamp = 102,
+                    .timestamp = 103,
                     .author_email = user_data[2].email,
                     .event = .{ .issue = .{
                         .title = "Segfault on early window resize",
@@ -600,8 +619,18 @@ pub fn main(init: std.process.Init) !void {
                         .tags = "bug crash rendering",
                     } },
                 }, .{
+                    .id = issue_events[issue_data.len - 3].id,
+                    .timestamp = 104,
+                    .author_email = user_data[2].email,
+                    .event = .{ .issue = .{
+                        .title = sync_issue.title,
+                        .description = sync_p1 ++ "\n\n" ++ sync_p2 ++ "\n\n" ++
+                            "Add end-to-end tests that drive two live instances against a local server on every CI run.",
+                        .tags = sync_issue.tags,
+                    } },
+                }, .{
                     .id = issue_events[issue_data.len - 2].id,
-                    .timestamp = 103,
+                    .timestamp = 105,
                     .author_email = user_data[2].email,
                     .event = .{ .issue = .{
                         .title = desc_issue.title,
