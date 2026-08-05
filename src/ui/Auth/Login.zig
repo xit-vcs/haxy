@@ -45,7 +45,7 @@ pub const View = struct {
         var nav_ids: [3]usize = undefined;
 
         {
-            var username = try wgt.TextInput(ui.Widget).init(allocator, .{ .label = " username ", .name = "username", .rounded_corners = true, .render_content = !wasm });
+            var username = try wgt.TextInput(ui.Widget).init(allocator, .{ .label = " username ", .name = "username", .rounded_corners = true, .render_content = session.is_terminal });
             errdefer username.deinit(allocator);
             username.getFocus().focusable = true;
             nav_ids[username_index] = username.getFocus().id;
@@ -57,7 +57,7 @@ pub const View = struct {
         }
 
         {
-            var password = try wgt.TextInput(ui.Widget).init(allocator, .{ .label = " password ", .password = true, .name = "password", .rounded_corners = true, .render_content = !wasm });
+            var password = try wgt.TextInput(ui.Widget).init(allocator, .{ .label = " password ", .password = true, .name = "password", .rounded_corners = true, .render_content = session.is_terminal });
             errdefer password.deinit(allocator);
             password.getFocus().focusable = true;
             nav_ids[password_index] = password.getFocus().id;

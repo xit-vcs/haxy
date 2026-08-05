@@ -439,7 +439,7 @@ pub const View = struct {
                 (if (data.selectedIssue()) |entry| &entry.issue else null)
             else
                 null;
-            var form = try initIssueForm(allocator, action, issue);
+            var form = try initIssueForm(allocator, session, action, issue);
             errdefer form.deinit(allocator);
             try stack.children.put(allocator, form.getFocus().id, .{ .box = form });
         } else {
@@ -534,13 +534,13 @@ pub const View = struct {
     // an issue form: title/tags/description inputs and a submit button,
     // prefilled from `issue` when given. its form: subtree makes the web
     // overlay wrap them in a <form> POSTing to `action`'s route.
-    fn initIssueForm(allocator: std.mem.Allocator, action: []const u8, issue: ?*const evt.Issue.Record) !wgt.Box(ui.Widget) {
+    fn initIssueForm(allocator: std.mem.Allocator, session: *ui.Session, action: []const u8, issue: ?*const evt.Issue.Record) !wgt.Box(ui.Widget) {
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert });
         errdefer box.deinit(allocator);
         box.getFocus().kind = .{ .custom = action };
 
         {
-            var title = try wgt.TextInput(ui.Widget).init(allocator, .{ .label = " title ", .name = "title", .visible_width = null, .rounded_corners = true, .render_content = !wasm });
+            var title = try wgt.TextInput(ui.Widget).init(allocator, .{ .label = " title ", .name = "title", .visible_width = null, .rounded_corners = true, .render_content = session.is_terminal });
             errdefer title.deinit(allocator);
             title.getFocus().focusable = true;
             if (issue) |i| try title.setContent(allocator, i.event.title);
@@ -548,7 +548,7 @@ pub const View = struct {
         }
 
         {
-            var tags = try wgt.TextInput(ui.Widget).init(allocator, .{ .label = " tags (separate with spaces) ", .name = "tags", .visible_width = null, .rounded_corners = true, .render_content = !wasm });
+            var tags = try wgt.TextInput(ui.Widget).init(allocator, .{ .label = " tags (separate with spaces) ", .name = "tags", .visible_width = null, .rounded_corners = true, .render_content = session.is_terminal });
             errdefer tags.deinit(allocator);
             tags.getFocus().focusable = true;
             if (issue) |i| try tags.setContent(allocator, i.event.tags);
@@ -556,7 +556,7 @@ pub const View = struct {
         }
 
         {
-            var description = try wgt.TextInput(ui.Widget).init(allocator, .{ .label = " description ", .name = "description", .visible_width = null, .rounded_corners = true, .render_content = !wasm, .multiline = true, .scroll = .{ .fill = true } });
+            var description = try wgt.TextInput(ui.Widget).init(allocator, .{ .label = " description ", .name = "description", .visible_width = null, .rounded_corners = true, .render_content = session.is_terminal, .multiline = true, .scroll = .{ .fill = true } });
             errdefer description.deinit(allocator);
             description.getFocus().focusable = true;
             if (issue) |i| try description.setContent(allocator, i.event.description);
