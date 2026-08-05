@@ -1420,7 +1420,13 @@ pub const View = struct {
         sc.getFocus().version +%= 1;
     }
 
-    pub fn input(self: *View, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
+    pub fn input(self: *View, allocator: std.mem.Allocator, raw_key: Key, root_focus: *Focus) !void {
+        // wheel input moves focus like the arrows
+        const key: Key = if (raw_key == .mouse and raw_key.mouse.action == .scroll)
+            (if (raw_key.mouse.action.scroll == .up) .arrow_up else .arrow_down)
+        else
+            raw_key;
+
         if (self.headerActive()) {
             // down from the tabs re-enters the stack if the selected view has
             // something to focus; other keys move the tabs.
@@ -1520,33 +1526,18 @@ pub const View = struct {
             .arrow_up => self.focusHeader(root_focus),
             .arrow_down => self.focusTitle(index, root_focus),
             .enter => if (on_status) try self.toggleIssueStatus(allocator, index),
-            .mouse => |mouse| switch (mouse.action) {
-                .scroll => |dir| {
-                    const sc = self.detailScroll(index);
-                    sc.y += if (dir == .up) @as(isize, -1) else 1;
-                    sc.clampToContent();
-                },
-                else => if (self.statusButton(index)) |button| {
-                    if (inp.leftClickOn(root_focus, button.getFocus().id, mouse)) try self.toggleIssueStatus(allocator, index);
-                },
+            .mouse => |mouse| if (self.statusButton(index)) |button| {
+                if (inp.leftClickOn(root_focus, button.getFocus().id, mouse)) try self.toggleIssueStatus(allocator, index);
             },
             else => {},
         }
     }
 
     fn titleInput(self: *View, index: usize, key: Key, root_focus: *Focus) !void {
-        const sc = self.detailScroll(index);
         switch (key) {
             .arrow_left => try self.focusList(index, root_focus),
             .arrow_up => self.focusToolRow(index, root_focus),
             .arrow_down => if (self.authorPresent(index)) self.focusAuthor(index, root_focus) else try self.focusDescription(index, root_focus),
-            .mouse => |mouse| switch (mouse.action) {
-                .scroll => |dir| {
-                    sc.y += if (dir == .up) @as(isize, -1) else 1;
-                    sc.clampToContent();
-                },
-                else => {},
-            },
             else => {},
         }
     }
@@ -1554,18 +1545,10 @@ pub const View = struct {
     // the author box's a: link (when it has one) is followed by the host on
     // enter / a click; arrows cross to the neighboring widgets.
     fn authorInput(self: *View, index: usize, key: Key, root_focus: *Focus) !void {
-        const sc = self.detailScroll(index);
         switch (key) {
             .arrow_left => try self.focusList(index, root_focus),
             .arrow_up => self.focusTitle(index, root_focus),
             .arrow_down => if (self.tagFlow(index) != null) try self.focusTags(index, root_focus) else try self.focusDescription(index, root_focus),
-            .mouse => |mouse| switch (mouse.action) {
-                .scroll => |dir| {
-                    sc.y += if (dir == .up) @as(isize, -1) else 1;
-                    sc.clampToContent();
-                },
-                else => {},
-            },
             else => {},
         }
     }
@@ -1595,10 +1578,6 @@ pub const View = struct {
             .page_down => sc.y += 10,
             .home => sc.y = 0,
             .end => sc.y = std.math.maxInt(isize),
-            .mouse => |mouse| switch (mouse.action) {
-                .scroll => |dir| sc.y += if (dir == .up) @as(isize, -1) else 1,
-                else => {},
-            },
             else => return,
         }
         sc.clampToContent();
@@ -1669,11 +1648,6 @@ pub const View = struct {
             .enter => if (on_submit) try self.submitResolution(allocator),
             .mouse => |mouse| if (on_submit and inp.leftClickOn(root_focus, cid, mouse)) {
                 try self.submitResolution(allocator);
-            } else if (mouse.action == .scroll) {
-                if (self.resolveScroll()) |sc| {
-                    sc.y += if (mouse.action.scroll == .up) @as(isize, -1) else 1;
-                    sc.clampToContent();
-                }
             },
             else => try child.widget.input(allocator, key, root_focus),
         }
@@ -1948,7 +1922,6 @@ pub const View = struct {
         const cid = tf.focus.child_id orelse return;
         const cur = tf.indexOfFocusId(cid) orelse return;
         const count = tf.text_boxes.items.len;
-        const sc = self.detailScroll(index);
         switch (key) {
             .arrow_left => if (cur > 0) self.focusTag(index, tf, root_focus, cur - 1) else try self.focusList(index, root_focus),
             .arrow_right => if (cur + 1 < count) self.focusTag(index, tf, root_focus, cur + 1),
@@ -1956,13 +1929,6 @@ pub const View = struct {
             .arrow_down => if (tf.rowStep(cur, true)) |i| self.focusTag(index, tf, root_focus, i) else try self.focusDescription(index, root_focus),
             .home => self.focusTag(index, tf, root_focus, 0),
             .end => self.focusTag(index, tf, root_focus, count - 1),
-            .mouse => |mouse| switch (mouse.action) {
-                .scroll => |dir| {
-                    sc.y += if (dir == .up) @as(isize, -1) else 1;
-                    sc.clampToContent();
-                },
-                else => {},
-            },
             else => {},
         }
     }
