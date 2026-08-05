@@ -1427,6 +1427,8 @@ pub const Widget = union(enum) {
     tag_flow: TagFlow,
     spacer: Spacer,
     center: Center,
+    section_label: SectionLabel,
+    submit_button: SubmitButton,
     background: AnsiBackground,
     home: Home.View,
     user: User.View,
@@ -2073,6 +2075,122 @@ pub const Footer = struct {
 
 // a single-child wrapper that builds the child at its natural size and
 // positions its grid in the middle of the area granted by the parent
+// a bordered label, indented past the content it precedes
+pub const SectionLabel = struct {
+    box: wgt.Box(Widget),
+
+    pub fn init(allocator: std.mem.Allocator, content: []const u8) !SectionLabel {
+        var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
+        errdefer box.deinit(allocator);
+
+        {
+            var gap = try wgt.Text(Widget).init(allocator, "  ");
+            errdefer gap.deinit(allocator);
+            try box.children.put(allocator, gap.getFocus().id, .{ .widget = .{ .text = gap }, .rect = null, .min_size = null });
+        }
+
+        {
+            var tb = try wgt.TextBox(Widget).init(allocator, content, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            errdefer tb.deinit(allocator);
+            tb.getFocus().focusable = true;
+            try box.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
+        }
+
+        box.getFocus().child_id = box.children.keys()[1];
+        return .{ .box = box };
+    }
+
+    pub fn deinit(self: *SectionLabel, allocator: std.mem.Allocator) void {
+        self.box.deinit(allocator);
+    }
+
+    pub fn build(self: *SectionLabel, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
+        try self.box.build(allocator, constraint, root_focus);
+    }
+
+    pub fn input(self: *SectionLabel, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
+        _ = self;
+        _ = allocator;
+        _ = key;
+        _ = root_focus;
+    }
+
+    pub fn clearGrid(self: *SectionLabel) void {
+        self.box.clearGrid();
+    }
+
+    pub fn getGrid(self: SectionLabel) ?Grid {
+        return self.box.getGrid();
+    }
+
+    pub fn getFocus(self: *SectionLabel) *Focus {
+        return self.box.getFocus();
+    }
+};
+
+// a submit button, indented past its form's content. the web overlay POSTs
+// the button's form; terminal hosts detect presses through `buttonId`.
+pub const SubmitButton = struct {
+    box: wgt.Box(Widget),
+
+    pub fn init(allocator: std.mem.Allocator) !SubmitButton {
+        var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
+        errdefer box.deinit(allocator);
+
+        {
+            var gap = try wgt.Text(Widget).init(allocator, "  ");
+            errdefer gap.deinit(allocator);
+            try box.children.put(allocator, gap.getFocus().id, .{ .widget = .{ .text = gap }, .rect = null, .min_size = null });
+        }
+
+        {
+            const label = "submit";
+            var button = try wgt.TextBox(Widget).init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            errdefer button.deinit(allocator);
+            button.getFocus().focusable = true;
+            // the renderer distinguishes plain clickables from buttons that
+            // should POST to a server route by this kind.
+            button.getFocus().kind = .{ .custom = "submit" };
+            try box.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = .{ .width = label.len + 2, .height = null } });
+        }
+
+        box.getFocus().child_id = box.children.keys()[1];
+        return .{ .box = box };
+    }
+
+    pub fn deinit(self: *SubmitButton, allocator: std.mem.Allocator) void {
+        self.box.deinit(allocator);
+    }
+
+    pub fn build(self: *SubmitButton, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
+        try self.box.build(allocator, constraint, root_focus);
+    }
+
+    pub fn input(self: *SubmitButton, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
+        _ = self;
+        _ = allocator;
+        _ = key;
+        _ = root_focus;
+    }
+
+    pub fn clearGrid(self: *SubmitButton) void {
+        self.box.clearGrid();
+    }
+
+    pub fn getGrid(self: SubmitButton) ?Grid {
+        return self.box.getGrid();
+    }
+
+    pub fn getFocus(self: *SubmitButton) *Focus {
+        return self.box.getFocus();
+    }
+
+    // the button's focus id, for click hit-testing
+    pub fn buttonId(self: *const SubmitButton) usize {
+        return self.box.children.keys()[1];
+    }
+};
+
 pub const Center = struct {
     focus: *Focus,
     grid: ?Grid,

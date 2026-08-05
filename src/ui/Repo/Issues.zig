@@ -806,13 +806,9 @@ pub const View = struct {
     // natural height
     fn addSubmitButton(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget)) !void {
         {
-            var button = try wgt.TextBox(ui.Widget).init(allocator, "submit", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
-            errdefer button.deinit(allocator);
-            button.getFocus().focusable = true;
-            // the renderer distinguishes plain clickables from buttons that
-            // should POST to a server route by this kind.
-            button.getFocus().kind = .{ .custom = "submit" };
-            try box.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
+            var submit = try ui.SubmitButton.init(allocator);
+            errdefer submit.deinit(allocator);
+            try box.children.put(allocator, submit.getFocus().id, .{ .widget = .{ .submit_button = submit }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
         }
         {
             var spacer = try ui.Spacer.init(allocator);
@@ -850,7 +846,6 @@ pub const View = struct {
             try addLabel(allocator, &box, "description conflict:");
             var hunk_index: usize = 0;
             for (desc.chunks, 0..) |*chunk, chunk_index| {
-                if (chunk_index > 0) try addGap(allocator, &box);
                 switch (chunk.*) {
                     .same => |text| {
                         var tb = try wgt.TextBox(ui.Widget).init(allocator, text, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .word });
@@ -873,6 +868,9 @@ pub const View = struct {
                         try box.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
                     },
                     .conflict => |hunk| {
+                        // a blank row on each side sets the group apart from
+                        // the flowing shared and auto-resolved chunks
+                        if (chunk_index > 0) try addGap(allocator, &box);
                         const name = try std.fmt.allocPrint(aa, "d{d}", .{hunk_index});
                         hunk_index += 1;
                         const picked_theirs = data.theirsPicked(name);
@@ -883,6 +881,7 @@ pub const View = struct {
                         resolution_input.getFocus().focusable = true;
                         try resolution_input.setContent(allocator, (if (picked_theirs) hunk.theirs else hunk.ours) orelse "");
                         try box.children.put(allocator, resolution_input.getFocus().id, .{ .widget = .{ .text_input = resolution_input }, .rect = null, .min_size = null });
+                        if (chunk_index + 1 < desc.chunks.len) try addGap(allocator, &box);
                     },
                 }
             }
@@ -908,19 +907,17 @@ pub const View = struct {
         try box.children.put(allocator, resolution_input.getFocus().id, .{ .widget = .{ .text_input = resolution_input }, .rect = null, .min_size = null });
     }
 
-    // a blank row separating adjacent chunks
+    // a blank row setting a conflict group apart from its neighbors
     fn addGap(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget)) !void {
         var text = try wgt.Text(ui.Widget).init(allocator, " ");
         errdefer text.deinit(allocator);
         try box.children.put(allocator, text.getFocus().id, .{ .widget = .{ .text = text }, .rect = null, .min_size = null });
     }
 
-    // a section label
     fn addLabel(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), content: []const u8) !void {
-        var tb = try wgt.TextBox(ui.Widget).init(allocator, content, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
-        errdefer tb.deinit(allocator);
-        tb.getFocus().focusable = true;
-        try box.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
+        var label = try ui.SectionLabel.init(allocator, content);
+        errdefer label.deinit(allocator);
+        try box.children.put(allocator, label.getFocus().id, .{ .widget = .{ .section_label = label }, .rect = null, .min_size = null });
     }
 
     // one side of a conflict: the "use this" link on the left, the version
@@ -930,15 +927,16 @@ pub const View = struct {
         errdefer row.deinit(allocator);
 
         {
-            var use = try wgt.TextBox(ui.Widget).init(allocator, "use this", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            const use_label = "use this";
+            var use = try wgt.TextBox(ui.Widget).init(allocator, use_label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer use.deinit(allocator);
             use.getFocus().focusable = true;
             use.getFocus().kind = .{ .custom = link };
             try row.children.put(allocator, use.getFocus().id, .{
                 .widget = .{ .text_box = use },
                 .rect = null,
-                .min_size = .{ .width = "use this".len + 2, .height = null },
-                .max_size = .{ .width = "use this".len + 2, .height = null },
+                .min_size = .{ .width = use_label.len + 2, .height = null },
+                .max_size = .{ .width = use_label.len + 2, .height = null },
             });
         }
 
@@ -1295,12 +1293,13 @@ pub const View = struct {
             // stays visible logged out; the resolve page shows the
             // unauthorized view then.
             if (entry.conflicted) {
-                var button = try wgt.TextBox(ui.Widget).init(allocator, "resolve", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+                const label = "resolve conflict";
+                var button = try wgt.TextBox(ui.Widget).init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
                 errdefer button.deinit(allocator);
                 button.getFocus().focusable = true;
                 const route = ui.RoutablePage.repoIssuesResolveRoute(self.data.identity, entry.id, "") orelse return error.RouteTooLong;
                 button.getFocus().kind = .{ .custom = try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}) };
-                try row.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = .{ .width = "resolve".len + 2, .height = null } });
+                try row.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = .{ .width = label.len + 2, .height = null } });
             } else {
                 // a logged-out session can't flip the status, so it gets no
                 // open/close button (and no form action on the row)
@@ -1606,8 +1605,9 @@ pub const View = struct {
                 root_focus.setFocus(form.children.keys()[cur + 1]);
             },
             .enter => if (cur == submit_field_index) try self.submitForm(allocator),
-            .mouse => |mouse| if (cur == submit_field_index and inp.leftClickOn(root_focus, cid, mouse)) {
-                try self.submitForm(allocator);
+            .mouse => |mouse| if (cur == submit_field_index) {
+                const submit = &form.children.values()[cur].widget.submit_button;
+                if (inp.leftClickOn(root_focus, submit.buttonId(), mouse)) try self.submitForm(allocator);
             },
             else => try form.children.values()[cur].widget.input(allocator, key, root_focus),
         }
@@ -1628,7 +1628,7 @@ pub const View = struct {
                 return child.widget.input(allocator, key, root_focus);
         }
 
-        const on_submit = isSubmitButton(&child.widget);
+        const on_submit = child.widget == .submit_button;
 
         switch (key) {
             .arrow_up, .back_tab => if (resolveStep(form, cur, false)) |i| self.focusResolveChild(form, i, root_focus) else self.focusHeader(root_focus),
@@ -1646,8 +1646,8 @@ pub const View = struct {
                 else => try child.widget.input(allocator, key, root_focus),
             },
             .enter => if (on_submit) try self.submitResolution(allocator),
-            .mouse => |mouse| if (on_submit and inp.leftClickOn(root_focus, cid, mouse)) {
-                try self.submitResolution(allocator);
+            .mouse => |mouse| if (on_submit) {
+                if (inp.leftClickOn(root_focus, child.widget.submit_button.buttonId(), mouse)) try self.submitResolution(allocator);
             },
             else => try child.widget.input(allocator, key, root_focus),
         }
@@ -1659,17 +1659,6 @@ pub const View = struct {
             .enter => true,
             .arrow_up => !try text_input.cursorOnFirstRow(allocator),
             .arrow_down => !try text_input.cursorOnLastRow(allocator),
-            else => false,
-        };
-    }
-
-    // whether the widget is a button that posts its form
-    fn isSubmitButton(widget: *const ui.Widget) bool {
-        return switch (widget.*) {
-            .text_box => |*tb| switch (tb.box.focus.kind) {
-                .custom => |custom| std.mem.eql(u8, custom, "submit"),
-                else => false,
-            },
             else => false,
         };
     }
@@ -1952,14 +1941,20 @@ pub const View = struct {
         return inner.children.getIndex(cid) == tags_child_index and self.tagFlow(index) != null;
     }
 
-    // the open/close button inside the detail frame's tool row; a logged-out
-    // session's or conflicted issue's row has none.
+    // the open/close button inside the detail frame's tool row, identified
+    // by its posting kind; a logged-out session's or conflicted issue's row
+    // has none.
     fn statusButton(self: *View, index: usize) ?*wgt.TextBox(ui.Widget) {
         const row = self.toolRow(index);
         if (row.children.count() <= button_in_row_index) return null;
-        const child = &row.children.values()[button_in_row_index].widget;
-        if (!isSubmitButton(child)) return null;
-        return &child.text_box;
+        switch (row.children.values()[button_in_row_index].widget) {
+            .text_box => |*tb| switch (tb.box.focus.kind) {
+                .custom => |custom| if (std.mem.eql(u8, custom, "submit")) return tb,
+                else => {},
+            },
+            else => {},
+        }
+        return null;
     }
 
     fn toolRowFocused(self: *View, index: usize) bool {
