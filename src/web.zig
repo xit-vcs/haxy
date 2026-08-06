@@ -1165,7 +1165,10 @@ pub fn generateOverlay(allocator: std.mem.Allocator, root: *ui.Widget, session: 
                     try out.appendSlice(allocator, "\" style=\"left:");
                     var pos_buf: [128]u8 = undefined;
                     try out.appendSlice(allocator, try std.fmt.bufPrint(&pos_buf, "{d}ch;top:{d}em;width:{d}ch;height:{d}em", .{ inner_left, inner_top, inner_width, inner_height }));
-                    try out.appendSlice(allocator, "\">");
+                    // textarea discards the first newline immediately following
+                    // its start tag, so add one of our own so text that begins
+                    // with a newline doesn't lose it
+                    try out.appendSlice(allocator, "\">\n");
                     if (session.input_values.get(inner_id)) |value| try appendEscapedHtml(allocator, &out, value);
                     try out.appendSlice(allocator, "</textarea>");
                 },
