@@ -2463,7 +2463,7 @@ pub const AnsiBackground = struct {
 
         if (self.session.data.enable_ansi) {
             if (self.child.getGrid()) |fg| {
-                self.grid = try artBehind(allocator, fg, &self.art, .top_right, root_focus);
+                self.grid = try artBehind(allocator, fg, &self.art, .top_right, self.session.is_terminal, root_focus);
             }
         }
     }
@@ -2531,7 +2531,7 @@ pub const AnsiBackground = struct {
     }
 
     // composites ANSI art behind a foreground grid
-    fn artBehind(allocator: std.mem.Allocator, foreground: Grid, art: *AnsiArt, anchor: ArtAnchor, root_focus: *Focus) !Grid {
+    fn artBehind(allocator: std.mem.Allocator, foreground: Grid, art: *AnsiArt, anchor: ArtAnchor, is_terminal: bool, root_focus: *Focus) !Grid {
         art.clearGrid();
         try art.build(allocator, .{
             .min_size = .{ .width = null, .height = null },
@@ -2562,7 +2562,27 @@ pub const AnsiBackground = struct {
                         dst.style.fg = sgrSafe(dimColor(dst.style.fg));
                         dst.style.bg = sgrSafe(dimColor(dst.style.bg));
                     } else {
-                        dst.style.bg = sgrSafe(dimColor(src.style.bg orelse src.style.fg));
+                        const background_maybe = sgrSafe(dimColor(src.style.bg orelse src.style.fg));
+                        dst.style.bg = background_maybe;
+                        // change the color of text overlaying ANSI art to ensure
+                        // it is readable. don't do this in the web UI, since we
+                        // have direct control of the theme there (also, inner
+                        // scroll panes allow text to move without a re-render
+                        // by the TUI, which would break this). also don't do this
+                        // if the text is explicitly styled.
+                        if (is_terminal and dst.style.fg == null) {
+                            if (background_maybe) |background| {
+                                // use near-black and near-white, which is easier on the eyes
+                                // while retaining high contrast
+                                const luminance = (@as(u32, background.r) * 299 +
+                                    @as(u32, background.g) * 587 +
+                                    @as(u32, background.b) * 114) / 1000;
+                                dst.style.fg = if (luminance >= 128)
+                                    .{ .r = 16, .g = 16, .b = 16 }
+                                else
+                                    .{ .r = 240, .g = 240, .b = 240 };
+                            }
+                        }
                     }
                 }
             }
