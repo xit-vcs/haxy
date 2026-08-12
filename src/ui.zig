@@ -203,6 +203,8 @@ pub const RoutablePage = union(enum) {
     const start_seg = @tagName(Params.ParamKey.start) ++ ":";
     const line_seg = @tagName(Params.ParamKey.line) ++ ":";
     const theirs_seg = @tagName(Params.ParamKey.theirs) ++ ":";
+    const issue_seg = "issue:";
+    const comment_seg = "comment:";
     // marks a files or commits route's trailing path: the value is the raw
     // remainder of the url, so it must come last
     const path_seg = "path:";
@@ -511,32 +513,31 @@ pub const RoutablePage = union(enum) {
             },
             .repo_issues => |i| blk: {
                 const prefix = try repoUrlPrefix(arena, i.name.slice());
-                if (i.view == .edit) break :blk try std.fmt.allocPrint(arena.allocator(), "{s}/issues/{s}/edit", .{ prefix, i.selected.slice() });
-                if (i.view == .description) break :blk try std.fmt.allocPrint(arena.allocator(), "{s}/issues/{s}/description", .{ prefix, i.selected.slice() });
+                if (i.view == .edit) break :blk try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ issue_seg ++ "{s}/edit", .{ prefix, i.selected.slice() });
+                if (i.view == .description) break :blk try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ issue_seg ++ "{s}/description", .{ prefix, i.selected.slice() });
                 if (i.view == .resolve) break :blk if (i.theirs.len == 0)
-                    try std.fmt.allocPrint(arena.allocator(), "{s}/issues/{s}/resolve", .{ prefix, i.selected.slice() })
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ issue_seg ++ "{s}/resolve", .{ prefix, i.selected.slice() })
                 else
-                    try std.fmt.allocPrint(arena.allocator(), "{s}/issues/" ++ theirs_seg ++ "{s}/{s}/resolve", .{ prefix, i.theirs.slice(), i.selected.slice() });
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ issue_seg ++ "{s}/" ++ theirs_seg ++ "{s}/resolve", .{ prefix, i.selected.slice(), i.theirs.slice() });
                 if (i.view == .conflicts) break :blk if (i.selected.len == 0)
                     try std.fmt.allocPrint(arena.allocator(), "{s}/issues/conflicts", .{prefix})
                 else
                     try std.fmt.allocPrint(arena.allocator(), "{s}/issues/" ++ start_seg ++ "{s}/conflicts", .{ prefix, i.selected.slice() });
-                // a selected issue's url carries its id instead of a view
-                // name, so it survives status changes
-                const word = if (i.selected.len != 0) i.selected.slice() else @tagName(i.view);
-                break :blk if (i.tag.len == 0 and i.comments_start == 0)
-                    try std.fmt.allocPrint(arena.allocator(), "{s}/issues/{s}", .{ prefix, word })
-                else if (i.tag.len == 0)
-                    try std.fmt.allocPrint(arena.allocator(), "{s}/issues/{s}/" ++ start_seg ++ "{d}", .{ prefix, word, i.comments_start })
+                if (i.selected.len != 0) break :blk if (i.comments_start == 0)
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ issue_seg ++ "{s}", .{ prefix, i.selected.slice() })
                 else
-                    try std.fmt.allocPrint(arena.allocator(), "{s}/issues/{s}/" ++ tag_filter_seg ++ "{s}", .{ prefix, word, i.tag.slice() });
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ issue_seg ++ "{s}/" ++ start_seg ++ "{d}", .{ prefix, i.selected.slice(), i.comments_start });
+                break :blk if (i.tag.len == 0)
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/issues/{s}", .{ prefix, @tagName(i.view) })
+                else
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/issues/{s}/" ++ tag_filter_seg ++ "{s}", .{ prefix, @tagName(i.view), i.tag.slice() });
             },
             .repo_comments => |c| blk: {
                 const prefix = try repoUrlPrefix(arena, c.name.slice());
                 break :blk if (c.start == 0)
-                    try std.fmt.allocPrint(arena.allocator(), "{s}/issues/{s}/comments/{s}", .{ prefix, c.thread.slice(), c.selected.slice() })
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ issue_seg ++ "{s}/" ++ comment_seg ++ "{s}", .{ prefix, c.thread.slice(), c.selected.slice() })
                 else
-                    try std.fmt.allocPrint(arena.allocator(), "{s}/issues/{s}/comments/{s}/" ++ start_seg ++ "{d}", .{ prefix, c.thread.slice(), c.selected.slice(), c.start });
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ issue_seg ++ "{s}/" ++ comment_seg ++ "{s}/" ++ start_seg ++ "{d}", .{ prefix, c.thread.slice(), c.selected.slice(), c.start });
             },
             .repo_settings => |name| try std.fmt.allocPrint(arena.allocator(), "{s}/settings", .{try repoUrlPrefix(arena, name.slice())}),
             .repo_auth => |name| try std.fmt.allocPrint(arena.allocator(), "{s}/auth", .{try repoUrlPrefix(arena, name.slice())}),
@@ -675,43 +676,30 @@ pub const RoutablePage = union(enum) {
             const kind = std.meta.stringToEnum(RefKind, @tagName(ref.kind)) orelse return null;
             return repoRefsRoute(pair, kind, ref.value);
         }
-        if (std.mem.eql(u8, tab, "issues")) {
-            // "<id>/edit" is the edit form for that issue, with no params;
-            // "<id>/description" is its whole-description page.
-            const after_tab = segments.rest();
-            // "<thread-id>/comments/<comment-id>[/start:<n>]" is a comment
-            // permalink with one window of its immediate replies.
-            {
-                var comment_segments = std.mem.splitScalar(u8, after_tab, '/');
-                const thread = comment_segments.next() orelse return null;
-                const marker = comment_segments.next();
-                if (marker) |word| {
-                    if (std.mem.eql(u8, word, "comments")) {
-                        const comment = comment_segments.next() orelse return null;
-                        if (thread.len == 0 or comment.len == 0) return null;
-                        return repoCommentsRoute(pair, thread, comment, listStart(&comment_segments) orelse return null);
-                    }
+        if (std.mem.startsWith(u8, tab, issue_seg)) {
+            const issue_id = tab[issue_seg.len..];
+            if (issue_id.len == 0) return null;
+            const word = params.scanTail(&segments) catch return null;
+            if (word) |tail| {
+                if (std.mem.startsWith(u8, tail, comment_seg)) {
+                    if (!params.only(&.{.start})) return null;
+                    const comment_id = tail[comment_seg.len..];
+                    if (comment_id.len == 0) return null;
+                    return repoCommentsRoute(pair, issue_id, comment_id, params.start() orelse return null);
                 }
+                if (std.mem.eql(u8, tail, "edit")) return if (params.only(&.{})) repoIssuesEditRoute(pair, issue_id) else null;
+                if (std.mem.eql(u8, tail, "description")) return if (params.only(&.{})) repoIssuesDescriptionRoute(pair, issue_id) else null;
+                if (std.mem.eql(u8, tail, "resolve")) {
+                    if (!params.only(&.{.theirs})) return null;
+                    return repoIssuesResolveRoute(pair, issue_id, params.values.get(.theirs) orelse "");
+                }
+                return null;
             }
-            if (std.mem.endsWith(u8, after_tab, "/edit")) {
-                const id = after_tab[0 .. after_tab.len - "/edit".len];
-                if (id.len == 0 or std.mem.indexOfScalar(u8, id, '/') != null) return null;
-                return repoIssuesEditRoute(pair, id);
-            }
-            if (std.mem.endsWith(u8, after_tab, "/description")) {
-                const id = after_tab[0 .. after_tab.len - "/description".len];
-                if (id.len == 0 or std.mem.indexOfScalar(u8, id, '/') != null) return null;
-                return repoIssuesDescriptionRoute(pair, id);
-            }
-            // "[theirs:<list>/]<id>/resolve" is the conflict resolve form.
-            if (std.mem.endsWith(u8, after_tab, "/resolve")) {
-                var resolve_segments = std.mem.splitScalar(u8, after_tab[0 .. after_tab.len - "/resolve".len], '/');
-                const id = (params.scanTail(&resolve_segments) catch return null) orelse return null;
-                if (!params.only(&.{.theirs})) return null;
-                return repoIssuesResolveRoute(pair, id, params.values.get(.theirs) orelse "");
-            }
-            // the word is a view name or an issue event id (whose status
-            // picks the view); a filter with neither is never emitted.
+            if (!params.only(&.{.start})) return null;
+            return repoIssueCommentsRoute(pair, issue_id, params.start() orelse return null);
+        }
+        if (std.mem.eql(u8, tab, "issues")) {
+            // the word is a list view; a filter with neither is never emitted.
             const word = params.scanTail(&segments) catch return null;
             const tag_value = params.values.get(.tag) orelse "";
             const w = word orelse return if (params.only(&.{})) repoIssuesRoute(pair, .open, "", "") else null;
@@ -721,15 +709,11 @@ pub const RoutablePage = union(enum) {
                 if (!params.only(&.{.start})) return null;
                 return repoIssuesConflictsRoute(pair, params.values.get(.start) orelse "");
             }
-            if (params.values.get(.start) != null) {
-                if (!params.only(&.{.start})) return null;
-                return repoIssueCommentsRoute(pair, w, params.start() orelse return null);
-            }
             if (!params.only(&.{.tag})) return null;
             if (std.meta.stringToEnum(evt.Issue.Status, w)) |status| return repoIssuesRoute(pair, status, tag_value, "");
             if (std.mem.eql(u8, w, "tags")) return repoIssuesTagsRoute(pair, tag_value);
             if (std.mem.eql(u8, w, "new")) return if (tag_value.len == 0) repoIssuesNewRoute(pair) else null;
-            return repoIssuesRoute(pair, .open, tag_value, w);
+            return null;
         }
         if (std.mem.eql(u8, tab, files_seg)) {
             params.scanPairs(&segments) catch return null;

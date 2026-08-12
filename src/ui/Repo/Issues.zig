@@ -665,9 +665,9 @@ pub const View = struct {
                 const aa = session.page_arena.allocator();
                 const action = if (data.view == .edit)
                     (if (data.identity.len == 0)
-                        try std.fmt.allocPrint(aa, "form:/issues/{s}/edit", .{data.selected_id})
+                        try std.fmt.allocPrint(aa, "form:/issue:{s}/edit", .{data.selected_id})
                     else
-                        try std.fmt.allocPrint(aa, "form:/repo/{s}/issues/{s}/edit", .{ data.identity, data.selected_id }))
+                        try std.fmt.allocPrint(aa, "form:/repo/{s}/issue:{s}/edit", .{ data.identity, data.selected_id }))
                 else if (data.identity.len == 0)
                     "form:/issue"
                 else
@@ -853,9 +853,9 @@ pub const View = struct {
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert });
         errdefer box.deinit(allocator);
         box.getFocus().kind = .{ .custom = if (data.identity.len == 0)
-            try std.fmt.allocPrint(aa, "form:/issues/{s}/resolve", .{data.selected_id})
+            try std.fmt.allocPrint(aa, "form:/issue:{s}/resolve", .{data.selected_id})
         else
-            try std.fmt.allocPrint(aa, "form:/repo/{s}/issues/{s}/resolve", .{ data.identity, data.selected_id }) };
+            try std.fmt.allocPrint(aa, "form:/repo/{s}/issue:{s}/resolve", .{ data.identity, data.selected_id }) };
 
         if (conflict.title) |*fc| {
             try addLabel(allocator, &box, "title conflict:");
@@ -1335,9 +1335,9 @@ pub const View = struct {
                         .closed => "open",
                     };
                     row.getFocus().kind = .{ .custom = if (self.data.identity.len == 0)
-                        try std.fmt.allocPrint(pa, "form:/issues/{s}/{s}", .{ entry.id, action })
+                        try std.fmt.allocPrint(pa, "form:/issue:{s}/{s}", .{ entry.id, action })
                     else
-                        try std.fmt.allocPrint(pa, "form:/repo/{s}/issues/{s}/{s}", .{ self.data.identity, entry.id, action }) };
+                        try std.fmt.allocPrint(pa, "form:/repo/{s}/issue:{s}/{s}", .{ self.data.identity, entry.id, action }) };
 
                     var button = try wgt.TextBox(ui.Widget).init(allocator, action, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
                     errdefer button.deinit(allocator);

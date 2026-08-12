@@ -501,7 +501,7 @@ fn handleIssue(
         },
     }
 
-    const location = try std.fmt.allocPrint(allocator, "{s}/issues/{s}", .{ base, &event_id_hex });
+    const location = try std.fmt.allocPrint(allocator, "{s}/issue:{s}", .{ base, &event_id_hex });
     defer allocator.free(location);
     try request.respond("", .{
         .status = .see_other,
@@ -509,12 +509,12 @@ fn handleIssue(
     });
 }
 
-// split an issue url ("/repo/<owner>/<name>/issues/<id>", identity elided in
-// local mode) into what precedes "/issues/" and the decoded id, null when it
+// split an issue url ("/repo/<owner>/<name>/issue:<id>", identity elided in
+// local mode) into what precedes "/issue:" and the decoded id, null when it
 // isn't one. the repo base is validated per host in updateIssue.
 const IssueBaseParts = struct { repo_base: []const u8, id_bytes: [evt.event_id_size]u8 };
 fn issueBaseParts(base: []const u8) ?IssueBaseParts {
-    const issues_infix = "/issues/";
+    const issues_infix = "/issue:";
     const id_len = evt.event_id_size * 2;
     if (base.len < issues_infix.len + id_len) return null;
     var id_bytes: [evt.event_id_size]u8 = undefined;
@@ -552,7 +552,7 @@ fn updateIssue(
             try evt.Issue.update(.xit, .{}, io, allocator, &repo, &parts.id_bytes, update, author_email);
         },
         .local => |src| {
-            // the local forms post to "/issues/<id>/...", so the repo base
+            // the local forms post to "/issue:<id>/...", so the repo base
             // is empty
             if (parts.repo_base.len != 0) return error.NotFound;
             switch (src.repo_kind) {
@@ -569,7 +569,7 @@ fn updateIssue(
 }
 
 // set the status of the issue the url names (base is
-// "/repo/<owner>/<name>/issues/<id>", identity elided in local mode) by
+// "/repo/<owner>/<name>/issue:<id>", identity elided in local mode) by
 // re-emitting its event, then redirect back to it
 fn handleIssueStatus(
     io: std.Io,
@@ -613,7 +613,7 @@ fn handleIssueStatus(
 }
 
 // replace the title/tags/description of the issue the url names (base is
-// "/repo/<owner>/<name>/issues/<id>", identity elided in local mode; the
+// "/repo/<owner>/<name>/issue:<id>", identity elided in local mode; the
 // form posts to "<base>/edit") by re-emitting its event with its status
 // preserved, then redirect back to it
 fn handleIssueEdit(
@@ -685,7 +685,7 @@ fn handleIssueEdit(
 }
 
 // resolve the conflict of the issue the url names (base is
-// "/repo/<owner>/<name>/issues/<id>", identity elided in local mode; the
+// "/repo/<owner>/<name>/issue:<id>", identity elided in local mode; the
 // form posts to "<base>/resolve")
 fn handleIssueResolve(
     io: std.Io,
