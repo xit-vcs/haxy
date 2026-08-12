@@ -9,6 +9,7 @@ const rf = xit.ref;
 pub const User = @import("event/User.zig");
 pub const Repo = @import("event/Repo.zig");
 pub const Issue = @import("event/Issue.zig");
+pub const Comment = @import("event/Comment.zig");
 
 pub const event_id_size: usize = 16;
 
@@ -51,6 +52,7 @@ pub const EventKind = enum {
     user,
     repo,
     issue,
+    comment,
 };
 
 // a null payload deletes the record
@@ -58,6 +60,7 @@ pub const Event = union(EventKind) {
     user: ?User,
     repo: ?Repo,
     issue: ?Issue,
+    comment: ?Comment,
 };
 
 pub const EventWithId = struct {
@@ -106,6 +109,12 @@ pub const EventWithId = struct {
                 .issue => .{
                     .issue = if (json_event.data) |value|
                         try std.json.parseFromValueLeaky(Issue, arena.allocator(), value, .{ .ignore_unknown_fields = true })
+                    else
+                        null,
+                },
+                .comment => .{
+                    .comment = if (json_event.data) |value|
+                        try std.json.parseFromValueLeaky(Comment, arena.allocator(), value, .{ .ignore_unknown_fields = true })
                     else
                         null,
                 },
@@ -621,6 +630,14 @@ pub fn consumeInTransaction(
                         .created_ts = created_ts,
                     } else null;
                     try Issue.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, record_maybe, &arena, &repo_event_oid);
+                },
+                .comment => |event_maybe| {
+                    const record_maybe: ?Comment.Record = if (event_maybe) |event| .{
+                        .event = event,
+                        .author_email = authorEmail(commit_object.content.commit.metadata.author orelse ""),
+                        .created_ts = created_ts,
+                    } else null;
+                    try Comment.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, record_maybe, &arena, &repo_event_oid);
                 },
             }
         }

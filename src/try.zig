@@ -677,6 +677,38 @@ pub fn main(init: std.process.Init) !void {
             }
 
             try evt.consume(.xit, .{}, io, allocator, &template_repo, evt.events_ref, &.{});
+
+            // seed a small comment tree on the second-newest issue
+            var comment_ids: [5][evt.event_id_size]u8 = undefined;
+            for (&comment_ids) |*id| id.* = evt.EventWithId.randomId(prng.random());
+
+            const comment_bodies = [_][]const u8{
+                "I can take this. The compatibility scanner already reports which repositories still use the legacy format.",
+                "Can we keep loading legacy plugins for one release after the warning lands? That would give downstream maintainers time to migrate.",
+                "That sounds good. I'll include the scanner output in the warning so each affected plugin is named.",
+                "Please include the replacement manifest path too. That should make the warning actionable without opening the migration guide.",
+                "I'll add release-note text once the warning format is settled.",
+            };
+
+            var comment_events: [comment_ids.len]evt.EventWithId = undefined;
+            for (&comment_events, 0..) |*event, i| {
+                event.* = .{
+                    .id = std.fmt.bytesToHex(comment_ids[i], .lower),
+                    .timestamp = @intCast(200 + i),
+                    .author_email = user_data[(i + 1) % user_data.len].email,
+                    .event = .{ .comment = .{
+                        .thread_id = issue_events[issue_events.len - 2].id,
+                        .parent_id = switch (i) {
+                            0, 1 => issue_events[issue_events.len - 2].id,
+                            2, 4 => std.fmt.bytesToHex(comment_ids[0], .lower),
+                            3 => std.fmt.bytesToHex(comment_ids[2], .lower),
+                            else => unreachable,
+                        },
+                        .body = comment_bodies[i],
+                    } },
+                };
+            }
+            try evt.consume(.xit, .{}, io, allocator, &template_repo, evt.events_ref, &comment_events);
         }
 
         // copy the template to each repo's on-disk location, named by its
