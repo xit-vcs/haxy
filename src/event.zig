@@ -780,41 +780,6 @@ pub fn merge(
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    // a record the parent deleted is deleted here too, unless the target
-    // changed it. runs first so a delete and recreate is applied in that order.
-    deletions: {
-        const baseline_map = baseline_records orelse break :deletions;
-        const baseline_set_cursor = try baseline_moment.getCursor(hash.hashInt(hash_kind, T.id_set_key)) orelse break :deletions;
-        const baseline_set = try DB.SortedSet(.read_only).init(baseline_set_cursor);
-
-        var baseline_iter = try baseline_set.iteratorFromIndex(0);
-        while (try baseline_iter.next()) |kv_pair_cursor| {
-            const event_id = try readOrderKeyId(DB, kv_pair_cursor);
-            const record_key = hash.hashInt(hash_kind, &event_id);
-
-            if (null != try parent_records.getSlot(record_key)) continue;
-            const baseline_record_cursor = try baseline_map.getCursor(record_key) orelse continue;
-
-            _ = arena.reset(.retain_capacity);
-
-            // re-derived every iteration, since `consume` writes through its
-            // own handles
-            const target_records_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, T.record_map_key));
-            const target_records = try DB.HashMap(.read_write).init(target_records_cursor);
-            const target_record_cursor = try target_records.getCursor(record_key) orelse continue;
-
-            if (!target_record_cursor.slot().eql(baseline_record_cursor.slot())) {
-                // every write copies the record's block, so only a content
-                // change means the target kept it
-                const target_record = try read(T.Record, DB, hash_kind, &arena, try DB.HashMap(.read_only).init(target_record_cursor));
-                const baseline_record = try read(T.Record, DB, hash_kind, &arena, try DB.HashMap(.read_only).init(baseline_record_cursor));
-                if (!fieldsEqual(T, target_record.event, baseline_record.event)) continue;
-            }
-
-            try T.consume(DB, hash_kind, haxy_moment, &event_id, null, &arena, null);
-        }
-    }
-
     var iter = try parent_set.iteratorFromIndex(0);
     while (try iter.next()) |kv_pair_cursor| {
         const event_id = try readOrderKeyId(DB, kv_pair_cursor);
@@ -838,8 +803,7 @@ pub fn merge(
         const target_records_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, T.record_map_key));
         const target_records = try DB.HashMap(.read_write).init(target_records_cursor);
 
-        // a record the target doesn't have, or deleted, arrives wholesale from
-        // the parent
+        // a record the target doesn't have arrives wholesale from the parent
         var outcome: [std.meta.fields(T).len]FieldMerge = @splat(.parent);
         var merged = parent_record;
 
@@ -849,22 +813,34 @@ pub fn merge(
 
             const target_record = try read(T.Record, DB, hash_kind, &arena, try DB.HashMap(.read_only).init(target_record_cursor));
 
-            var baseline_event: ?T = null;
+            var baseline_record: ?T.Record = null;
             if (baseline_records) |map| {
                 if (try map.getCursor(record_key)) |baseline_record_cursor| {
-                    baseline_event = (try read(T.Record, DB, hash_kind, &arena, try DB.HashMap(.read_only).init(baseline_record_cursor))).event;
+                    baseline_record = try read(T.Record, DB, hash_kind, &arena, try DB.HashMap(.read_only).init(baseline_record_cursor));
                 }
             }
 
             outcome = @splat(.kept);
             merged = target_record;
-            merged.event = mergeFields(T, baseline_event, target_record.event, parent_record.event, &outcome);
+            merged.event = mergeFields(T, if (baseline_record) |baseline| baseline.event else null, target_record.event, parent_record.event, &outcome);
+
+            // merge the tombstone separately from serialized fields. a deletion
+            // carries over an unchanged record, while an edit or restoration
+            // keeps it active.
+            merged.deleted = if (target_record.deleted == parent_record.deleted)
+                target_record.deleted
+            else if (baseline_record) |baseline| blk: {
+                const active = if (!target_record.deleted) target_record else parent_record;
+                if (active.deleted != baseline.deleted) break :blk false;
+                if (!fieldsEqual(T, active.event, baseline.event)) break :blk false;
+                break :blk true;
+            } else false;
         }
 
         // the index is unique, so a key the target gave to a different record
         // leaves this one out rather than stranding that one behind a name it
         // no longer owns
-        if (@hasDecl(T, "name_index_key")) {
+        if (!merged.deleted and @hasDecl(T, "name_index_key")) {
             const index_key = try merged.indexKey(arena.allocator());
             const name_index_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, T.name_index_key));
             const name_index = try DB.HashMap(.read_write).init(name_index_cursor);
@@ -878,6 +854,9 @@ pub fn merge(
         // `consume` sets no oids, since each field's winner may come from
         // a different side
         try T.consume(DB, hash_kind, haxy_moment, &event_id, merged, &arena, null);
+
+        // tombstones do not carry field conflicts
+        if (merged.deleted) continue;
 
         const conflicts_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, T.conflicts_key));
         const conflicts = try DB.SortedMap(.read_write).init(conflicts_cursor);

@@ -13,6 +13,7 @@ status: Status = .open,
 // what the db stores: the event's data plus the commit-derived fields
 pub const Record = struct {
     event: Self,
+    deleted: bool = false,
     author_email: ?[]const u8 = null,
     created_ts: u64 = 0, // the commit timestamp of the event that first created this issue
 };
@@ -91,79 +92,68 @@ pub fn consume(
     const issue_id_to_field_to_oid_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, id_to_field_to_oid_key));
     const issue_id_to_field_to_oid = try DB.HashMap(.read_write).init(issue_id_to_field_to_oid_cursor);
 
-    if (record_maybe) |record| {
-        var record_to_write = record;
+    var existing_record_maybe: ?Record = null;
+    const existing_cursor_maybe = try event_id_to_issue.getCursor(issue_key);
+    if (existing_cursor_maybe) |existing_cursor| {
+        const existing_issue = try DB.HashMap(.read_only).init(existing_cursor);
+        existing_record_maybe = try evt.read(Record, DB, hash_kind, arena, existing_issue);
+    }
 
-        var existing_record_maybe: ?Record = null;
-        const existing_cursor_maybe = try event_id_to_issue.getCursor(issue_key);
-        if (existing_cursor_maybe) |existing_cursor| {
-            // updates preserve the original creation timestamp and author
-            const existing_issue = try DB.HashMap(.read_only).init(existing_cursor);
-            const existing_record = try evt.read(Record, DB, hash_kind, arena, existing_issue);
-            existing_record_maybe = existing_record;
-            record_to_write.created_ts = existing_record.created_ts;
-            record_to_write.author_email = existing_record.author_email;
+    var record_to_write = if (record_maybe) |record|
+        record
+    else blk: {
+        var record = existing_record_maybe orelse return error.EventNotFound;
+        record.deleted = true;
+        break :blk record;
+    };
 
-            // drop the old status's and tags' entries; the current ones are re-added below
-            const order_key = evt.orderKeyDesc(existing_record.created_ts, event_id);
+    if (existing_record_maybe) |existing_record| {
+        // updates preserve the original creation timestamp and author
+        record_to_write.created_ts = existing_record.created_ts;
+        record_to_write.author_email = existing_record.author_email;
+
+        // drop the old status's and tags' entries; active values are re-added below
+        const order_key = evt.orderKeyDesc(existing_record.created_ts, event_id);
+        if (!existing_record.deleted) {
             const status_set = try statusSet(DB, status_to_issues, existing_record.event.status);
             _ = try status_set.remove(&order_key);
             try removeFromTagSets(DB, tag_to_issues, existing_record.event.tags, existing_record.event.status, &order_key);
-
-            // any event settles the conflict, since resolving in the ui may
-            // keep our own values and so change nothing to detect
-            if (event_oid != null) _ = try conflicts.remove(&order_key);
         }
 
-        try evt.writeOid(Self, DB, hash_kind, issue_id_to_field_to_oid, issue_key, if (existing_record_maybe) |existing| existing.event else null, record.event, event_oid);
+        // any event settles the conflict, since resolving in the ui may
+        // keep our own values and so change nothing to detect
+        if (event_oid != null or record_to_write.deleted) _ = try conflicts.remove(&order_key);
+    }
 
-        const issue_cursor = try event_id_to_issue.putCursor(issue_key);
-        const issue = try DB.HashMap(.read_write).init(issue_cursor);
-        try evt.upsert(Record, DB, hash_kind, issue, record_to_write);
+    try evt.writeOid(Self, DB, hash_kind, issue_id_to_field_to_oid, issue_key, if (existing_record_maybe) |existing| existing.event else null, record_to_write.event, event_oid);
 
-        const order_key = evt.orderKeyDesc(record_to_write.created_ts, event_id);
+    const issue_cursor = try event_id_to_issue.putCursor(issue_key);
+    const issue = try DB.HashMap(.read_write).init(issue_cursor);
+    try evt.upsert(Record, DB, hash_kind, issue, record_to_write);
 
-        // first time we've seen this issue: add it to the set that enumerates
-        // every issue regardless of status
-        if (existing_cursor_maybe == null) {
-            const issue_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, id_set_key));
-            const issue_id_set = try DB.SortedSet(.read_write).init(issue_id_set_cursor);
-            try issue_id_set.put(&order_key);
-        }
+    const order_key = evt.orderKeyDesc(record_to_write.created_ts, event_id);
 
-        const status_set = try statusSet(DB, status_to_issues, record.event.status);
+    // the id set retains tombstones so merges can carry deletions
+    if (existing_cursor_maybe == null) {
+        const issue_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, id_set_key));
+        const issue_id_set = try DB.SortedSet(.read_write).init(issue_id_set_cursor);
+        try issue_id_set.put(&order_key);
+    }
+
+    if (!record_to_write.deleted) {
+        const status_set = try statusSet(DB, status_to_issues, record_to_write.event.status);
         try status_set.put(&order_key);
 
-        var tag_iter = tagIterator(record.event.tags);
+        var tag_iter = tagIterator(record_to_write.event.tags);
         while (tag_iter.next()) |tag| {
             // an over-long tag goes unindexed rather than failing the consume,
             // which would wedge the branch it arrived on
             if (tag.len == 0 or tag.len > tag_max_len) continue;
             var key_buffer: TagStatusKey = undefined;
-            const tag_set_cursor = try tag_to_issues.putCursor(try tagStatusKey(&key_buffer, tag, record.event.status));
+            const tag_set_cursor = try tag_to_issues.putCursor(try tagStatusKey(&key_buffer, tag, record_to_write.event.status));
             const tag_set = try DB.SortedSet(.read_write).init(tag_set_cursor);
             try tag_set.put(&order_key);
         }
-    } else {
-        // drop it from the ordered sets using its recorded creation timestamp and status
-        if (try event_id_to_issue.getCursor(issue_key)) |existing_cursor| {
-            const existing_issue = try DB.HashMap(.read_only).init(existing_cursor);
-            const existing_record = try evt.read(Record, DB, hash_kind, arena, existing_issue);
-            const order_key = evt.orderKeyDesc(existing_record.created_ts, event_id);
-
-            const status_set = try statusSet(DB, status_to_issues, existing_record.event.status);
-            _ = try status_set.remove(&order_key);
-
-            try removeFromTagSets(DB, tag_to_issues, existing_record.event.tags, existing_record.event.status, &order_key);
-
-            const issue_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, id_set_key));
-            const issue_id_set = try DB.SortedSet(.read_write).init(issue_id_set_cursor);
-            _ = try issue_id_set.remove(&order_key);
-
-            _ = try conflicts.remove(&order_key);
-            _ = try issue_id_to_field_to_oid.remove(issue_key);
-        }
-        if (!try event_id_to_issue.remove(issue_key)) return error.EventNotFound;
     }
 }
 

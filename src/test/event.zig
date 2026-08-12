@@ -1000,10 +1000,11 @@ test "merge" {
 
         const haxy_moment = try evt.currentMoment(repo_opts, &repo);
 
-        // the one we left alone is gone, and its tags left the index with it
+        // the one we left alone is tombstoned, and its tags left the index
         var dropped_id: [evt.event_id_size]u8 = undefined;
         _ = try std.fmt.hexToBytes(&dropped_id, &events_to_consume2[0].id);
-        try std.testing.expectError(error.NotFound, readIssue(Repo.DB, repo_opts.hash, haxy_moment, &arena, &dropped_id));
+        const dropped = try readIssue(Repo.DB, repo_opts.hash, haxy_moment, &arena, &dropped_id);
+        try std.testing.expect(dropped.deleted);
 
         const tag_to_issues_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, "tag+status->issue-id-set")) orelse return error.NotFound;
         const tag_to_issues = try Repo.DB.SortedMap(.read_only).init(tag_to_issues_cursor);
@@ -1013,6 +1014,7 @@ test "merge" {
         var kept_id: [evt.event_id_size]u8 = undefined;
         _ = try std.fmt.hexToBytes(&kept_id, &events_to_consume2[1].id);
         const kept = try readIssue(Repo.DB, repo_opts.hash, haxy_moment, &arena, &kept_id);
+        try std.testing.expect(!kept.deleted);
         try std.testing.expectEqualStrings("Kept by the edit", kept.event.title);
     }
 }
@@ -1199,7 +1201,10 @@ test "user and repo" {
         const event_id_to_repo_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, "event-id->repo")) orelse return error.NotFound;
         const event_id_to_repo = try Repo.DB.HashMap(.read_only).init(event_id_to_repo_cursor);
 
-        try std.testing.expect(null == try event_id_to_repo.getCursor(hash.hashInt(repo_opts.hash, &repo_event_id)));
+        const repo_cursor = try event_id_to_repo.getCursor(hash.hashInt(repo_opts.hash, &repo_event_id)) orelse return error.NotFound;
+        const repo_map = try Repo.DB.HashMap(.read_only).init(repo_cursor);
+        const repo_event = try evt.read(evt.Repo.Record, Repo.DB, repo_opts.hash, &arena, repo_map);
+        try std.testing.expect(repo_event.deleted);
 
         // get the repos created by the user
         const user_id_to_repo_id_set_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, "user-id->repo-id-set")) orelse return error.NotFound;
@@ -1210,6 +1215,29 @@ test "user and repo" {
 
         // removing the repo emptied the user's set
         try std.testing.expectEqual(0, try user_repos.count());
+    }
+
+    // a non-null payload restores the repo and its indexes
+    try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &[_]evt.EventWithId{.{
+        .id = std.fmt.bytesToHex(repo_event_id, .lower),
+        .author_email = author_email,
+        .event = events_to_consume[2].event,
+    }});
+
+    {
+        const haxy_moment = try evt.currentMoment(repo_opts, &repo);
+        const event_id_to_repo_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, "event-id->repo")) orelse return error.NotFound;
+        const event_id_to_repo = try Repo.DB.HashMap(.read_only).init(event_id_to_repo_cursor);
+        const repo_cursor = try event_id_to_repo.getCursor(hash.hashInt(repo_opts.hash, &repo_event_id)) orelse return error.NotFound;
+        const repo_map = try Repo.DB.HashMap(.read_only).init(repo_cursor);
+        const repo_event = try evt.read(evt.Repo.Record, Repo.DB, repo_opts.hash, &arena, repo_map);
+        try std.testing.expect(!repo_event.deleted);
+
+        const user_id_to_repo_id_set_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, "user-id->repo-id-set")) orelse return error.NotFound;
+        const user_id_to_repo_id_set = try Repo.DB.HashMap(.read_only).init(user_id_to_repo_id_set_cursor);
+        const user_repos_cursor = try user_id_to_repo_id_set.getCursor(hash.hashInt(repo_opts.hash, &user_event_id)) orelse return error.NotFound;
+        const user_repos = try Repo.DB.SortedSet(.read_only).init(user_repos_cursor);
+        try std.testing.expectEqual(1, try user_repos.count());
     }
 
     //
@@ -1234,7 +1262,18 @@ test "user and repo" {
         const event_id_to_user_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, "event-id->user")) orelse return error.NotFound;
         const event_id_to_user = try Repo.DB.HashMap(.read_only).init(event_id_to_user_cursor);
 
-        try std.testing.expect(null == try event_id_to_user.getCursor(hash.hashInt(repo_opts.hash, &user_event_id)));
+        const user_cursor = try event_id_to_user.getCursor(hash.hashInt(repo_opts.hash, &user_event_id)) orelse return error.NotFound;
+        const user_map = try Repo.DB.HashMap(.read_only).init(user_cursor);
+        const user_event = try evt.read(evt.User.Record, Repo.DB, repo_opts.hash, &arena, user_map);
+        try std.testing.expect(user_event.deleted);
+
+        // deleting the user tombstones their active repos too
+        const event_id_to_repo_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, "event-id->repo")) orelse return error.NotFound;
+        const event_id_to_repo = try Repo.DB.HashMap(.read_only).init(event_id_to_repo_cursor);
+        const repo_cursor = try event_id_to_repo.getCursor(hash.hashInt(repo_opts.hash, &repo_event_id)) orelse return error.NotFound;
+        const repo_map = try Repo.DB.HashMap(.read_only).init(repo_cursor);
+        const repo_event = try evt.read(evt.Repo.Record, Repo.DB, repo_opts.hash, &arena, repo_map);
+        try std.testing.expect(repo_event.deleted);
     }
 }
 
@@ -1316,13 +1355,13 @@ test "repos and users paginate newest first" {
         try std.testing.expectEqual(1, try uset.count());
     }
 
-    // delete repo1 -> dense order (no tombstone)
+    // deleting repo1 retains its place in the canonical order
     try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &[_]evt.EventWithId{
         .{ .id = std.fmt.bytesToHex(repo_ids[1], .lower), .author_email = author_email, .timestamp = 200, .event = .{ .repo = null } },
     });
     {
         const moment = try evt.currentMoment(repo_opts, &repo);
-        try Check.order(Repo.DB, repo_opts.hash, moment, &.{ &repo_ids[3], &repo_ids[2], &repo_ids[0] });
+        try Check.order(Repo.DB, repo_opts.hash, moment, &.{ &repo_ids[3], &repo_ids[2], &repo_ids[1], &repo_ids[0] });
     }
 
     // update repo0 at a later timestamp -> keeps its original place
@@ -1331,7 +1370,7 @@ test "repos and users paginate newest first" {
     });
     {
         const moment = try evt.currentMoment(repo_opts, &repo);
-        try Check.order(Repo.DB, repo_opts.hash, moment, &.{ &repo_ids[3], &repo_ids[2], &repo_ids[0] });
+        try Check.order(Repo.DB, repo_opts.hash, moment, &.{ &repo_ids[3], &repo_ids[2], &repo_ids[1], &repo_ids[0] });
 
         // the value really was updated
         const e2r_cur = try moment.getCursor(hash.hashInt(repo_opts.hash, "event-id->repo")) orelse return error.NotFound;

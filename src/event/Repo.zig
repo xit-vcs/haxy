@@ -10,6 +10,7 @@ description: []const u8,
 // what the db stores: the event's data plus the commit-derived fields
 pub const Record = struct {
     event: Self,
+    deleted: bool = false,
     created_ts: u64 = 0, // the commit timestamp of the event that first created this repo
 
     // a repo's key in the name index. it's unique per owner, so the read side
@@ -66,94 +67,71 @@ pub fn consume(
     const repo_id_to_field_to_oid_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, id_to_field_to_oid_key));
     const repo_id_to_field_to_oid = try DB.HashMap(.read_write).init(repo_id_to_field_to_oid_cursor);
 
-    if (record_maybe) |record| {
-        try validateName(record.event.name);
+    var existing_record_maybe: ?Record = null;
+    const existing_cursor_maybe = try event_id_to_repo.getCursor(repo_key);
+    if (existing_cursor_maybe) |existing_cursor| {
+        const existing_repo = try DB.HashMap(.read_only).init(existing_cursor);
+        existing_record_maybe = try evt.read(Record, DB, hash_kind, arena, existing_repo);
+    }
 
-        var record_to_write = record;
+    var record_to_write = if (record_maybe) |record|
+        record
+    else blk: {
+        var record = existing_record_maybe orelse return error.EventNotFound;
+        record.deleted = true;
+        break :blk record;
+    };
 
-        const repo_path = try record.indexKey(arena.allocator());
+    if (!record_to_write.deleted) try validateName(record_to_write.event.name);
 
-        const user_id_to_repo_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, "user-id->repo-id-set"));
-        const user_id_to_repo_id_set = try DB.HashMap(.read_write).init(user_id_to_repo_id_set_cursor);
+    const user_id_to_repo_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, "user-id->repo-id-set"));
+    const user_id_to_repo_id_set = try DB.HashMap(.read_write).init(user_id_to_repo_id_set_cursor);
 
-        // if this event_id already maps to a repo under a different key (its
-        // name or owner changed), drop the stale index entries first
-        var existing_record_maybe: ?Record = null;
-        const existing_cursor_maybe = try event_id_to_repo.getCursor(repo_key);
-        if (existing_cursor_maybe) |existing_cursor| {
-            const existing_repo = try DB.HashMap(.read_only).init(existing_cursor);
-            const existing_record = try evt.read(Record, DB, hash_kind, arena, existing_repo);
-            existing_record_maybe = existing_record;
-            // updates preserve the original creation timestamp
-            record_to_write.created_ts = existing_record.created_ts;
+    if (existing_record_maybe) |existing_record| {
+        // updates preserve the original creation timestamp
+        record_to_write.created_ts = existing_record.created_ts;
+        const order_key = evt.orderKeyDesc(existing_record.created_ts, event_id);
 
-            // any event settles the conflict, since resolving in the ui may
-            // keep our own values and so change nothing to detect
-            if (event_oid != null) {
-                _ = try conflicts.remove(&evt.orderKeyDesc(existing_record.created_ts, event_id));
-            }
+        // drop the old active indexes; active values are re-added below
+        if (!existing_record.deleted) {
             const existing_path = try existing_record.indexKey(arena.allocator());
-            if (!std.mem.eql(u8, existing_path, repo_path)) {
-                _ = try name_to_repo_id.remove(hash.hashInt(hash_kind, existing_path));
-            }
-            if (!std.mem.eql(u8, existing_record.event.user_id, record.event.user_id)) {
-                const old_user_repos_cursor = try user_id_to_repo_id_set.putCursor(hash.hashInt(hash_kind, existing_record.event.user_id));
-                const old_user_repos = try DB.SortedSet(.read_write).init(old_user_repos_cursor);
-                const order_key = evt.orderKeyDesc(existing_record.created_ts, event_id);
-                _ = try old_user_repos.remove(&order_key);
-            }
-        }
-
-        try evt.writeOid(Self, DB, hash_kind, repo_id_to_field_to_oid, repo_key, if (existing_record_maybe) |existing| existing.event else null, record.event, event_oid);
-
-        const repo_cursor = try event_id_to_repo.putCursor(repo_key);
-        const repo = try DB.HashMap(.read_write).init(repo_cursor);
-        try evt.upsert(Record, DB, hash_kind, repo, record_to_write);
-
-        try name_to_repo_id.put(hash.hashInt(hash_kind, repo_path), .{ .bytes = event_id });
-
-        // first time we've seen this repo: add it to the ordered set the repos
-        // view paginates through. the key embeds the event id, so the set needs
-        // no value.
-        if (existing_cursor_maybe == null) {
-            const repo_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, "repo-id-set"));
-            const repo_id_set = try DB.SortedSet(.read_write).init(repo_id_set_cursor);
-            const order_key = evt.orderKeyDesc(record_to_write.created_ts, event_id);
-            try repo_id_set.put(&order_key);
-        }
-
-        // each user's repos are a set ordered by creation time (newest first), so
-        // the user page paginates them the same way the home repos list does.
-        const user_repos_cursor = try user_id_to_repo_id_set.putCursor(hash.hashInt(hash_kind, record.event.user_id));
-        const user_repos = try DB.SortedSet(.read_write).init(user_repos_cursor);
-        const user_repo_order_key = evt.orderKeyDesc(record_to_write.created_ts, event_id);
-        try user_repos.put(&user_repo_order_key);
-    } else {
-        if (try event_id_to_repo.getCursor(repo_key)) |existing_repo_cursor| {
-            const existing_repo = try DB.HashMap(.read_only).init(existing_repo_cursor);
-            const existing_repo_record = try evt.read(Record, DB, hash_kind, arena, existing_repo);
-
-            const existing_path = try existing_repo_record.indexKey(arena.allocator());
             _ = try name_to_repo_id.remove(hash.hashInt(hash_kind, existing_path));
 
-            // drop it from the ordered set using its recorded creation timestamp
-            const repo_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, "repo-id-set"));
-            const repo_id_set = try DB.SortedSet(.read_write).init(repo_id_set_cursor);
-            const order_key = evt.orderKeyDesc(existing_repo_record.created_ts, event_id);
-            _ = try repo_id_set.remove(&order_key);
-
-            const user_id_to_repo_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, "user-id->repo-id-set"));
-            const user_id_to_repo_id_set = try DB.HashMap(.read_write).init(user_id_to_repo_id_set_cursor);
-
-            const user_key = hash.hashInt(hash_kind, existing_repo_record.event.user_id);
-            const user_repos_cursor = try user_id_to_repo_id_set.putCursor(user_key);
-            const user_repos = try DB.SortedSet(.read_write).init(user_repos_cursor);
-            _ = try user_repos.remove(&order_key);
-
-            _ = try conflicts.remove(&order_key);
-            _ = try repo_id_to_field_to_oid.remove(repo_key);
+            const old_user_repos_cursor = try user_id_to_repo_id_set.putCursor(hash.hashInt(hash_kind, existing_record.event.user_id));
+            const old_user_repos = try DB.SortedSet(.read_write).init(old_user_repos_cursor);
+            _ = try old_user_repos.remove(&order_key);
         }
-        if (!try event_id_to_repo.remove(repo_key)) return error.EventNotFound;
+
+        // any event settles the conflict, since resolving in the ui may
+        // keep our own values and so change nothing to detect
+        if (event_oid != null or record_to_write.deleted) {
+            _ = try conflicts.remove(&order_key);
+        }
+    }
+
+    try evt.writeOid(Self, DB, hash_kind, repo_id_to_field_to_oid, repo_key, if (existing_record_maybe) |existing| existing.event else null, record_to_write.event, event_oid);
+
+    const repo_cursor = try event_id_to_repo.putCursor(repo_key);
+    const repo = try DB.HashMap(.read_write).init(repo_cursor);
+    try evt.upsert(Record, DB, hash_kind, repo, record_to_write);
+
+    const order_key = evt.orderKeyDesc(record_to_write.created_ts, event_id);
+
+    // the id set retains tombstones so merges can carry deletions
+    if (existing_cursor_maybe == null) {
+        const repo_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, id_set_key));
+        const repo_id_set = try DB.SortedSet(.read_write).init(repo_id_set_cursor);
+        try repo_id_set.put(&order_key);
+    }
+
+    if (!record_to_write.deleted) {
+        const repo_path = try record_to_write.indexKey(arena.allocator());
+        try name_to_repo_id.put(hash.hashInt(hash_kind, repo_path), .{ .bytes = event_id });
+
+        // each user's repos are ordered by creation time, newest first
+        const user_repos_cursor = try user_id_to_repo_id_set.putCursor(hash.hashInt(hash_kind, record_to_write.event.user_id));
+        const user_repos = try DB.SortedSet(.read_write).init(user_repos_cursor);
+        try user_repos.put(&order_key);
     }
 }
 
