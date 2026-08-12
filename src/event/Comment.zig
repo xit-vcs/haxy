@@ -27,6 +27,10 @@ pub const id_to_field_to_oid_key = "comment-id->field->oid";
 pub const thread_id_to_comment_id_set_key = "thread-id->comment-id-set";
 pub const parent_id_to_comment_id_set_key = "parent-id->comment-id-set";
 
+pub fn fieldsValid(body: []const u8) bool {
+    return body.len != 0;
+}
+
 pub fn consume(
     comptime DB: type,
     comptime hash_kind: hash.HashKind,

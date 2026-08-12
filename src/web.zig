@@ -95,7 +95,7 @@ fn handleRequest(
     if (method == .POST) {
         switch (host) {
             .remote => |remote| {
-                const PostRoute = enum { login, logout, ansi, issue, open, close, edit, resolve };
+                const PostRoute = enum { login, logout, ansi, issue, comment, open, close, edit, resolve };
                 inline for (@typeInfo(PostRoute).@"enum".fields) |field| {
                     const suffix = "/" ++ field.name;
                     if (std.mem.endsWith(u8, path, suffix)) {
@@ -105,6 +105,7 @@ fn handleRequest(
                             .logout => handleLogout(request, base, remote.session_store),
                             .ansi => handleAnsi(io, request, allocator, base, remote.admin_repo_path, remote.session_store),
                             .issue => handleIssue(io, request, allocator, base, host),
+                            .comment => handleComment(io, request, allocator, base, host),
                             .open => handleIssueStatus(io, request, allocator, base, host, .open),
                             .close => handleIssueStatus(io, request, allocator, base, host, .closed),
                             .edit => handleIssueEdit(io, request, allocator, base, host),
@@ -114,13 +115,14 @@ fn handleRequest(
                 }
             },
             .local => {
-                const PostRoute = enum { issue, open, close, edit, resolve };
+                const PostRoute = enum { issue, comment, open, close, edit, resolve };
                 inline for (@typeInfo(PostRoute).@"enum".fields) |field| {
                     const suffix = "/" ++ field.name;
                     if (std.mem.endsWith(u8, path, suffix)) {
                         const base = path[0 .. path.len - suffix.len];
                         return switch (@field(PostRoute, field.name)) {
                             .issue => handleIssue(io, request, allocator, base, host),
+                            .comment => handleComment(io, request, allocator, base, host),
                             .open => handleIssueStatus(io, request, allocator, base, host, .open),
                             .close => handleIssueStatus(io, request, allocator, base, host, .closed),
                             .edit => handleIssueEdit(io, request, allocator, base, host),
@@ -502,6 +504,144 @@ fn handleIssue(
     }
 
     const location = try std.fmt.allocPrint(allocator, "{s}/issue:{s}", .{ base, &event_id_hex });
+    defer allocator.free(location);
+    try request.respond("", .{
+        .status = .see_other,
+        .extra_headers = &.{.{ .name = "location", .value = location }},
+    });
+}
+
+const CommentBaseParts = struct {
+    repo_base: []const u8,
+    thread_id: [evt.event_id_size]u8,
+    parent_id: [evt.event_id_size]u8,
+};
+
+fn commentBaseParts(base: []const u8) ?CommentBaseParts {
+    const issue_infix = "/issue:";
+    const comment_infix = "/comment:";
+    const id_len = evt.event_id_size * 2;
+    const issue_at = std.mem.lastIndexOf(u8, base, issue_infix) orelse return null;
+    const tail = base[issue_at + issue_infix.len ..];
+    if (tail.len < id_len) return null;
+
+    var thread_id: [evt.event_id_size]u8 = undefined;
+    _ = std.fmt.hexToBytes(&thread_id, tail[0..id_len]) catch return null;
+    var parent_id = thread_id;
+    if (tail.len != id_len) {
+        if (tail.len != id_len + comment_infix.len + id_len) return null;
+        if (!std.mem.eql(u8, tail[id_len .. id_len + comment_infix.len], comment_infix)) return null;
+        _ = std.fmt.hexToBytes(&parent_id, tail[id_len + comment_infix.len ..]) catch return null;
+    }
+    return .{ .repo_base = base[0..issue_at], .thread_id = thread_id, .parent_id = parent_id };
+}
+
+// create a reply from an issue or comment /new form, then redirect to its
+// permalink. the rest of the url identifies the thread and parent.
+fn handleComment(
+    io: std.Io,
+    request: *std.http.Server.Request,
+    allocator: std.mem.Allocator,
+    base: []const u8,
+    host: Host,
+) !void {
+    const not_found = "comment parent not found";
+    const parts = commentBaseParts(base) orelse {
+        try request.respond(not_found, .{
+            .status = .not_found,
+            .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+        });
+        return;
+    };
+
+    var author_arena = std.heap.ArenaAllocator.init(allocator);
+    defer author_arena.deinit();
+    const author_email = (try eventAuthorEmail(io, allocator, &author_arena, request, host)) orelse return respondLoginRequired(request);
+
+    var body_buf: [256]u8 = undefined;
+    const reader = request.readerExpectNone(&body_buf);
+    const posted = reader.allocRemaining(allocator, .limited(65536)) catch &[_]u8{};
+    defer allocator.free(posted);
+    const body_crlf = (try parseFormField(allocator, posted, "body")) orelse try allocator.dupe(u8, "");
+    defer allocator.free(body_crlf);
+    const body = try std.mem.replaceOwned(u8, allocator, body_crlf, "\r\n", "\n");
+    defer allocator.free(body);
+
+    if (!evt.Comment.fieldsValid(body)) {
+        const form_location = try std.fmt.allocPrint(allocator, "{s}/new", .{base});
+        defer allocator.free(form_location);
+        try request.respond("", .{
+            .status = .see_other,
+            .extra_headers = &.{.{ .name = "location", .value = form_location }},
+        });
+        return;
+    }
+
+    var id_bytes: [evt.event_id_size]u8 = undefined;
+    io.random(&id_bytes);
+    const event_id_hex = std.fmt.bytesToHex(id_bytes, .lower);
+    const thread_id_hex = std.fmt.bytesToHex(parts.thread_id, .lower);
+    const parent_id_hex = std.fmt.bytesToHex(parts.parent_id, .lower);
+    const event = evt.EventWithId{
+        .id = event_id_hex,
+        .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
+        .author_email = author_email,
+        .event = .{ .comment = .{
+            .thread_id = thread_id_hex,
+            .parent_id = parent_id_hex,
+            .body = body,
+        } },
+    };
+
+    switch (host) {
+        .remote => |remote| {
+            const repo_prefix = "/repo/";
+            if (!std.mem.startsWith(u8, parts.repo_base, repo_prefix)) {
+                try request.respond(not_found, .{
+                    .status = .not_found,
+                    .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+                });
+                return;
+            }
+            const repos_dir = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(remote.admin_repo_path) orelse ".", "repos" });
+            defer allocator.free(repos_dir);
+            const repo_path = switch (try serve_common.resolveRepoPath(io, allocator, repos_dir, remote.admin_repo_path, parts.repo_base[repo_prefix.len..], false)) {
+                .ok => |p| p,
+                .invalid, .not_found => {
+                    try request.respond(not_found, .{
+                        .status = .not_found,
+                        .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+                    });
+                    return;
+                },
+            };
+            defer allocator.free(repo_path);
+
+            var repo = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = repo_path });
+            defer repo.deinit(io, allocator);
+            try evt.consume(.xit, .{}, io, allocator, &repo, evt.events_ref, &.{event});
+        },
+        .local => |src| {
+            if (parts.repo_base.len != 0) {
+                try request.respond(not_found, .{
+                    .status = .not_found,
+                    .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+                });
+                return;
+            }
+            switch (src.repo_kind) {
+                inline else => |repo_kind| {
+                    var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, .{ .path = src.path });
+                    defer any_repo.deinit(io, allocator);
+                    switch (any_repo) {
+                        inline else => |*repo| try evt.consume(repo_kind, repo.self_repo_opts, io, allocator, repo, evt.events_ref, &.{event}),
+                    }
+                },
+            }
+        },
+    }
+
+    const location = try std.fmt.allocPrint(allocator, "{s}/issue:{s}/comment:{s}", .{ parts.repo_base, &thread_id_hex, &event_id_hex });
     defer allocator.free(location);
     try request.respond("", .{
         .status = .see_other,

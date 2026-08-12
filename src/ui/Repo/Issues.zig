@@ -278,8 +278,8 @@ pub fn init(
                 .open => open_root = order_key,
                 .closed => closed_root = order_key,
             }
-            // an edit url keeps its view; otherwise the issue's status picks it.
-            if (view != .edit) resolved_view = switch (issue_event.event.status) {
+            // form urls keep their view; otherwise the issue's status picks it.
+            if (view != .edit and view != .new_comment) resolved_view = switch (issue_event.event.status) {
                 .open => .open,
                 .closed => .closed,
             };
@@ -576,7 +576,7 @@ pub const View = struct {
     const open_view_index: usize = 0;
     const closed_view_index: usize = 1;
     const tags_view_index: usize = 2;
-    // the new-issue form, or the edit or resolve form when the page was
+    // the new-issue form, or the edit, comment, or resolve form when the page was
     // loaded at one of their urls.
     const form_view_index: usize = 3;
     // the conflicts split; the tab and stack child exist only when the repo
@@ -591,18 +591,21 @@ pub const View = struct {
     const detail_index: usize = 1;
     const list_max_width: usize = 40;
     const detail_min_width: usize = 40;
-    // indices within the new-issue form.
+    // indices within the issue form.
     const title_field_index: usize = 0;
     const tags_field_index: usize = 1;
     const description_field_index: usize = 2;
     const submit_field_index: usize = 3;
+    const comment_author_field_index: usize = 0;
+    const comment_body_field_index: usize = 1;
+    const comment_submit_field_index: usize = 2;
 
     fn viewIndex(view: ui.RoutablePage.IssuesView) usize {
         return switch (view) {
             .open => open_view_index,
             .closed => closed_view_index,
             .tags => tags_view_index,
-            .new, .edit, .resolve => form_view_index,
+            .new, .edit, .new_comment, .resolve => form_view_index,
             .conflicts => conflicts_view_index,
             // init resolves a description url to its issue's status list
             .description => unreachable,
@@ -657,12 +660,23 @@ pub const View = struct {
             try stack.children.put(allocator, tf.getFocus().id, .{ .tag_flow = tf });
         }
 
-        // the new-issue form, or — on an edit or resolve url — that form in
+        // the new-issue form, or — on an edit, comment, or resolve url — that form in
         // its place, prefilled with the selected issue's content. a
         // logged-out session can't create events, so the unauthorized view
         // stands in.
         if (session.data.is_local or session.data.user_id != null) {
-            if (data.view == .resolve) {
+            if (data.view == .new_comment) {
+                const route = ui.RoutablePage.repoCommentNewRoute(data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong;
+                const page_url = try route.toUrl(session.page_arena);
+                const action = try std.fmt.allocPrint(session.page_arena.allocator(), "form:{s}/comment", .{page_url[0 .. page_url.len - "/new".len]});
+                const parent_route = if (data.comment_page) |page|
+                    ui.RoutablePage.repoCommentsRoute(data.identity, data.selected_id, page.selected.id, 0)
+                else
+                    ui.RoutablePage.repoIssueCommentsRoute(data.identity, data.selected_id, 0);
+                var form = try initCommentForm(allocator, session, action, if (data.comment_page) |page| page.selected.author else if (data.selectedIssue()) |entry| entry.author else .unknown, parent_route orelse return error.RouteTooLong);
+                errdefer form.deinit(allocator);
+                try stack.children.put(allocator, form.getFocus().id, .{ .box = form });
+            } else if (data.view == .resolve) {
                 // on the web the page grows to the form's height and the
                 // browser scrolls it; the terminal scrolls the form itself
                 var form_widget: ui.Widget = blk: {
@@ -839,12 +853,49 @@ pub const View = struct {
         return box;
     }
 
+    fn initCommentForm(allocator: std.mem.Allocator, session: *ui.Session, action: []const u8, author: ui.Author, parent_route: ui.RoutablePage) !wgt.Box(ui.Widget) {
+        var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert });
+        errdefer box.deinit(allocator);
+        box.getFocus().kind = .{ .custom = action };
+
+        {
+            var parent = try ui.authorBox(allocator, session.page_arena, author);
+            errdefer parent.deinit(allocator);
+            parent.options.label = " replying to ";
+            parent.getFocus().kind = .{ .custom = try std.fmt.allocPrint(session.page_arena.allocator(), "a:{s}", .{try parent_route.toUrl(session.page_arena)}) };
+            try box.children.put(allocator, parent.getFocus().id, .{ .widget = .{ .text_box = parent }, .rect = null, .min_size = null });
+        }
+
+        {
+            var body = try wgt.TextInput(ui.Widget).init(allocator, .{
+                .label = " comment ",
+                .name = "body",
+                .visible_width = null,
+                .rounded_corners = true,
+                .render_content = session.is_terminal,
+                .multiline = true,
+                .visible_height = 5,
+            });
+            errdefer body.deinit(allocator);
+            body.getFocus().focusable = true;
+            try box.children.put(allocator, body.getFocus().id, .{ .widget = .{ .text_input = body }, .rect = null, .min_size = null });
+        }
+
+        try addSubmitButtonLabeled(allocator, &box, "submit reply");
+        box.getFocus().child_id = box.children.keys()[comment_author_field_index];
+        return box;
+    }
+
     // a form's submit button, then a spacer absorbing the leftover
     // min-height the box hands its last child, so the button keeps its
     // natural height
     fn addSubmitButton(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget)) !void {
+        return addSubmitButtonLabeled(allocator, box, "submit");
+    }
+
+    fn addSubmitButtonLabeled(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8) !void {
         {
-            var submit = try ui.SubmitButton.init(allocator);
+            var submit = try ui.SubmitButton.initLabeled(allocator, label);
             errdefer submit.deinit(allocator);
             try box.children.put(allocator, submit.getFocus().id, .{ .widget = .{ .submit_button = submit }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
         }
@@ -1185,6 +1236,7 @@ pub const View = struct {
             self.session.data.current_page = (if (index == form_view_index)
                 (switch (self.data.view) {
                     .edit => ui.RoutablePage.repoIssuesEditRoute(self.data.identity, self.data.selected_id),
+                    .new_comment => ui.RoutablePage.repoCommentNewRoute(self.data.identity, self.data.selected_id, self.data.comment_id),
                     .resolve => ui.RoutablePage.repoIssuesResolveRoute(self.data.identity, self.data.selected_id, self.data.theirs_picks),
                     else => ui.RoutablePage.repoIssuesNewRoute(self.data.identity),
                 })
@@ -1478,6 +1530,10 @@ pub const View = struct {
         };
 
         if (!description_page) {
+            var reply = try Comment.linkBox(allocator, self.session, "new comment", ui.RoutablePage.repoCommentNewRoute(self.data.identity, entry.id, "") orelse return error.RouteTooLong);
+            errdefer reply.deinit(allocator);
+            try inner.children.put(allocator, reply.getFocus().id, .{ .widget = .{ .text_box = reply }, .rect = null, .min_size = null });
+
             try Comment.appendCount(allocator, inner, entry.comments.count, "comment", "comments", self.session.page_arena.allocator());
             for (entry.comments.comments) |comment| try Comment.appendComment(allocator, inner, self.session, self.data.identity, comment);
             try Comment.appendWindowNav(allocator, inner, self.session, self.data.identity, entry.id, null, entry.comments);
@@ -1529,6 +1585,8 @@ pub const View = struct {
         if (self.formViewActive()) {
             if (self.data.view == .resolve) {
                 try self.resolveInput(allocator, key, root_focus);
+            } else if (self.data.view == .new_comment) {
+                try self.commentFormInput(allocator, key, root_focus);
             } else {
                 try self.formInput(allocator, key, root_focus);
             }
@@ -1819,6 +1877,31 @@ pub const View = struct {
         }
     }
 
+    fn commentFormInput(self: *View, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
+        const form = self.issueForm() orelse return;
+        const cid = form.getFocus().child_id orelse return;
+        const cur = form.children.getIndex(cid) orelse return;
+        const child = &form.children.values()[cur];
+
+        if (cur == comment_body_field_index and try multilineKeepsKey(&child.widget.text_input, allocator, key))
+            return child.widget.input(allocator, key, root_focus);
+
+        switch (key) {
+            .arrow_up, .back_tab => if (cur > comment_author_field_index)
+                root_focus.setFocus(form.children.keys()[cur - 1])
+            else
+                self.focusHeader(root_focus),
+            .arrow_down, .tab => if (cur < comment_submit_field_index)
+                root_focus.setFocus(form.children.keys()[cur + 1]),
+            .enter => if (cur == comment_submit_field_index) try self.submitComment(allocator),
+            .mouse => |mouse| if (cur == comment_submit_field_index) {
+                const submit = &child.widget.submit_button;
+                if (inp.leftClickOn(root_focus, submit.buttonId(), mouse)) try self.submitComment(allocator);
+            },
+            else => try child.widget.input(allocator, key, root_focus),
+        }
+    }
+
     // the multiline hunk inputs keep enter and any up/down that has a row to
     // move to; enter on a "use this" link is a navigation the host follows
     // before this runs.
@@ -1961,6 +2044,55 @@ pub const View = struct {
         }
 
         const route = ui.RoutablePage.repoIssuesRoute(self.data.identity, entry.issue.event.status, "", entry.id) orelse return;
+        try self.session.navigate(route);
+    }
+
+    // commit a reply and navigate to its permalink. this is the terminal path;
+    // the web posts the form to its /comment route.
+    fn submitComment(self: *View, allocator: std.mem.Allocator) !void {
+        if (comptime wasm) return;
+        const io = self.session.io orelse return;
+        const src = self.data.repo_source orelse return;
+        const author_email = (try self.session.eventAuthorEmail()) orelse return;
+        const form = self.issueForm() orelse return;
+        const body_input = &form.children.values()[comment_body_field_index].widget.text_input;
+        const body = try body_input.text(allocator);
+        defer allocator.free(body);
+        if (!evt.Comment.fieldsValid(body)) return;
+
+        var id_bytes: [evt.event_id_size]u8 = undefined;
+        io.random(&id_bytes);
+        const event_id_hex = std.fmt.bytesToHex(id_bytes, .lower);
+        var thread_id: [evt.event_id_size * 2]u8 = undefined;
+        @memcpy(&thread_id, self.data.selected_id);
+        const parent_id = if (self.data.comment_id.len == 0) thread_id else blk: {
+            var parent: [evt.event_id_size * 2]u8 = undefined;
+            @memcpy(&parent, self.data.comment_id);
+            break :blk parent;
+        };
+        const event = evt.EventWithId{
+            .id = event_id_hex,
+            .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
+            .author_email = author_email,
+            .event = .{ .comment = .{
+                .thread_id = thread_id,
+                .parent_id = parent_id,
+                .body = body,
+            } },
+        };
+
+        switch (src.repo_kind) {
+            inline else => |repo_kind| {
+                var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, .{ .path = src.path });
+                defer any_repo.deinit(io, allocator);
+                switch (any_repo) {
+                    inline else => |*repo| try evt.consume(repo_kind, repo.self_repo_opts, io, allocator, repo, evt.events_ref, &.{event}),
+                }
+            },
+        }
+
+        body_input.clear(allocator);
+        const route = ui.RoutablePage.repoCommentsRoute(self.data.identity, &thread_id, &event_id_hex, 0) orelse return;
         try self.session.navigate(route);
     }
 
@@ -2360,12 +2492,14 @@ pub const Header = struct {
         {
             const route = switch (data.view) {
                 .edit => ui.RoutablePage.repoIssuesEditRoute(data.identity, data.selected_id) orelse return error.RouteTooLong,
+                .new_comment => ui.RoutablePage.repoCommentNewRoute(data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong,
                 .resolve => ui.RoutablePage.repoIssuesResolveRoute(data.identity, data.selected_id, data.theirs_picks) orelse return error.RouteTooLong,
                 else => ui.RoutablePage.repoIssuesNewRoute(data.identity) orelse return error.RouteTooLong,
             };
             const link = try std.fmt.allocPrint(aa, "ai:{s}", .{try route.toUrl(session.page_arena)});
             const label: []const u8 = switch (data.view) {
                 .edit => "edit",
+                .new_comment => "reply",
                 .resolve => "resolve",
                 else => "new",
             };

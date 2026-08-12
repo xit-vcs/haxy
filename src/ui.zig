@@ -111,7 +111,7 @@ pub const RoutablePage = union(enum) {
 
     pub const RefKind = enum { branch, tag };
 
-    pub const IssuesView = enum { open, closed, tags, new, edit, description, conflicts, resolve };
+    pub const IssuesView = enum { open, closed, tags, new, edit, description, new_comment, conflicts, resolve };
 
     pub const RefOrOid = enum {
         branch,
@@ -366,6 +366,15 @@ pub const RoutablePage = union(enum) {
         return route;
     }
 
+    // build the form route for replying to an issue or one of its comments.
+    pub fn repoCommentNewRoute(identity: []const u8, thread: []const u8, parent_id: []const u8) ?RoutablePage {
+        if (thread.len == 0) return null;
+        var route = repoIssueCommentsRoute(identity, thread, 0) orelse return null;
+        route.repo_issues.comment = Array(evt.event_id_size * 2).from(parent_id) orelse return null;
+        route.repo_issues.view = .new_comment;
+        return route;
+    }
+
     // build a `.repo_issues` route showing tags view, keeping the url-encoded
     // `tag` filter ("" = unfiltered).
     pub fn repoIssuesTagsRoute(identity: []const u8, tag: []const u8) ?RoutablePage {
@@ -512,6 +521,10 @@ pub const RoutablePage = union(enum) {
                     try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ issue_seg ++ "{s}/resolve", .{ prefix, i.selected.slice() })
                 else
                     try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ issue_seg ++ "{s}/" ++ theirs_seg ++ "{s}/resolve", .{ prefix, i.selected.slice(), i.theirs.slice() });
+                if (i.view == .new_comment) break :blk if (i.comment.len == 0)
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ issue_seg ++ "{s}/new", .{ prefix, i.selected.slice() })
+                else
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ issue_seg ++ "{s}/" ++ comment_seg ++ "{s}/new", .{ prefix, i.selected.slice(), i.comment.slice() });
                 if (i.view == .conflicts) break :blk if (i.selected.len == 0)
                     try std.fmt.allocPrint(arena.allocator(), "{s}/issues/conflicts", .{prefix})
                 else
@@ -590,7 +603,7 @@ pub const RoutablePage = union(enum) {
     // browser scroll the whole page, rather than being pinned to the viewport
     pub fn fullHeight(self: RoutablePage) bool {
         return switch (self) {
-            .repo_issues => |i| i.view == .resolve,
+            .repo_issues => |i| i.view == .resolve or i.view == .new_comment,
             else => false,
         };
     }
@@ -667,14 +680,23 @@ pub const RoutablePage = union(enum) {
         if (std.mem.startsWith(u8, tab, issue_seg)) {
             const issue_id = tab[issue_seg.len..];
             if (issue_id.len == 0) return null;
-            const word = params.scanTail(&segments) catch return null;
-            if (word) |tail| {
+            if (segments.peek()) |tail| {
                 if (std.mem.startsWith(u8, tail, comment_seg)) {
-                    if (!params.only(&.{.start})) return null;
+                    _ = segments.next();
                     const comment_id = tail[comment_seg.len..];
                     if (comment_id.len == 0) return null;
+                    const word = params.scanTail(&segments) catch return null;
+                    if (word) |last| {
+                        if (!std.mem.eql(u8, last, "new") or !params.only(&.{})) return null;
+                        return repoCommentNewRoute(pair, issue_id, comment_id);
+                    }
+                    if (!params.only(&.{.start})) return null;
                     return repoCommentsRoute(pair, issue_id, comment_id, params.start() orelse return null);
                 }
+            }
+            const word = params.scanTail(&segments) catch return null;
+            if (word) |tail| {
+                if (std.mem.eql(u8, tail, "new")) return if (params.only(&.{})) repoCommentNewRoute(pair, issue_id, "") else null;
                 if (std.mem.eql(u8, tail, "edit")) return if (params.only(&.{})) repoIssuesEditRoute(pair, issue_id) else null;
                 if (std.mem.eql(u8, tail, "description")) return if (params.only(&.{})) repoIssuesDescriptionRoute(pair, issue_id) else null;
                 if (std.mem.eql(u8, tail, "resolve")) {
@@ -2164,6 +2186,10 @@ pub const SubmitButton = struct {
     box: wgt.Box(Widget),
 
     pub fn init(allocator: std.mem.Allocator) !SubmitButton {
+        return initLabeled(allocator, "submit");
+    }
+
+    pub fn initLabeled(allocator: std.mem.Allocator, label: []const u8) !SubmitButton {
         var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
         errdefer box.deinit(allocator);
 
@@ -2174,7 +2200,6 @@ pub const SubmitButton = struct {
         }
 
         {
-            const label = "submit";
             var button = try wgt.TextBox(Widget).init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer button.deinit(allocator);
             button.getFocus().focusable = true;
