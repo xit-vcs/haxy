@@ -119,3 +119,19 @@ pub fn consume(
     const replies = try DB.SortedSet(.read_write).init(replies_cursor);
     try replies.put(&thread_order_key);
 }
+
+// read a comment by event id, or null if the id isn't a known comment. field
+// byte slices are allocated in `arena`.
+pub fn readById(
+    comptime DB: type,
+    comptime hash_kind: hash.HashKind,
+    haxy_moment: DB.HashMap(.read_only),
+    arena: *std.heap.ArenaAllocator,
+    comment_id: []const u8,
+) !?Record {
+    const records_cursor = try haxy_moment.getCursor(hash.hashInt(hash_kind, record_map_key)) orelse return null;
+    const records = try DB.HashMap(.read_only).init(records_cursor);
+    const record_cursor = try records.getCursor(hash.hashInt(hash_kind, comment_id)) orelse return null;
+    const record_map = try DB.HashMap(.read_only).init(record_cursor);
+    return try evt.read(Record, DB, hash_kind, arena, record_map);
+}

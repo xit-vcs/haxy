@@ -125,16 +125,10 @@ fn readOneBytes(
     id: []const u8,
 ) !?CommentWithId {
     const DB = evt.EventDB(hash_kind);
-    const records_cursor = try haxy_moment.getCursor(hash.hashInt(hash_kind, evt.Comment.record_map_key)) orelse return null;
-    const records = try DB.HashMap(.read_only).init(records_cursor);
-    const record_cursor = try records.getCursor(hash.hashInt(hash_kind, id_bytes)) orelse return null;
-    const record_map = try DB.HashMap(.read_only).init(record_cursor);
-    const comment = try evt.read(evt.Comment.Record, DB, hash_kind, arena, record_map);
+    const comment = (try evt.Comment.readById(DB, hash_kind, haxy_moment, arena, id_bytes)) orelse return null;
     const parent_author: ?ui.Author = if (!std.mem.eql(u8, &comment.event.parent_id, &comment.event.thread_id)) blk: {
         const parent_bytes = (try idBytes(&comment.event.parent_id)) orelse break :blk null;
-        const parent_cursor = try records.getCursor(hash.hashInt(hash_kind, &parent_bytes)) orelse break :blk null;
-        const parent_map = try DB.HashMap(.read_only).init(parent_cursor);
-        const parent = try evt.read(evt.Comment.Record, DB, hash_kind, arena, parent_map);
+        const parent = (try evt.Comment.readById(DB, hash_kind, haxy_moment, arena, &parent_bytes)) orelse break :blk null;
         break :blk try ui.Author.initFromEmail(admin_moment, arena, parent.author_email);
     } else null;
     return .{
