@@ -533,10 +533,10 @@ pub fn main(init: std.process.Init) !void {
 
             var issue_events: [issue_data.len]evt.EventWithId = undefined;
             for (issue_data, 0..) |issue, i| {
-                // the newest issue's description runs past what the detail
+                // the fifth-newest issue's description runs past what the detail
                 // pane shows, so it shows the truncated description and its
                 // link.
-                const description = if (i == issue_data.len - 1) desc: {
+                const description = if (i == issue_data.len - 5) desc: {
                     var desc_writer = std.Io.Writer.Allocating.init(allocator);
                     defer desc_writer.deinit();
                     try desc_writer.writer.print("{s}", .{issue.description});
@@ -678,7 +678,7 @@ pub fn main(init: std.process.Init) !void {
 
             try evt.consume(.xit, .{}, io, allocator, &template_repo, evt.events_ref, &.{});
 
-            // seed a small comment tree on the second-newest issue
+            // seed a small comment tree on the newest issue
             var comment_ids: [5][evt.event_id_size]u8 = undefined;
             for (&comment_ids) |*id| id.* = evt.EventWithId.randomId(prng.random());
 
@@ -697,9 +697,9 @@ pub fn main(init: std.process.Init) !void {
                     .timestamp = @intCast(200 + i),
                     .author_email = user_data[(i + 1) % user_data.len].email,
                     .event = .{ .comment = .{
-                        .thread_id = issue_events[issue_events.len - 2].id,
+                        .thread_id = issue_events[issue_events.len - 1].id,
                         .parent_id = switch (i) {
-                            0, 1 => issue_events[issue_events.len - 2].id,
+                            0, 1 => issue_events[issue_events.len - 1].id,
                             2, 4 => std.fmt.bytesToHex(comment_ids[0], .lower),
                             3 => std.fmt.bytesToHex(comment_ids[2], .lower),
                             else => unreachable,

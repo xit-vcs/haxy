@@ -51,7 +51,7 @@ pub const Page = union(PageKind) {
                 };
             },
             .repo => switch (route) {
-                .repo_files, .repo_commits, .repo_refs, .repo_issues, .repo_settings, .repo_auth => .{ .repo = try Repo.init(arena, session, route) },
+                .repo_files, .repo_commits, .repo_refs, .repo_issues, .repo_comments, .repo_settings, .repo_auth => .{ .repo = try Repo.init(arena, session, route) },
                 else => return error.UnexpectedRoute,
             },
         };
@@ -99,6 +99,14 @@ pub const RoutablePage = union(enum) {
         // the view the url names; a route with `selected` derives its view
         // from that issue's status instead.
         view: IssuesView = .open,
+        // the selected issue's comment window (0 = the first window).
+        comments_start: usize = 0,
+    },
+    repo_comments: struct {
+        name: Array(repo_route_max_len),
+        thread: Array(evt.event_id_size * 2),
+        selected: Array(evt.event_id_size * 2),
+        start: usize = 0,
     },
     repo_settings: Array(repo_route_max_len),
     repo_auth: Array(repo_route_max_len),
@@ -345,6 +353,24 @@ pub const RoutablePage = union(enum) {
         } };
     }
 
+    // build a selected issue route at one of its comment windows.
+    pub fn repoIssueCommentsRoute(identity: []const u8, selected: []const u8, start: usize) ?RoutablePage {
+        var route = repoIssuesRoute(identity, .open, "", selected) orelse return null;
+        route.repo_issues.comments_start = start;
+        return route;
+    }
+
+    // build a comment permalink route at one of its immediate-reply windows.
+    pub fn repoCommentsRoute(identity: []const u8, thread: []const u8, selected: []const u8, start: usize) ?RoutablePage {
+        if (thread.len == 0 or selected.len == 0) return null;
+        return .{ .repo_comments = .{
+            .name = Array(repo_route_max_len).from(identity) orelse return null,
+            .thread = Array(evt.event_id_size * 2).from(thread) orelse return null,
+            .selected = Array(evt.event_id_size * 2).from(selected) orelse return null,
+            .start = start,
+        } };
+    }
+
     // build a `.repo_issues` route showing tags view, keeping the url-encoded
     // `tag` filter ("" = unfiltered).
     pub fn repoIssuesTagsRoute(identity: []const u8, tag: []const u8) ?RoutablePage {
@@ -498,10 +524,19 @@ pub const RoutablePage = union(enum) {
                 // a selected issue's url carries its id instead of a view
                 // name, so it survives status changes
                 const word = if (i.selected.len != 0) i.selected.slice() else @tagName(i.view);
-                break :blk if (i.tag.len == 0)
+                break :blk if (i.tag.len == 0 and i.comments_start == 0)
                     try std.fmt.allocPrint(arena.allocator(), "{s}/issues/{s}", .{ prefix, word })
+                else if (i.tag.len == 0)
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/issues/{s}/" ++ start_seg ++ "{d}", .{ prefix, word, i.comments_start })
                 else
                     try std.fmt.allocPrint(arena.allocator(), "{s}/issues/{s}/" ++ tag_filter_seg ++ "{s}", .{ prefix, word, i.tag.slice() });
+            },
+            .repo_comments => |c| blk: {
+                const prefix = try repoUrlPrefix(arena, c.name.slice());
+                break :blk if (c.start == 0)
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/issues/{s}/comments/{s}", .{ prefix, c.thread.slice(), c.selected.slice() })
+                else
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/issues/{s}/comments/{s}/" ++ start_seg ++ "{d}", .{ prefix, c.thread.slice(), c.selected.slice(), c.start });
             },
             .repo_settings => |name| try std.fmt.allocPrint(arena.allocator(), "{s}/settings", .{try repoUrlPrefix(arena, name.slice())}),
             .repo_auth => |name| try std.fmt.allocPrint(arena.allocator(), "{s}/auth", .{try repoUrlPrefix(arena, name.slice())}),
@@ -565,6 +600,7 @@ pub const RoutablePage = union(enum) {
     pub fn fullHeight(self: RoutablePage) bool {
         return switch (self) {
             .repo_issues => |i| i.view == .resolve,
+            .repo_comments => true,
             else => false,
         };
     }
@@ -577,6 +613,7 @@ pub const RoutablePage = union(enum) {
             .repo_commits => |*c| c.name.slice(),
             .repo_refs => |*r| r.name.slice(),
             .repo_issues => |*i| i.name.slice(),
+            .repo_comments => |*c| c.name.slice(),
             .repo_settings, .repo_auth => |*name| name.slice(),
             else => null,
         };
@@ -601,7 +638,7 @@ pub const RoutablePage = union(enum) {
         return switch (self) {
             .home_users, .home_repos, .home_settings, .home_auth => .home,
             .user_repos, .user_settings, .user_auth => .user,
-            .repo_files, .repo_commits, .repo_refs, .repo_issues, .repo_settings, .repo_auth => .repo,
+            .repo_files, .repo_commits, .repo_refs, .repo_issues, .repo_comments, .repo_settings, .repo_auth => .repo,
         };
     }
 
@@ -642,6 +679,20 @@ pub const RoutablePage = union(enum) {
             // "<id>/edit" is the edit form for that issue, with no params;
             // "<id>/description" is its whole-description page.
             const after_tab = segments.rest();
+            // "<thread-id>/comments/<comment-id>[/start:<n>]" is a comment
+            // permalink with one window of its immediate replies.
+            {
+                var comment_segments = std.mem.splitScalar(u8, after_tab, '/');
+                const thread = comment_segments.next() orelse return null;
+                const marker = comment_segments.next();
+                if (marker) |word| {
+                    if (std.mem.eql(u8, word, "comments")) {
+                        const comment = comment_segments.next() orelse return null;
+                        if (thread.len == 0 or comment.len == 0) return null;
+                        return repoCommentsRoute(pair, thread, comment, listStart(&comment_segments) orelse return null);
+                    }
+                }
+            }
             if (std.mem.endsWith(u8, after_tab, "/edit")) {
                 const id = after_tab[0 .. after_tab.len - "/edit".len];
                 if (id.len == 0 or std.mem.indexOfScalar(u8, id, '/') != null) return null;
@@ -669,6 +720,10 @@ pub const RoutablePage = union(enum) {
             if (std.mem.eql(u8, w, "conflicts")) {
                 if (!params.only(&.{.start})) return null;
                 return repoIssuesConflictsRoute(pair, params.values.get(.start) orelse "");
+            }
+            if (params.values.get(.start) != null) {
+                if (!params.only(&.{.start})) return null;
+                return repoIssueCommentsRoute(pair, w, params.start() orelse return null);
             }
             if (!params.only(&.{.tag})) return null;
             if (std.meta.stringToEnum(evt.Issue.Status, w)) |status| return repoIssuesRoute(pair, status, tag_value, "");
@@ -730,7 +785,12 @@ pub const RoutablePage = union(enum) {
                 std.mem.eql(u8, a_i.tag.slice(), b.repo_issues.tag.slice()) and
                 std.mem.eql(u8, a_i.selected.slice(), b.repo_issues.selected.slice()) and
                 std.mem.eql(u8, a_i.theirs.slice(), b.repo_issues.theirs.slice()) and
-                a_i.view == b.repo_issues.view,
+                a_i.view == b.repo_issues.view and
+                a_i.comments_start == b.repo_issues.comments_start,
+            .repo_comments => |a_c| std.mem.eql(u8, a_c.name.slice(), b.repo_comments.name.slice()) and
+                std.mem.eql(u8, a_c.thread.slice(), b.repo_comments.thread.slice()) and
+                std.mem.eql(u8, a_c.selected.slice(), b.repo_comments.selected.slice()) and
+                a_c.start == b.repo_comments.start,
             .repo_settings => |a_name| std.mem.eql(u8, a_name.slice(), b.repo_settings.slice()),
             .repo_auth => |a_name| std.mem.eql(u8, a_name.slice(), b.repo_auth.slice()),
             else => true,
@@ -1447,6 +1507,8 @@ pub const Widget = union(enum) {
     repo_commits: Repo.Commits.View,
     repo_refs: Repo.Refs.View,
     repo_issues: Repo.Issues.View,
+    repo_comments: Repo.Comments.View,
+    repo_comment: Repo.Comments.Item,
     home_users: Home.Users.View,
     home_repos: Home.Repos.View,
     auth_tab: Home.Header.AuthTab.View,

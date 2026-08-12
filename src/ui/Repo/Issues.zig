@@ -13,6 +13,7 @@ const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
 const inp = @import("../input.zig");
 const diff3 = @import("../../diff3.zig");
+const Comments = @import("Comments.zig");
 
 const wasm = builtin.target.cpu.arch == .wasm32;
 
@@ -35,6 +36,7 @@ pub const IssueWithId = struct {
     author: ui.Author = .unknown,
     // whether the issue has an unresolved merge conflict
     conflicted: bool = false,
+    comments: Comments.Window = .empty,
 };
 
 // one side of a conflicted field: its value and who set it
@@ -82,6 +84,8 @@ tag: []const u8,
 // the hex event id of the issue its status's window is rooted at ("" = the
 // first window), mirrored into the url.
 selected_id: []const u8,
+// the selected issue's comment window (0 = the first window).
+comments_start: usize,
 open: Window,
 closed: Window,
 // the conflicted issues' listing; its count also gates the conflicts tab.
@@ -134,11 +138,12 @@ pub fn selectedIssue(self: *const Self) ?*const IssueWithId {
 }
 
 // an empty listing, for the wasm / no-repo paths.
-pub fn emptyResult(aa: std.mem.Allocator, identity: []const u8, tag: []const u8, selected_id: []const u8, theirs_picks: []const u8, view: ui.RoutablePage.IssuesView) !Self {
+pub fn emptyResult(aa: std.mem.Allocator, identity: []const u8, tag: []const u8, selected_id: []const u8, comments_start: usize, theirs_picks: []const u8, view: ui.RoutablePage.IssuesView) !Self {
     return .{
         .identity = try aa.dupe(u8, identity),
         .tag = try aa.dupe(u8, tag),
         .selected_id = try aa.dupe(u8, selected_id),
+        .comments_start = comments_start,
         .open = .empty,
         .closed = .empty,
         .conflicts = .empty,
@@ -172,10 +177,11 @@ pub fn init(
     identity: []const u8,
     tag: []const u8,
     selected_id: []const u8,
+    comments_start: usize,
     theirs_picks: []const u8,
     view: ui.RoutablePage.IssuesView,
 ) !Self {
-    const empty = try emptyResult(arena.allocator(), identity, tag, selected_id, theirs_picks, view);
+    const empty = try emptyResult(arena.allocator(), identity, tag, selected_id, comments_start, theirs_picks, view);
 
     const aa = arena.allocator();
     const DB = evt.EventDB(repo_opts.hash);
@@ -290,9 +296,9 @@ pub fn init(
         }
     }
 
-    const open_window = try loadWindow(repo_opts.hash, arena, admin_moment, event_id_to_issue, open_set, open_root, conflict_set);
-    const closed_window = try loadWindow(repo_opts.hash, arena, admin_moment, event_id_to_issue, closed_set, closed_root, conflict_set);
-    const conflicts_window = try loadWindow(repo_opts.hash, arena, admin_moment, event_id_to_issue, conflict_set, conflicts_root, conflict_set);
+    const open_window = try loadWindow(repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_issue, open_set, open_root, conflict_set, empty.selected_id, comments_start);
+    const closed_window = try loadWindow(repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_issue, closed_set, closed_root, conflict_set, empty.selected_id, comments_start);
+    const conflicts_window = try loadWindow(repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_issue, conflict_set, conflicts_root, conflict_set, empty.selected_id, comments_start);
     if (view == .conflicts and conflicts_window.count > 0) resolved_view = .conflicts;
 
     // every tag in the repo, in the tag map's sorted order. the keys are
@@ -319,6 +325,7 @@ pub fn init(
         .identity = empty.identity,
         .tag = empty.tag,
         .selected_id = empty.selected_id,
+        .comments_start = comments_start,
         .open = open_window,
         .closed = closed_window,
         .conflicts = conflicts_window,
@@ -360,10 +367,13 @@ fn loadWindow(
     comptime hash_kind: hash.HashKind,
     arena: *std.heap.ArenaAllocator,
     admin_moment: ?evt.AdminDB.HashMap(.read_only),
+    haxy_moment: evt.EventDB(hash_kind).HashMap(.read_only),
     event_id_to_issue: evt.EventDB(hash_kind).HashMap(.read_only),
     set_maybe: ?evt.EventDB(hash_kind).SortedSet(.read_only),
     root_key: ?[]const u8,
     conflict_set: ?evt.EventDB(hash_kind).SortedSet(.read_only),
+    selected_id: []const u8,
+    comments_start: usize,
 ) !Window {
     const set = set_maybe orelse return .empty;
     const DB = evt.EventDB(hash_kind);
@@ -410,6 +420,15 @@ fn loadWindow(
             .issue = issue_event,
             .author = try ui.Author.initFromEmail(admin_moment, arena, issue_event.author_email),
             .conflicted = if (conflict_set) |cs| try cs.contains(&order_key) else false,
+            .comments = try Comments.loadWindow(
+                hash_kind,
+                arena,
+                admin_moment,
+                haxy_moment,
+                evt.Comment.thread_id_to_comment_id_set_key,
+                &id_hex,
+                if (std.mem.eql(u8, &id_hex, selected_id)) comments_start else 0,
+            ),
         });
     }
 
@@ -709,8 +728,13 @@ pub const View = struct {
                 if (win.prev_id) |prev|
                     try addRow(allocator, &list_box, "← previous", "", try windowLink(session.page_arena, data, status_maybe, prev));
                 for (win.issues) |entry| {
-                    // conflicted issues carry a marker in the status lists
-                    const label: []const u8 = if (entry.conflicted and status_maybe != null) "[conflict]" else "";
+                    // conflicts take precedence over the comment count
+                    const label: []const u8 = if (entry.conflicted and status_maybe != null)
+                        " conflict "
+                    else if (entry.comments.count > 0)
+                        try std.fmt.allocPrint(session.page_arena.allocator(), " {d} comments ", .{entry.comments.count})
+                    else
+                        "";
                     try addRow(allocator, &list_box, entry.issue.event.title, label, try issueRowLink(session.page_arena, data.identity, entry.id));
                 }
                 if (win.next_id) |next|
@@ -1156,7 +1180,7 @@ pub const View = struct {
                 (if (self.data.description_page)
                     ui.RoutablePage.repoIssuesDescriptionRoute(self.data.identity, self.data.selected_id)
                 else
-                    ui.RoutablePage.repoIssuesRoute(self.data.identity, .open, self.data.tag, self.data.selected_id))
+                    ui.RoutablePage.repoIssueCommentsRoute(self.data.identity, self.data.selected_id, self.data.comments_start))
             else if (index == tags_view_index)
                 ui.RoutablePage.repoIssuesTagsRoute(self.data.identity, self.data.tag)
             else
@@ -1178,8 +1202,10 @@ pub const View = struct {
                         const entry = &self.window(i).issues[sel];
                         const mirrored = if (self.data.description_page and std.mem.eql(u8, entry.id, self.data.selected_id))
                             ui.RoutablePage.repoIssuesDescriptionRoute(self.data.identity, entry.id)
+                        else if (std.mem.eql(u8, entry.id, self.data.selected_id))
+                            ui.RoutablePage.repoIssueCommentsRoute(self.data.identity, entry.id, entry.comments.start)
                         else
-                            ui.RoutablePage.repoIssuesRoute(self.data.identity, entry.issue.event.status, "", entry.id);
+                            ui.RoutablePage.repoIssueCommentsRoute(self.data.identity, entry.id, 0);
                         if (mirrored) |route| self.session.data.current_page = route;
                     }
                 }
@@ -1407,6 +1433,12 @@ pub const View = struct {
             break :blk tb.getFocus().id;
         };
 
+        if (!description_page) {
+            try Comments.appendCount(allocator, inner, entry.comments.count, "comment", "comments", self.session.page_arena.allocator());
+            for (entry.comments.comments) |comment| try Comments.appendComment(allocator, inner, self.session, self.data.identity, comment);
+            try Comments.appendWindowNav(allocator, inner, self.session, self.data.identity, entry.id, null, entry.comments);
+        }
+
         // select the title by default
         inner.getFocus().child_id = inner.children.keys()[title_child_index];
 
@@ -1506,8 +1538,10 @@ pub const View = struct {
             try self.authorInput(index, key, root_focus);
         } else if (self.tagsFocused(index)) {
             try self.tagsInput(index, key, root_focus);
-        } else {
+        } else if (self.descriptionFocused(index)) {
             try self.descriptionInput(index, key, root_focus);
+        } else {
+            try self.commentInput(index, key, root_focus);
         }
     }
 
@@ -1572,7 +1606,14 @@ pub const View = struct {
                 }
                 return;
             },
-            .arrow_down => sc.y += 1,
+            .arrow_down => {
+                if (self.moveDetailFocus(index, root_focus, true)) return;
+                const before = sc.y;
+                sc.y += 1;
+                sc.clampToContent();
+                if (sc.y == before) _ = self.moveDetailFocus(index, root_focus, true);
+                return;
+            },
             .page_up => sc.y -= 10,
             .page_down => sc.y += 10,
             .home => sc.y = 0,
@@ -1580,6 +1621,121 @@ pub const View = struct {
             else => return,
         }
         sc.clampToContent();
+    }
+
+    fn commentInput(self: *View, index: usize, key: Key, root_focus: *Focus) !void {
+        switch (key) {
+            .arrow_left => if (!self.moveCommentHorizontal(index, root_focus, false)) return self.focusList(index, root_focus),
+            .arrow_right => _ = self.moveCommentHorizontal(index, root_focus, true),
+            .arrow_up => _ = self.moveCommentVertical(index, root_focus, false),
+            .arrow_down => _ = self.moveCommentVertical(index, root_focus, true),
+            .page_up => self.detailScroll(index).y -= 10,
+            .page_down => self.detailScroll(index).y += 10,
+            .home => self.detailScroll(index).y = 0,
+            .end => self.detailScroll(index).y = std.math.maxInt(isize),
+            else => return,
+        }
+        self.detailScroll(index).clampToContent();
+    }
+
+    fn focusedDetailChild(self: *View, index: usize, root_focus: *Focus) ?usize {
+        const inner = self.detailInner(index);
+        var id = root_focus.grandchild_id orelse return null;
+        while (inner.getFocus().children.get(id)) |child| {
+            if (child.parent_id == inner.getFocus().id) return inner.children.getIndex(id);
+            id = child.parent_id;
+        }
+        return null;
+    }
+
+    fn detailChildFocusable(self: *View, index: usize, child_index: usize) bool {
+        const child = &self.detailInner(index).children.values()[child_index].widget;
+        return switch (child.*) {
+            .repo_comment => true,
+            .box => |*box| for (box.children.values()) |*item| {
+                if (item.widget.getFocus().focusable) break true;
+            } else false,
+            else => child.getFocus().focusable,
+        };
+    }
+
+    fn focusDetailChild(self: *View, index: usize, child_index: usize, last: bool, root_focus: *Focus) void {
+        const inner = self.detailInner(index);
+        const child = &inner.children.values()[child_index];
+        var target = inner.children.keys()[child_index];
+        var rect = child.rect orelse return;
+        switch (child.widget) {
+            .repo_comment => |*comment| {
+                if (comment.rowRect(last)) |row_rect| {
+                    rect.x += row_rect.x;
+                    rect.y += row_rect.y;
+                    rect.size = row_rect.size;
+                }
+                if (last) comment.focusBody(root_focus) else comment.focusMetadata(root_focus);
+            },
+            .box => |*box| if (box.children.count() > 0) {
+                target = box.children.keys()[if (last) box.children.count() - 1 else 0];
+                root_focus.setFocus(target);
+            },
+            else => root_focus.setFocus(target),
+        }
+        self.detailScroll(index).scrollToRect(rect);
+    }
+
+    fn moveCommentVertical(self: *View, index: usize, root_focus: *Focus, down: bool) bool {
+        const inner = self.detailInner(index);
+        const current = self.focusedDetailChild(index, root_focus) orelse return false;
+        if (inner.children.values()[current].widget == .repo_comment) {
+            const comment = &inner.children.values()[current].widget.repo_comment;
+            if (down and !comment.bodyFocused()) {
+                self.focusDetailChild(index, current, true, root_focus);
+                return true;
+            }
+            if (!down and comment.bodyFocused()) {
+                self.focusDetailChild(index, current, false, root_focus);
+                return true;
+            }
+        }
+
+        var next = current;
+        while (true) {
+            if (down) {
+                next += 1;
+                if (next >= inner.children.count()) return false;
+            } else {
+                if (next == 0) return false;
+                next -= 1;
+            }
+            if (!self.detailChildFocusable(index, next)) continue;
+            self.focusDetailChild(index, next, !down, root_focus);
+            return true;
+        }
+    }
+
+    fn moveCommentHorizontal(self: *View, index: usize, root_focus: *Focus, right: bool) bool {
+        const inner = self.detailInner(index);
+        const current = self.focusedDetailChild(index, root_focus) orelse return false;
+        const child = &inner.children.values()[current];
+        if (child.widget == .repo_comment) {
+            const moved = child.widget.repo_comment.moveHorizontal(root_focus, right);
+            if (moved) if (child.rect) |rect| self.detailScroll(index).scrollToRect(rect);
+            return moved;
+        }
+        const row = switch (child.widget) {
+            .box => |*box| box,
+            else => return false,
+        };
+        const selected = row.getFocus().child_id orelse return false;
+        const selected_index = row.children.getIndex(selected) orelse return false;
+        const target = if (right) selected_index + 1 else selected_index -| 1;
+        if (target == selected_index or target >= row.children.count()) return false;
+        root_focus.setFocus(row.children.keys()[target]);
+        if (child.rect) |rect| self.detailScroll(index).scrollToRect(rect);
+        return true;
+    }
+
+    fn moveDetailFocus(self: *View, index: usize, root_focus: *Focus, down: bool) bool {
+        return self.moveCommentVertical(index, root_focus, down);
     }
 
     // up/down (and tab/shift+tab) move between a form's fields; up from the
@@ -1991,6 +2147,11 @@ pub const View = struct {
         const inner = self.detailInner(index);
         const cid = inner.getFocus().child_id orelse return false;
         return cid == self.author_id[index];
+    }
+
+    fn descriptionFocused(self: *View, index: usize) bool {
+        const cid = self.detailInner(index).getFocus().child_id orelse return false;
+        return cid == self.description_id[index];
     }
 
     // the author sits right under the title at the top of the pane, so
