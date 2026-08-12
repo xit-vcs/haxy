@@ -577,22 +577,10 @@ fn handleComment(
         return;
     }
 
-    var id_bytes: [evt.event_id_size]u8 = undefined;
-    io.random(&id_bytes);
-    const event_id_hex = std.fmt.bytesToHex(id_bytes, .lower);
     const thread_id_hex = std.fmt.bytesToHex(parts.thread_id, .lower);
     const parent_id_hex = std.fmt.bytesToHex(parts.parent_id, .lower);
-    const event = evt.EventWithId{
-        .id = event_id_hex,
-        .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
-        .author_email = author_email,
-        .event = .{ .comment = .{
-            .thread_id = thread_id_hex,
-            .parent_id = parent_id_hex,
-            .body = body,
-        } },
-    };
 
+    var event_id_hex: [evt.event_id_size * 2]u8 = undefined;
     switch (host) {
         .remote => |remote| {
             const repo_prefix = "/repo/";
@@ -619,7 +607,7 @@ fn handleComment(
 
             var repo = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = repo_path });
             defer repo.deinit(io, allocator);
-            try evt.consume(.xit, .{}, io, allocator, &repo, evt.events_ref, &.{event});
+            event_id_hex = try evt.Comment.create(.xit, .{}, io, allocator, &repo, &thread_id_hex, &parent_id_hex, body, author_email);
         },
         .local => |src| {
             if (parts.repo_base.len != 0) {
@@ -634,7 +622,7 @@ fn handleComment(
                     var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, .{ .path = src.path });
                     defer any_repo.deinit(io, allocator);
                     switch (any_repo) {
-                        inline else => |*repo| try evt.consume(repo_kind, repo.self_repo_opts, io, allocator, repo, evt.events_ref, &.{event}),
+                        inline else => |*repo| event_id_hex = try evt.Comment.create(repo_kind, repo.self_repo_opts, io, allocator, repo, &thread_id_hex, &parent_id_hex, body, author_email),
                     }
                 },
             }

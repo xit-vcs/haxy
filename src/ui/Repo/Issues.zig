@@ -670,7 +670,7 @@ pub const View = struct {
                 const page_url = try route.toUrl(session.page_arena);
                 const action = try std.fmt.allocPrint(session.page_arena.allocator(), "form:{s}/comment", .{page_url[0 .. page_url.len - "/new".len]});
                 const parent_route = if (data.comment_page) |page|
-                    ui.RoutablePage.repoCommentsRoute(data.identity, data.selected_id, page.selected.id, 0)
+                    ui.RoutablePage.repoCommentsRoute(data.identity, data.selected_id, &page.selected.id, 0)
                 else
                     ui.RoutablePage.repoIssueCommentsRoute(data.identity, data.selected_id, 0);
                 var form = try initCommentForm(allocator, session, action, if (data.comment_page) |page| page.selected.author else if (data.selectedIssue()) |entry| entry.author else .unknown, parent_route orelse return error.RouteTooLong);
@@ -1246,7 +1246,7 @@ pub const View = struct {
                 (if (self.data.description_page)
                     ui.RoutablePage.repoIssuesDescriptionRoute(self.data.identity, self.data.selected_id)
                 else if (self.data.comment_page) |page|
-                    ui.RoutablePage.repoCommentsRoute(self.data.identity, self.data.selected_id, page.selected.id, page.replies.start)
+                    ui.RoutablePage.repoCommentsRoute(self.data.identity, self.data.selected_id, &page.selected.id, page.replies.start)
                 else
                     ui.RoutablePage.repoIssueCommentsRoute(self.data.identity, self.data.selected_id, self.data.comments_start))
             else if (index == tags_view_index)
@@ -1272,7 +1272,7 @@ pub const View = struct {
                             ui.RoutablePage.repoIssuesDescriptionRoute(self.data.identity, entry.id)
                         else if (self.data.comment_page) |page|
                             if (std.mem.eql(u8, entry.id, self.data.selected_id))
-                                ui.RoutablePage.repoCommentsRoute(self.data.identity, entry.id, page.selected.id, page.replies.start)
+                                ui.RoutablePage.repoCommentsRoute(self.data.identity, entry.id, &page.selected.id, page.replies.start)
                             else
                                 ui.RoutablePage.repoIssueCommentsRoute(self.data.identity, entry.id, 0)
                         else if (std.mem.eql(u8, entry.id, self.data.selected_id))
@@ -1446,7 +1446,7 @@ pub const View = struct {
             try Comment.appendComment(allocator, inner, self.session, self.data.identity, page.selected);
             try Comment.appendCount(allocator, inner, page.replies.count, "reply", "replies", self.session.page_arena.allocator());
             for (page.replies.comments) |comment| try Comment.appendComment(allocator, inner, self.session, self.data.identity, comment);
-            try Comment.appendWindowNav(allocator, inner, self.session, self.data.identity, page.thread_id, page.selected.id, page.replies);
+            try Comment.appendWindowNav(allocator, inner, self.session, self.data.identity, &page.selected.comment.event.thread_id, &page.selected.id, page.replies);
 
             var spacer = try ui.Spacer.init(allocator);
             errdefer spacer.deinit(allocator);
@@ -1715,11 +1715,11 @@ pub const View = struct {
                 return;
             },
             .arrow_down => {
-                if (self.moveDetailFocus(index, root_focus, true)) return;
+                if (self.moveCommentVertical(index, root_focus, true)) return;
                 const before = sc.y;
                 sc.y += 1;
                 sc.clampToContent();
-                if (sc.y == before) _ = self.moveDetailFocus(index, root_focus, true);
+                if (sc.y == before) _ = self.moveCommentVertical(index, root_focus, true);
                 return;
             },
             .page_up => sc.y -= 10,
@@ -1840,10 +1840,6 @@ pub const View = struct {
         root_focus.setFocus(row.children.keys()[target]);
         if (child.rect) |rect| self.detailScroll(index).scrollToRect(rect);
         return true;
-    }
-
-    fn moveDetailFocus(self: *View, index: usize, root_focus: *Focus, down: bool) bool {
-        return self.moveCommentVertical(index, root_focus, down);
     }
 
     // up/down (and tab/shift+tab) move between a form's fields; up from the
@@ -2060,9 +2056,6 @@ pub const View = struct {
         defer allocator.free(body);
         if (!evt.Comment.fieldsValid(body)) return;
 
-        var id_bytes: [evt.event_id_size]u8 = undefined;
-        io.random(&id_bytes);
-        const event_id_hex = std.fmt.bytesToHex(id_bytes, .lower);
         var thread_id: [evt.event_id_size * 2]u8 = undefined;
         @memcpy(&thread_id, self.data.selected_id);
         const parent_id = if (self.data.comment_id.len == 0) thread_id else blk: {
@@ -2070,23 +2063,13 @@ pub const View = struct {
             @memcpy(&parent, self.data.comment_id);
             break :blk parent;
         };
-        const event = evt.EventWithId{
-            .id = event_id_hex,
-            .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
-            .author_email = author_email,
-            .event = .{ .comment = .{
-                .thread_id = thread_id,
-                .parent_id = parent_id,
-                .body = body,
-            } },
-        };
-
+        var event_id_hex: [evt.event_id_size * 2]u8 = undefined;
         switch (src.repo_kind) {
             inline else => |repo_kind| {
                 var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, .{ .path = src.path });
                 defer any_repo.deinit(io, allocator);
                 switch (any_repo) {
-                    inline else => |*repo| try evt.consume(repo_kind, repo.self_repo_opts, io, allocator, repo, evt.events_ref, &.{event}),
+                    inline else => |*repo| event_id_hex = try evt.Comment.create(repo_kind, repo.self_repo_opts, io, allocator, repo, &thread_id, &parent_id, body, author_email),
                 }
             },
         }

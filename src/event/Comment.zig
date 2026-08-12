@@ -1,6 +1,7 @@
 const std = @import("std");
 const evt = @import("../event.zig");
 const xit = @import("xit");
+const rp = xit.repo;
 const hash = xit.hash;
 
 thread_id: [evt.event_id_size * 2]u8,
@@ -118,6 +119,36 @@ pub fn consume(
     const replies_cursor = try parent_id_to_comment_id_set.putCursor(hash.hashInt(hash_kind, &record_to_write.event.parent_id));
     const replies = try DB.SortedSet(.read_write).init(replies_cursor);
     try replies.put(&thread_order_key);
+}
+
+// create a comment and return its event id. `repo` must be writable.
+pub fn create(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    repo: *rp.Repo(repo_kind, repo_opts),
+    thread_id: *const [evt.event_id_size * 2]u8,
+    parent_id: *const [evt.event_id_size * 2]u8,
+    body: []const u8,
+    author_email: []const u8,
+) ![evt.event_id_size * 2]u8 {
+    if (!fieldsValid(body)) return error.InvalidFields;
+
+    var id_bytes: [evt.event_id_size]u8 = undefined;
+    io.random(&id_bytes);
+    const event_id = std.fmt.bytesToHex(id_bytes, .lower);
+    try evt.consume(repo_kind, repo_opts, io, allocator, repo, evt.events_ref, &.{.{
+        .id = event_id,
+        .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
+        .author_email = author_email,
+        .event = .{ .comment = .{
+            .thread_id = thread_id.*,
+            .parent_id = parent_id.*,
+            .body = body,
+        } },
+    }});
+    return event_id;
 }
 
 // read a comment by event id, or null if the id isn't a known comment. field

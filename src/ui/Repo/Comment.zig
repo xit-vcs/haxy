@@ -13,7 +13,7 @@ const Focus = xitui.focus.Focus;
 pub const page_size = 10;
 
 pub const CommentWithId = struct {
-    id: []const u8,
+    id: [evt.event_id_size * 2]u8,
     comment: evt.Comment.Record,
     author: ui.Author = .unknown,
     parent_author: ?ui.Author = null,
@@ -23,14 +23,11 @@ pub const Window = struct {
     comments: []const CommentWithId,
     start: usize,
     count: usize,
-    has_prev: bool,
-    has_more: bool,
 
-    pub const empty: Window = .{ .comments = &.{}, .start = 0, .count = 0, .has_prev = false, .has_more = false };
+    pub const empty: Window = .{ .comments = &.{}, .start = 0, .count = 0 };
 };
 
 pub const Permalink = struct {
-    thread_id: []const u8,
     selected: CommentWithId,
     replies: Window,
 };
@@ -49,7 +46,6 @@ pub fn init(
     if (!std.mem.eql(u8, &selected.comment.event.thread_id, thread_id)) return error.NotFound;
 
     return .{
-        .thread_id = try arena.allocator().dupe(u8, thread_id),
         .selected = selected,
         .replies = try loadWindow(hash_kind, arena, admin_moment, haxy_moment, evt.Comment.parent_id_to_comment_id_set_key, selected_id, start),
     };
@@ -70,20 +66,16 @@ pub fn loadWindow(
         .comments = &.{},
         .start = start,
         .count = 0,
-        .has_prev = start > 0,
-        .has_more = false,
     };
     const index = try DB.HashMap(.read_only).init(index_cursor);
     const set_cursor = try index.getCursor(hash.hashInt(hash_kind, owner_id)) orelse return .{
         .comments = &.{},
         .start = start,
         .count = 0,
-        .has_prev = start > 0,
-        .has_more = false,
     };
     const set = try DB.SortedSet(.read_only).init(set_cursor);
     const count: usize = @intCast(try set.count());
-    const end = @min(start + page_size, count);
+    const end = start + @min(page_size, count -| start);
     var iter = try set.iteratorFromIndex(start);
     var comments: std.ArrayList(CommentWithId) = .empty;
     var i = start;
@@ -92,16 +84,14 @@ pub fn loadWindow(
         const kv = try cursor.readKeyValuePair();
         var order_key: [@sizeOf(u64) + evt.event_id_size]u8 = undefined;
         _ = try kv.key_cursor.readBytes(&order_key);
-        const id_hex = std.fmt.bytesToHex(order_key[@sizeOf(u64)..].*, .lower);
-        const entry = (try readOneBytes(hash_kind, arena, admin_moment, haxy_moment, order_key[@sizeOf(u64)..], &id_hex)) orelse continue;
+        const id_bytes = order_key[@sizeOf(u64)..].*;
+        const entry = (try readOneBytes(hash_kind, arena, admin_moment, haxy_moment, &id_bytes)) orelse continue;
         try comments.append(arena.allocator(), entry);
     }
     return .{
         .comments = comments.items,
         .start = start,
         .count = count,
-        .has_prev = start > 0,
-        .has_more = end < count,
     };
 }
 
@@ -112,8 +102,8 @@ fn readOne(
     haxy_moment: evt.EventDB(hash_kind).HashMap(.read_only),
     id: []const u8,
 ) !?CommentWithId {
-    const bytes = (try idBytes(id)) orelse return null;
-    return readOneBytes(hash_kind, arena, admin_moment, haxy_moment, &bytes, id);
+    const bytes = idBytes(id) orelse return null;
+    return readOneBytes(hash_kind, arena, admin_moment, haxy_moment, &bytes);
 }
 
 fn readOneBytes(
@@ -121,25 +111,24 @@ fn readOneBytes(
     arena: *std.heap.ArenaAllocator,
     admin_moment: ?evt.AdminDB.HashMap(.read_only),
     haxy_moment: evt.EventDB(hash_kind).HashMap(.read_only),
-    id_bytes: []const u8,
-    id: []const u8,
+    id_bytes: *const [evt.event_id_size]u8,
 ) !?CommentWithId {
     const DB = evt.EventDB(hash_kind);
     const comment = (try evt.Comment.readById(DB, hash_kind, haxy_moment, arena, id_bytes)) orelse return null;
     const parent_author: ?ui.Author = if (!std.mem.eql(u8, &comment.event.parent_id, &comment.event.thread_id)) blk: {
-        const parent_bytes = (try idBytes(&comment.event.parent_id)) orelse break :blk null;
+        const parent_bytes = idBytes(&comment.event.parent_id) orelse break :blk null;
         const parent = (try evt.Comment.readById(DB, hash_kind, haxy_moment, arena, &parent_bytes)) orelse break :blk null;
         break :blk try ui.Author.initFromEmail(admin_moment, arena, parent.author_email);
     } else null;
     return .{
-        .id = try arena.allocator().dupe(u8, id),
+        .id = std.fmt.bytesToHex(id_bytes.*, .lower),
         .comment = comment,
         .author = try ui.Author.initFromEmail(admin_moment, arena, comment.author_email),
         .parent_author = parent_author,
     };
 }
 
-fn idBytes(id: []const u8) !?[evt.event_id_size]u8 {
+fn idBytes(id: []const u8) ?[evt.event_id_size]u8 {
     if (id.len != evt.event_id_size * 2) return null;
     var bytes: [evt.event_id_size]u8 = undefined;
     _ = std.fmt.hexToBytes(&bytes, id) catch return null;
@@ -165,11 +154,11 @@ pub const Item = struct {
             errdefer author.deinit(allocator);
             try bar.children.put(allocator, author.getFocus().id, .{ .widget = .{ .text_box = author }, .rect = null, .min_size = null, .shrink = true });
 
-            var reply = try linkBox(allocator, session, "new reply", ui.RoutablePage.repoCommentNewRoute(identity, &entry.comment.event.thread_id, entry.id) orelse return error.RouteTooLong);
+            var reply = try linkBox(allocator, session, "new reply", ui.RoutablePage.repoCommentNewRoute(identity, &entry.comment.event.thread_id, &entry.id) orelse return error.RouteTooLong);
             errdefer reply.deinit(allocator);
             try bar.children.put(allocator, reply.getFocus().id, .{ .widget = .{ .text_box = reply }, .rect = null, .min_size = .{ .width = "new reply".len + 2, .height = null } });
 
-            var permalink = try linkBox(allocator, session, "permalink", ui.RoutablePage.repoCommentsRoute(identity, &entry.comment.event.thread_id, entry.id, 0) orelse return error.RouteTooLong);
+            var permalink = try linkBox(allocator, session, "permalink", ui.RoutablePage.repoCommentsRoute(identity, &entry.comment.event.thread_id, &entry.id, 0) orelse return error.RouteTooLong);
             errdefer permalink.deinit(allocator);
             try bar.children.put(allocator, permalink.getFocus().id, .{ .widget = .{ .text_box = permalink }, .rect = null, .min_size = .{ .width = "permalink".len + 2, .height = null } });
 
@@ -281,10 +270,12 @@ pub fn appendCount(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), count
 }
 
 pub fn appendWindowNav(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), session: *ui.Session, identity: []const u8, thread_id: []const u8, selected_id: ?[]const u8, window: Window) !void {
-    if (!window.has_prev and !window.has_more) return;
+    const has_prev = window.start > 0;
+    const has_more = window.start < window.count and window.count - window.start > page_size;
+    if (!has_prev and !has_more) return;
     var row = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
     errdefer row.deinit(allocator);
-    if (window.has_prev) {
+    if (has_prev) {
         const start = window.start -| page_size;
         const route = if (selected_id) |id|
             ui.RoutablePage.repoCommentsRoute(identity, thread_id, id, start)
@@ -294,7 +285,7 @@ pub fn appendWindowNav(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), s
         errdefer previous.deinit(allocator);
         try row.children.put(allocator, previous.getFocus().id, .{ .widget = .{ .text_box = previous }, .rect = null, .min_size = null });
     }
-    if (window.has_more) {
+    if (has_more) {
         const start = window.start + page_size;
         const route = if (selected_id) |id|
             ui.RoutablePage.repoCommentsRoute(identity, thread_id, id, start)
