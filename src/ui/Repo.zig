@@ -16,7 +16,7 @@ pub const Files = @import("./Repo/Files.zig");
 pub const Commits = @import("./Repo/Commits.zig");
 pub const Refs = @import("./Repo/Refs.zig");
 pub const Issues = @import("./Repo/Issues.zig");
-pub const Comments = @import("./Repo/Comments.zig");
+pub const Comment = @import("./Repo/Comment.zig");
 pub const Settings = @import("./Settings.zig");
 pub const Auth = @import("./Auth.zig");
 pub const Quit = @import("./Quit.zig");
@@ -29,7 +29,6 @@ files: Files,
 commits: Commits,
 refs: Refs,
 issues: Issues,
-comments: ?Comments,
 settings: Settings,
 auth: Auth,
 quit: Quit,
@@ -110,6 +109,10 @@ pub fn init(
         .repo_issues => |*i| i.selected.slice(),
         else => "",
     };
+    const issues_comment: []const u8 = switch (route) {
+        .repo_issues => |*i| i.comment.slice(),
+        else => "",
+    };
     const issues_theirs: []const u8 = switch (route) {
         .repo_issues => |*i| i.theirs.slice(),
         else => "",
@@ -164,7 +167,7 @@ pub fn init(
     // route named none), so they end up viewing the same one and either's
     // resolved ref can canonicalize the tab mirror urls below. no filesystem
     // (wasm), nowhere to look, or a failed open: empty tabs.
-    const files, const commits, const refs, var issues, const comments = blk: {
+    const files, const commits, const refs, var issues = blk: {
         read: {
             const io = session.io orelse break :read;
             const src = source orelse break :read;
@@ -177,19 +180,11 @@ pub fn init(
                         inline else => |*opened| {
                             // local mode: bring the event db up to date with the events branch
                             if (session.local != null) try evt.consume(repo_kind, opened.self_repo_opts, io, gpa, opened, evt.events_ref, &.{});
-                            const comments = switch (route) {
-                                .repo_comments => |*c| try Comments.initFromRepo(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, c.thread.slice(), c.selected.slice(), c.start),
-                                else => null,
-                            };
                             break :blk .{
                                 try Files.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, repo_identity.identity, requested_ref_or_oid, requested_ref_value, files_dir, files_line),
                                 try Commits.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, session.haxy_moment, repo_identity.identity, requested_ref_or_oid, requested_ref_value, commits_content),
                                 try Refs.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, repo_identity.identity, refs_kind, refs_from),
-                                if (comments == null)
-                                    try Issues.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, issues_tag, issues_selected, issues_comments_start, issues_theirs, issues_view)
-                                else
-                                    try Issues.emptyResult(arena.allocator(), repo_identity.identity, "", "", 0, "", .open),
-                                comments,
+                                try Issues.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, issues_tag, issues_selected, issues_comment, issues_comments_start, issues_theirs, issues_view),
                             };
                         },
                     }
@@ -201,11 +196,9 @@ pub fn init(
             try Files.emptyResult(aa, repo_identity.identity, requested_ref_or_oid orelse .branch, requested_ref_value, files_dir),
             try Commits.emptyResult(aa, repo_identity.identity, requested_ref_or_oid orelse .branch, requested_ref_value, commits_content),
             try Refs.emptyResult(arena, repo_identity.identity, refs_kind, refs_from),
-            try Issues.emptyResult(aa, repo_identity.identity, issues_tag, issues_selected, issues_comments_start, issues_theirs, issues_view),
-            null,
+            try Issues.emptyResult(aa, repo_identity.identity, issues_tag, issues_selected, issues_comment, issues_comments_start, issues_theirs, issues_view),
         };
     };
-    if (std.meta.activeTag(route) == .repo_comments and comments == null) return error.NotFound;
     issues.repo_source = source;
 
     // each tab mirror carries this page's route for that tab; tabs not targeted
@@ -233,7 +226,6 @@ pub fn init(
         .commits = commits,
         .refs = refs,
         .issues = issues,
-        .comments = comments,
         .settings = Settings.init(),
         .auth = Auth.init(),
         .quit = Quit.init(),
@@ -288,17 +280,11 @@ pub const View = struct {
                 try stack.children.put(allocator, refs_view.getFocus().id, .{ .repo_refs = refs_view });
             }
 
-            // issues — the repo's issue tracker or a comment permalink.
+            // issues — the repo's issue tracker and comment permalinks.
             {
-                if (data.comments) |*comments| {
-                    var comments_view = try Comments.View.init(allocator, comments, session);
-                    errdefer comments_view.deinit(allocator);
-                    try stack.children.put(allocator, comments_view.getFocus().id, .{ .repo_comments = comments_view });
-                } else {
-                    var issues_view = try Issues.View.init(allocator, &data.issues, session);
-                    errdefer issues_view.deinit(allocator);
-                    try stack.children.put(allocator, issues_view.getFocus().id, .{ .repo_issues = issues_view });
-                }
+                var issues_view = try Issues.View.init(allocator, &data.issues, session);
+                errdefer issues_view.deinit(allocator);
+                try stack.children.put(allocator, issues_view.getFocus().id, .{ .repo_issues = issues_view });
             }
 
             // the header only shows the settings tab with a login and the auth
@@ -354,8 +340,6 @@ pub const View = struct {
                 // the issues tab mirrors this page's tag filter (issue urls
                 // themselves never carry the tag).
                 .repo_issues => self.session.data.current_page = ui.RoutablePage.repoIssuesRoute(self.data.identity.slice(), .open, self.data.issues.tag, "") orelse self.session.data.current_page,
-                // the comment view mirrors its own content route when built.
-                .repo_comments => {},
                 .home_settings => {
                     if (ui.RoutablePage.Array(ui.RoutablePage.repo_route_max_len).from(self.data.identity.slice())) |identity|
                         self.session.data.current_page = .{ .repo_settings = identity };
@@ -395,7 +379,6 @@ pub const View = struct {
                                         .repo_commits => |*v| v.getSelectedIndex() == 0,
                                         .repo_refs => |*v| v.getSelectedIndex() == 0,
                                         .repo_issues => |*v| v.getSelectedIndex() == 0,
-                                        .repo_comments => |*v| v.getSelectedIndex() == 0,
                                         .home_settings => |*v| v.getSelectedIndex() == 0,
                                         .home_auth => |*v| v.getSelectedIndex() == 0,
                                         .quit => |*v| v.getSelectedIndex() == 0,

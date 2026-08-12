@@ -13,7 +13,7 @@ const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
 const inp = @import("../input.zig");
 const diff3 = @import("../../diff3.zig");
-const Comments = @import("Comments.zig");
+const Comment = @import("Comment.zig");
 
 const wasm = builtin.target.cpu.arch == .wasm32;
 
@@ -36,7 +36,7 @@ pub const IssueWithId = struct {
     author: ui.Author = .unknown,
     // whether the issue has an unresolved merge conflict
     conflicted: bool = false,
-    comments: Comments.Window = .empty,
+    comments: Comment.Window = .empty,
 };
 
 // one side of a conflicted field: its value and who set it
@@ -84,8 +84,12 @@ tag: []const u8,
 // the hex event id of the issue its status's window is rooted at ("" = the
 // first window), mirrored into the url.
 selected_id: []const u8,
+// the comment shown in the selected issue's detail pane.
+comment_id: []const u8,
 // the selected issue's comment window (0 = the first window).
 comments_start: usize,
+// the selected comment and its immediate replies.
+comment_page: ?Comment.Permalink = null,
 open: Window,
 closed: Window,
 // the conflicted issues' listing; its count also gates the conflicts tab.
@@ -138,11 +142,12 @@ pub fn selectedIssue(self: *const Self) ?*const IssueWithId {
 }
 
 // an empty listing, for the wasm / no-repo paths.
-pub fn emptyResult(aa: std.mem.Allocator, identity: []const u8, tag: []const u8, selected_id: []const u8, comments_start: usize, theirs_picks: []const u8, view: ui.RoutablePage.IssuesView) !Self {
+pub fn emptyResult(aa: std.mem.Allocator, identity: []const u8, tag: []const u8, selected_id: []const u8, comment_id: []const u8, comments_start: usize, theirs_picks: []const u8, view: ui.RoutablePage.IssuesView) !Self {
     return .{
         .identity = try aa.dupe(u8, identity),
         .tag = try aa.dupe(u8, tag),
         .selected_id = try aa.dupe(u8, selected_id),
+        .comment_id = try aa.dupe(u8, comment_id),
         .comments_start = comments_start,
         .open = .empty,
         .closed = .empty,
@@ -177,11 +182,12 @@ pub fn init(
     identity: []const u8,
     tag: []const u8,
     selected_id: []const u8,
+    comment_id: []const u8,
     comments_start: usize,
     theirs_picks: []const u8,
     view: ui.RoutablePage.IssuesView,
 ) !Self {
-    const empty = try emptyResult(arena.allocator(), identity, tag, selected_id, comments_start, theirs_picks, view);
+    const empty = try emptyResult(arena.allocator(), identity, tag, selected_id, comment_id, comments_start, theirs_picks, view);
 
     const aa = arena.allocator();
     const DB = evt.EventDB(repo_opts.hash);
@@ -296,10 +302,16 @@ pub fn init(
         }
     }
 
-    const open_window = try loadWindow(repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_issue, open_set, open_root, conflict_set, empty.selected_id, comments_start);
-    const closed_window = try loadWindow(repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_issue, closed_set, closed_root, conflict_set, empty.selected_id, comments_start);
-    const conflicts_window = try loadWindow(repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_issue, conflict_set, conflicts_root, conflict_set, empty.selected_id, comments_start);
+    const thread_comments_start = if (empty.comment_id.len == 0) comments_start else 0;
+    const open_window = try loadWindow(repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_issue, open_set, open_root, conflict_set, empty.selected_id, thread_comments_start);
+    const closed_window = try loadWindow(repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_issue, closed_set, closed_root, conflict_set, empty.selected_id, thread_comments_start);
+    const conflicts_window = try loadWindow(repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_issue, conflict_set, conflicts_root, conflict_set, empty.selected_id, thread_comments_start);
     if (view == .conflicts and conflicts_window.count > 0) resolved_view = .conflicts;
+
+    const comment_page = if (empty.comment_id.len == 0)
+        null
+    else
+        try Comment.init(repo_opts.hash, arena, admin_moment, haxy_moment, empty.selected_id, empty.comment_id, comments_start);
 
     // every tag in the repo, in the tag map's sorted order. the keys are
     // "tag,status", so a tag's entries are adjacent and dedup by prefix.
@@ -325,7 +337,9 @@ pub fn init(
         .identity = empty.identity,
         .tag = empty.tag,
         .selected_id = empty.selected_id,
+        .comment_id = empty.comment_id,
         .comments_start = comments_start,
+        .comment_page = comment_page,
         .open = open_window,
         .closed = closed_window,
         .conflicts = conflicts_window,
@@ -420,7 +434,7 @@ fn loadWindow(
             .issue = issue_event,
             .author = try ui.Author.initFromEmail(admin_moment, arena, issue_event.author_email),
             .conflicted = if (conflict_set) |cs| try cs.contains(&order_key) else false,
-            .comments = try Comments.loadWindow(
+            .comments = try Comment.loadWindow(
                 hash_kind,
                 arena,
                 admin_moment,
@@ -1179,6 +1193,8 @@ pub const View = struct {
             else if (index == viewIndex(self.data.view) and self.data.selected_id.len != 0)
                 (if (self.data.description_page)
                     ui.RoutablePage.repoIssuesDescriptionRoute(self.data.identity, self.data.selected_id)
+                else if (self.data.comment_page) |page|
+                    ui.RoutablePage.repoCommentsRoute(self.data.identity, self.data.selected_id, page.selected.id, page.replies.start)
                 else
                     ui.RoutablePage.repoIssueCommentsRoute(self.data.identity, self.data.selected_id, self.data.comments_start))
             else if (index == tags_view_index)
@@ -1202,6 +1218,11 @@ pub const View = struct {
                         const entry = &self.window(i).issues[sel];
                         const mirrored = if (self.data.description_page and std.mem.eql(u8, entry.id, self.data.selected_id))
                             ui.RoutablePage.repoIssuesDescriptionRoute(self.data.identity, entry.id)
+                        else if (self.data.comment_page) |page|
+                            if (std.mem.eql(u8, entry.id, self.data.selected_id))
+                                ui.RoutablePage.repoCommentsRoute(self.data.identity, entry.id, page.selected.id, page.replies.start)
+                            else
+                                ui.RoutablePage.repoIssueCommentsRoute(self.data.identity, entry.id, 0)
                         else if (std.mem.eql(u8, entry.id, self.data.selected_id))
                             ui.RoutablePage.repoIssueCommentsRoute(self.data.identity, entry.id, entry.comments.start)
                         else
@@ -1290,6 +1311,7 @@ pub const View = struct {
         // the /description page replaces its issue's detail with a back link
         // and the whole description; other issues keep their normal detail.
         const description_page = self.data.description_page and std.mem.eql(u8, entry.id, self.data.selected_id);
+        const comment_page = if (std.mem.eql(u8, entry.id, self.data.selected_id)) self.data.comment_page else null;
 
         for (inner.children.values()) |*child| child.widget.deinit(allocator);
         inner.children.clearAndFree(allocator);
@@ -1305,7 +1327,7 @@ pub const View = struct {
             row.getFocus().child_id = null;
             row.getFocus().kind = .container;
         }
-        if (!description_page) {
+        if (!description_page and comment_page == null) {
             const row = self.toolRow(index);
             const pa = self.session.page_arena.allocator();
 
@@ -1362,6 +1384,28 @@ pub const View = struct {
             // the resolve button on a conflicted issue, else the open/close
             // button when present, the edit button otherwise
             row.getFocus().child_id = row.children.keys()[button_in_row_index];
+        }
+
+        if (comment_page) |page| {
+            var back = try Comment.linkBox(allocator, self.session, "← back to issue", ui.RoutablePage.repoIssueCommentsRoute(self.data.identity, entry.id, 0) orelse return error.RouteTooLong);
+            errdefer back.deinit(allocator);
+            try inner.children.put(allocator, back.getFocus().id, .{ .widget = .{ .text_box = back }, .rect = null, .min_size = null });
+
+            try Comment.appendComment(allocator, inner, self.session, self.data.identity, page.selected);
+            try Comment.appendCount(allocator, inner, page.replies.count, "reply", "replies", self.session.page_arena.allocator());
+            for (page.replies.comments) |comment| try Comment.appendComment(allocator, inner, self.session, self.data.identity, comment);
+            try Comment.appendWindowNav(allocator, inner, self.session, self.data.identity, page.thread_id, page.selected.id, page.replies);
+
+            var spacer = try ui.Spacer.init(allocator);
+            errdefer spacer.deinit(allocator);
+            try inner.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null });
+
+            inner.getFocus().child_id = inner.children.keys()[0];
+            const sc = self.detailScroll(index);
+            sc.x = 0;
+            sc.y = 0;
+            sc.getFocus().version +%= 1;
+            return;
         }
 
         if (description_page) {
@@ -1434,9 +1478,13 @@ pub const View = struct {
         };
 
         if (!description_page) {
-            try Comments.appendCount(allocator, inner, entry.comments.count, "comment", "comments", self.session.page_arena.allocator());
-            for (entry.comments.comments) |comment| try Comments.appendComment(allocator, inner, self.session, self.data.identity, comment);
-            try Comments.appendWindowNav(allocator, inner, self.session, self.data.identity, entry.id, null, entry.comments);
+            try Comment.appendCount(allocator, inner, entry.comments.count, "comment", "comments", self.session.page_arena.allocator());
+            for (entry.comments.comments) |comment| try Comment.appendComment(allocator, inner, self.session, self.data.identity, comment);
+            try Comment.appendWindowNav(allocator, inner, self.session, self.data.identity, entry.id, null, entry.comments);
+
+            var spacer = try ui.Spacer.init(allocator);
+            errdefer spacer.deinit(allocator);
+            try inner.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null });
         }
 
         // select the title by default
@@ -1530,7 +1578,9 @@ pub const View = struct {
     }
 
     fn detailInput(self: *View, allocator: std.mem.Allocator, index: usize, key: Key, root_focus: *Focus) !void {
-        if (self.toolRowFocused(index)) {
+        if (self.data.comment_page != null and std.mem.eql(u8, self.window(index).issues[self.detailed_index[index] orelse return].id, self.data.selected_id)) {
+            try self.commentInput(index, key, root_focus);
+        } else if (self.toolRowFocused(index)) {
             try self.toolRowInput(allocator, index, key, root_focus);
         } else if (self.titleFocused(index)) {
             try self.titleInput(index, key, root_focus);

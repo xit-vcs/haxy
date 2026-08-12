@@ -51,7 +51,7 @@ pub const Page = union(PageKind) {
                 };
             },
             .repo => switch (route) {
-                .repo_files, .repo_commits, .repo_refs, .repo_issues, .repo_comments, .repo_settings, .repo_auth => .{ .repo = try Repo.init(arena, session, route) },
+                .repo_files, .repo_commits, .repo_refs, .repo_issues, .repo_settings, .repo_auth => .{ .repo = try Repo.init(arena, session, route) },
                 else => return error.UnexpectedRoute,
             },
         };
@@ -101,12 +101,8 @@ pub const RoutablePage = union(enum) {
         view: IssuesView = .open,
         // the selected issue's comment window (0 = the first window).
         comments_start: usize = 0,
-    },
-    repo_comments: struct {
-        name: Array(repo_route_max_len),
-        thread: Array(evt.event_id_size * 2),
-        selected: Array(evt.event_id_size * 2),
-        start: usize = 0,
+        // the comment shown in the detail pane (empty = the issue thread).
+        comment: Array(evt.event_id_size * 2) = .{},
     },
     repo_settings: Array(repo_route_max_len),
     repo_auth: Array(repo_route_max_len),
@@ -365,12 +361,9 @@ pub const RoutablePage = union(enum) {
     // build a comment permalink route at one of its immediate-reply windows.
     pub fn repoCommentsRoute(identity: []const u8, thread: []const u8, selected: []const u8, start: usize) ?RoutablePage {
         if (thread.len == 0 or selected.len == 0) return null;
-        return .{ .repo_comments = .{
-            .name = Array(repo_route_max_len).from(identity) orelse return null,
-            .thread = Array(evt.event_id_size * 2).from(thread) orelse return null,
-            .selected = Array(evt.event_id_size * 2).from(selected) orelse return null,
-            .start = start,
-        } };
+        var route = repoIssueCommentsRoute(identity, thread, start) orelse return null;
+        route.repo_issues.comment = Array(evt.event_id_size * 2).from(selected) orelse return null;
+        return route;
     }
 
     // build a `.repo_issues` route showing tags view, keeping the url-encoded
@@ -523,6 +516,10 @@ pub const RoutablePage = union(enum) {
                     try std.fmt.allocPrint(arena.allocator(), "{s}/issues/conflicts", .{prefix})
                 else
                     try std.fmt.allocPrint(arena.allocator(), "{s}/issues/" ++ start_seg ++ "{s}/conflicts", .{ prefix, i.selected.slice() });
+                if (i.comment.len != 0) break :blk if (i.comments_start == 0)
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ issue_seg ++ "{s}/" ++ comment_seg ++ "{s}", .{ prefix, i.selected.slice(), i.comment.slice() })
+                else
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ issue_seg ++ "{s}/" ++ comment_seg ++ "{s}/" ++ start_seg ++ "{d}", .{ prefix, i.selected.slice(), i.comment.slice(), i.comments_start });
                 if (i.selected.len != 0) break :blk if (i.comments_start == 0)
                     try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ issue_seg ++ "{s}", .{ prefix, i.selected.slice() })
                 else
@@ -531,13 +528,6 @@ pub const RoutablePage = union(enum) {
                     try std.fmt.allocPrint(arena.allocator(), "{s}/issues/{s}", .{ prefix, @tagName(i.view) })
                 else
                     try std.fmt.allocPrint(arena.allocator(), "{s}/issues/{s}/" ++ tag_filter_seg ++ "{s}", .{ prefix, @tagName(i.view), i.tag.slice() });
-            },
-            .repo_comments => |c| blk: {
-                const prefix = try repoUrlPrefix(arena, c.name.slice());
-                break :blk if (c.start == 0)
-                    try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ issue_seg ++ "{s}/" ++ comment_seg ++ "{s}", .{ prefix, c.thread.slice(), c.selected.slice() })
-                else
-                    try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ issue_seg ++ "{s}/" ++ comment_seg ++ "{s}/" ++ start_seg ++ "{d}", .{ prefix, c.thread.slice(), c.selected.slice(), c.start });
             },
             .repo_settings => |name| try std.fmt.allocPrint(arena.allocator(), "{s}/settings", .{try repoUrlPrefix(arena, name.slice())}),
             .repo_auth => |name| try std.fmt.allocPrint(arena.allocator(), "{s}/auth", .{try repoUrlPrefix(arena, name.slice())}),
@@ -601,7 +591,6 @@ pub const RoutablePage = union(enum) {
     pub fn fullHeight(self: RoutablePage) bool {
         return switch (self) {
             .repo_issues => |i| i.view == .resolve,
-            .repo_comments => true,
             else => false,
         };
     }
@@ -614,7 +603,6 @@ pub const RoutablePage = union(enum) {
             .repo_commits => |*c| c.name.slice(),
             .repo_refs => |*r| r.name.slice(),
             .repo_issues => |*i| i.name.slice(),
-            .repo_comments => |*c| c.name.slice(),
             .repo_settings, .repo_auth => |*name| name.slice(),
             else => null,
         };
@@ -639,7 +627,7 @@ pub const RoutablePage = union(enum) {
         return switch (self) {
             .home_users, .home_repos, .home_settings, .home_auth => .home,
             .user_repos, .user_settings, .user_auth => .user,
-            .repo_files, .repo_commits, .repo_refs, .repo_issues, .repo_comments, .repo_settings, .repo_auth => .repo,
+            .repo_files, .repo_commits, .repo_refs, .repo_issues, .repo_settings, .repo_auth => .repo,
         };
     }
 
@@ -770,11 +758,8 @@ pub const RoutablePage = union(enum) {
                 std.mem.eql(u8, a_i.selected.slice(), b.repo_issues.selected.slice()) and
                 std.mem.eql(u8, a_i.theirs.slice(), b.repo_issues.theirs.slice()) and
                 a_i.view == b.repo_issues.view and
-                a_i.comments_start == b.repo_issues.comments_start,
-            .repo_comments => |a_c| std.mem.eql(u8, a_c.name.slice(), b.repo_comments.name.slice()) and
-                std.mem.eql(u8, a_c.thread.slice(), b.repo_comments.thread.slice()) and
-                std.mem.eql(u8, a_c.selected.slice(), b.repo_comments.selected.slice()) and
-                a_c.start == b.repo_comments.start,
+                a_i.comments_start == b.repo_issues.comments_start and
+                std.mem.eql(u8, a_i.comment.slice(), b.repo_issues.comment.slice()),
             .repo_settings => |a_name| std.mem.eql(u8, a_name.slice(), b.repo_settings.slice()),
             .repo_auth => |a_name| std.mem.eql(u8, a_name.slice(), b.repo_auth.slice()),
             else => true,
@@ -1491,8 +1476,7 @@ pub const Widget = union(enum) {
     repo_commits: Repo.Commits.View,
     repo_refs: Repo.Refs.View,
     repo_issues: Repo.Issues.View,
-    repo_comments: Repo.Comments.View,
-    repo_comment: Repo.Comments.Item,
+    repo_comment: Repo.Comment.Item,
     home_users: Home.Users.View,
     home_repos: Home.Repos.View,
     auth_tab: Home.Header.AuthTab.View,
