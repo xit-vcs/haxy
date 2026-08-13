@@ -141,6 +141,8 @@ pub const Item = struct {
 
     const metadata_index: usize = 0;
     const body_index: usize = 1;
+    const gap_index: usize = 2;
+    const metadata_first_link_index: usize = 1;
 
     pub fn init(allocator: std.mem.Allocator, session: *ui.Session, identity: []const u8, entry: CommentWithId) !Item {
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert });
@@ -149,6 +151,10 @@ pub const Item = struct {
         {
             var bar = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
             errdefer bar.deinit(allocator);
+
+            var spacer = try ui.Spacer.init(allocator);
+            errdefer spacer.deinit(allocator);
+            try bar.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null });
 
             var author = try ui.authorBox(allocator, session.page_arena, entry.author);
             errdefer author.deinit(allocator);
@@ -184,7 +190,7 @@ pub const Item = struct {
                 try bar.children.put(allocator, parent.getFocus().id, .{ .widget = .{ .text_box = parent }, .rect = null, .min_size = .{ .width = @max(parent_text.len, " replying to ".len) + 2, .height = null } });
             }
 
-            bar.getFocus().child_id = bar.children.keys()[0];
+            bar.getFocus().child_id = bar.children.keys()[metadata_first_link_index];
             try box.children.put(allocator, bar.getFocus().id, .{ .widget = .{ .box = bar }, .rect = null, .min_size = null });
         }
 
@@ -193,6 +199,11 @@ pub const Item = struct {
         errdefer body_box.deinit(allocator);
         body_box.getFocus().focusable = true;
         try box.children.put(allocator, body_box.getFocus().id, .{ .widget = .{ .text_box = body_box }, .rect = null, .min_size = null });
+
+        var gap = try wgt.Text(ui.Widget).init(allocator, "");
+        errdefer gap.deinit(allocator);
+        try box.children.put(allocator, gap.getFocus().id, .{ .widget = .{ .text = gap }, .rect = null, .min_size = null });
+
         box.getFocus().child_id = box.children.keys()[metadata_index];
 
         return .{ .box = box };
@@ -212,7 +223,7 @@ pub const Item = struct {
 
     pub fn focusMetadata(self: *Item, root_focus: *Focus) void {
         const bar = self.metadata();
-        root_focus.setFocus(bar.getFocus().child_id orelse bar.children.keys()[0]);
+        root_focus.setFocus(bar.getFocus().child_id orelse bar.children.keys()[metadata_first_link_index]);
     }
 
     pub fn focusBody(self: *Item, root_focus: *Focus) void {
@@ -225,13 +236,16 @@ pub const Item = struct {
         const selected = bar.getFocus().child_id orelse return false;
         const selected_index = bar.children.getIndex(selected) orelse return false;
         const target = if (right) selected_index + 1 else selected_index -| 1;
-        if (target == selected_index or target >= bar.children.count()) return false;
+        if (target < metadata_first_link_index or target >= bar.children.count()) return false;
         root_focus.setFocus(bar.children.keys()[target]);
         return true;
     }
 
     pub fn rowRect(self: *Item, body_row: bool) ?layout.IRect {
-        return self.box.children.values()[if (body_row) body_index else metadata_index].rect;
+        if (!body_row) return self.box.children.values()[metadata_index].rect;
+        var rect = self.box.children.values()[body_index].rect orelse return null;
+        if (self.box.children.values()[gap_index].rect) |gap| rect.size.height += gap.size.height;
+        return rect;
     }
 
     pub fn deinit(self: *Item, allocator: std.mem.Allocator) void {
