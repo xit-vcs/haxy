@@ -1887,7 +1887,10 @@ pub const View = struct {
                 if (next == 0) return false;
                 next -= 1;
             }
-            if (self.focusVisibleChild(index, next, root_focus, !down)) return true;
+            if (self.focusVisibleChild(index, next, root_focus, !down)) {
+                self.focusDetailChild(index, next, !down, root_focus);
+                return true;
+            }
         }
     }
 
