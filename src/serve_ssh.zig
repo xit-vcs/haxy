@@ -26,6 +26,8 @@ pub const SessionHandler = struct {
     admin_repo_path: []const u8,
     repo_root_path: []const u8,
     wui_port: u16, // port the web UI is served on, shown in the TUI footer's url
+    clone_http_port: u16,
+    clone_ssh_port: u16,
     err: *std.Io.Writer,
 
     pub fn handleSession(self: *const SessionHandler, sess: *ssh.SessionCtx, request: ssh.Request) !void {
@@ -194,6 +196,8 @@ fn runTui(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh.PtySiz
     var ui_session = try ui.Session.init(&session_arena, &repo, .{});
     ui_session.is_terminal = true;
     ui_session.web_port = handler.wui_port;
+    ui_session.data.clone_http_port = handler.clone_http_port;
+    ui_session.data.clone_ssh_port = handler.clone_ssh_port;
     // let page builders open on-disk repos (sibling "repos" dir of the admin repo)
     ui_session.io = io;
     ui_session.repos_dir = try std.fs.path.join(session_arena.allocator(), &.{ std.fs.path.dirname(handler.admin_repo_path) orelse ".", "repos" });
@@ -208,11 +212,12 @@ fn runTui(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh.PtySiz
     // flushes, restoring the client's screen. as a function-scoped defer it runs
     // before runTui returns — on the normal path and on any error — so the
     // caller can write to the client afterward (and sess.exit can close cleanly).
-    var terminal = try StreamTerminal.init(allocator, &session_writer.interface, .{
+    var terminal_size = Size{
         .width = effective_pty.width_cells,
         .height = effective_pty.height_cells,
-    });
-    defer terminal.deinit();
+    };
+    var terminal_maybe: ?StreamTerminal = try StreamTerminal.init(allocator, &session_writer.interface, terminal_size);
+    defer if (terminal_maybe) |*terminal| terminal.deinit();
 
     var last_size = Size{ .width = 0, .height = 0 };
     var last_grid = try Grid.init(allocator, last_size);
@@ -223,31 +228,58 @@ fn runTui(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh.PtySiz
         .min_size = .{ .width = null, .height = null },
         .max_size = .{ .width = last_size.width, .height = last_size.height },
     }, nav.root.getFocus());
-    _ = try terminal.render(&nav.root, &last_grid, &last_size);
+    if (terminal_maybe) |*terminal| _ = try terminal.render(&nav.root, &last_grid, &last_size);
 
     // event loop. nextEvent blocks until something interesting arrives;
     // for each event, rebuild the widget tree and re-render so the user
     // sees the effect of their input on the same iteration.
-    while (!terminal.shouldQuit()) {
+    event_loop: while (true) {
         const event = try sess.nextEvent();
-        switch (event) {
-            .data => |payload| {
-                defer allocator.free(payload);
-                try terminal.writeBytes(payload);
-                while (terminal.popKey()) |key| {
-                    try ui.inputKey(allocator, &nav.root, key, &ui_session);
-                }
-            },
-            .resize => |sz| {
-                terminal.pushResize(.{ .width = sz.width_cells, .height = sz.height_cells });
-                while (terminal.popKey()) |key| {
-                    try ui.inputKey(allocator, &nav.root, key, &ui_session);
-                }
-            },
-            // either way no more input can arrive, so nothing is left to
-            // drive the ui — but on .eof the channel is still open, so the
-            // teardown below still reaches the client.
-            .eof, .close => terminal.requestQuit(),
+        if (terminal_maybe) |*terminal| {
+            switch (event) {
+                .data => |payload| {
+                    defer allocator.free(payload);
+                    try terminal.writeBytes(payload);
+                    while (terminal.popKey()) |key| {
+                        try ui.inputKey(allocator, &nav.root, key, &ui_session);
+                    }
+                },
+                .resize => |sz| {
+                    terminal_size = .{ .width = sz.width_cells, .height = sz.height_cells };
+                    terminal.pushResize(terminal_size);
+                    while (terminal.popKey()) |key| {
+                        try ui.inputKey(allocator, &nav.root, key, &ui_session);
+                    }
+                },
+                .eof, .close => break :event_loop,
+            }
+        } else {
+            switch (event) {
+                .data => |payload| {
+                    defer allocator.free(payload);
+                    if (std.mem.indexOfAny(u8, payload, "\r\n") == null) continue;
+                    terminal_maybe = try StreamTerminal.init(allocator, &session_writer.interface, terminal_size);
+                    last_size = .{ .width = 0, .height = 0 };
+                },
+                .resize => |sz| {
+                    terminal_size = .{ .width = sz.width_cells, .height = sz.height_cells };
+                    continue;
+                },
+                .eof, .close => break :event_loop,
+            }
+        }
+
+        if (ui_session.host_request) |request| {
+            ui_session.host_request = null;
+            switch (request) {
+                .clone_url => |url| {
+                    if (terminal_maybe) |*terminal| terminal.deinit();
+                    terminal_maybe = null;
+                    try session_writer.interface.print("\x1b[2J\x1b[H{s}\r\n\r\npress enter to go back\r\n", .{url});
+                    try session_writer.interface.flush();
+                    continue;
+                },
+            }
         }
 
         try ui_session.applyAndWritePending(io, allocator, &repo);
@@ -260,13 +292,13 @@ fn runTui(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh.PtySiz
         try nav.sync(allocator, &ui_session);
 
         // the quit button (on the quit tab) asks the host to tear down
-        if (ui_session.quit_requested) terminal.requestQuit();
+        if (ui_session.quit_requested) break :event_loop;
 
         try nav.root.build(allocator, .{
             .min_size = .{ .width = null, .height = null },
             .max_size = .{ .width = last_size.width, .height = last_size.height },
         }, nav.root.getFocus());
-        _ = try terminal.render(&nav.root, &last_grid, &last_size);
+        if (terminal_maybe) |*terminal| _ = try terminal.render(&nav.root, &last_grid, &last_size);
     }
 }
 
@@ -291,6 +323,8 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, command:
 
     const parsed = parseGitCommand(allocator, command) catch return writeError(sess, "unsupported command (expected git-upload-pack or git-receive-pack)");
     defer parsed.deinit(allocator);
+    const repo_prefix = "/repo/";
+    const repo_identity = if (std.mem.startsWith(u8, parsed.dir, repo_prefix)) parsed.dir[repo_prefix.len..] else parsed.dir;
 
     const create_if_missing = parsed.service == .receive_pack;
     const any_repo_opts: rp.AnyRepoOpts(.xit) = .{};
@@ -298,12 +332,12 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, command:
     // authenticate pushes: the authenticated key must be registered to the
     // repo's owner.
     if (create_if_missing) {
-        const owner_repo = evt.parseOwnerRepoPath(parsed.dir) orelse return writeError(sess, "repo path must be <owner>/<repo>");
+        const owner_repo = evt.parseOwnerRepoPath(repo_identity) orelse return writeError(sess, "repo path must be <owner>/<repo>");
         if (!try isKeyAuthorized(io, allocator, handler.admin_repo_path, owner_repo.owner, &sess.fingerprint))
             return writeError(sess, "unauthorized: this SSH key is not registered to the repo owner");
     }
 
-    const repo_path = switch (try serve_common.resolveRepoPath(io, allocator, handler.repo_root_path, handler.admin_repo_path, parsed.dir, create_if_missing)) {
+    const repo_path = switch (try serve_common.resolveRepoPath(io, allocator, handler.repo_root_path, handler.admin_repo_path, repo_identity, create_if_missing)) {
         .ok => |p| p,
         .invalid => return writeError(sess, "repo path must be <owner>/<repo>"),
         .not_found => return writeError(sess, "repo not found"),

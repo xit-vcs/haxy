@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const xit = @import("xit");
 const rp = xit.repo;
 const rf = xit.ref;
@@ -18,6 +19,7 @@ pub const Repo = @import("./ui/Repo.zig");
 pub const Title = @import("./ui/Title.zig");
 pub const SubTitle = @import("./ui/SubTitle.zig");
 pub const Quit = @import("./ui/Quit.zig");
+pub const CloneUrl = @import("./ui/CloneUrl.zig");
 pub const Unauthorized = @import("./ui/Unauthorized.zig");
 
 pub const PageKind = enum {
@@ -965,7 +967,14 @@ pub const Session = struct {
     // port the web UI is served on, for the TUI/SSH footer's "http://localhost:<port>..."
     // url. null on the web itself (no footer there).
     web_port: ?u16 = null,
+    // a host operation requested by a widget. terminals present clone urls on
+    // their restored screen; wasm asks the browser to copy them.
+    host_request: ?HostRequest = null,
     quit_requested: bool = false,
+
+    pub const HostRequest = union(enum) {
+        clone_url: []const u8,
+    };
 
     const Self = @This();
 
@@ -979,6 +988,10 @@ pub const Session = struct {
         current_page: RoutablePage = .default,
         // whether to render the ANSI art backdrop
         enable_ansi: bool = true,
+        // the bound clone-service ports. absent in local mode, where clone urls
+        // are not shown.
+        clone_http_port: ?u16 = null,
+        clone_ssh_port: ?u16 = null,
         // true when this session views a single local repo. unlike `local`
         // (the host-side filesystem source) this travels in the snapshot, so
         // the wasm side also parses elided link urls and hides the multi-user
@@ -1096,7 +1109,8 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, session: *Session, repo_may
     defer nav.deinit(allocator);
 
     var terminal = try term.Terminal.init(io, allocator);
-    defer terminal.deinit(io);
+    var terminal_live = true;
+    defer if (terminal_live) terminal.deinit(io);
 
     // set term as active so it will be properly cooked
     // when a panic/segfault happens
@@ -1126,6 +1140,27 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, session: *Session, repo_may
             try inputKey(allocator, &nav.root, key, session);
         }
 
+        if (session.host_request) |request| {
+            session.host_request = null;
+            switch (request) {
+                .clone_url => |url| {
+                    term.setActive(null);
+                    terminal.deinit(io);
+                    terminal_live = false;
+                    showCloneUrl(io, url) catch |show_err| {
+                        terminal = try term.Terminal.init(io, allocator);
+                        terminal_live = true;
+                        term.setActive(&terminal);
+                        return show_err;
+                    };
+                    terminal = try term.Terminal.init(io, allocator);
+                    terminal_live = true;
+                    term.setActive(&terminal);
+                    last_size = .{ .width = 0, .height = 0 };
+                },
+            }
+        }
+
         // persist queued actions when there's a repo; local mode has none,
         // so just apply in-memory
         if (repo_maybe) |repo| {
@@ -1146,6 +1181,29 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, session: *Session, repo_may
             .min_size = .{ .width = null, .height = null },
             .max_size = .{ .width = last_size.width, .height = last_size.height },
         }, nav.root.getFocus());
+    }
+}
+
+fn showCloneUrl(io: std.Io, url: []const u8) !void {
+    const tty: ?std.Io.File = if (builtin.os.tag == .windows)
+        null
+    else
+        try std.Io.Dir.cwd().openFile(io, "/dev/tty", .{ .mode = .read_write });
+    defer if (tty) |file| file.close(io);
+
+    const input = if (tty) |file| file else std.Io.File.stdin();
+    const output = if (tty) |file| file else std.Io.File.stdout();
+
+    var write_buf: [1024]u8 = undefined;
+    var writer = output.writer(io, &write_buf);
+    try writer.interface.print("\x1b[2J\x1b[H{s}\r\n\r\npress enter to go back\r\n", .{url});
+    try writer.interface.flush();
+
+    var read_buf: [1]u8 = undefined;
+    var reader = input.reader(io, &read_buf);
+    while (true) {
+        const byte = try reader.interface.takeByte();
+        if (byte == '\r' or byte == '\n') return;
     }
 }
 
@@ -1510,6 +1568,7 @@ pub const Widget = union(enum) {
     repo_refs: Repo.Refs.View,
     repo_issues: Repo.Issues.View,
     repo_comment: Repo.Comment.Item,
+    clone_url: CloneUrl.View,
     home_users: Home.Users.View,
     home_repos: Home.Repos.View,
     auth_tab: Home.Header.AuthTab.View,

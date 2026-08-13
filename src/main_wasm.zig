@@ -52,7 +52,6 @@ fn tick(min_height: u32, max_width: u32) !void {
     // apply actions queued during input. the wasm path has no repo, so this is
     // in-memory only; logged-in web persistence goes through the /ansi POST.
     session.applyPending();
-
     // bind the UI to the browser viewport (cols x rows) like the terminal:
     // min == max height fills it exactly, and each Scroll clips to its
     // viewport while handing its full content to a native-scrollable element.
@@ -169,7 +168,6 @@ extern fn _replaceState(arg: [*]const u8, len: u32) void;
 extern fn _focusInput(focus_id: u32) void;
 extern fn _navigate(arg: [*]const u8, len: u32) void;
 extern fn _scrollToFocus(focus_id: u32) void;
-
 /// js calls this first to get a wasm pointer it can write the page json into.
 export fn _alloc(len: u32) ?[*]u8 {
     const slice = allocator.alloc(u8, len) catch return null;

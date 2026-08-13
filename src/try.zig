@@ -774,8 +774,9 @@ pub fn main(init: std.process.Init) !void {
             io: std.Io,
             key_path: []const u8,
 
-            pub fn run(self: @This(), web_port: u16, ssh_port: u16) !void {
+            pub fn run(self: @This(), web_port: u16, http_port: u16, ssh_port: u16) !void {
                 _ = web_port;
+                _ = http_port;
                 std.debug.print(
                     \\
                     \\connect to the TUI with:
@@ -815,10 +816,11 @@ pub fn main(init: std.process.Init) !void {
             session: *ui.Session,
             repo: *Repo,
 
-            pub fn run(self: @This(), web_port: u16, ssh_port: u16) !void {
-                _ = ssh_port;
+            pub fn run(self: @This(), web_port: u16, http_port: u16, ssh_port: u16) !void {
                 // launch the TUI; the footer points at whatever port was bound
                 self.session.web_port = web_port;
+                self.session.data.clone_http_port = http_port;
+                self.session.data.clone_ssh_port = ssh_port;
                 try hx.ui.run(self.io, self.allocator, self.session, self.repo);
             }
         };

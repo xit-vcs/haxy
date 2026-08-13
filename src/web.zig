@@ -38,6 +38,8 @@ pub const Host = union(enum) {
     remote: struct {
         admin_repo_path: []const u8,
         session_store: SessionStore,
+        clone_http_port: u16,
+        clone_ssh_port: u16,
     },
     local: ui.RepoSource,
 };
@@ -192,11 +194,17 @@ fn handleRequest(
             .local => {},
         }
 
+        const clone_http_port: ?u16, const clone_ssh_port: ?u16 = switch (host) {
+            .remote => |remote| .{ remote.clone_http_port, remote.clone_ssh_port },
+            .local => .{ null, null },
+        };
         const html = renderIndexHtml(io, allocator, host, .{
             .user_id = user_id,
             .login_failure = login_failure,
             .current_page = current_page,
             .is_local = host == .local,
+            .clone_http_port = clone_http_port,
+            .clone_ssh_port = clone_ssh_port,
         }) catch |err| switch (err) {
             error.NotFound => {
                 try request.respond("not found", .{
@@ -1381,7 +1389,7 @@ pub fn generateOverlay(allocator: std.mem.Allocator, root: *ui.Widget, session: 
 
                     try out.appendSlice(allocator, "<input type=\"");
                     try out.appendSlice(allocator, if (root_child.focus.kind == .text_input_password) "password" else "text");
-                    try out.appendSlice(allocator, "\" data-focus-id=\"");
+                    try out.appendSlice(allocator, if (action_url.len == 0) "\" readonly data-focus-id=\"" else "\" data-focus-id=\"");
                     var id_buf: [32]u8 = undefined;
                     try out.appendSlice(allocator, try std.fmt.bufPrint(&id_buf, "{d}", .{inner_id}));
                     if (ti.options.name.len > 0) {

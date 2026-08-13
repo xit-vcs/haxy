@@ -243,6 +243,17 @@ WebAssembly.instantiateStreaming(fetch("/haxy.wasm"), importObject).then(async (
             const tag = document.activeElement.tagName;
             const isArrow = event.key === "ArrowUp" || event.key === "ArrowDown" ||
                 event.key === "ArrowLeft" || event.key === "ArrowRight";
+            if (tag === "INPUT" && document.activeElement.readOnly &&
+                ["Enter", "ArrowLeft", "ArrowRight"].includes(event.key)) {
+                event.preventDefault();
+                if (event.key === "Enter") {
+                    document.activeElement.select();
+                    return;
+                }
+                wasmInstance.exports._onKeyDown(event.keyCode);
+                wasmInstance.exports._tick(minRows(), maxCols());
+                return;
+            }
             if (tag === "INPUT" && event.key === "Enter") {
                 // enter in a text input never submits the form; only the
                 // submit button does
@@ -297,6 +308,11 @@ WebAssembly.instantiateStreaming(fetch("/haxy.wasm"), importObject).then(async (
         const t = event.target;
         if (!t || (t.tagName !== "INPUT" && t.tagName !== "TEXTAREA") || !t.dataset.focusId) return;
         sendTextInputValue(Number(t.dataset.focusId), t.value);
+    });
+
+    document.addEventListener("click", (event) => {
+        const t = event.target;
+        if (t && t.tagName === "INPUT" && t.readOnly) t.select();
     });
 
     document.addEventListener("focusin", (event) => {

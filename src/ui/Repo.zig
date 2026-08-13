@@ -359,6 +359,7 @@ pub const View = struct {
     }
 
     pub fn input(self: *View, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
+        const stack = &self.box.children.values()[stack_index].widget.stack;
         if (self.getFocus().child_id) |child_id| {
             if (self.box.children.getIndex(child_id)) |current_index| {
                 const child = &self.box.children.values()[current_index].widget;
@@ -397,6 +398,11 @@ pub const View = struct {
                     .down => {
                         switch (child.*) {
                             .repo_header => {
+                                if (stack.getSelected()) |selected_widget| switch (selected_widget.*) {
+                                    .repo_files => |*v| if (v.focusCloneUrl(root_focus)) return,
+                                    .repo_commits => |*v| if (v.focusCloneUrl(root_focus)) return,
+                                    else => {},
+                                };
                                 index = stack_index;
                             },
                             .stack => {

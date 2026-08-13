@@ -239,9 +239,9 @@ pub const View = struct {
 
         // the ref banner at the top.
         {
-            var header = try Header.View.init(allocator, &data.header, session);
-            errdefer header.deinit(allocator);
-            try outer.children.put(allocator, header.getFocus().id, .{ .widget = .{ .repo_files_header = header }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
+            var header_view = try Header.View.init(allocator, &data.header, session, data.identity);
+            errdefer header_view.deinit(allocator);
+            try outer.children.put(allocator, header_view.getFocus().id, .{ .widget = .{ .repo_files_header = header_view }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
         }
 
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
@@ -374,6 +374,14 @@ pub const View = struct {
 
     fn contentBox(self: *View) *wgt.Box(ui.Widget) {
         return &self.box.children.values()[content_index].widget.box;
+    }
+
+    fn header(self: *View) *Header.View {
+        return &self.box.children.values()[header_index].widget.repo_files_header;
+    }
+
+    fn headerActive(self: *View) bool {
+        return self.box.getFocus().child_id == self.header().getFocus().id;
     }
 
     fn listScroll(self: *View) *wgt.Scroll(ui.Widget) {
@@ -584,7 +592,15 @@ pub const View = struct {
     }
 
     pub fn input(self: *View, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
-        _ = allocator;
+        if (self.headerActive()) {
+            if (key == .arrow_down) {
+                root_focus.setFocus(self.contentBox().getFocus().id);
+            } else {
+                try self.header().input(allocator, key, root_focus);
+            }
+            return;
+        }
+        if (key == .arrow_up and self.contentAtTop() and self.header().focusCloneUrl(root_focus)) return;
         if (self.detailActive()) {
             try self.detailInput(key, root_focus);
         } else {
@@ -740,18 +756,25 @@ pub const View = struct {
         return self.box.getFocus();
     }
 
-    // for the parent's "up at the top jumps to the header" check: report 0
-    // whenever up would otherwise do nothing here.
-    pub fn getSelectedIndex(self: *View) ?usize {
+    fn contentAtTop(self: *View) bool {
         if (self.detailActive()) {
-            if (self.detailOuter().getFocus().child_id == self.navBox().getFocus().id) return 0;
-            if (self.navBox().children.count() == 0 and
-                (!self.session.is_terminal or self.detailScroll().y == 0)) return 0;
-            return 1;
+            if (self.detailOuter().getFocus().child_id == self.navBox().getFocus().id) return true;
+            return self.navBox().children.count() == 0 and
+                (!self.session.is_terminal or self.detailScroll().y == 0);
         }
         const lb = self.listBox();
-        const cid = lb.getFocus().child_id orelse return null;
-        return lb.children.getIndex(cid);
+        const cid = lb.getFocus().child_id orelse return true;
+        return lb.children.getIndex(cid) == 0;
+    }
+
+    // only the clone-url row sits directly below the repository header.
+    pub fn getSelectedIndex(self: *View) ?usize {
+        if (self.headerActive()) return 0;
+        return if (self.header().hasCloneUrl() or !self.contentAtTop()) 1 else 0;
+    }
+
+    pub fn focusCloneUrl(self: *View, root_focus: *Focus) bool {
+        return self.header().focusCloneUrl(root_focus);
     }
 };
 
@@ -833,7 +856,7 @@ fn parentDir(dir: []const u8) []const u8 {
     return dir[0..slash];
 }
 
-// the "viewing <ref_or_oid> <value>" banner shown above the listing.
+// the "<ref_or_oid> <value>" banner shown above the listing.
 pub const Header = struct {
     content: []const u8,
 
@@ -841,7 +864,7 @@ pub const Header = struct {
     pub fn init(aa: std.mem.Allocator, ref_or_oid: ui.RoutablePage.RefOrOid, value: []const u8) !Header {
         const decoded = std.Uri.percentDecodeInPlace(try aa.dupe(u8, value));
         return .{
-            .content = try std.fmt.allocPrint(aa, "viewing {s} {s}", .{ @tagName(ref_or_oid), decoded }),
+            .content = try std.fmt.allocPrint(aa, "{s} {s}", .{ @tagName(ref_or_oid), decoded }),
         };
     }
 
@@ -849,14 +872,25 @@ pub const Header = struct {
         box: wgt.Box(ui.Widget),
         data: *const Header,
 
-        pub fn init(allocator: std.mem.Allocator, data: *const Header, session: *ui.Session) !Header.View {
-            _ = session;
+        pub fn init(allocator: std.mem.Allocator, data: *const Header, session: *ui.Session, identity: []const u8) !Header.View {
             var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
             errdefer box.deinit(allocator);
 
+            if (!session.data.is_local and session.data.clone_http_port != null and session.data.clone_ssh_port != null) {
+                var clone_url = try ui.CloneUrl.View.init(allocator, session, identity);
+                errdefer clone_url.deinit(allocator);
+                const min_width = clone_url.minWidth();
+                box.getFocus().child_id = clone_url.getFocus().id;
+                try box.children.put(allocator, clone_url.getFocus().id, .{ .widget = .{ .clone_url = clone_url }, .rect = null, .min_size = .{ .width = min_width, .height = 3 } });
+            }
+
+            var spacer = try ui.Spacer.init(allocator);
+            errdefer spacer.deinit(allocator);
+            try box.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null });
+
             var text_box = try wgt.TextBox(ui.Widget).init(allocator, data.content, .{ .border_style = .hidden, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
-            try box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
+            try box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null, .shrink = true });
 
             return .{ .box = box, .data = data };
         }
@@ -871,10 +905,26 @@ pub const Header = struct {
         }
 
         pub fn input(self: *Header.View, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
-            _ = self;
-            _ = allocator;
-            _ = key;
-            _ = root_focus;
+            const clone_url = self.cloneUrl() orelse return;
+            try clone_url.input(allocator, key, root_focus);
+        }
+
+        pub fn focusCloneUrl(self: *Header.View, root_focus: *Focus) bool {
+            const clone_url = self.cloneUrl() orelse return false;
+            root_focus.setFocus(clone_url.getFocus().id);
+            return true;
+        }
+
+        pub fn hasCloneUrl(self: *Header.View) bool {
+            return self.cloneUrl() != null;
+        }
+
+        fn cloneUrl(self: *Header.View) ?*ui.CloneUrl.View {
+            for (self.box.children.values()) |*child| switch (child.widget) {
+                .clone_url => |*clone_url| return clone_url,
+                else => {},
+            };
+            return null;
         }
 
         pub fn clearGrid(self: *Header.View) void {

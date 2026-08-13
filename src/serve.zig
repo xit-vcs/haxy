@@ -100,6 +100,8 @@ pub fn run(
         .admin_repo_path = admin_repo_path,
         .repo_root_path = repo_root_path,
         .wui_port = wui_server.socket.address.getPort(),
+        .clone_http_port = http_server.socket.address.getPort(),
+        .clone_ssh_port = ssh_server.socket.address.getPort(),
         .err = err,
     };
     serve_ssh.runListener(io, allocator, &host_key, &ssh_session_handler, &ssh_server, &tasks, err);
@@ -110,10 +112,12 @@ pub fn run(
     runWebListener(io, allocator, &wui_server, &tasks, .{ .remote = .{
         .admin_repo_path = admin_repo_path,
         .session_store = session_store,
+        .clone_http_port = http_server.socket.address.getPort(),
+        .clone_ssh_port = ssh_server.socket.address.getPort(),
     } }, err);
 
     if (@TypeOf(runnable) != void) {
-        try runnable.run(wui_server.socket.address.getPort(), ssh_server.socket.address.getPort());
+        try runnable.run(wui_server.socket.address.getPort(), http_server.socket.address.getPort(), ssh_server.socket.address.getPort());
     } else {
         try tasks.await(io);
     }
