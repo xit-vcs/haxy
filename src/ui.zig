@@ -12,6 +12,7 @@ const Key = xitui.input.Key;
 const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
 const evt = @import("./event.zig");
+const inp = @import("./ui/input.zig");
 
 pub const Home = @import("./ui/Home.zig");
 pub const User = @import("./ui/User.zig");
@@ -967,13 +968,13 @@ pub const Session = struct {
     // port the web UI is served on, for the TUI/SSH footer's "http://localhost:<port>..."
     // url. null on the web itself (no footer there).
     web_port: ?u16 = null,
-    // a host operation requested by a widget. terminals present clone urls on
+    // a host operation requested by a widget. terminals present urls on
     // their restored screen; wasm asks the browser to copy them.
     host_request: ?HostRequest = null,
     quit_requested: bool = false,
 
     pub const HostRequest = union(enum) {
-        clone_url: []const u8,
+        show_url: []const u8,
     };
 
     const Self = @This();
@@ -1143,11 +1144,11 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, session: *Session, repo_may
         if (session.host_request) |request| {
             session.host_request = null;
             switch (request) {
-                .clone_url => |url| {
+                .show_url => |url| {
                     term.setActive(null);
                     terminal.deinit(io);
                     terminal_live = false;
-                    showCloneUrl(io, url) catch |show_err| {
+                    showUrl(io, url) catch |show_err| {
                         terminal = try term.Terminal.init(io, allocator);
                         terminal_live = true;
                         term.setActive(&terminal);
@@ -1184,7 +1185,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, session: *Session, repo_may
     }
 }
 
-fn showCloneUrl(io: std.Io, url: []const u8) !void {
+fn showUrl(io: std.Io, url: []const u8) !void {
     const tty: ?std.Io.File = if (builtin.os.tag == .windows)
         null
     else
@@ -2130,6 +2131,8 @@ pub const Footer = struct {
     grid: ?Grid,
     session: *Session,
     arena: std.heap.ArenaAllocator,
+    url: []const u8 = "",
+    url_width: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator, session: *Session) !Footer {
         return .{
@@ -2153,12 +2156,15 @@ pub const Footer = struct {
         if (width == 0) return;
 
         _ = self.arena.reset(.retain_capacity);
+        self.url = "";
+        self.url_width = 0;
         const aa = self.arena.allocator();
         const path = self.session.data.current_page.toUrl(&self.arena) catch return;
         const text = if (self.session.web_port) |port|
             std.fmt.allocPrint(aa, "http://localhost:{d}{s}", .{ port, path }) catch return
         else
             path;
+        self.url = text;
 
         var grid = try Grid.init(allocator, .{ .width = width, .height = 1 });
         errdefer grid.deinit();
@@ -2169,14 +2175,20 @@ pub const Footer = struct {
             grid.cells.items[try grid.cells.at(.{ 0, i })].rune = ch;
             i += 1;
         }
+        self.url_width = i;
         self.grid = grid;
     }
 
     pub fn input(self: *Footer, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
-        _ = self;
         _ = allocator;
-        _ = key;
-        _ = root_focus;
+        switch (key) {
+            .mouse => |mouse| {
+                if (mouse.ctrl or !inp.leftClickOn(root_focus, self.getFocus().id, mouse)) return;
+                const rect = (root_focus.children.get(self.getFocus().id) orelse return).rect;
+                if (mouse.x < rect.x + self.url_width) self.session.host_request = .{ .show_url = self.url };
+            },
+            else => {},
+        }
     }
 
     pub fn clearGrid(self: *Footer) void {

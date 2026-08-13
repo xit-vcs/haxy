@@ -272,7 +272,7 @@ fn runTui(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh.PtySiz
         if (ui_session.host_request) |request| {
             ui_session.host_request = null;
             switch (request) {
-                .clone_url => |url| {
+                .show_url => |url| {
                     if (terminal_maybe) |*terminal| terminal.deinit();
                     terminal_maybe = null;
                     try session_writer.interface.print("\x1b[2J\x1b[H{s}\r\n\r\npress enter to go back\r\n", .{url});

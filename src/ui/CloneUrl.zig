@@ -126,16 +126,15 @@ pub const View = struct {
             .arrow_left => if (self.selected > 0) self.selected - 1 else return,
             .arrow_right => if (self.selected + 1 < self.protocol_count) self.selected + 1 else return,
             .enter => {
-                if (self.session.is_terminal) self.session.host_request = .{ .clone_url = self.protocols[self.selected].url };
+                if (self.session.is_terminal) self.session.host_request = .{ .show_url = self.protocols[self.selected].url };
                 return;
             },
             .mouse => |mouse| blk: {
                 for (0..self.protocol_count) |i| {
                     if (inp.leftClickOn(root_focus, self.protocolLabel(i).getFocus().id, mouse)) break :blk i;
                 }
-                if (inp.leftClickOn(root_focus, self.urlInput().getFocus().id, mouse)) {
-                    if (self.session.is_terminal) self.session.host_request = .{ .clone_url = self.protocols[self.selected].url };
-                }
+                if (self.session.is_terminal and !mouse.ctrl and inp.leftClickOn(root_focus, self.urlInput().getFocus().id, mouse))
+                    self.session.host_request = .{ .show_url = self.protocols[self.selected].url };
                 return;
             },
             else => return,
