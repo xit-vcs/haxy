@@ -108,7 +108,7 @@ fn handleRequest(
                             .comment => handleComment(io, request, allocator, base, host),
                             .open => handleIssueStatus(io, request, allocator, base, host, .open),
                             .close => handleIssueStatus(io, request, allocator, base, host, .closed),
-                            .edit => handleIssueEdit(io, request, allocator, base, host),
+                            .edit => handleEdit(io, request, allocator, base, host),
                             .resolve => handleIssueResolve(io, request, allocator, base, host),
                         };
                     }
@@ -125,7 +125,7 @@ fn handleRequest(
                             .comment => handleComment(io, request, allocator, base, host),
                             .open => handleIssueStatus(io, request, allocator, base, host, .open),
                             .close => handleIssueStatus(io, request, allocator, base, host, .closed),
-                            .edit => handleIssueEdit(io, request, allocator, base, host),
+                            .edit => handleEdit(io, request, allocator, base, host),
                             .resolve => handleIssueResolve(io, request, allocator, base, host),
                         };
                     }
@@ -514,7 +514,7 @@ fn handleIssue(
 const CommentBaseParts = struct {
     repo_base: []const u8,
     thread_id: [evt.event_id_size]u8,
-    parent_id: [evt.event_id_size]u8,
+    comment_id: ?[evt.event_id_size]u8,
 };
 
 fn commentBaseParts(base: []const u8) ?CommentBaseParts {
@@ -527,13 +527,15 @@ fn commentBaseParts(base: []const u8) ?CommentBaseParts {
 
     var thread_id: [evt.event_id_size]u8 = undefined;
     _ = std.fmt.hexToBytes(&thread_id, tail[0..id_len]) catch return null;
-    var parent_id = thread_id;
+    var comment_id: ?[evt.event_id_size]u8 = null;
     if (tail.len != id_len) {
         if (tail.len != id_len + comment_infix.len + id_len) return null;
         if (!std.mem.eql(u8, tail[id_len .. id_len + comment_infix.len], comment_infix)) return null;
-        _ = std.fmt.hexToBytes(&parent_id, tail[id_len + comment_infix.len ..]) catch return null;
+        var id: [evt.event_id_size]u8 = undefined;
+        _ = std.fmt.hexToBytes(&id, tail[id_len + comment_infix.len ..]) catch return null;
+        comment_id = id;
     }
-    return .{ .repo_base = base[0..issue_at], .thread_id = thread_id, .parent_id = parent_id };
+    return .{ .repo_base = base[0..issue_at], .thread_id = thread_id, .comment_id = comment_id };
 }
 
 // create a reply from an issue or comment /new form, then redirect to its
@@ -578,7 +580,7 @@ fn handleComment(
     }
 
     const thread_id_hex = std.fmt.bytesToHex(parts.thread_id, .lower);
-    const parent_id_hex = std.fmt.bytesToHex(parts.parent_id, .lower);
+    const parent_id_hex = std.fmt.bytesToHex(parts.comment_id orelse parts.thread_id, .lower);
 
     var event_id_hex: [evt.event_id_size * 2]u8 = undefined;
     switch (host) {
@@ -634,6 +636,115 @@ fn handleComment(
     try request.respond("", .{
         .status = .see_other,
         .extra_headers = &.{.{ .name = "location", .value = location }},
+    });
+}
+
+// re-emit the comment `parts` names with a new body, in the repo the host
+// resolves the base to.
+fn updateComment(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    host: Host,
+    parts: CommentBaseParts,
+    body: []const u8,
+    author_email: []const u8,
+) !void {
+    const comment_id = parts.comment_id orelse return error.NotFound;
+    const thread_id = std.fmt.bytesToHex(parts.thread_id, .lower);
+    switch (host) {
+        .remote => |remote| {
+            const repo_prefix = "/repo/";
+            if (!std.mem.startsWith(u8, parts.repo_base, repo_prefix)) return error.NotFound;
+            const repos_dir = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(remote.admin_repo_path) orelse ".", "repos" });
+            defer allocator.free(repos_dir);
+            const repo_path = switch (try serve_common.resolveRepoPath(io, allocator, repos_dir, remote.admin_repo_path, parts.repo_base[repo_prefix.len..], false)) {
+                .ok => |p| p,
+                .invalid, .not_found => return error.NotFound,
+            };
+            defer allocator.free(repo_path);
+
+            var repo = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = repo_path });
+            defer repo.deinit(io, allocator);
+            try evt.Comment.update(.xit, .{}, io, allocator, &repo, &thread_id, &comment_id, body, author_email);
+        },
+        .local => |src| {
+            if (parts.repo_base.len != 0) return error.NotFound;
+            switch (src.repo_kind) {
+                inline else => |repo_kind| {
+                    var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, .{ .path = src.path });
+                    defer any_repo.deinit(io, allocator);
+                    switch (any_repo) {
+                        inline else => |*repo| try evt.Comment.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &thread_id, &comment_id, body, author_email),
+                    }
+                },
+            }
+        },
+    }
+}
+
+// edit actions share a suffix; the base identifies whether the form names an
+// issue or comment.
+fn handleEdit(
+    io: std.Io,
+    request: *std.http.Server.Request,
+    allocator: std.mem.Allocator,
+    base: []const u8,
+    host: Host,
+) !void {
+    if (commentBaseParts(base)) |parts| {
+        if (parts.comment_id != null) return handleCommentEdit(io, request, allocator, base, host, parts);
+    }
+    return handleIssueEdit(io, request, allocator, base, host);
+}
+
+// replace the body of the comment the url names, then redirect to its
+// permalink.
+fn handleCommentEdit(
+    io: std.Io,
+    request: *std.http.Server.Request,
+    allocator: std.mem.Allocator,
+    base: []const u8,
+    host: Host,
+    parts: CommentBaseParts,
+) !void {
+    var author_arena = std.heap.ArenaAllocator.init(allocator);
+    defer author_arena.deinit();
+    const author_email = (try eventAuthorEmail(io, allocator, &author_arena, request, host)) orelse return respondLoginRequired(request);
+
+    var body_buf: [256]u8 = undefined;
+    const reader = request.readerExpectNone(&body_buf);
+    const posted = reader.allocRemaining(allocator, .limited(65536)) catch &[_]u8{};
+    defer allocator.free(posted);
+    const body_crlf = (try parseFormField(allocator, posted, "body")) orelse try allocator.dupe(u8, "");
+    defer allocator.free(body_crlf);
+    const body = try std.mem.replaceOwned(u8, allocator, body_crlf, "\r\n", "\n");
+    defer allocator.free(body);
+
+    if (!evt.Comment.fieldsValid(body)) {
+        const form_location = try std.fmt.allocPrint(allocator, "{s}/edit", .{base});
+        defer allocator.free(form_location);
+        try request.respond("", .{
+            .status = .see_other,
+            .extra_headers = &.{.{ .name = "location", .value = form_location }},
+        });
+        return;
+    }
+
+    const not_found = "comment not found";
+    updateComment(io, allocator, host, parts, body, author_email) catch |err| switch (err) {
+        error.NotFound => {
+            try request.respond(not_found, .{
+                .status = .not_found,
+                .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+            });
+            return;
+        },
+        else => |e| return e,
+    };
+
+    try request.respond("", .{
+        .status = .see_other,
+        .extra_headers = &.{.{ .name = "location", .value = base }},
     });
 }
 

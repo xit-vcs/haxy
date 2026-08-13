@@ -158,6 +158,10 @@ pub const Item = struct {
             errdefer reply.deinit(allocator);
             try bar.children.put(allocator, reply.getFocus().id, .{ .widget = .{ .text_box = reply }, .rect = null, .min_size = .{ .width = "new reply".len + 2, .height = null } });
 
+            var edit = try linkBox(allocator, session, "edit comment", ui.RoutablePage.repoCommentEditRoute(identity, &entry.comment.event.thread_id, &entry.id) orelse return error.RouteTooLong);
+            errdefer edit.deinit(allocator);
+            try bar.children.put(allocator, edit.getFocus().id, .{ .widget = .{ .text_box = edit }, .rect = null, .min_size = .{ .width = "edit comment".len + 2, .height = null } });
+
             var permalink = try linkBox(allocator, session, "permalink", ui.RoutablePage.repoCommentsRoute(identity, &entry.comment.event.thread_id, &entry.id, 0) orelse return error.RouteTooLong);
             errdefer permalink.deinit(allocator);
             try bar.children.put(allocator, permalink.getFocus().id, .{ .widget = .{ .text_box = permalink }, .rect = null, .min_size = .{ .width = "permalink".len + 2, .height = null } });

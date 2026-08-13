@@ -151,6 +151,46 @@ pub fn create(
     return event_id;
 }
 
+// replace a comment's body while preserving its thread and parent. `repo` must
+// be writable.
+pub fn update(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    repo: *rp.Repo(repo_kind, repo_opts),
+    thread_id: *const [evt.event_id_size * 2]u8,
+    comment_id: *const [evt.event_id_size]u8,
+    body: []const u8,
+    author_email: []const u8,
+) !void {
+    if (!fieldsValid(body)) return error.InvalidFields;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const DB = evt.EventDB(repo_opts.hash);
+    var event_db_maybe: ?evt.LocalEventDB(repo_opts.hash) = if (repo_kind == .git) try evt.LocalEventDB(repo_opts.hash).openReadOnly(io, allocator, repo.core.repo_dir) else null;
+    defer if (event_db_maybe) |*event_db| event_db.deinit(io, allocator);
+    const moment = (if (event_db_maybe) |*event_db|
+        evt.currentMomentFromDb(repo_opts.hash, event_db.db)
+    else if (repo_kind == .git)
+        return error.NotFound
+    else
+        evt.currentMoment(repo_opts, repo)) catch return error.NotFound;
+    const comment = (try readById(DB, repo_opts.hash, moment, &arena, comment_id)) orelse return error.NotFound;
+    if (!std.mem.eql(u8, &comment.event.thread_id, thread_id)) return error.NotFound;
+
+    var updated = comment.event;
+    updated.body = body;
+    try evt.consume(repo_kind, repo_opts, io, allocator, repo, evt.events_ref, &.{.{
+        .id = std.fmt.bytesToHex(comment_id.*, .lower),
+        .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
+        .author_email = author_email,
+        .event = .{ .comment = updated },
+    }});
+}
+
 // read a comment by event id, or null if the id isn't a known comment. field
 // byte slices are allocated in `arena`.
 pub fn readById(

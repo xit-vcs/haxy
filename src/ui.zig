@@ -111,7 +111,7 @@ pub const RoutablePage = union(enum) {
 
     pub const RefKind = enum { branch, tag };
 
-    pub const IssuesView = enum { open, closed, tags, new, edit, description, new_comment, conflicts, resolve };
+    pub const IssuesView = enum { open, closed, tags, new, edit, description, new_comment, edit_comment, conflicts, resolve };
 
     pub const RefOrOid = enum {
         branch,
@@ -375,6 +375,14 @@ pub const RoutablePage = union(enum) {
         return route;
     }
 
+    // build the form route for editing a comment.
+    pub fn repoCommentEditRoute(identity: []const u8, thread: []const u8, comment_id: []const u8) ?RoutablePage {
+        if (thread.len == 0 or comment_id.len == 0) return null;
+        var route = repoCommentsRoute(identity, thread, comment_id, 0) orelse return null;
+        route.repo_issues.view = .edit_comment;
+        return route;
+    }
+
     // build a `.repo_issues` route showing tags view, keeping the url-encoded
     // `tag` filter ("" = unfiltered).
     pub fn repoIssuesTagsRoute(identity: []const u8, tag: []const u8) ?RoutablePage {
@@ -525,6 +533,7 @@ pub const RoutablePage = union(enum) {
                     try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ issue_seg ++ "{s}/new", .{ prefix, i.selected.slice() })
                 else
                     try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ issue_seg ++ "{s}/" ++ comment_seg ++ "{s}/new", .{ prefix, i.selected.slice(), i.comment.slice() });
+                if (i.view == .edit_comment) break :blk try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ issue_seg ++ "{s}/" ++ comment_seg ++ "{s}/edit", .{ prefix, i.selected.slice(), i.comment.slice() });
                 if (i.view == .conflicts) break :blk if (i.selected.len == 0)
                     try std.fmt.allocPrint(arena.allocator(), "{s}/issues/conflicts", .{prefix})
                 else
@@ -687,8 +696,10 @@ pub const RoutablePage = union(enum) {
                     if (comment_id.len == 0) return null;
                     const word = params.scanTail(&segments) catch return null;
                     if (word) |last| {
-                        if (!std.mem.eql(u8, last, "new") or !params.only(&.{})) return null;
-                        return repoCommentNewRoute(pair, issue_id, comment_id);
+                        if (!params.only(&.{})) return null;
+                        if (std.mem.eql(u8, last, "new")) return repoCommentNewRoute(pair, issue_id, comment_id);
+                        if (std.mem.eql(u8, last, "edit")) return repoCommentEditRoute(pair, issue_id, comment_id);
+                        return null;
                     }
                     if (!params.only(&.{.start})) return null;
                     return repoCommentsRoute(pair, issue_id, comment_id, params.start() orelse return null);

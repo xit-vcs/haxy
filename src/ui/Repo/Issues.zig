@@ -279,7 +279,7 @@ pub fn init(
                 .closed => closed_root = order_key,
             }
             // form urls keep their view; otherwise the issue's status picks it.
-            if (view != .edit and view != .new_comment) resolved_view = switch (issue_event.event.status) {
+            if (view != .edit and view != .new_comment and view != .edit_comment) resolved_view = switch (issue_event.event.status) {
                 .open => .open,
                 .closed => .closed,
             };
@@ -605,7 +605,7 @@ pub const View = struct {
             .open => open_view_index,
             .closed => closed_view_index,
             .tags => tags_view_index,
-            .new, .edit, .new_comment, .resolve => form_view_index,
+            .new, .edit, .new_comment, .edit_comment, .resolve => form_view_index,
             .conflicts => conflicts_view_index,
             // init resolves a description url to its issue's status list
             .description => unreachable,
@@ -665,15 +665,45 @@ pub const View = struct {
         // logged-out session can't create events, so the unauthorized view
         // stands in.
         if (session.data.is_local or session.data.user_id != null) {
-            if (data.view == .new_comment) {
-                const route = ui.RoutablePage.repoCommentNewRoute(data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong;
+            if (data.view == .new_comment or data.view == .edit_comment) {
+                const editing = data.view == .edit_comment;
+                const route = if (editing)
+                    ui.RoutablePage.repoCommentEditRoute(data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong
+                else
+                    ui.RoutablePage.repoCommentNewRoute(data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong;
                 const page_url = try route.toUrl(session.page_arena);
-                const action = try std.fmt.allocPrint(session.page_arena.allocator(), "form:{s}/comment", .{page_url[0 .. page_url.len - "/new".len]});
-                const parent_route = if (data.comment_page) |page|
-                    ui.RoutablePage.repoCommentsRoute(data.identity, data.selected_id, &page.selected.id, 0)
+                const action = if (editing)
+                    try std.fmt.allocPrint(session.page_arena.allocator(), "form:{s}", .{page_url})
+                else
+                    try std.fmt.allocPrint(session.page_arena.allocator(), "form:{s}/comment", .{page_url[0 .. page_url.len - "/new".len]});
+                const page = data.comment_page;
+                const top_level = if (page) |p| std.mem.eql(u8, &p.selected.comment.event.parent_id, &p.selected.comment.event.thread_id) else false;
+                const parent_route = if (editing)
+                    if (top_level)
+                        ui.RoutablePage.repoIssueCommentsRoute(data.identity, data.selected_id, 0)
+                    else if (page) |p|
+                        ui.RoutablePage.repoCommentsRoute(data.identity, data.selected_id, &p.selected.comment.event.parent_id, 0)
+                    else
+                        null
+                else if (page) |p|
+                    ui.RoutablePage.repoCommentsRoute(data.identity, data.selected_id, &p.selected.id, 0)
                 else
                     ui.RoutablePage.repoIssueCommentsRoute(data.identity, data.selected_id, 0);
-                var form = try initCommentForm(allocator, session, action, if (data.comment_page) |page| page.selected.author else if (data.selectedIssue()) |entry| entry.author else .unknown, parent_route orelse return error.RouteTooLong);
+                const parent_author: ui.Author = if (editing)
+                    if (top_level)
+                        if (data.selectedIssue()) |entry| entry.author else .unknown
+                    else if (page) |p|
+                        p.selected.parent_author orelse .unknown
+                    else
+                        .unknown
+                else if (page) |p|
+                    p.selected.author
+                else if (data.selectedIssue()) |entry|
+                    entry.author
+                else
+                    .unknown;
+                const initial_body: ?[]const u8 = if (editing) if (page) |p| p.selected.comment.event.body else null else null;
+                var form = try initCommentForm(allocator, session, action, parent_author, parent_route orelse return error.RouteTooLong, initial_body);
                 errdefer form.deinit(allocator);
                 try stack.children.put(allocator, form.getFocus().id, .{ .box = form });
             } else if (data.view == .resolve) {
@@ -691,15 +721,11 @@ pub const View = struct {
                 try stack.children.put(allocator, form_widget.getFocus().id, form_widget);
             } else {
                 const aa = session.page_arena.allocator();
-                const action = if (data.view == .edit)
-                    (if (data.identity.len == 0)
-                        try std.fmt.allocPrint(aa, "form:/issue:{s}/edit", .{data.selected_id})
-                    else
-                        try std.fmt.allocPrint(aa, "form:/repo/{s}/issue:{s}/edit", .{ data.identity, data.selected_id }))
-                else if (data.identity.len == 0)
-                    "form:/issue"
+                const route = if (data.view == .edit)
+                    ui.RoutablePage.repoIssuesEditRoute(data.identity, data.selected_id) orelse return error.RouteTooLong
                 else
-                    try std.fmt.allocPrint(aa, "form:/repo/{s}/issue", .{data.identity});
+                    ui.RoutablePage.repoIssuesNewRoute(data.identity) orelse return error.RouteTooLong;
+                const action = try std.fmt.allocPrint(aa, "form:{s}", .{try route.toUrl(session.page_arena)});
                 const issue = if (data.view == .edit)
                     (if (data.selectedIssue()) |entry| &entry.issue else null)
                 else
@@ -853,7 +879,7 @@ pub const View = struct {
         return box;
     }
 
-    fn initCommentForm(allocator: std.mem.Allocator, session: *ui.Session, action: []const u8, author: ui.Author, parent_route: ui.RoutablePage) !wgt.Box(ui.Widget) {
+    fn initCommentForm(allocator: std.mem.Allocator, session: *ui.Session, action: []const u8, author: ui.Author, parent_route: ui.RoutablePage, initial_body: ?[]const u8) !wgt.Box(ui.Widget) {
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert });
         errdefer box.deinit(allocator);
         box.getFocus().kind = .{ .custom = action };
@@ -879,10 +905,11 @@ pub const View = struct {
             });
             errdefer body.deinit(allocator);
             body.getFocus().focusable = true;
+            if (initial_body) |text| try body.setContent(allocator, text);
             try box.children.put(allocator, body.getFocus().id, .{ .widget = .{ .text_input = body }, .rect = null, .min_size = null });
         }
 
-        try addSubmitButtonLabeled(allocator, &box, "submit reply");
+        try addSubmitButtonLabeled(allocator, &box, "submit");
         box.getFocus().child_id = box.children.keys()[comment_author_field_index];
         return box;
     }
@@ -1238,6 +1265,7 @@ pub const View = struct {
                 (switch (self.data.view) {
                     .edit => ui.RoutablePage.repoIssuesEditRoute(self.data.identity, self.data.selected_id),
                     .new_comment => ui.RoutablePage.repoCommentNewRoute(self.data.identity, self.data.selected_id, self.data.comment_id),
+                    .edit_comment => ui.RoutablePage.repoCommentEditRoute(self.data.identity, self.data.selected_id, self.data.comment_id),
                     .resolve => ui.RoutablePage.repoIssuesResolveRoute(self.data.identity, self.data.selected_id, self.data.theirs_picks),
                     else => ui.RoutablePage.repoIssuesNewRoute(self.data.identity),
                 })
@@ -1333,6 +1361,13 @@ pub const View = struct {
                     try self.session.input_values.put(inputs_arena, fields[title_field_index].widget.text_input.getFocus().id, entry.issue.event.title);
                     try self.session.input_values.put(inputs_arena, fields[tags_field_index].widget.text_input.getFocus().id, entry.issue.event.tags);
                     try self.session.input_values.put(inputs_arena, fields[description_field_index].widget.text_input.getFocus().id, entry.issue.event.description);
+                }
+            }
+
+            if (self.data.view == .edit_comment) {
+                if (self.data.comment_page) |page| {
+                    const body = &form.children.values()[comment_body_field_index].widget.text_input;
+                    try self.session.input_values.put(inputs_arena, body.getFocus().id, page.selected.comment.event.body);
                 }
             }
 
@@ -1586,7 +1621,7 @@ pub const View = struct {
         if (self.formViewActive()) {
             if (self.data.view == .resolve) {
                 try self.resolveInput(allocator, key, root_focus);
-            } else if (self.data.view == .new_comment) {
+            } else if (self.data.view == .new_comment or self.data.view == .edit_comment) {
                 try self.commentFormInput(allocator, key, root_focus);
             } else {
                 try self.formInput(allocator, key, root_focus);
@@ -2044,8 +2079,8 @@ pub const View = struct {
         try self.session.navigate(route);
     }
 
-    // commit a reply and navigate to its permalink. this is the terminal path;
-    // the web posts the form to its /comment route.
+    // commit a new or edited comment and navigate to its permalink. this is the
+    // terminal path; the web posts the form to its comment route.
     fn submitComment(self: *View, allocator: std.mem.Allocator) !void {
         if (comptime wasm) return;
         const io = self.session.io orelse return;
@@ -2065,12 +2100,20 @@ pub const View = struct {
             break :blk parent;
         };
         var event_id_hex: [evt.event_id_size * 2]u8 = undefined;
+        const editing = self.data.view == .edit_comment;
         switch (src.repo_kind) {
             inline else => |repo_kind| {
                 var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, .{ .path = src.path });
                 defer any_repo.deinit(io, allocator);
                 switch (any_repo) {
-                    inline else => |*repo| event_id_hex = try evt.Comment.create(repo_kind, repo.self_repo_opts, io, allocator, repo, &thread_id, &parent_id, body, author_email),
+                    inline else => |*repo| if (editing) {
+                        var comment_id: [evt.event_id_size]u8 = undefined;
+                        _ = std.fmt.hexToBytes(&comment_id, self.data.comment_id) catch return;
+                        try evt.Comment.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &thread_id, &comment_id, body, author_email);
+                        event_id_hex = std.fmt.bytesToHex(comment_id, .lower);
+                    } else {
+                        event_id_hex = try evt.Comment.create(repo_kind, repo.self_repo_opts, io, allocator, repo, &thread_id, &parent_id, body, author_email);
+                    },
                 }
             },
         }
@@ -2477,6 +2520,7 @@ pub const Header = struct {
             const route = switch (data.view) {
                 .edit => ui.RoutablePage.repoIssuesEditRoute(data.identity, data.selected_id) orelse return error.RouteTooLong,
                 .new_comment => ui.RoutablePage.repoCommentNewRoute(data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong,
+                .edit_comment => ui.RoutablePage.repoCommentEditRoute(data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong,
                 .resolve => ui.RoutablePage.repoIssuesResolveRoute(data.identity, data.selected_id, data.theirs_picks) orelse return error.RouteTooLong,
                 else => ui.RoutablePage.repoIssuesNewRoute(data.identity) orelse return error.RouteTooLong,
             };
@@ -2484,6 +2528,7 @@ pub const Header = struct {
             const label: []const u8 = switch (data.view) {
                 .edit => "edit",
                 .new_comment => "reply",
+                .edit_comment => "edit",
                 .resolve => "resolve",
                 else => "new",
             };
