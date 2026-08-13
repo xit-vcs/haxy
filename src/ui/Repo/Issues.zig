@@ -672,10 +672,7 @@ pub const View = struct {
                 else
                     ui.RoutablePage.repoCommentNewRoute(data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong;
                 const page_url = try route.toUrl(session.page_arena);
-                const action = if (editing)
-                    try std.fmt.allocPrint(session.page_arena.allocator(), "form:{s}", .{page_url})
-                else
-                    try std.fmt.allocPrint(session.page_arena.allocator(), "form:{s}/comment", .{page_url[0 .. page_url.len - "/new".len]});
+                const action = try std.fmt.allocPrint(session.page_arena.allocator(), "form:{s}", .{page_url});
                 const page = data.comment_page;
                 const top_level = if (page) |p| std.mem.eql(u8, &p.selected.comment.event.parent_id, &p.selected.comment.event.thread_id) else false;
                 const parent_route = if (editing)

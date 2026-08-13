@@ -91,11 +91,11 @@ fn handleRequest(
 
     // POST routes can be scoped by any page, so they can redirect using
     // the base of the URL. this allows logging in to keep you on the page
-    // you were on. local mode has no accounts, so only the issue routes.
+    // you were on. local mode has no accounts, so only the repo routes.
     if (method == .POST) {
         switch (host) {
             .remote => |remote| {
-                const PostRoute = enum { login, logout, ansi, issue, comment, open, close, edit, resolve };
+                const PostRoute = enum { login, logout, ansi, new, edit, open, close, resolve };
                 inline for (@typeInfo(PostRoute).@"enum".fields) |field| {
                     const suffix = "/" ++ field.name;
                     if (std.mem.endsWith(u8, path, suffix)) {
@@ -104,28 +104,26 @@ fn handleRequest(
                             .login => handleLogin(io, request, allocator, base, remote.admin_repo_path, remote.session_store),
                             .logout => handleLogout(request, base, remote.session_store),
                             .ansi => handleAnsi(io, request, allocator, base, remote.admin_repo_path, remote.session_store),
-                            .issue => handleIssue(io, request, allocator, base, host),
-                            .comment => handleComment(io, request, allocator, base, host),
+                            .new => handleNew(io, request, allocator, base, host),
+                            .edit => handleEdit(io, request, allocator, base, host),
                             .open => handleIssueStatus(io, request, allocator, base, host, .open),
                             .close => handleIssueStatus(io, request, allocator, base, host, .closed),
-                            .edit => handleEdit(io, request, allocator, base, host),
                             .resolve => handleIssueResolve(io, request, allocator, base, host),
                         };
                     }
                 }
             },
             .local => {
-                const PostRoute = enum { issue, comment, open, close, edit, resolve };
+                const PostRoute = enum { new, edit, open, close, resolve };
                 inline for (@typeInfo(PostRoute).@"enum".fields) |field| {
                     const suffix = "/" ++ field.name;
                     if (std.mem.endsWith(u8, path, suffix)) {
                         const base = path[0 .. path.len - suffix.len];
                         return switch (@field(PostRoute, field.name)) {
-                            .issue => handleIssue(io, request, allocator, base, host),
-                            .comment => handleComment(io, request, allocator, base, host),
+                            .new => handleNew(io, request, allocator, base, host),
+                            .edit => handleEdit(io, request, allocator, base, host),
                             .open => handleIssueStatus(io, request, allocator, base, host, .open),
                             .close => handleIssueStatus(io, request, allocator, base, host, .closed),
-                            .edit => handleEdit(io, request, allocator, base, host),
                             .resolve => handleIssueResolve(io, request, allocator, base, host),
                         };
                     }
@@ -398,9 +396,29 @@ fn respondLoginRequired(request: *std.http.Server.Request) !void {
     });
 }
 
-// create an issue in the repo the form's page names (base is
-// "/repo/<owner>/<name>", or "" in local mode) and redirect to it
-fn handleIssue(
+// new actions share a suffix; the base identifies whether the form creates an
+// issue or comment.
+fn handleNew(
+    io: std.Io,
+    request: *std.http.Server.Request,
+    allocator: std.mem.Allocator,
+    base: []const u8,
+    host: Host,
+) !void {
+    if (commentBaseParts(base) != null) return handleCommentNew(io, request, allocator, base, host);
+
+    const issues_suffix = "/issues";
+    if (std.mem.endsWith(u8, base, issues_suffix))
+        return handleIssueNew(io, request, allocator, base[0 .. base.len - issues_suffix.len], host);
+
+    try request.respond("new event target not found", .{
+        .status = .not_found,
+        .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+    });
+}
+
+// create an issue in the repo the form's page names and redirect to it.
+fn handleIssueNew(
     io: std.Io,
     request: *std.http.Server.Request,
     allocator: std.mem.Allocator,
@@ -483,7 +501,7 @@ fn handleIssue(
             try evt.consume(.xit, .{}, io, allocator, &repo, evt.events_ref, &[_]evt.EventWithId{event});
         },
         .local => |src| {
-            // the local form posts to "/issue", so base is empty
+            // local routes elide the repo base
             if (base.len != 0) {
                 try request.respond(not_found, .{
                     .status = .not_found,
@@ -540,7 +558,7 @@ fn commentBaseParts(base: []const u8) ?CommentBaseParts {
 
 // create a reply from an issue or comment /new form, then redirect to its
 // permalink. the rest of the url identifies the thread and parent.
-fn handleComment(
+fn handleCommentNew(
     io: std.Io,
     request: *std.http.Server.Request,
     allocator: std.mem.Allocator,
