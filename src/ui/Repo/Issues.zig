@@ -1717,7 +1717,10 @@ pub const View = struct {
             .arrow_left => if (cur > button_in_row_index) root_focus.setFocus(row.children.keys()[cur - 1]) else try self.focusList(index, root_focus),
             .arrow_right => if (cur + 1 < row.children.count()) root_focus.setFocus(row.children.keys()[cur + 1]),
             .arrow_up => self.focusHeader(root_focus),
-            .arrow_down => self.focusTitle(index, root_focus),
+            .arrow_down => {
+                self.focusDetailEdge(index, root_focus, false);
+                self.detailScroll(index).y = 0;
+            },
             .enter => if (on_status) try self.toggleIssueStatus(allocator, index),
             .mouse => |mouse| if (self.statusButton(index)) |button| {
                 if (inp.leftClickOn(root_focus, button.getFocus().id, mouse)) try self.toggleIssueStatus(allocator, index);
@@ -1730,7 +1733,7 @@ pub const View = struct {
         switch (key) {
             .arrow_left => try self.focusList(index, root_focus),
             .arrow_up => self.focusToolRow(index, root_focus),
-            .arrow_down => if (self.authorPresent(index)) self.focusAuthor(index, root_focus) else try self.focusDescription(index, root_focus),
+            .arrow_down => _ = self.moveDetailVertical(index, root_focus, true),
             else => {},
         }
     }
@@ -1740,8 +1743,8 @@ pub const View = struct {
     fn authorInput(self: *View, index: usize, key: Key, root_focus: *Focus) !void {
         switch (key) {
             .arrow_left => try self.focusList(index, root_focus),
-            .arrow_up => self.focusTitle(index, root_focus),
-            .arrow_down => if (self.tagFlow(index) != null) try self.focusTags(index, root_focus) else try self.focusDescription(index, root_focus),
+            .arrow_up => _ = self.moveDetailVertical(index, root_focus, false),
+            .arrow_down => _ = self.moveDetailVertical(index, root_focus, true),
             else => {},
         }
     }
@@ -1750,28 +1753,30 @@ pub const View = struct {
         const sc = self.detailScroll(index);
         switch (key) {
             .arrow_left => return self.focusList(index, root_focus),
-            // once the scroll can't move further, cross into the tags (or the
-            // open/close button when the issue has none).
+            // the terminal moves through the description one line at a time;
+            // the web lets focus changes drive its native scroll.
             .arrow_up => {
+                if (!self.session.is_terminal) {
+                    _ = self.moveDetailVertical(index, root_focus, false);
+                    return;
+                }
+                if (self.focusAdjacentVisible(index, root_focus, false)) return;
                 const before = sc.y;
                 sc.y -= 1;
                 sc.clampToContent();
-                if (sc.y == before) {
-                    if (self.tagFlow(index) != null)
-                        try self.focusTags(index, root_focus)
-                    else if (self.authorPresent(index))
-                        self.focusAuthor(index, root_focus)
-                    else
-                        self.focusTitle(index, root_focus);
-                }
+                if (sc.y == before) _ = self.moveDetailVertical(index, root_focus, false);
                 return;
             },
             .arrow_down => {
-                if (self.moveCommentVertical(index, root_focus, true)) return;
+                if (!self.session.is_terminal) {
+                    _ = self.moveDetailVertical(index, root_focus, true);
+                    return;
+                }
+                if (self.focusAdjacentVisible(index, root_focus, true)) return;
                 const before = sc.y;
                 sc.y += 1;
                 sc.clampToContent();
-                if (sc.y == before) _ = self.moveCommentVertical(index, root_focus, true);
+                if (sc.y == before) _ = self.moveDetailVertical(index, root_focus, true);
                 return;
             },
             else => return,
@@ -1783,26 +1788,43 @@ pub const View = struct {
         switch (key) {
             .arrow_left => if (!self.moveCommentHorizontal(index, root_focus, false)) return self.focusList(index, root_focus),
             .arrow_right => _ = self.moveCommentHorizontal(index, root_focus, true),
-            .arrow_up => _ = self.moveCommentVertical(index, root_focus, false),
-            .arrow_down => _ = self.moveCommentVertical(index, root_focus, true),
+            .arrow_up => _ = self.moveDetailVertical(index, root_focus, false),
+            .arrow_down => _ = self.moveDetailVertical(index, root_focus, true),
             else => return,
         }
     }
 
     // page the detail scroll, then focus the first or last visible widget.
     fn pageDetail(self: *View, index: usize, root_focus: *Focus, delta: isize) void {
+        if (!self.session.is_terminal) return;
         const sc = self.detailScroll(index);
         sc.y += delta;
         sc.clampToContent();
         self.focusVisible(index, root_focus, delta > 0);
     }
 
-    // jump to the detail's top or bottom and focus that edge's visible widget.
+    // jump to the detail's first or last focusable widget. the terminal pins
+    // its synthetic scroll too; the browser scrolls to the new focus itself.
     fn jumpDetail(self: *View, index: usize, root_focus: *Focus, to_end: bool) void {
-        const sc = self.detailScroll(index);
-        sc.y = if (to_end) std.math.maxInt(isize) else 0;
-        sc.clampToContent();
-        self.focusVisible(index, root_focus, to_end);
+        if (self.session.is_terminal) {
+            const sc = self.detailScroll(index);
+            sc.y = if (to_end) std.math.maxInt(isize) else 0;
+            sc.clampToContent();
+            self.focusVisible(index, root_focus, to_end);
+        } else {
+            self.focusDetailEdge(index, root_focus, to_end);
+        }
+    }
+
+    fn focusDetailEdge(self: *View, index: usize, root_focus: *Focus, last: bool) void {
+        const focus = self.detailInner(index).getFocus();
+        var chosen: ?usize = null;
+        for (focus.children.keys(), focus.children.values()) |id, child| {
+            if (!child.focus.focusable) continue;
+            chosen = id;
+            if (!last) break;
+        }
+        if (chosen) |id| root_focus.setFocus(id);
     }
 
     fn detailRectVisible(self: *View, index: usize, rect: layout.IRect) bool {
@@ -1854,6 +1876,21 @@ pub const View = struct {
         return false;
     }
 
+    fn focusAdjacentVisible(self: *View, index: usize, root_focus: *Focus, down: bool) bool {
+        const inner = self.detailInner(index);
+        var next = self.focusedDetailChild(index, root_focus) orelse return false;
+        while (true) {
+            if (down) {
+                next += 1;
+                if (next >= inner.children.count()) return false;
+            } else {
+                if (next == 0) return false;
+                next -= 1;
+            }
+            if (self.focusVisibleChild(index, next, root_focus, !down)) return true;
+        }
+    }
+
     fn focusedDetailChild(self: *View, index: usize, root_focus: *Focus) ?usize {
         const inner = self.detailInner(index);
         var id = root_focus.grandchild_id orelse return null;
@@ -1866,13 +1903,12 @@ pub const View = struct {
 
     fn detailChildFocusable(self: *View, index: usize, child_index: usize) bool {
         const child = &self.detailInner(index).children.values()[child_index].widget;
-        return switch (child.*) {
-            .repo_comment => true,
-            .box => |*box| for (box.children.values()) |*item| {
-                if (item.widget.getFocus().focusable) break true;
-            } else false,
-            else => child.getFocus().focusable,
-        };
+        const focus = child.getFocus();
+        if (focus.focusable) return true;
+        for (focus.children.values()) |item| {
+            if (item.focus.focusable) return true;
+        }
+        return false;
     }
 
     fn focusDetailChild(self: *View, index: usize, child_index: usize, last: bool, root_focus: *Focus) void {
@@ -1895,10 +1931,20 @@ pub const View = struct {
             },
             else => root_focus.setFocus(target),
         }
-        self.detailScroll(index).scrollToRect(rect);
+        const sc = self.detailScroll(index);
+        if (sc.grid) |viewport| {
+            const viewport_height = viewport.size.height - sc.bar_h;
+            if (rect.size.height > viewport_height) {
+                const bottom_aligned = rect.y + @as(isize, @intCast(rect.size.height - viewport_height));
+                sc.y = std.math.clamp(sc.y, rect.y, bottom_aligned);
+                sc.clampToContent();
+                return;
+            }
+        }
+        sc.scrollToRect(rect);
     }
 
-    fn moveCommentVertical(self: *View, index: usize, root_focus: *Focus, down: bool) bool {
+    fn moveDetailVertical(self: *View, index: usize, root_focus: *Focus, down: bool) bool {
         const inner = self.detailInner(index);
         const current = self.focusedDetailChild(index, root_focus) orelse return false;
         if (inner.children.values()[current].widget == .repo_comment) {
@@ -2351,8 +2397,16 @@ pub const View = struct {
         switch (key) {
             .arrow_left => if (cur > 0) self.focusTag(index, tf, root_focus, cur - 1) else try self.focusList(index, root_focus),
             .arrow_right => if (cur + 1 < count) self.focusTag(index, tf, root_focus, cur + 1),
-            .arrow_up => if (tf.rowStep(cur, false)) |i| self.focusTag(index, tf, root_focus, i) else self.focusAuthor(index, root_focus),
-            .arrow_down => if (tf.rowStep(cur, true)) |i| self.focusTag(index, tf, root_focus, i) else try self.focusDescription(index, root_focus),
+            .arrow_up => if (tf.rowStep(cur, false)) |i| {
+                self.focusTag(index, tf, root_focus, i);
+            } else {
+                _ = self.moveDetailVertical(index, root_focus, false);
+            },
+            .arrow_down => if (tf.rowStep(cur, true)) |i| {
+                self.focusTag(index, tf, root_focus, i);
+            } else {
+                _ = self.moveDetailVertical(index, root_focus, true);
+            },
             .home => self.focusTag(index, tf, root_focus, 0),
             .end => self.focusTag(index, tf, root_focus, count - 1),
             else => {},
@@ -2420,10 +2474,6 @@ pub const View = struct {
         return inner.children.getIndex(cid) == title_child_index;
     }
 
-    fn authorPresent(self: *View, index: usize) bool {
-        return self.author_id[index] != null;
-    }
-
     fn authorFocused(self: *View, index: usize) bool {
         const inner = self.detailInner(index);
         const cid = inner.getFocus().child_id orelse return false;
@@ -2433,34 +2483,6 @@ pub const View = struct {
     fn descriptionFocused(self: *View, index: usize) bool {
         const cid = self.detailInner(index).getFocus().child_id orelse return false;
         return cid == self.description_id[index];
-    }
-
-    // the author sits right under the title at the top of the pane, so
-    // focusing it scrolls there.
-    fn focusAuthor(self: *View, index: usize, root_focus: *Focus) void {
-        const id = self.author_id[index] orelse return;
-        root_focus.setFocus(id);
-        self.detailScroll(index).y = 0;
-    }
-
-    // the title sits at the top of the pane, so focusing it scrolls there.
-    fn focusTitle(self: *View, index: usize, root_focus: *Focus) void {
-        const inner = self.detailInner(index);
-        if (inner.children.count() == 0) return;
-        root_focus.setFocus(inner.children.keys()[title_child_index]);
-        self.detailScroll(index).y = 0;
-    }
-
-    fn focusTags(self: *View, index: usize, root_focus: *Focus) !void {
-        const tf = self.tagFlow(index) orelse return;
-        if (tf.text_boxes.items.len == 0) return;
-        const cid = tf.focus.child_id orelse tf.text_boxes.items[0].getFocus().id;
-        const item = tf.indexOfFocusId(cid) orelse 0;
-        self.focusTag(index, tf, root_focus, item);
-    }
-
-    fn focusDescription(self: *View, index: usize, root_focus: *Focus) !void {
-        if (self.description_id[index]) |id| root_focus.setFocus(id);
     }
 
     // return to the tool row's last-focused button (the header when the

@@ -53,6 +53,48 @@ function readWasmString(ptr, len) {
     return decoder.decode(new Uint8Array(memory.buffer, ptr, len));
 }
 
+function focusedNativeScroll() {
+    const id = grid.dataset.focusId;
+    if (!id) return null;
+    const focused = grid.querySelectorAll(`[data-focus-id="${id}"]`);
+    if (focused.length === 0) return null;
+    const container = focused[0].closest(".scroll");
+    return container ? { focused, container } : null;
+}
+
+// scroll one row while the focused widget continues past the viewport edge.
+function scrollFocusedWidget(down) {
+    const native = focusedNativeScroll();
+    if (!native) return false;
+    const viewport = native.container.getBoundingClientRect();
+    const edge = (down ? native.focused[native.focused.length - 1] : native.focused[0]).getBoundingClientRect();
+    const overflow = down ? edge.bottom - viewport.bottom : viewport.top - edge.top;
+    if (overflow <= 0.5) return false;
+    if (!cellHeight) measureCell();
+    native.container.scrollTop += (down ? 1 : -1) * Math.min(cellHeight, overflow);
+    return true;
+}
+
+// page the focused native scroll, then focus its leading visible widget.
+function pageFocusedScroll(down) {
+    const native = focusedNativeScroll();
+    if (!native) return false;
+    const container = native.container;
+
+    container.scrollTop += (down ? 1 : -1) * container.clientHeight;
+    const viewport = container.getBoundingClientRect();
+    let chosen = null;
+    for (const el of container.querySelectorAll(".clickable[data-focus-id]")) {
+        const rect = el.getBoundingClientRect();
+        if (rect.bottom <= viewport.top || rect.top >= viewport.bottom) continue;
+        chosen = el;
+        if (!down) break;
+    }
+    if (chosen) wasmInstance.exports._setFocus(Number(chosen.dataset.focusId));
+    wasmInstance.exports._tick(minRows(), maxCols());
+    return true;
+}
+
 const importObject = {
     env: {
         _consoleLog: function (ptr, len) {
@@ -123,6 +165,7 @@ const importObject = {
             window.location.assign(readWasmString(ptr, len));
         },
         _scrollToFocus: function (id) {
+            grid.dataset.focusId = id;
             // bring the focused widget into view within its own .scroll div. it's
             // several spans (one per row) sharing this id, in top-to-bottom order,
             // so the first gives its top/left edge and the last its bottom.
@@ -138,9 +181,11 @@ const importObject = {
             const bottom = last.bottom - c.top + container.scrollTop;
             const left = first.left - c.left + container.scrollLeft;
 
-            // vertical is the priority axis: fit the widget, preferring its top
-            // when it's taller than the viewport.
-            if (top < container.scrollTop || bottom - top > container.clientHeight) {
+            // vertical is the priority axis. keep the viewport in place when it
+            // already overlaps a tall widget; otherwise reveal its nearest edge.
+            if (bottom - top > container.clientHeight) {
+                container.scrollTop = Math.min(Math.max(container.scrollTop, top), bottom - container.clientHeight);
+            } else if (top < container.scrollTop) {
                 container.scrollTop = top;
             } else if (bottom > container.scrollTop + container.clientHeight) {
                 container.scrollTop = bottom - container.clientHeight;
@@ -215,6 +260,14 @@ WebAssembly.instantiateStreaming(fetch("/haxy.wasm"), importObject).then(async (
                 // arrows — handled natively by the browser
                 return;
             }
+        }
+        if ((event.key === "ArrowUp" || event.key === "ArrowDown") && scrollFocusedWidget(event.key === "ArrowDown")) {
+            event.preventDefault();
+            return;
+        }
+        if ((event.key === "PageUp" || event.key === "PageDown") && pageFocusedScroll(event.key === "PageDown")) {
+            event.preventDefault();
+            return;
         }
         if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "PageUp", "PageDown", "Home", "End"].includes(event.key)) {
             event.preventDefault();
