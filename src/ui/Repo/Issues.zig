@@ -1669,6 +1669,25 @@ pub const View = struct {
     }
 
     fn detailInput(self: *View, allocator: std.mem.Allocator, index: usize, key: Key, root_focus: *Focus) !void {
+        switch (key) {
+            .page_up => {
+                self.pageDetail(index, root_focus, -10);
+                return;
+            },
+            .page_down => {
+                self.pageDetail(index, root_focus, 10);
+                return;
+            },
+            .home => {
+                self.jumpDetail(index, root_focus, false);
+                return;
+            },
+            .end => {
+                self.jumpDetail(index, root_focus, true);
+                return;
+            },
+            else => {},
+        }
         if (self.data.comment_page != null and std.mem.eql(u8, self.window(index).issues[self.detailed_index[index] orelse return].id, self.data.selected_id)) {
             try self.commentInput(index, key, root_focus);
         } else if (self.toolRowFocused(index)) {
@@ -1755,10 +1774,6 @@ pub const View = struct {
                 if (sc.y == before) _ = self.moveCommentVertical(index, root_focus, true);
                 return;
             },
-            .page_up => sc.y -= 10,
-            .page_down => sc.y += 10,
-            .home => sc.y = 0,
-            .end => sc.y = std.math.maxInt(isize),
             else => return,
         }
         sc.clampToContent();
@@ -1770,13 +1785,73 @@ pub const View = struct {
             .arrow_right => _ = self.moveCommentHorizontal(index, root_focus, true),
             .arrow_up => _ = self.moveCommentVertical(index, root_focus, false),
             .arrow_down => _ = self.moveCommentVertical(index, root_focus, true),
-            .page_up => self.detailScroll(index).y -= 10,
-            .page_down => self.detailScroll(index).y += 10,
-            .home => self.detailScroll(index).y = 0,
-            .end => self.detailScroll(index).y = std.math.maxInt(isize),
             else => return,
         }
-        self.detailScroll(index).clampToContent();
+    }
+
+    // page the detail scroll, then focus the first or last visible widget.
+    fn pageDetail(self: *View, index: usize, root_focus: *Focus, delta: isize) void {
+        const sc = self.detailScroll(index);
+        sc.y += delta;
+        sc.clampToContent();
+        self.focusVisible(index, root_focus, delta > 0);
+    }
+
+    // jump to the detail's top or bottom and focus that edge's visible widget.
+    fn jumpDetail(self: *View, index: usize, root_focus: *Focus, to_end: bool) void {
+        const sc = self.detailScroll(index);
+        sc.y = if (to_end) std.math.maxInt(isize) else 0;
+        sc.clampToContent();
+        self.focusVisible(index, root_focus, to_end);
+    }
+
+    fn detailRectVisible(self: *View, index: usize, rect: layout.IRect) bool {
+        const sc = self.detailScroll(index);
+        const viewport = sc.grid orelse return false;
+        const top = sc.y;
+        const bottom = top + @as(isize, @intCast(viewport.size.height - sc.bar_h));
+        return rect.y + @as(isize, @intCast(rect.size.height)) > top and rect.y < bottom;
+    }
+
+    // focus the top- or bottom-most focusable widget intersecting the viewport.
+    fn focusVisible(self: *View, index: usize, root_focus: *Focus, last: bool) void {
+        const inner = self.detailInner(index);
+        var offset: usize = 0;
+        while (offset < inner.children.count()) : (offset += 1) {
+            const child_index = if (last) inner.children.count() - 1 - offset else offset;
+            if (self.focusVisibleChild(index, child_index, root_focus, last)) return;
+        }
+    }
+
+    fn focusVisibleChild(self: *View, index: usize, child_index: usize, root_focus: *Focus, last: bool) bool {
+        const child = &self.detailInner(index).children.values()[child_index];
+        const child_rect = child.rect orelse return false;
+        var chosen: ?usize = null;
+        if (child.widget.getFocus().focusable and self.detailRectVisible(index, child_rect)) {
+            const id = self.detailInner(index).children.keys()[child_index];
+            chosen = id;
+            if (!last) {
+                root_focus.setFocus(id);
+                return true;
+            }
+        }
+
+        for (child.widget.getFocus().children.keys(), child.widget.getFocus().children.values()) |id, focus_child| {
+            if (!focus_child.focus.focusable) continue;
+            const rect: layout.IRect = .{
+                .x = child_rect.x + @as(isize, @intCast(focus_child.rect.x)),
+                .y = child_rect.y + @as(isize, @intCast(focus_child.rect.y)),
+                .size = focus_child.rect.size,
+            };
+            if (!self.detailRectVisible(index, rect)) continue;
+            chosen = id;
+            if (!last) break;
+        }
+        if (chosen) |id| {
+            root_focus.setFocus(id);
+            return true;
+        }
+        return false;
     }
 
     fn focusedDetailChild(self: *View, index: usize, root_focus: *Focus) ?usize {

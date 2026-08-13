@@ -883,7 +883,7 @@ pub const View = struct {
         const vp = sc.grid orelse return false;
         const r = inner.children.values()[index].rect orelse return false;
         const top = sc.y;
-        const bottom = sc.y + @as(isize, @intCast(vp.size.height));
+        const bottom = sc.y + @as(isize, @intCast(vp.size.height - sc.bar_h));
         return (r.y + @as(isize, @intCast(r.size.height))) > top and r.y < bottom;
     }
 
@@ -894,7 +894,7 @@ pub const View = struct {
         const sc = self.diffScroll();
         const vp = sc.grid orelse return;
         const top = sc.y;
-        const bottom = sc.y + @as(isize, @intCast(vp.size.height));
+        const bottom = sc.y + @as(isize, @intCast(vp.size.height - sc.bar_h));
         var chosen: ?usize = null;
         for (inner.children.keys(), inner.children.values()) |id, *child| {
             const r = child.rect orelse continue; // content-space layout rect
