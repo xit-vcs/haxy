@@ -603,7 +603,7 @@ pub const RoutablePage = union(enum) {
     // browser scroll the whole page, rather than being pinned to the viewport
     pub fn fullHeight(self: RoutablePage) bool {
         return switch (self) {
-            .repo_issues => |i| i.view == .resolve or i.view == .new_comment,
+            .repo_issues => |i| i.view == .resolve,
             else => false,
         };
     }

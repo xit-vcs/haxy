@@ -863,7 +863,7 @@ pub const View = struct {
             errdefer parent.deinit(allocator);
             parent.options.label = " replying to ";
             parent.getFocus().kind = .{ .custom = try std.fmt.allocPrint(session.page_arena.allocator(), "a:{s}", .{try parent_route.toUrl(session.page_arena)}) };
-            try box.children.put(allocator, parent.getFocus().id, .{ .widget = .{ .text_box = parent }, .rect = null, .min_size = null });
+            try box.children.put(allocator, parent.getFocus().id, .{ .widget = .{ .text_box = parent }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
         }
 
         {
@@ -875,6 +875,7 @@ pub const View = struct {
                 .render_content = session.is_terminal,
                 .multiline = true,
                 .visible_height = 5,
+                .scroll = .{ .fill = true },
             });
             errdefer body.deinit(allocator);
             body.getFocus().focusable = true;
