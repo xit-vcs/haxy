@@ -13,6 +13,11 @@ pub const Comment = @import("event/Comment.zig");
 
 pub const event_id_size: usize = 16;
 
+pub const MergePolicy = enum {
+    field_conflicts,
+    target_wins,
+};
+
 // the most bytes an event's serialized form may hold
 pub const max_event_size: usize = 100 * 1024;
 
@@ -753,10 +758,9 @@ fn mergeFields(
     return merged;
 }
 
-// three-way merge of one kind's records from a merge parent, field by field, so
-// sides editing different fields combine cleanly. the result goes through the
-// kind's `consume`, which re-derives the indexes from it. a field both sides
-// changed differently keeps the target's value and records a conflict entry. a
+// three-way merge of one kind's records from a merge parent. kinds that expose
+// conflicts merge field by field; the others take one whole record. the result
+// goes through the kind's `consume`, which re-derives the indexes from it. a
 // deletion carries over unless the other side changed the record, so a merge
 // never fails.
 pub fn merge(
@@ -780,18 +784,21 @@ pub fn merge(
     }
 
     var parent_conflicts: ?DB.SortedMap(.read_only) = null;
-    if (try parent_moment.getCursor(hash.hashInt(hash_kind, T.conflicts_key))) |cursor| {
-        parent_conflicts = try DB.SortedMap(.read_only).init(cursor);
-    }
-
     var baseline_conflicts: ?DB.SortedMap(.read_only) = null;
-    if (try baseline_moment.getCursor(hash.hashInt(hash_kind, T.conflicts_key))) |cursor| {
-        baseline_conflicts = try DB.SortedMap(.read_only).init(cursor);
-    }
-
     var parent_id_to_field_to_oid: ?DB.HashMap(.read_only) = null;
-    if (try parent_moment.getCursor(hash.hashInt(hash_kind, T.id_to_field_to_oid_key))) |cursor| {
-        parent_id_to_field_to_oid = try DB.HashMap(.read_only).init(cursor);
+    switch (comptime T.merge_policy) {
+        .field_conflicts => {
+            if (try parent_moment.getCursor(hash.hashInt(hash_kind, T.conflicts_key))) |cursor| {
+                parent_conflicts = try DB.SortedMap(.read_only).init(cursor);
+            }
+            if (try baseline_moment.getCursor(hash.hashInt(hash_kind, T.conflicts_key))) |cursor| {
+                baseline_conflicts = try DB.SortedMap(.read_only).init(cursor);
+            }
+            if (try parent_moment.getCursor(hash.hashInt(hash_kind, T.id_to_field_to_oid_key))) |cursor| {
+                parent_id_to_field_to_oid = try DB.HashMap(.read_only).init(cursor);
+            }
+        },
+        .target_wins => {},
     }
 
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -837,21 +844,40 @@ pub fn merge(
                 }
             }
 
-            outcome = @splat(.kept);
-            merged = target_record;
-            merged.event = mergeFields(T, if (baseline_record) |baseline| baseline.event else null, target_record.event, parent_record.event, &outcome);
+            switch (comptime T.merge_policy) {
+                .field_conflicts => {
+                    outcome = @splat(.kept);
+                    merged = target_record;
+                    merged.event = mergeFields(T, if (baseline_record) |baseline| baseline.event else null, target_record.event, parent_record.event, &outcome);
 
-            // merge the tombstone separately from serialized fields. a deletion
-            // carries over an unchanged record, while an edit or restoration
-            // keeps it active.
-            merged.deleted = if (target_record.deleted == parent_record.deleted)
-                target_record.deleted
-            else if (baseline_record) |baseline| blk: {
-                const active = if (!target_record.deleted) target_record else parent_record;
-                if (active.deleted != baseline.deleted) break :blk false;
-                if (!fieldsEqual(T, active.event, baseline.event)) break :blk false;
-                break :blk true;
-            } else false;
+                    // merge the tombstone separately from serialized fields. a deletion
+                    // carries over an unchanged record, while an edit or restoration
+                    // keeps it active.
+                    merged.deleted = if (target_record.deleted == parent_record.deleted)
+                        target_record.deleted
+                    else if (baseline_record) |baseline| blk: {
+                        const active = if (!target_record.deleted) target_record else parent_record;
+                        if (active.deleted != baseline.deleted) break :blk false;
+                        if (!fieldsEqual(T, active.event, baseline.event)) break :blk false;
+                        break :blk true;
+                    } else false;
+                },
+                .target_wins => {
+                    // an uncontested parent change carries over. if both sides
+                    // changed the record, the target wins as a whole, except that
+                    // an edit or restoration wins over a deletion.
+                    const target_changed = if (baseline_slot) |slot|
+                        !target_record_cursor.slot().eql(slot)
+                    else
+                        true;
+                    merged = if (!target_changed)
+                        parent_record
+                    else if (target_record.deleted != parent_record.deleted)
+                        if (target_record.deleted) parent_record else target_record
+                    else
+                        target_record;
+                },
+            }
         }
 
         // the index is unique, so a key the target gave to a different record
@@ -871,6 +897,11 @@ pub fn merge(
         // `consume` sets no oids, since each field's winner may come from
         // a different side
         try T.consume(DB, hash_kind, haxy_moment, &event_id, merged, &arena, null);
+
+        switch (comptime T.merge_policy) {
+            .field_conflicts => {},
+            .target_wins => continue,
+        }
 
         // tombstones do not carry field conflicts
         if (merged.deleted) continue;

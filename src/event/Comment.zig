@@ -19,10 +19,9 @@ pub const Record = struct {
 const Self = @This();
 
 // the moment keys `evt.merge` reads and writes for this kind
+pub const merge_policy: evt.MergePolicy = .target_wins;
 pub const record_map_key = "event-id->comment";
 pub const id_set_key = "comment-id-set";
-pub const conflicts_key = "conflicted-comment-id->conflict";
-pub const id_to_field_to_oid_key = "comment-id->field->oid";
 
 // the indexes the thread reads
 pub const thread_id_to_comment_id_set_key = "thread-id->comment-id-set";
@@ -39,9 +38,7 @@ pub fn consume(
     event_id: *const [evt.event_id_size]u8,
     record_maybe: ?Record,
     arena: *std.heap.ArenaAllocator,
-    // the commit this event came from, recorded against every field it
-    // changes. null from `merge`, which sets oids and conflicts itself.
-    event_oid: ?[]const u8,
+    _: ?[]const u8,
 ) !void {
     const comment_key = hash.hashInt(hash_kind, event_id);
 
@@ -53,12 +50,6 @@ pub fn consume(
 
     const parent_id_to_comment_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, parent_id_to_comment_id_set_key));
     const parent_id_to_comment_id_set = try DB.HashMap(.read_write).init(parent_id_to_comment_id_set_cursor);
-
-    const conflicts_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, conflicts_key));
-    const conflicts = try DB.SortedMap(.read_write).init(conflicts_cursor);
-
-    const comment_id_to_field_to_oid_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, id_to_field_to_oid_key));
-    const comment_id_to_field_to_oid = try DB.HashMap(.read_write).init(comment_id_to_field_to_oid_cursor);
 
     var existing_record_maybe: ?Record = null;
     const existing_cursor_maybe = try event_id_to_comment.getCursor(comment_key);
@@ -90,15 +81,7 @@ pub fn consume(
         // a comment cannot move between threads or positions in the thread
         if (!std.mem.eql(u8, &existing_record.event.thread_id, &record_to_write.event.thread_id)) return error.ThreadChanged;
         if (!std.mem.eql(u8, &existing_record.event.parent_id, &record_to_write.event.parent_id)) return error.ParentChanged;
-
-        // any event settles the conflict, since resolving in the ui may
-        // keep our own values and so change nothing to detect
-        if (event_oid != null or record_to_write.deleted) {
-            _ = try conflicts.remove(&evt.orderKeyDesc(existing_record.created_ts, event_id));
-        }
     }
-
-    try evt.writeOid(Self, DB, hash_kind, comment_id_to_field_to_oid, comment_key, if (existing_record_maybe) |existing| existing.event else null, record_to_write.event, event_oid);
 
     const comment_cursor = try event_id_to_comment.putCursor(comment_key);
     const comment = try DB.HashMap(.read_write).init(comment_cursor);

@@ -36,11 +36,10 @@ const Self = @This();
 pub const name_max_len = 32;
 
 // the moment keys `evt.merge` reads and writes for this kind
+pub const merge_policy: evt.MergePolicy = .target_wins;
 pub const record_map_key = "event-id->user";
 pub const id_set_key = "user-id-set";
 pub const name_index_key = "name->user-id";
-pub const conflicts_key = "conflicted-user-id->conflict";
-pub const id_to_field_to_oid_key = "user-id->field->oid";
 
 // resolves a commit's author email to its user at read time
 pub const email_to_user_id_key = "email->user-id";
@@ -69,9 +68,7 @@ pub fn consume(
     event_id: *const [evt.event_id_size]u8,
     record_maybe: ?Record,
     arena: *std.heap.ArenaAllocator,
-    // the commit this event came from, recorded against every field it
-    // changes. null from `merge`, which sets oids and conflicts itself.
-    event_oid: ?[]const u8,
+    _: ?[]const u8,
 ) !void {
     const user_key = hash.hashInt(hash_kind, event_id);
 
@@ -83,12 +80,6 @@ pub fn consume(
 
     const email_to_user_id_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, email_to_user_id_key));
     const email_to_user_id = try DB.HashMap(.read_write).init(email_to_user_id_cursor);
-
-    const conflicts_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, conflicts_key));
-    const conflicts = try DB.SortedMap(.read_write).init(conflicts_cursor);
-
-    const user_id_to_field_to_oid_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, id_to_field_to_oid_key));
-    const user_id_to_field_to_oid = try DB.HashMap(.read_write).init(user_id_to_field_to_oid_cursor);
 
     var existing_record_maybe: ?Record = null;
     const existing_cursor_maybe = try event_id_to_user.getCursor(user_key);
@@ -110,22 +101,13 @@ pub fn consume(
     if (existing_record_maybe) |existing_record| {
         // updates preserve the original creation timestamp
         record_to_write.created_ts = existing_record.created_ts;
-        const order_key = evt.orderKeyDesc(existing_record.created_ts, event_id);
 
         // drop the old active indexes; active values are re-added below
         if (!existing_record.deleted) {
             _ = try name_to_user_id.remove(hash.hashInt(hash_kind, existing_record.event.name));
             _ = try email_to_user_id.remove(hash.hashInt(hash_kind, existing_record.event.email));
         }
-
-        // any event settles the conflict, since resolving in the ui may
-        // keep our own values and so change nothing to detect
-        if (event_oid != null or record_to_write.deleted) {
-            _ = try conflicts.remove(&order_key);
-        }
     }
-
-    try evt.writeOid(Self, DB, hash_kind, user_id_to_field_to_oid, user_key, if (existing_record_maybe) |existing| existing.event else null, record_to_write.event, event_oid);
 
     const user_cursor = try event_id_to_user.putCursor(user_key);
     const user = try DB.HashMap(.read_write).init(user_cursor);
@@ -162,7 +144,7 @@ pub fn consume(
             }
 
             for (repo_ids.items) |*repo_id| {
-                try evt.Repo.consume(DB, hash_kind, haxy_moment, repo_id, null, arena, event_oid);
+                try evt.Repo.consume(DB, hash_kind, haxy_moment, repo_id, null, arena, null);
             }
         }
         _ = try user_id_to_repo_id_set.remove(user_key);

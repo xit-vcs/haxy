@@ -25,11 +25,10 @@ const Self = @This();
 pub const name_max_len = 32;
 
 // the moment keys `evt.merge` reads and writes for this kind
+pub const merge_policy: evt.MergePolicy = .target_wins;
 pub const record_map_key = "event-id->repo";
 pub const id_set_key = "repo-id-set";
 pub const name_index_key = "name->repo-id";
-pub const conflicts_key = "conflicted-repo-id->conflict";
-pub const id_to_field_to_oid_key = "repo-id->field->oid";
 
 pub fn validateName(name: []const u8) !void {
     if (name.len == 0) return error.NameEmpty;
@@ -49,9 +48,7 @@ pub fn consume(
     event_id: *const [evt.event_id_size]u8,
     record_maybe: ?Record,
     arena: *std.heap.ArenaAllocator,
-    // the commit this event came from, recorded against every field it
-    // changes. null from `merge`, which sets oids and conflicts itself.
-    event_oid: ?[]const u8,
+    _: ?[]const u8,
 ) !void {
     const repo_key = hash.hashInt(hash_kind, event_id);
 
@@ -60,12 +57,6 @@ pub fn consume(
 
     const name_to_repo_id_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, "name->repo-id"));
     const name_to_repo_id = try DB.HashMap(.read_write).init(name_to_repo_id_cursor);
-
-    const conflicts_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, conflicts_key));
-    const conflicts = try DB.SortedMap(.read_write).init(conflicts_cursor);
-
-    const repo_id_to_field_to_oid_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, id_to_field_to_oid_key));
-    const repo_id_to_field_to_oid = try DB.HashMap(.read_write).init(repo_id_to_field_to_oid_cursor);
 
     var existing_record_maybe: ?Record = null;
     const existing_cursor_maybe = try event_id_to_repo.getCursor(repo_key);
@@ -101,15 +92,7 @@ pub fn consume(
             const old_user_repos = try DB.SortedSet(.read_write).init(old_user_repos_cursor);
             _ = try old_user_repos.remove(&order_key);
         }
-
-        // any event settles the conflict, since resolving in the ui may
-        // keep our own values and so change nothing to detect
-        if (event_oid != null or record_to_write.deleted) {
-            _ = try conflicts.remove(&order_key);
-        }
     }
-
-    try evt.writeOid(Self, DB, hash_kind, repo_id_to_field_to_oid, repo_key, if (existing_record_maybe) |existing| existing.event else null, record_to_write.event, event_oid);
 
     const repo_cursor = try event_id_to_repo.putCursor(repo_key);
     const repo = try DB.HashMap(.read_write).init(repo_cursor);

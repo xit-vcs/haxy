@@ -34,6 +34,7 @@ pub const Status = enum {
 pub const tag_max_len = 64;
 
 // the moment keys `evt.merge` reads and writes for this kind
+pub const merge_policy: evt.MergePolicy = .field_conflicts;
 pub const record_map_key = "event-id->issue";
 pub const id_set_key = "issue-id-set";
 pub const conflicts_key = "conflicted-issue-id->conflict";
