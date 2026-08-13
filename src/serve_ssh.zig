@@ -26,8 +26,8 @@ pub const SessionHandler = struct {
     admin_repo_path: []const u8,
     repo_root_path: []const u8,
     wui_port: u16, // port the web UI is served on, shown in the TUI footer's url
-    clone_http_port: u16,
-    clone_ssh_port: u16,
+    clone_http_port: ?u16,
+    clone_ssh_port: ?u16,
     err: *std.Io.Writer,
 
     pub fn handleSession(self: *const SessionHandler, sess: *ssh.SessionCtx, request: ssh.Request) !void {

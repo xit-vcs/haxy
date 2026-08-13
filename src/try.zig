@@ -60,7 +60,29 @@ pub fn main(init: std.process.Init) !void {
     const cwd_path = try std.process.currentPathAlloc(io, allocator);
     defer allocator.free(cwd_path);
 
-    const work_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "server", "admin" });
+    var cli = false;
+    var serve_args: std.ArrayList([]const u8) = .empty;
+    defer serve_args.deinit(allocator);
+    var arg_it = try init.minimal.args.iterateAllocator(allocator);
+    defer arg_it.deinit();
+    _ = arg_it.skip();
+    while (arg_it.next()) |arg| {
+        if (std.mem.eql(u8, "--cli", arg)) {
+            cli = true;
+        } else {
+            try serve_args.append(allocator, arg);
+        }
+    }
+    var serve_options = try hx.command.parseServeOptions(allocator, serve_args.items);
+
+    const server_path = if (std.mem.eql(u8, serve_options.data_dir, "."))
+        try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "server" })
+    else
+        try std.fs.path.resolve(allocator, &.{ cwd_path, serve_options.data_dir });
+    defer allocator.free(server_path);
+    serve_options.data_dir = server_path;
+
+    const work_path = try std.fs.path.join(allocator, &.{ server_path, "admin" });
     defer allocator.free(work_path);
 
     const Repo = rp.Repo(.xit, evt.admin_repo_opts);
@@ -720,7 +742,7 @@ pub fn main(init: std.process.Init) !void {
 
             for (repo_event_ids) |id_bytes| {
                 const repo_id = std.fmt.bytesToHex(id_bytes, .lower);
-                const repo_path = try std.fs.path.join(arena.allocator(), &.{ cwd_path, temp_dir_name, "server", "repos", &repo_id });
+                const repo_path = try std.fs.path.join(arena.allocator(), &.{ server_path, "repos", &repo_id });
                 var dest_dir = try cwd.createDirPathOpen(io, repo_path, .{});
                 defer dest_dir.close(io);
                 try copyDir(io, template_dir, dest_dir);
@@ -732,20 +754,6 @@ pub fn main(init: std.process.Init) !void {
     session.is_terminal = true;
 
     // start the server
-
-    var cli = false;
-
-    var arg_it = try init.minimal.args.iterateAllocator(allocator);
-    defer arg_it.deinit();
-    _ = arg_it.skip();
-    while (arg_it.next()) |arg| {
-        if (std.mem.eql(u8, "--cli", arg)) {
-            cli = true;
-        }
-    }
-
-    const server_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "server" });
-    defer allocator.free(server_path);
 
     // let the native TUI's page builders open the on-disk repos for the file tree
     session.io = io;
@@ -774,9 +782,10 @@ pub fn main(init: std.process.Init) !void {
             io: std.Io,
             key_path: []const u8,
 
-            pub fn run(self: @This(), web_port: u16, http_port: u16, ssh_port: u16) !void {
+            pub fn run(self: @This(), web_port: u16, http_port: ?u16, ssh_port_maybe: ?u16) !void {
                 _ = web_port;
                 _ = http_port;
+                const ssh_port = ssh_port_maybe orelse return error.SshDisabled;
                 std.debug.print(
                     \\
                     \\connect to the TUI with:
@@ -803,9 +812,7 @@ pub fn main(init: std.process.Init) !void {
             }
         };
 
-        try srv.run(.xit, .{}, io, allocator, cwd_path, .{
-            .data_dir = server_path,
-        }, run_opts.err, Runnable{ .io = io, .key_path = key_path });
+        try srv.run(.xit, .{}, io, allocator, cwd_path, serve_options, run_opts.err, Runnable{ .io = io, .key_path = key_path });
     } else {
         var null_writer = std.Io.Writer.Discarding.init(&.{});
         const run_opts = hx.main.RunOpts{ .out = &null_writer.writer, .err = &null_writer.writer };
@@ -816,7 +823,7 @@ pub fn main(init: std.process.Init) !void {
             session: *ui.Session,
             repo: *Repo,
 
-            pub fn run(self: @This(), web_port: u16, http_port: u16, ssh_port: u16) !void {
+            pub fn run(self: @This(), web_port: u16, http_port: ?u16, ssh_port: ?u16) !void {
                 // launch the TUI; the footer points at whatever port was bound
                 self.session.web_port = web_port;
                 self.session.data.clone_http_port = http_port;
@@ -825,9 +832,7 @@ pub fn main(init: std.process.Init) !void {
             }
         };
 
-        try srv.run(.xit, .{}, io, allocator, cwd_path, .{
-            .data_dir = server_path,
-        }, run_opts.err, Runnable{ .io = io, .allocator = allocator, .session = &session, .repo = &repo });
+        try srv.run(.xit, .{}, io, allocator, cwd_path, serve_options, run_opts.err, Runnable{ .io = io, .allocator = allocator, .session = &session, .repo = &repo });
     }
 }
 

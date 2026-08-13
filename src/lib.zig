@@ -1,4 +1,5 @@
 pub const xit = @import("xit");
+pub const command = @import("./command.zig");
 pub const main = @import("./main.zig");
 pub const event = @import("./event.zig");
 pub const serve = @import("./serve.zig");

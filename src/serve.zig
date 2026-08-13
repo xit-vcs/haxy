@@ -10,8 +10,8 @@ const serve_ssh = @import("./serve_ssh.zig");
 const serve_http = @import("./serve_http.zig");
 
 pub const Options = struct {
-    http_listen: []const u8 = "127.0.0.1:8080",
-    ssh_listen: []const u8 = "127.0.0.1:8022",
+    http_listen: ?[]const u8 = "127.0.0.1:8080",
+    ssh_listen: ?[]const u8 = "127.0.0.1:8022",
     wui_listen: []const u8 = "127.0.0.1:8000",
     data_dir: []const u8 = ".",
 };
@@ -19,6 +19,25 @@ pub const Options = struct {
 const ListenAddress = struct {
     host: []const u8,
     port: u16,
+};
+
+const BoundListener = struct {
+    address: ListenAddress,
+    server: std.Io.net.Server,
+
+    fn deinit(self: *BoundListener, io: std.Io) void {
+        self.server.deinit(io);
+    }
+
+    fn port(self: *const BoundListener) u16 {
+        return self.server.socket.address.getPort();
+    }
+};
+
+const SshService = struct {
+    listener: BoundListener,
+    host_key: serve_ssh_protocol.HostKey,
+    session_handler: serve_ssh.SessionHandler,
 };
 
 pub fn run(
@@ -58,18 +77,11 @@ pub fn run(
 
     // create http listener
 
-    const http_listen_address = try parseListenAddress(options.http_listen);
-    var http_server = try listenWithFallback(io, http_listen_address, fallback);
-    defer http_server.deinit(io);
-
-    // create ssh listener
-
-    const ssh_listen_address = try parseListenAddress(options.ssh_listen);
-    var ssh_server = try listenWithFallback(io, ssh_listen_address, fallback);
-    defer ssh_server.deinit(io);
-
-    // load or generate the SSH host key
-    const host_key = try serve_ssh_protocol.HostKey.loadOrGenerate(io, allocator, data_dir_path);
+    var http_maybe: ?BoundListener = if (options.http_listen) |value| blk: {
+        const address = try parseListenAddress(value);
+        break :blk .{ .address = address, .server = try listenWithFallback(io, address, fallback) };
+    } else null;
+    defer if (http_maybe) |*http| http.deinit(io);
 
     // disk-backed store for web login sessions
     const session_store = try web.SessionStore.init(io, data_dir);
@@ -81,6 +93,29 @@ pub fn run(
     var wui_server = try listenWithFallback(io, wui_listen_address, fallback);
     defer wui_server.deinit(io);
 
+    // create ssh listener and its session state
+
+    const clone_http_port: ?u16 = if (http_maybe) |*http| http.port() else null;
+    var ssh_maybe: ?SshService = if (options.ssh_listen) |value| blk: {
+        const address = try parseListenAddress(value);
+        var listener = BoundListener{ .address = address, .server = try listenWithFallback(io, address, fallback) };
+        errdefer listener.deinit(io);
+        const ssh_port = listener.port();
+        break :blk .{
+            .listener = listener,
+            .host_key = try serve_ssh_protocol.HostKey.loadOrGenerate(io, allocator, data_dir_path),
+            .session_handler = .{
+                .admin_repo_path = admin_repo_path,
+                .repo_root_path = repo_root_path,
+                .wui_port = wui_server.socket.address.getPort(),
+                .clone_http_port = clone_http_port,
+                .clone_ssh_port = ssh_port,
+                .err = err,
+            },
+        };
+    } else null;
+    defer if (ssh_maybe) |*ssh| ssh.listener.deinit(io);
+
     // start task group
 
     var tasks: std.Io.Group = .init;
@@ -88,23 +123,19 @@ pub fn run(
 
     // run listeners, printing the ports actually bound
 
-    try err.print("serving HTTP on {s}:{d}, repo root {s}\n", .{ http_listen_address.host, http_server.socket.address.getPort(), repo_root_path });
-    try err.flush();
+    const clone_ssh_port: ?u16 = if (ssh_maybe) |*ssh| ssh.listener.port() else null;
 
-    serve_http.runListener(repo_kind, any_repo_opts, io, allocator, repo_root_path, admin_repo_path, &http_server, &tasks, err);
+    if (http_maybe) |*http| {
+        try err.print("serving HTTP on {s}:{d}, repo root {s}\n", .{ http.address.host, http.port(), repo_root_path });
+        try err.flush();
+        serve_http.runListener(repo_kind, any_repo_opts, io, allocator, repo_root_path, admin_repo_path, &http.server, &tasks, err);
+    }
 
-    try err.print("serving SSH on {s}:{d}\n", .{ ssh_listen_address.host, ssh_server.socket.address.getPort() });
-    try err.flush();
-
-    const ssh_session_handler = serve_ssh.SessionHandler{
-        .admin_repo_path = admin_repo_path,
-        .repo_root_path = repo_root_path,
-        .wui_port = wui_server.socket.address.getPort(),
-        .clone_http_port = http_server.socket.address.getPort(),
-        .clone_ssh_port = ssh_server.socket.address.getPort(),
-        .err = err,
-    };
-    serve_ssh.runListener(io, allocator, &host_key, &ssh_session_handler, &ssh_server, &tasks, err);
+    if (ssh_maybe) |*ssh| {
+        try err.print("serving SSH on {s}:{d}\n", .{ ssh.listener.address.host, ssh.listener.port() });
+        try err.flush();
+        serve_ssh.runListener(io, allocator, &ssh.host_key, &ssh.session_handler, &ssh.listener.server, &tasks, err);
+    }
 
     try err.print("serving web UI on http://{s}:{d}/\n", .{ wui_listen_address.host, wui_server.socket.address.getPort() });
     try err.flush();
@@ -112,12 +143,12 @@ pub fn run(
     runWebListener(io, allocator, &wui_server, &tasks, .{ .remote = .{
         .admin_repo_path = admin_repo_path,
         .session_store = session_store,
-        .clone_http_port = http_server.socket.address.getPort(),
-        .clone_ssh_port = ssh_server.socket.address.getPort(),
+        .clone_http_port = clone_http_port,
+        .clone_ssh_port = clone_ssh_port,
     } }, err);
 
     if (@TypeOf(runnable) != void) {
-        try runnable.run(wui_server.socket.address.getPort(), http_server.socket.address.getPort(), ssh_server.socket.address.getPort());
+        try runnable.run(wui_server.socket.address.getPort(), clone_http_port, clone_ssh_port);
     } else {
         try tasks.await(io);
     }

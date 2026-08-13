@@ -38,8 +38,8 @@ pub const Host = union(enum) {
     remote: struct {
         admin_repo_path: []const u8,
         session_store: SessionStore,
-        clone_http_port: u16,
-        clone_ssh_port: u16,
+        clone_http_port: ?u16,
+        clone_ssh_port: ?u16,
     },
     local: ui.RepoSource,
 };

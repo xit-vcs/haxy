@@ -876,7 +876,7 @@ pub const Header = struct {
             var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
             errdefer box.deinit(allocator);
 
-            if (!session.data.is_local and session.data.clone_http_port != null and session.data.clone_ssh_port != null) {
+            if (!session.data.is_local and (session.data.clone_http_port != null or session.data.clone_ssh_port != null)) {
                 var clone_url = try ui.CloneUrl.View.init(allocator, session, identity);
                 errdefer clone_url.deinit(allocator);
                 const min_width = clone_url.minWidth();

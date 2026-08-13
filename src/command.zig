@@ -20,6 +20,7 @@ fn commandHelp(command_kind: CommandKind) Help {
             ,
             .example =
             \\haxy serve --http-listen 127.0.0.1:8080 --ssh-listen 127.0.0.1:8022 --wui-listen 127.0.0.1:8000 --data-dir /srv/git
+            \\use "none" for --http-listen or --ssh-listen to disable that service.
             ,
         },
     };
@@ -182,28 +183,36 @@ pub const Command = union(CommandKind) {
         const command_kind = cmd_args.command_kind orelse return null;
         switch (command_kind) {
             .serve => {
-                if (cmd_args.positional_args.len != 0) return null;
-
-                var options: srv.Options = .{};
-
-                if (cmd_args.get("--http-listen")) |val_maybe| {
-                    options.http_listen = val_maybe orelse return error.HttpListenNeedsValue;
-                }
-                if (cmd_args.get("--ssh-listen")) |val_maybe| {
-                    options.ssh_listen = val_maybe orelse return error.SshListenNeedsValue;
-                }
-                if (cmd_args.get("--wui-listen")) |val_maybe| {
-                    options.wui_listen = val_maybe orelse return error.WuiListenNeedsValue;
-                }
-                if (cmd_args.get("--data-dir")) |val_maybe| {
-                    options.data_dir = val_maybe orelse return error.DataDirNeedsValue;
-                }
-
-                return .{ .serve = options };
+                return .{ .serve = try serveOptions(cmd_args) orelse return null };
             },
         }
     }
 };
+
+pub fn parseServeOptions(allocator: std.mem.Allocator, args: []const []const u8) !srv.Options {
+    var cmd_args = try CommandArgs.init(allocator, args);
+    defer cmd_args.deinit();
+    const options = try serveOptions(&cmd_args) orelse return error.InvalidServeArgument;
+    if (cmd_args.unused_args.count() != 0) return error.InvalidServeArgument;
+    return options;
+}
+
+fn serveOptions(cmd_args: *CommandArgs) !?srv.Options {
+    if (cmd_args.positional_args.len != 0) return null;
+
+    var options: srv.Options = .{};
+    if (cmd_args.get("--http-listen")) |value_maybe| {
+        const value = value_maybe orelse return error.HttpListenNeedsValue;
+        options.http_listen = if (std.mem.eql(u8, value, "none")) null else value;
+    }
+    if (cmd_args.get("--ssh-listen")) |value_maybe| {
+        const value = value_maybe orelse return error.SshListenNeedsValue;
+        options.ssh_listen = if (std.mem.eql(u8, value, "none")) null else value;
+    }
+    if (cmd_args.get("--wui-listen")) |value_maybe| options.wui_listen = value_maybe orelse return error.WuiListenNeedsValue;
+    if (cmd_args.get("--data-dir")) |value_maybe| options.data_dir = value_maybe orelse return error.DataDirNeedsValue;
+    return options;
+}
 
 /// parses the given args into a command if valid, and determines how it should be run
 /// (via the TUI or CLI).
