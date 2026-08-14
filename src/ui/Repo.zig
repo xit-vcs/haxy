@@ -17,6 +17,7 @@ pub const Commits = @import("./Repo/Commits.zig");
 pub const Refs = @import("./Repo/Refs.zig");
 pub const Issues = @import("./Repo/Issues.zig");
 pub const Comment = @import("./Repo/Comment.zig");
+pub const Events = @import("./Repo/Events.zig");
 pub const Settings = @import("./Settings.zig");
 pub const Auth = @import("./Auth.zig");
 pub const Quit = @import("./Quit.zig");
@@ -29,6 +30,7 @@ files: Files,
 commits: Commits,
 refs: Refs,
 issues: Issues,
+events: Events,
 settings: Settings,
 auth: Auth,
 quit: Quit,
@@ -125,6 +127,14 @@ pub fn init(
         .repo_issues => |i| i.comments_start,
         else => 0,
     };
+    const events_kind: ?evt.EventKind = switch (route) {
+        .repo_events => |e| e.kind,
+        else => null,
+    };
+    const events_selected: []const u8 = switch (route) {
+        .repo_events => |*e| e.selected.slice(),
+        else => "",
+    };
 
     // where the on-disk repo lives (null keeps the views' empty fallback), plus
     // the repo and owner-name metadata the header shows. local mode already
@@ -167,7 +177,7 @@ pub fn init(
     // route named none), so they end up viewing the same one and either's
     // resolved ref can canonicalize the tab mirror urls below. no filesystem
     // (wasm), nowhere to look, or a failed open: empty tabs.
-    const files, const commits, const refs, var issues = blk: {
+    const files, const commits, const refs, var issues, const events = blk: {
         read: {
             const io = session.io orelse break :read;
             const src = source orelse break :read;
@@ -185,6 +195,7 @@ pub fn init(
                                 try Commits.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, session.haxy_moment, repo_identity.identity, requested_ref_or_oid, requested_ref_value, commits_content),
                                 try Refs.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, repo_identity.identity, refs_kind, refs_from),
                                 try Issues.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, issues_tag, issues_selected, issues_comment, issues_comments_start, issues_theirs, issues_view),
+                                try Events.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, events_kind, events_selected, session.local != null, session.data.sync_failure),
                             };
                         },
                     }
@@ -197,6 +208,7 @@ pub fn init(
             try Commits.emptyResult(aa, repo_identity.identity, requested_ref_or_oid orelse .branch, requested_ref_value, commits_content),
             try Refs.emptyResult(arena, repo_identity.identity, refs_kind, refs_from),
             try Issues.emptyResult(aa, repo_identity.identity, issues_tag, issues_selected, issues_comment, issues_comments_start, issues_theirs, issues_view),
+            try Events.empty(aa, repo_identity.identity, session.local != null, session.data.sync_failure),
         };
     };
     issues.repo_source = source;
@@ -226,6 +238,7 @@ pub fn init(
         .commits = commits,
         .refs = refs,
         .issues = issues,
+        .events = events,
         .settings = Settings.init(),
         .auth = Auth.init(),
         .quit = Quit.init(),
@@ -287,6 +300,12 @@ pub const View = struct {
                 try stack.children.put(allocator, issues_view.getFocus().id, .{ .repo_issues = issues_view });
             }
 
+            {
+                var events_view = try Events.View.init(allocator, &data.events, session);
+                errdefer events_view.deinit(allocator);
+                try stack.children.put(allocator, events_view.getFocus().id, .{ .repo_events = events_view });
+            }
+
             // the header only shows the settings tab with a login and the auth
             // tab outside local mode, so keep the stack's children 1:1 with
             // the tabs by skipping the same views.
@@ -340,6 +359,7 @@ pub const View = struct {
                 // the issues tab mirrors this page's tag filter (issue urls
                 // themselves never carry the tag).
                 .repo_issues => self.session.data.current_page = ui.RoutablePage.repoIssuesRoute(self.data.identity.slice(), .open, self.data.issues.tag, "") orelse self.session.data.current_page,
+                .repo_events => self.session.data.current_page = ui.RoutablePage.repoEventsRoute(self.data.identity.slice(), null, "") orelse self.session.data.current_page,
                 .home_settings => {
                     if (ui.RoutablePage.Array(ui.RoutablePage.repo_route_max_len).from(self.data.identity.slice())) |identity|
                         self.session.data.current_page = .{ .repo_settings = identity };
@@ -380,6 +400,7 @@ pub const View = struct {
                                         .repo_commits => |*v| v.getSelectedIndex() == 0,
                                         .repo_refs => |*v| v.getSelectedIndex() == 0,
                                         .repo_issues => |*v| v.getSelectedIndex() == 0,
+                                        .repo_events => |*v| v.getSelectedIndex() == 0,
                                         .home_settings => |*v| v.getSelectedIndex() == 0,
                                         .home_auth => |*v| v.getSelectedIndex() == 0,
                                         .quit => |*v| v.getSelectedIndex() == 0,

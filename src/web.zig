@@ -18,6 +18,7 @@ const session_cookie_fmt = cookie_name ++ "={s}; Path=/; HttpOnly; SameSite=Stri
 // set on the failure redirect, read and immediately expired on the next
 // GET / so refreshing the page doesn't keep showing the error.
 const login_failure_cookie = "haxy_login_failure";
+const sync_failure_cookie = "haxy_sync_failure";
 
 const Embed = struct {
     path: []const u8,
@@ -115,8 +116,8 @@ fn handleRequest(
                     }
                 }
             },
-            .local => {
-                const PostRoute = enum { new, edit, open, close, resolve };
+            .local => |local| {
+                const PostRoute = enum { new, edit, open, close, resolve, sync };
                 inline for (@typeInfo(PostRoute).@"enum".fields) |field| {
                     const suffix = "/" ++ field.name;
                     if (std.mem.endsWith(u8, path, suffix)) {
@@ -127,6 +128,7 @@ fn handleRequest(
                             .open => handleIssueStatus(io, request, allocator, base, host, .open),
                             .close => handleIssueStatus(io, request, allocator, base, host, .closed),
                             .resolve => handleIssueResolve(io, request, allocator, base, host),
+                            .sync => handleSync(io, request, allocator, base, local),
                         };
                     }
                 }
@@ -163,6 +165,9 @@ fn handleRequest(
         var user_id_buf: [evt.event_id_size]u8 = undefined;
         var user_id: ?[]const u8 = null;
         var login_failure: ?ui.Home.Auth.Login.Failure = null;
+        var sync_failure: ?[]const u8 = null;
+        var sync_failure_allocated: ?[]u8 = null;
+        defer if (sync_failure_allocated) |value| allocator.free(value);
         // backs the cookie a claimed auto-login sets
         var cookie_buf: [256]u8 = undefined;
         var session_cookie: ?[]const u8 = null;
@@ -191,7 +196,11 @@ fn handleRequest(
                 else
                     null;
             },
-            .local => {},
+            .local => if (getCookieValue(request, sync_failure_cookie)) |raw| {
+                const value = try allocator.dupe(u8, raw);
+                sync_failure_allocated = value;
+                sync_failure = std.Uri.percentDecodeInPlace(value);
+            },
         }
 
         const clone_http_port: ?u16, const clone_ssh_port: ?u16 = switch (host) {
@@ -201,6 +210,7 @@ fn handleRequest(
         const html = renderIndexHtml(io, allocator, host, .{
             .user_id = user_id,
             .login_failure = login_failure,
+            .sync_failure = sync_failure,
             .current_page = current_page,
             .is_local = host == .local,
             .clone_http_port = clone_http_port,
@@ -217,12 +227,13 @@ fn handleRequest(
         };
         defer allocator.free(html);
 
-        var header_buf: [3]std.http.Header = undefined;
+        var header_buf: [4]std.http.Header = undefined;
         var headers: std.ArrayList(std.http.Header) = .initBuffer(&header_buf);
         headers.appendAssumeCapacity(.{ .name = "content-type", .value = "text/html; charset=utf-8" });
         // expire the flash cookie on the way out so a refresh doesn't keep
         // showing the failure label
         if (login_failure != null) headers.appendAssumeCapacity(.{ .name = "set-cookie", .value = login_failure_cookie ++ "=; Path=/; Max-Age=0" });
+        if (sync_failure != null) headers.appendAssumeCapacity(.{ .name = "set-cookie", .value = sync_failure_cookie ++ "=; Path=/; Max-Age=0" });
         if (session_cookie) |cookie| headers.appendAssumeCapacity(.{ .name = "set-cookie", .value = cookie });
         try request.respond(html, .{ .extra_headers = headers.items });
         return;
@@ -1021,6 +1032,60 @@ fn handleIssueResolve(
     try request.respond("", .{
         .status = .see_other,
         .extra_headers = &.{.{ .name = "location", .value = base }},
+    });
+}
+
+fn handleSync(
+    io: std.Io,
+    request: *std.http.Server.Request,
+    allocator: std.mem.Allocator,
+    base: []const u8,
+    source: ui.RepoSource,
+) !void {
+    if (base.len != 0) {
+        try request.respond("not found", .{
+            .status = .not_found,
+            .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+        });
+        return;
+    }
+
+    var owned_failure: ?[]u8 = null;
+    defer if (owned_failure) |message| allocator.free(message);
+    const failure: ?[]const u8 = blk: {
+        owned_failure = ui.Repo.Events.sync(io, allocator, source) catch |err| break :blk @errorName(err);
+        break :blk owned_failure;
+    };
+    if (failure) |message| {
+        var encoded: std.Io.Writer.Allocating = .init(allocator);
+        defer encoded.deinit();
+        try std.Uri.Component.percentEncode(&encoded.writer, message, struct {
+            fn isUnreserved(c: u8) bool {
+                return std.ascii.isAlphanumeric(c) or c == '-' or c == '.' or c == '_' or c == '~';
+            }
+        }.isUnreserved);
+        const cookie = try std.fmt.allocPrint(
+            allocator,
+            sync_failure_cookie ++ "={s}; Path=/; HttpOnly; SameSite=Strict",
+            .{encoded.written()},
+        );
+        defer allocator.free(cookie);
+        try request.respond("", .{
+            .status = .see_other,
+            .extra_headers = &.{
+                .{ .name = "location", .value = "/events" },
+                .{ .name = "set-cookie", .value = cookie },
+            },
+        });
+        return;
+    }
+
+    try request.respond("", .{
+        .status = .see_other,
+        .extra_headers = &.{
+            .{ .name = "location", .value = "/events" },
+            .{ .name = "set-cookie", .value = sync_failure_cookie ++ "=; Path=/; Max-Age=0" },
+        },
     });
 }
 

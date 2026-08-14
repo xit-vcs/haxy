@@ -280,6 +280,7 @@ fn runTui(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh.PtySiz
                     try session_writer.interface.flush();
                     continue;
                 },
+                .sync_events => {},
             }
         }
 

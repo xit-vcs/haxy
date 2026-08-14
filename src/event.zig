@@ -60,6 +60,10 @@ pub const EventKind = enum {
     comment,
 };
 
+// every logical event's kind and creation-ordered id set
+pub const event_index_key = "event-id->kind";
+pub const event_id_set_key = "event-id-set";
+
 // a null payload deletes the record
 pub const Event = union(EventKind) {
     user: ?User,
@@ -225,6 +229,99 @@ pub fn consume(
             };
         },
     }
+}
+
+// merge the remote events ref into the local events ref without touching head,
+// the index, or the worktree
+pub fn mergeEvents(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    repo: *rp.Repo(repo_kind, repo_opts),
+    remote_ref: rf.Ref,
+) !void {
+    switch (repo_kind) {
+        .git => _ = try mergeEventsInTransaction(.git, repo_opts, .{ .core = &repo.core, .extra = .{} }, io, allocator, remote_ref),
+        .xit => {
+            const DB = rp.Repo(.xit, repo_opts).DB;
+            const State = rp.Repo(.xit, repo_opts).State;
+
+            const Ctx = struct {
+                core: *rp.Repo(.xit, repo_opts).Core,
+                io: std.Io,
+                allocator: std.mem.Allocator,
+                remote_ref: rf.Ref,
+
+                pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
+                    var moment = try DB.HashMap(.read_write).init(cursor.*);
+                    const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
+                    if (!try mergeEventsInTransaction(.xit, repo_opts, state, ctx.io, ctx.allocator, ctx.remote_ref)) return error.CancelTransaction;
+                    try xit.undo.writeMessage(repo_opts, state, .{ .custom = "event" });
+                    try ctx.core.chunk_store_file.sync(ctx.io);
+                }
+            };
+
+            try repo.core.db_file.lock(io, .exclusive);
+            defer repo.core.db_file.unlock(io);
+
+            const history = try DB.ArrayList(.read_write).init(repo.core.db.rootCursor());
+            history.appendContext(.{ .slot = try history.getSlot(-1) }, Ctx{
+                .core = &repo.core,
+                .io = io,
+                .allocator = allocator,
+                .remote_ref = remote_ref,
+            }) catch |err| switch (err) {
+                error.CancelTransaction => {},
+                else => |e| return e,
+            };
+        },
+    }
+}
+
+fn mergeEventsInTransaction(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    remote_ref: rf.Ref,
+) !bool {
+    const remote_oid = (try rf.readRecur(repo_kind, repo_opts, state.readOnly(), io, .{ .ref = remote_ref })) orelse return false;
+    const local_oid_maybe = try rf.readRecur(repo_kind, repo_opts, state.readOnly(), io, .{ .ref = events_ref });
+
+    var ref_path_buffer: [rf.MAX_REF_CONTENT_SIZE]u8 = undefined;
+    const ref_path = try events_ref.toPath(&ref_path_buffer);
+    const local_oid = local_oid_maybe orelse {
+        try rf.write(repo_kind, repo_opts, state, io, ref_path, .{ .oid = &remote_oid });
+        return true;
+    };
+    if (std.mem.eql(u8, &local_oid, &remote_oid)) return false;
+
+    const ancestor_maybe: ?[hash.hexLen(repo_opts.hash)]u8 = mrg.commonAncestor(repo_kind, repo_opts, state.readOnly(), io, allocator, &local_oid, &remote_oid) catch |err| switch (err) {
+        error.NoCommonAncestor => null,
+        else => return err,
+    };
+    if (ancestor_maybe) |ancestor| {
+        if (std.mem.eql(u8, &ancestor, &remote_oid)) return false;
+        if (std.mem.eql(u8, &ancestor, &local_oid)) {
+            try rf.write(repo_kind, repo_opts, state, io, ref_path, .{ .oid = &remote_oid });
+            return true;
+        }
+    }
+
+    var local_commit = try obj.Object(repo_kind, repo_opts).initCommit(state.readOnly(), io, allocator, &local_oid);
+    defer local_commit.deinit();
+    var remote_commit = try obj.Object(repo_kind, repo_opts).initCommit(state.readOnly(), io, allocator, &remote_oid);
+    defer remote_commit.deinit();
+    if (!std.mem.eql(u8, &local_commit.content.commit.tree, &remote_commit.content.commit.tree)) return error.EventTreeConflict;
+
+    const parent_oids = [_][hash.hexLen(repo_opts.hash)]u8{ local_oid, remote_oid };
+    _ = try obj.writeCommit(repo_kind, repo_opts, state, io, allocator, .{
+        .message = "merge events",
+        .parent_oids = &parent_oids,
+    }, null, events_ref);
+    return true;
 }
 
 // commit each event as a JSON commit message on `ref` through `state`, so a
@@ -1043,6 +1140,25 @@ pub fn orderKey(timestamp: u64, event_id: *const [event_id_size]u8) [@sizeOf(u64
 
 pub fn orderKeyDesc(timestamp: u64, event_id: *const [event_id_size]u8) [@sizeOf(u64) + event_id_size]u8 {
     return orderKey(std.math.maxInt(u64) - timestamp, event_id);
+}
+
+// add or refresh one entry in the global logical-event index. updates and
+// tombstones preserve created_ts, so the key never moves.
+pub fn indexEvent(
+    comptime DB: type,
+    comptime hash_kind: hash.HashKind,
+    haxy_moment: DB.HashMap(.read_write),
+    event_id: *const [event_id_size]u8,
+    kind: EventKind,
+    created_ts: u64,
+) !void {
+    const kind_map_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, event_index_key));
+    const kind_map = try DB.HashMap(.read_write).init(kind_map_cursor);
+    try kind_map.put(hash.hashInt(hash_kind, event_id), .{ .bytes = @tagName(kind) });
+
+    const id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, event_id_set_key));
+    const id_set = try DB.SortedSet(.read_write).init(id_set_cursor);
+    try id_set.put(&orderKeyDesc(created_ts, event_id));
 }
 
 // the event id embedded in a set entry's order key

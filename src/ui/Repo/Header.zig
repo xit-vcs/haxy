@@ -120,6 +120,8 @@ pub const View = struct {
         const refs_link = try std.fmt.allocPrint(aa, "ai:{s}", .{try refs_route.toUrl(session.page_arena)});
         const issues_route = ui.RoutablePage.repoIssuesRoute(identity, .open, data.issues_tag, "") orelse return error.RouteTooLong;
         const issues_link = try std.fmt.allocPrint(aa, "ai:{s}", .{try issues_route.toUrl(session.page_arena)});
+        const events_route = ui.RoutablePage.repoEventsRoute(identity, null, "") orelse return error.RouteTooLong;
+        const events_link = try std.fmt.allocPrint(aa, "ai:{s}", .{try events_route.toUrl(session.page_arena)});
         const settings_route = ui.RoutablePage{ .repo_settings = Array.from(identity) orelse return error.RouteTooLong };
         const settings_link = try std.fmt.allocPrint(aa, "ai:{s}", .{try settings_route.toUrl(session.page_arena)});
         const auth_route = ui.RoutablePage{ .repo_auth = Array.from(identity) orelse return error.RouteTooLong };
@@ -131,6 +133,7 @@ pub const View = struct {
             .repo_commits => commits_link,
             .repo_refs => refs_link,
             .repo_issues => issues_link,
+            .repo_events => events_link,
             .repo_settings => settings_link,
             .repo_auth => auth_link,
             else => files_link,
@@ -194,6 +197,21 @@ pub const View = struct {
                 .widget = .{ .text_box = text_box },
                 .rect = null,
                 .min_size = .{ .width = "issues".len + 2, .height = null },
+            });
+        }
+
+        // events
+        {
+            var text_box = try wgt.TextBox(ui.Widget).init(allocator, "events", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            errdefer text_box.deinit(allocator);
+            text_box.getFocus().focusable = true;
+            text_box.getFocus().kind = .{ .custom = events_link };
+            try tab_ids.put(allocator, text_box.getFocus().id, {});
+            if (std.mem.eql(u8, events_link, current_link)) selected_tab = text_box.getFocus().id;
+            try box.children.put(allocator, text_box.getFocus().id, .{
+                .widget = .{ .text_box = text_box },
+                .rect = null,
+                .min_size = .{ .width = "events".len + 2, .height = null },
             });
         }
 

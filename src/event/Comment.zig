@@ -86,6 +86,7 @@ pub fn consume(
     const comment_cursor = try event_id_to_comment.putCursor(comment_key);
     const comment = try DB.HashMap(.read_write).init(comment_cursor);
     try evt.upsert(Record, DB, hash_kind, comment, record_to_write);
+    try evt.indexEvent(DB, hash_kind, haxy_moment, event_id, .comment, record_to_write.created_ts);
 
     if (existing_cursor_maybe == null) {
         const comment_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, id_set_key));

@@ -131,6 +131,7 @@ pub fn consume(
     const issue_cursor = try event_id_to_issue.putCursor(issue_key);
     const issue = try DB.HashMap(.read_write).init(issue_cursor);
     try evt.upsert(Record, DB, hash_kind, issue, record_to_write);
+    try evt.indexEvent(DB, hash_kind, haxy_moment, event_id, .issue, record_to_write.created_ts);
 
     const order_key = evt.orderKeyDesc(record_to_write.created_ts, event_id);
 

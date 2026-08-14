@@ -54,7 +54,7 @@ pub const Page = union(PageKind) {
                 };
             },
             .repo => switch (route) {
-                .repo_files, .repo_commits, .repo_refs, .repo_issues, .repo_settings, .repo_auth => .{ .repo = try Repo.init(arena, session, route) },
+                .repo_files, .repo_commits, .repo_refs, .repo_issues, .repo_events, .repo_settings, .repo_auth => .{ .repo = try Repo.init(arena, session, route) },
                 else => return error.UnexpectedRoute,
             },
         };
@@ -107,6 +107,7 @@ pub const RoutablePage = union(enum) {
         // the comment shown in the detail pane (empty = the issue thread).
         comment: Array(evt.event_id_size * 2) = .{},
     },
+    repo_events: RepoEventsRoute,
     repo_settings: Array(repo_route_max_len),
     repo_auth: Array(repo_route_max_len),
 
@@ -286,6 +287,12 @@ pub const RoutablePage = union(enum) {
         };
     };
 
+    pub const RepoEventsRoute = struct {
+        name: Array(repo_identity_max_len),
+        kind: ?evt.EventKind = null,
+        selected: Array(evt.event_id_size * 2) = .{},
+    };
+
     // build a `.repo_files` route (a null ref_kind = the bare default-branch
     // root). null if the result doesn't fit the inline name.
     pub fn repoFilesRoute(identity: []const u8, ref_kind: ?RefOrOid, ref_value: []const u8, dir: []const u8, line: usize) ?RoutablePage {
@@ -336,6 +343,16 @@ pub const RoutablePage = union(enum) {
             .name = Array(repo_route_max_len).from(identity) orelse return null,
             .kind = kind,
             .from = Array(ref_route_max_len).from(from) orelse return null,
+        } };
+    }
+
+    // build the events list or a window rooted at one event.
+    pub fn repoEventsRoute(identity: []const u8, kind: ?evt.EventKind, selected: []const u8) ?RoutablePage {
+        if ((kind == null) != (selected.len == 0)) return null;
+        return .{ .repo_events = .{
+            .name = Array(repo_identity_max_len).from(identity) orelse return null,
+            .kind = kind,
+            .selected = Array(evt.event_id_size * 2).from(selected) orelse return null,
         } };
     }
 
@@ -554,6 +571,13 @@ pub const RoutablePage = union(enum) {
                 else
                     try std.fmt.allocPrint(arena.allocator(), "{s}/issues/{s}/" ++ tag_filter_seg ++ "{s}", .{ prefix, @tagName(i.view), i.tag.slice() });
             },
+            .repo_events => |e| blk: {
+                const prefix = try repoUrlPrefix(arena, e.name.slice());
+                break :blk if (e.kind) |kind|
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/event:{s}/kind:{s}", .{ prefix, e.selected.slice(), @tagName(kind) })
+                else
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/events", .{prefix});
+            },
             .repo_settings => |name| try std.fmt.allocPrint(arena.allocator(), "{s}/settings", .{try repoUrlPrefix(arena, name.slice())}),
             .repo_auth => |name| try std.fmt.allocPrint(arena.allocator(), "{s}/auth", .{try repoUrlPrefix(arena, name.slice())}),
         };
@@ -628,6 +652,7 @@ pub const RoutablePage = union(enum) {
             .repo_commits => |*c| c.name.slice(),
             .repo_refs => |*r| r.name.slice(),
             .repo_issues => |*i| i.name.slice(),
+            .repo_events => |*e| e.name.slice(),
             .repo_settings, .repo_auth => |*name| name.slice(),
             else => null,
         };
@@ -652,7 +677,7 @@ pub const RoutablePage = union(enum) {
         return switch (self) {
             .home_users, .home_repos, .home_settings, .home_auth => .home,
             .user_repos, .user_settings, .user_auth => .user,
-            .repo_files, .repo_commits, .repo_refs, .repo_issues, .repo_settings, .repo_auth => .repo,
+            .repo_files, .repo_commits, .repo_refs, .repo_issues, .repo_events, .repo_settings, .repo_auth => .repo,
         };
     }
 
@@ -739,6 +764,16 @@ pub const RoutablePage = union(enum) {
             if (std.mem.eql(u8, w, "new")) return if (tag_value.len == 0) repoIssuesNewRoute(pair) else null;
             return null;
         }
+        if (std.mem.eql(u8, tab, "events"))
+            return if (segments.next() == null) repoEventsRoute(pair, null, "") else null;
+        if (std.mem.startsWith(u8, tab, "event:")) {
+            const event_id = tab["event:".len..];
+            const kind_segment = segments.next() orelse return null;
+            if (!std.mem.startsWith(u8, kind_segment, "kind:")) return null;
+            const kind = std.meta.stringToEnum(evt.EventKind, kind_segment["kind:".len..]) orelse return null;
+            if (event_id.len == 0 or segments.next() != null) return null;
+            return repoEventsRoute(pair, kind, event_id);
+        }
         if (std.mem.eql(u8, tab, files_seg)) {
             params.scanPairs(&segments) catch return null;
             if (!params.only(&.{ .line, .branch, .tag, .object })) return null;
@@ -796,6 +831,9 @@ pub const RoutablePage = union(enum) {
                 a_i.view == b.repo_issues.view and
                 a_i.comments_start == b.repo_issues.comments_start and
                 std.mem.eql(u8, a_i.comment.slice(), b.repo_issues.comment.slice()),
+            .repo_events => |a_e| std.mem.eql(u8, a_e.name.slice(), b.repo_events.name.slice()) and
+                a_e.kind == b.repo_events.kind and
+                std.mem.eql(u8, a_e.selected.slice(), b.repo_events.selected.slice()),
             .repo_settings => |a_name| std.mem.eql(u8, a_name.slice(), b.repo_settings.slice()),
             .repo_auth => |a_name| std.mem.eql(u8, a_name.slice(), b.repo_auth.slice()),
             else => true,
@@ -968,13 +1006,13 @@ pub const Session = struct {
     // port the web UI is served on, for the TUI/SSH footer's "http://localhost:<port>..."
     // url. null on the web itself (no footer there).
     web_port: ?u16 = null,
-    // a host operation requested by a widget. terminals present copyable text on
-    // their restored screen; wasm asks the browser to copy them.
+    // a host operation requested by a widget
     host_request: ?HostRequest = null,
     quit_requested: bool = false,
 
     pub const HostRequest = union(enum) {
         show_copyable_text: []const u8,
+        sync_events,
     };
 
     const Self = @This();
@@ -986,6 +1024,8 @@ pub const Session = struct {
         user_name: ?[]const u8 = null,
         // a transient outcome to surface from the last /login POST attempt
         login_failure: ?Home.Auth.Login.Failure = null,
+        // a transient local event-sync error
+        sync_failure: ?[]const u8 = null,
         current_page: RoutablePage = .default,
         // whether to render the ANSI art backdrop
         enable_ansi: bool = true,
@@ -1158,6 +1198,14 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, session: *Session, repo_may
                     terminal_live = true;
                     term.setActive(&terminal);
                     last_size = .{ .width = 0, .height = 0 };
+                },
+                .sync_events => {
+                    try nav.root.build(allocator, .{
+                        .min_size = .{ .width = null, .height = null },
+                        .max_size = .{ .width = last_size.width, .height = last_size.height },
+                    }, nav.root.getFocus());
+                    _ = try terminal.render(&nav.root, &last_grid, &last_size);
+                    try Repo.Events.performSync(allocator, session);
                 },
             }
         }
@@ -1412,13 +1460,15 @@ pub const Nav = struct {
 
                 session.page_arena = arena;
 
+                const route = session.data.current_page;
                 const page = try arena.allocator().create(Page);
-                page.* = try Page.init(arena, session, self.route);
+                page.* = try Page.init(arena, session, route);
                 const new_root = try initRoot(allocator, page, session);
 
                 self.root.deinit(allocator);
                 freeArena(allocator, self.arena);
                 self.root = new_root;
+                self.route = route;
                 self.arena = arena;
             }
             return;
@@ -1568,6 +1618,8 @@ pub const Widget = union(enum) {
     repo_commits: Repo.Commits.View,
     repo_refs: Repo.Refs.View,
     repo_issues: Repo.Issues.View,
+    repo_events_header: Repo.Events.Header.View,
+    repo_events: Repo.Events.View,
     repo_comment: Repo.Comment.Item,
     clone_url: CloneUrl.View,
     home_users: Home.Users.View,

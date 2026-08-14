@@ -97,6 +97,7 @@ pub fn consume(
     const repo_cursor = try event_id_to_repo.putCursor(repo_key);
     const repo = try DB.HashMap(.read_write).init(repo_cursor);
     try evt.upsert(Record, DB, hash_kind, repo, record_to_write);
+    try evt.indexEvent(DB, hash_kind, haxy_moment, event_id, .repo, record_to_write.created_ts);
 
     const order_key = evt.orderKeyDesc(record_to_write.created_ts, event_id);
 
