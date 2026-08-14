@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const ui = @import("../ui.zig");
 const xit = @import("xit");
 const xitui = xit.xitui;
@@ -19,6 +20,7 @@ pub const View = struct {
     const Protocol = struct {
         name: []const u8,
         url: []const u8,
+        copyable_text: []const u8,
     };
 
     pub fn init(allocator: std.mem.Allocator, session: *ui.Session, identity: []const u8) !View {
@@ -26,16 +28,21 @@ pub const View = struct {
         var protocols: [2]Protocol = undefined;
         var protocol_count: usize = 0;
         if (session.data.clone_http_port) |port| {
+            const url = try std.fmt.allocPrint(aa, "http://localhost:{d}/repo/{s}", .{ port, identity });
             protocols[protocol_count] = .{
                 .name = "http",
-                .url = try std.fmt.allocPrint(aa, "http://localhost:{d}/repo/{s}", .{ port, identity }),
+                .url = url,
+                .copyable_text = try std.fmt.allocPrint(aa, "git clone {s}", .{url}),
             };
             protocol_count += 1;
         }
         if (session.data.clone_ssh_port) |port| {
+            const debug_prefix = "GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR' \\\r\n";
+            const url = try std.fmt.allocPrint(aa, "ssh://localhost:{d}/repo/{s}", .{ port, identity });
             protocols[protocol_count] = .{
                 .name = "ssh",
-                .url = try std.fmt.allocPrint(aa, "ssh://localhost:{d}/repo/{s}", .{ port, identity }),
+                .url = url,
+                .copyable_text = try std.fmt.allocPrint(aa, "{s}git clone {s}", .{ if (builtin.mode == .Debug) debug_prefix else "", url }),
             };
             protocol_count += 1;
         }
@@ -126,7 +133,7 @@ pub const View = struct {
             .arrow_left => if (self.selected > 0) self.selected - 1 else return,
             .arrow_right => if (self.selected + 1 < self.protocol_count) self.selected + 1 else return,
             .enter => {
-                if (self.session.is_terminal) self.session.host_request = .{ .show_url = self.protocols[self.selected].url };
+                if (self.session.is_terminal) self.session.host_request = .{ .show_copyable_text = self.protocols[self.selected].copyable_text };
                 return;
             },
             .mouse => |mouse| blk: {
@@ -134,7 +141,7 @@ pub const View = struct {
                     if (inp.leftClickOn(root_focus, self.protocolLabel(i).getFocus().id, mouse)) break :blk i;
                 }
                 if (self.session.is_terminal and !mouse.ctrl and inp.leftClickOn(root_focus, self.urlInput().getFocus().id, mouse))
-                    self.session.host_request = .{ .show_url = self.protocols[self.selected].url };
+                    self.session.host_request = .{ .show_copyable_text = self.protocols[self.selected].copyable_text };
                 return;
             },
             else => return,

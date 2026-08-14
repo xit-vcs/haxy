@@ -272,10 +272,10 @@ fn runTui(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh.PtySiz
         if (ui_session.host_request) |request| {
             ui_session.host_request = null;
             switch (request) {
-                .show_url => |url| {
+                .show_copyable_text => |copyable_text| {
                     if (terminal_maybe) |*terminal| terminal.deinit();
                     terminal_maybe = null;
-                    try session_writer.interface.print("\x1b[2J\x1b[H{s}\r\n\r\npress enter to go back\r\n", .{url});
+                    try session_writer.interface.print("\x1b[2J\x1b[Hcopy the following text and then press enter to go back:\r\n\r\n{s}\r\n", .{copyable_text});
                     try session_writer.interface.flush();
                     continue;
                 },

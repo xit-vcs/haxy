@@ -968,13 +968,13 @@ pub const Session = struct {
     // port the web UI is served on, for the TUI/SSH footer's "http://localhost:<port>..."
     // url. null on the web itself (no footer there).
     web_port: ?u16 = null,
-    // a host operation requested by a widget. terminals present urls on
+    // a host operation requested by a widget. terminals present copyable text on
     // their restored screen; wasm asks the browser to copy them.
     host_request: ?HostRequest = null,
     quit_requested: bool = false,
 
     pub const HostRequest = union(enum) {
-        show_url: []const u8,
+        show_copyable_text: []const u8,
     };
 
     const Self = @This();
@@ -1144,11 +1144,11 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, session: *Session, repo_may
         if (session.host_request) |request| {
             session.host_request = null;
             switch (request) {
-                .show_url => |url| {
+                .show_copyable_text => |copyable_text| {
                     term.setActive(null);
                     terminal.deinit(io);
                     terminal_live = false;
-                    showUrl(io, url) catch |show_err| {
+                    showCopyableText(io, copyable_text) catch |show_err| {
                         terminal = try term.Terminal.init(io, allocator);
                         terminal_live = true;
                         term.setActive(&terminal);
@@ -1185,7 +1185,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, session: *Session, repo_may
     }
 }
 
-fn showUrl(io: std.Io, url: []const u8) !void {
+fn showCopyableText(io: std.Io, copyable_text: []const u8) !void {
     const tty: ?std.Io.File = if (builtin.os.tag == .windows)
         null
     else
@@ -1197,7 +1197,7 @@ fn showUrl(io: std.Io, url: []const u8) !void {
 
     var write_buf: [1024]u8 = undefined;
     var writer = output.writer(io, &write_buf);
-    try writer.interface.print("\x1b[2J\x1b[H{s}\r\n\r\npress enter to go back\r\n", .{url});
+    try writer.interface.print("\x1b[2J\x1b[Hcopy the following text and then press enter to go back:\r\n\r\n{s}\r\n", .{copyable_text});
     try writer.interface.flush();
 
     var read_buf: [1]u8 = undefined;
@@ -2185,7 +2185,7 @@ pub const Footer = struct {
             .mouse => |mouse| {
                 if (mouse.ctrl or !inp.leftClickOn(root_focus, self.getFocus().id, mouse)) return;
                 const rect = (root_focus.children.get(self.getFocus().id) orelse return).rect;
-                if (mouse.x < rect.x + self.url_width) self.session.host_request = .{ .show_url = self.url };
+                if (mouse.x < rect.x + self.url_width) self.session.host_request = .{ .show_copyable_text = self.url };
             },
             else => {},
         }
