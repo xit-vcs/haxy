@@ -147,6 +147,9 @@ pub fn consume(
     ref: rf.Ref,
     events: []const EventWithId,
 ) !void {
+    var resolved_remote_name: ?[]u8 = null;
+    defer if (resolved_remote_name) |name| allocator.free(name);
+
     // a branch that only exists on a remote is consumed from its remote-tracking
     // ref, while commits go on the local branch, continuing from the remote tip
     // so a cloned repo's local branch stays connected to the server history
@@ -158,7 +161,9 @@ pub fn consume(
             const remote_ref: rf.Ref = .{ .kind = .{ .remote = remote_name }, .name = ref.name };
             if (try repo.readRef(io, remote_ref)) |oid| {
                 if (events.len > 0) break :blk .{ ref, .{oid} };
-                break :blk .{ remote_ref, null };
+                const name = try allocator.dupe(u8, remote_name);
+                resolved_remote_name = name;
+                break :blk .{ rf.Ref{ .kind = .{ .remote = name }, .name = ref.name }, null };
             }
         }
         if (events.len > 0) break :blk .{ ref, null };
