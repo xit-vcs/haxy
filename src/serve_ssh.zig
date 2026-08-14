@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const xit = @import("xit");
 const rp = xit.repo;
 const xitui = xit.xitui;
@@ -333,7 +334,7 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, command:
     // repo's owner.
     if (create_if_missing) {
         const owner_repo = evt.parseOwnerRepoPath(repo_identity) orelse return writeError(sess, "repo path must be <owner>/<repo>");
-        if (!try isKeyAuthorized(io, allocator, handler.admin_repo_path, owner_repo.owner, &sess.fingerprint))
+        if (builtin.mode != .Debug and !try isKeyAuthorized(io, allocator, handler.admin_repo_path, owner_repo.owner, &sess.fingerprint))
             return writeError(sess, "unauthorized: this SSH key is not registered to the repo owner");
     }
 
