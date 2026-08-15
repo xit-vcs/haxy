@@ -662,7 +662,7 @@ fn testPushEvents(
     const events_to_push = [_]evt.EventWithId{
         .{
             .id = std.fmt.bytesToHex(issue_event_id, .lower),
-            .author_email = "user@haxy",
+            .author = .{ .name = "haxy", .email = "user@haxy" },
             .event = .{
                 .issue = .{
                     .title = "Login form clears password on validation error",
@@ -711,7 +711,7 @@ fn testPushEvents(
     const events_to_push2 = [_]evt.EventWithId{
         .{
             .id = std.fmt.bytesToHex(issue_event_id, .lower),
-            .author_email = "user@haxy",
+            .author = .{ .name = "haxy", .email = "user@haxy" },
             .event = .{
                 .issue = .{
                     .title = "Login form clears password on validation error",
@@ -1014,6 +1014,7 @@ fn testClone(
             remote_url,
             temp_path,
             client_path,
+            null,
             .{ .wire = .{ .ssh = .{
                 .command = ssh_cmd_maybe,
             } } },
@@ -1408,10 +1409,9 @@ fn setupAdmin(io: std.Io, allocator: std.mem.Allocator, data_dir_name: []const u
 
     try evt.consume(.xit, evt.admin_repo_opts, io, allocator, &repo, evt.events_ref, &[_]evt.EventWithId{.{
         .id = std.fmt.bytesToHex(user_id, .lower),
-        .author_email = "admin@example.test",
+        .author = .{ .name = "admin", .email = "admin@example.test" },
         .event = .{ .user = .{
             .name = "admin",
-            .display_name = "Admin",
             .email = "admin@example.test",
             .password_hash = password_hash,
             .ssh_keys = admin_ssh_key,

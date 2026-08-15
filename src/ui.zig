@@ -962,7 +962,48 @@ pub fn ResolvedRefOrOid(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.
 pub const RepoSource = struct {
     path: []const u8,
     repo_kind: rp.RepoKind,
+    // the user's global git config, so local mode picks up their identity and
+    // their signing and ssh settings. null on the server paths, which must not
+    // read whoever runs the server.
+    global_config_path: ?[]const u8 = null,
+
+    pub fn localInitOpts(self: RepoSource) rp.InitOpts {
+        return .{ .path = self.path, .global_config_path = self.global_config_path };
+    }
 };
+
+// events created in local mode have no account behind them, so the commit
+// author comes from the repo's config, which the global config feeds into.
+pub const local_author_fallback = evt.CommitAuthor{ .name = "haxy", .email = "user@haxy" };
+
+pub fn localAuthor(
+    src: RepoSource,
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    arena: *std.heap.ArenaAllocator,
+) !evt.CommitAuthor {
+    switch (src.repo_kind) {
+        inline else => |repo_kind| {
+            var any_repo = rp.AnyRepo(repo_kind, .{}).open(io, allocator, src.localInitOpts()) catch return local_author_fallback;
+            defer any_repo.deinit(io, allocator);
+
+            switch (any_repo) {
+                inline else => |*repo| {
+                    var config = try repo.listConfig(io, allocator);
+                    defer config.deinit();
+
+                    const user = config.sections.get("user") orelse return local_author_fallback;
+                    const name = user.get("name") orelse return local_author_fallback;
+                    const email = user.get("email") orelse return local_author_fallback;
+                    return .{
+                        .name = try arena.allocator().dupe(u8, name),
+                        .email = try arena.allocator().dupe(u8, email),
+                    };
+                },
+            }
+        },
+    }
+}
 
 // per-connection mutable state. each SSH session / web session / local TUI
 // run gets its own.
@@ -1077,14 +1118,18 @@ pub const Session = struct {
         }
     }
 
-    // the author for an event this session creates, or null when it may not
-    // create one. local mode has no accounts, so it authors anonymously.
-    pub fn eventAuthorEmail(self: *Self) !?[]const u8 {
-        if (self.data.is_local) return "user@haxy"; // TODO: try the repo's git config user.email first
+    // the commit author for an event this session creates, or null when it may
+    // not create one
+    pub fn eventAuthor(self: *Self) !?evt.CommitAuthor {
+        if (self.data.is_local) {
+            const src = self.local orelse return local_author_fallback;
+            const io = self.io orelse return local_author_fallback;
+            return try localAuthor(src, io, self.page_arena.child_allocator, self.page_arena);
+        }
         const user_id = self.data.user_id orelse return null;
         const moment = self.haxy_moment orelse return null;
         const user = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, self.page_arena, user_id)) orelse return null;
-        return user.event.email;
+        return .{ .name = user.event.name, .email = user.event.email };
     }
 
     // queue an action for the host to drain this frame.

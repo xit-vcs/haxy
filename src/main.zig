@@ -12,6 +12,9 @@ pub const std_options_debug_io = xit.xitui.terminal.crash_debug_io;
 pub const RunOpts = struct {
     out: *std.Io.Writer,
     err: *std.Io.Writer,
+    // the user's global git config, used for the commit identity in local mode.
+    // null by default so tests and the server paths never read it.
+    global_config_path: ?[]const u8 = null,
 };
 
 pub fn main(init: std.process.Init) !u8 {
@@ -35,7 +38,17 @@ pub fn main(init: std.process.Init) !u8 {
 
     var stdout_writer = std.Io.File.stdout().writer(io, &.{});
     var stderr_writer = std.Io.File.stderr().writer(io, &.{});
-    const run_opts = RunOpts{ .out = &stdout_writer.interface, .err = &stderr_writer.interface };
+
+    var environ_map = try std.process.Environ.createMap(init.minimal.environ, allocator);
+    defer environ_map.deinit();
+    const global_config_path = try xit.config.globalConfigPath(io, allocator, &environ_map);
+    defer if (global_config_path) |path| allocator.free(path);
+
+    const run_opts = RunOpts{
+        .out = &stdout_writer.interface,
+        .err = &stderr_writer.interface,
+        .global_config_path = global_config_path,
+    };
 
     const cwd_path = try std.process.currentPathAlloc(io, allocator);
     defer allocator.free(cwd_path);
@@ -93,7 +106,11 @@ pub fn run(
                         };
                         const found_len = if (found) |f| f.path.len else 0;
                         if (work_path.len > found_len) {
-                            found = .{ .path = try session_arena.allocator().dupe(u8, work_path), .repo_kind = probe_kind };
+                            found = .{
+                                .path = try session_arena.allocator().dupe(u8, work_path),
+                                .repo_kind = probe_kind,
+                                .global_config_path = run_opts.global_config_path,
+                            };
                         }
                     } else |err| switch (err) {
                         error.RepoNotFound => {},

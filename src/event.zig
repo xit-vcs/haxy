@@ -72,11 +72,17 @@ pub const Event = union(EventKind) {
     comment: ?Comment,
 };
 
+// who a commit is attributed to
+pub const CommitAuthor = struct {
+    name: []const u8,
+    email: []const u8,
+};
+
 pub const EventWithId = struct {
     id: [event_id_size * 2]u8,
     event: Event,
     timestamp: u64 = 0, // not serialized, because it comes from the commit timestamp
-    author_email: []const u8, // not serialized, because it goes in the commit author
+    author: CommitAuthor, // not serialized, because it goes in the commit author line
 
     pub fn jsonStringify(self: EventWithId, jw: anytype) !void {
         try jw.beginObject();
@@ -101,7 +107,7 @@ pub const EventWithId = struct {
         return .{
             .id = json_event.id,
             // unused when reading; the author lives in the commit
-            .author_email = "",
+            .author = .{ .name = "", .email = "" },
             .event = switch (json_event.kind) {
                 .user => .{
                     .user = if (json_event.data) |value|
@@ -345,7 +351,7 @@ fn commitEvents(
         json.clearRetainingCapacity();
         try std.json.Stringify.value(event, .{}, &json.writer);
         if (json.written().len > max_event_size) return error.EventTooLarge;
-        const author = try std.fmt.allocPrint(allocator, "haxy <{s}>", .{event.author_email});
+        const author = try std.fmt.allocPrint(allocator, "{s} <{s}>", .{ event.author.name, event.author.email });
         defer allocator.free(author);
         _ = try obj.writeCommit(repo_kind, repo_opts, state, io, allocator, .{ .author = author, .message = json.written(), .timestamp = event.timestamp, .parent_oids = parent_oids }, null, ref);
         // later events parent on the ref's new tip
@@ -1228,7 +1234,7 @@ pub fn resolveOrCreateRepo(
     try consume(.xit, admin_repo_opts, io, allocator, &repo, events_ref, &[_]EventWithId{.{
         .id = event_id_hex,
         .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
-        .author_email = owner.event.email,
+        .author = .{ .name = owner.event.name, .email = owner.event.email },
         .event = .{ .repo = .{
             .user_id = &owner_user_id,
             .name = repo_name,

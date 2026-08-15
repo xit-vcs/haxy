@@ -94,7 +94,7 @@ pub const View = struct {
             // clicking a user opens their page; the "a:" prefix makes the web
             // renderer emit an <a href="/user/foo"> anchor.
             try items.append(aa, .{
-                .text = try std.fmt.allocPrint(aa, "{s} ({s})", .{ user.name, user.display_name }),
+                .text = try aa.dupe(u8, user.name),
                 .link = try std.fmt.allocPrint(aa, "a:/user/{s}", .{user.name}),
             });
         if (data.next_start) |next_start|

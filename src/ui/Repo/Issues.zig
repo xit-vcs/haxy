@@ -2147,7 +2147,7 @@ pub const View = struct {
         const io = self.session.io orelse return;
         const src = self.data.repo_source orelse return;
         const entry = self.data.selectedIssue() orelse return;
-        const author_email = (try self.session.eventAuthorEmail()) orelse return;
+        const author = (try self.session.eventAuthor()) orelse return;
         const form = self.issueForm() orelse return;
 
         // gather the inputs by name; the d<n> hunk inputs appear in chunk order
@@ -2180,14 +2180,14 @@ pub const View = struct {
 
         switch (src.repo_kind) {
             inline else => |repo_kind| {
-                var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, .{ .path = src.path });
+                var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, src.localInitOpts());
                 defer any_repo.deinit(io, allocator);
                 switch (any_repo) {
                     inline else => |*repo| evt.Issue.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &id_bytes, .{ .resolve = .{
                         .title = title,
                         .tags = tags,
                         .hunks = hunks.items,
-                    } }, author_email) catch |err| switch (err) {
+                    } }, author) catch |err| switch (err) {
                         // leave the form up for correction
                         error.InvalidFields => return,
                         else => |e| return e,
@@ -2206,7 +2206,7 @@ pub const View = struct {
         if (comptime wasm) return;
         const io = self.session.io orelse return;
         const src = self.data.repo_source orelse return;
-        const author_email = (try self.session.eventAuthorEmail()) orelse return;
+        const author = (try self.session.eventAuthor()) orelse return;
         const form = self.issueForm() orelse return;
         const body_input = &form.children.values()[comment_body_field_index].widget.text_input;
         const body = try body_input.text(allocator);
@@ -2224,16 +2224,16 @@ pub const View = struct {
         const editing = self.data.view == .edit_comment;
         switch (src.repo_kind) {
             inline else => |repo_kind| {
-                var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, .{ .path = src.path });
+                var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, src.localInitOpts());
                 defer any_repo.deinit(io, allocator);
                 switch (any_repo) {
                     inline else => |*repo| if (editing) {
                         var comment_id: [evt.event_id_size]u8 = undefined;
                         _ = std.fmt.hexToBytes(&comment_id, self.data.comment_id) catch return;
-                        try evt.Comment.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &thread_id, &comment_id, body, author_email);
+                        try evt.Comment.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &thread_id, &comment_id, body, author);
                         event_id_hex = std.fmt.bytesToHex(comment_id, .lower);
                     } else {
-                        event_id_hex = try evt.Comment.create(repo_kind, repo.self_repo_opts, io, allocator, repo, &thread_id, &parent_id, body, author_email);
+                        event_id_hex = try evt.Comment.create(repo_kind, repo.self_repo_opts, io, allocator, repo, &thread_id, &parent_id, body, author);
                     },
                 }
             },
@@ -2262,7 +2262,7 @@ pub const View = struct {
         if (comptime wasm) return;
         const io = self.session.io orelse return;
         const src = self.data.repo_source orelse return;
-        const author_email = (try self.session.eventAuthorEmail()) orelse return;
+        const author = (try self.session.eventAuthor()) orelse return;
 
         const form = self.issueForm() orelse return;
         const title_input = &form.children.values()[title_field_index].widget.text_input;
@@ -2285,7 +2285,7 @@ pub const View = struct {
         const event = evt.EventWithId{
             .id = event_id_hex,
             .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
-            .author_email = author_email,
+            .author = author,
             .event = .{ .issue = .{
                 .title = title,
                 .description = description,
@@ -2295,7 +2295,7 @@ pub const View = struct {
 
         switch (src.repo_kind) {
             inline else => |repo_kind| {
-                var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, .{ .path = src.path });
+                var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, src.localInitOpts());
                 defer any_repo.deinit(io, allocator);
                 switch (any_repo) {
                     inline else => |*repo| try evt.consume(repo_kind, repo.self_repo_opts, io, allocator, repo, evt.events_ref, &.{event}),
@@ -2320,7 +2320,7 @@ pub const View = struct {
         const io = self.session.io orelse return;
         const src = self.data.repo_source orelse return;
         const entry = self.data.selectedIssue() orelse return;
-        const author_email = (try self.session.eventAuthorEmail()) orelse return;
+        const author = (try self.session.eventAuthor()) orelse return;
 
         const form = self.issueForm() orelse return;
         const title_input = &form.children.values()[title_field_index].widget.text_input;
@@ -2341,14 +2341,14 @@ pub const View = struct {
 
         switch (src.repo_kind) {
             inline else => |repo_kind| {
-                var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, .{ .path = src.path });
+                var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, src.localInitOpts());
                 defer any_repo.deinit(io, allocator);
                 switch (any_repo) {
                     inline else => |*repo| try evt.Issue.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &id_bytes, .{ .fields = .{
                         .title = title,
                         .tags = tags,
                         .description = description,
-                    } }, author_email),
+                    } }, author),
                 }
             },
         }
@@ -2366,7 +2366,7 @@ pub const View = struct {
         const src = self.data.repo_source orelse return;
         const sel = self.detailed_index[index] orelse return;
         const entry = self.window(index).issues[sel];
-        const author_email = (try self.session.eventAuthorEmail()) orelse return;
+        const author = (try self.session.eventAuthor()) orelse return;
 
         const status: evt.Issue.Status = switch (entry.issue.event.status) {
             .open => .closed,
@@ -2378,10 +2378,10 @@ pub const View = struct {
 
         switch (src.repo_kind) {
             inline else => |repo_kind| {
-                var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, .{ .path = src.path });
+                var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, src.localInitOpts());
                 defer any_repo.deinit(io, allocator);
                 switch (any_repo) {
-                    inline else => |*repo| try evt.Issue.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &id_bytes, .{ .status = status }, author_email),
+                    inline else => |*repo| try evt.Issue.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &id_bytes, .{ .status = status }, author),
                 }
             },
         }

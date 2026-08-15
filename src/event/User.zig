@@ -6,7 +6,6 @@ const hash = xit.hash;
 const bcrypt = std.crypto.pwhash.bcrypt;
 
 name: []const u8,
-display_name: []const u8,
 email: []const u8,
 password_hash: []const u8,
 enable_ansi: bool = true,
@@ -28,7 +27,6 @@ pub const Record = struct {
 // the subset of a user that anyone may see
 pub const Public = struct {
     name: []const u8,
-    display_name: []const u8,
 };
 
 const Self = @This();
@@ -284,7 +282,7 @@ pub fn toggleAnsi(
     try evt.consume(.xit, repo_opts, io, allocator, repo, evt.events_ref, &[_]evt.EventWithId{.{
         .id = std.fmt.bytesToHex(user_id[0..evt.event_id_size].*, .lower),
         .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
-        .author_email = user.event.email,
+        .author = .{ .name = user.event.name, .email = user.event.email },
         .event = .{ .user = updated },
     }});
 }

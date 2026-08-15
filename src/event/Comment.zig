@@ -115,7 +115,7 @@ pub fn create(
     thread_id: *const [evt.event_id_size * 2]u8,
     parent_id: *const [evt.event_id_size * 2]u8,
     body: []const u8,
-    author_email: []const u8,
+    author: evt.CommitAuthor,
 ) ![evt.event_id_size * 2]u8 {
     if (!fieldsValid(body)) return error.InvalidFields;
 
@@ -125,7 +125,7 @@ pub fn create(
     try evt.consume(repo_kind, repo_opts, io, allocator, repo, evt.events_ref, &.{.{
         .id = event_id,
         .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
-        .author_email = author_email,
+        .author = author,
         .event = .{ .comment = .{
             .thread_id = thread_id.*,
             .parent_id = parent_id.*,
@@ -146,7 +146,7 @@ pub fn update(
     thread_id: *const [evt.event_id_size * 2]u8,
     comment_id: *const [evt.event_id_size]u8,
     body: []const u8,
-    author_email: []const u8,
+    author: evt.CommitAuthor,
 ) !void {
     if (!fieldsValid(body)) return error.InvalidFields;
 
@@ -170,7 +170,7 @@ pub fn update(
     try evt.consume(repo_kind, repo_opts, io, allocator, repo, evt.events_ref, &.{.{
         .id = std.fmt.bytesToHex(comment_id.*, .lower),
         .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
-        .author_email = author_email,
+        .author = author,
         .event = .{ .comment = updated },
     }});
 }

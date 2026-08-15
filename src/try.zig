@@ -105,30 +105,29 @@ pub fn main(init: std.process.Init) !void {
 
         const user_data = [_]struct {
             name: []const u8,
-            display_name: []const u8,
             email: []const u8,
         }{
-            .{ .name = "admin", .display_name = "Admin", .email = "admin@example.test" },
-            .{ .name = "alice", .display_name = "Alice Tulley", .email = "alice@example.test" },
-            .{ .name = "bob", .display_name = "Bob Smith", .email = "bob@example.test" },
-            .{ .name = "carol", .display_name = "Carol Johnson", .email = "carol@example.test" },
-            .{ .name = "dave", .display_name = "Dave Wilson", .email = "dave@example.test" },
-            .{ .name = "eve", .display_name = "Eve Anderson", .email = "eve@example.test" },
-            .{ .name = "frank", .display_name = "Frank Miller", .email = "frank@example.test" },
-            .{ .name = "grace", .display_name = "Grace Lee", .email = "grace@example.test" },
-            .{ .name = "henry", .display_name = "Henry Davis", .email = "henry@example.test" },
-            .{ .name = "ivy", .display_name = "Ivy Martinez", .email = "ivy@example.test" },
-            .{ .name = "jack", .display_name = "Jack Thompson", .email = "jack@example.test" },
-            .{ .name = "kate", .display_name = "Kate Robinson", .email = "kate@example.test" },
-            .{ .name = "liam", .display_name = "Liam Walker", .email = "liam@example.test" },
-            .{ .name = "mona", .display_name = "Mona Patel", .email = "mona@example.test" },
-            .{ .name = "noah", .display_name = "Noah Garcia", .email = "noah@example.test" },
-            .{ .name = "olivia", .display_name = "Olivia Hernandez", .email = "olivia@example.test" },
-            .{ .name = "peter", .display_name = "Peter Wright", .email = "peter@example.test" },
-            .{ .name = "quinn", .display_name = "Quinn Foster", .email = "quinn@example.test" },
-            .{ .name = "rachel", .display_name = "Rachel Bennett", .email = "rachel@example.test" },
-            .{ .name = "sam", .display_name = "Sam Brooks", .email = "sam@example.test" },
-            .{ .name = "tina", .display_name = "Tina Cooper", .email = "tina@example.test" },
+            .{ .name = "admin", .email = "admin@example.test" },
+            .{ .name = "alice", .email = "alice@example.test" },
+            .{ .name = "bob", .email = "bob@example.test" },
+            .{ .name = "carol", .email = "carol@example.test" },
+            .{ .name = "dave", .email = "dave@example.test" },
+            .{ .name = "eve", .email = "eve@example.test" },
+            .{ .name = "frank", .email = "frank@example.test" },
+            .{ .name = "grace", .email = "grace@example.test" },
+            .{ .name = "henry", .email = "henry@example.test" },
+            .{ .name = "ivy", .email = "ivy@example.test" },
+            .{ .name = "jack", .email = "jack@example.test" },
+            .{ .name = "kate", .email = "kate@example.test" },
+            .{ .name = "liam", .email = "liam@example.test" },
+            .{ .name = "mona", .email = "mona@example.test" },
+            .{ .name = "noah", .email = "noah@example.test" },
+            .{ .name = "olivia", .email = "olivia@example.test" },
+            .{ .name = "peter", .email = "peter@example.test" },
+            .{ .name = "quinn", .email = "quinn@example.test" },
+            .{ .name = "rachel", .email = "rachel@example.test" },
+            .{ .name = "sam", .email = "sam@example.test" },
+            .{ .name = "tina", .email = "tina@example.test" },
         };
 
         const repo_data = [_]struct {
@@ -202,11 +201,10 @@ pub fn main(init: std.process.Init) !void {
                 .id = std.fmt.bytesToHex(user_ids[i], .lower),
                 // stepped timestamps so the seeded users/repos list in a stable order
                 .timestamp = @intCast(slot + 1),
-                .author_email = "admin@example.test",
+                .author = .{ .name = "admin", .email = "admin@example.test" },
                 .event = .{
                     .user = .{
                         .name = u.name,
-                        .display_name = u.display_name,
                         .email = u.email,
                         .password_hash = password_hash,
                         .ssh_keys = if (std.mem.eql(u8, "admin", u.name)) admin_ssh_key else "",
@@ -218,7 +216,7 @@ pub fn main(init: std.process.Init) !void {
             events_to_consume[user_data.len + i] = .{
                 .id = std.fmt.bytesToHex(repo_event_ids[i], .lower),
                 .timestamp = @intCast(user_data.len + i + 1),
-                .author_email = user_data[r.user_index].email,
+                .author = .{ .name = user_data[r.user_index].name, .email = user_data[r.user_index].email },
                 .event = .{
                     .repo = .{
                         .user_id = &user_ids[r.user_index],
@@ -572,7 +570,7 @@ pub fn main(init: std.process.Init) !void {
                     .id = std.fmt.bytesToHex(evt.EventWithId.randomId(prng.random()), .lower),
                     // stepped timestamps so the issues list in a stable order
                     .timestamp = @intCast(i + 1),
-                    .author_email = user_data[i % user_data.len].email,
+                    .author = .{ .name = user_data[i % user_data.len].name, .email = user_data[i % user_data.len].email },
                     .event = .{
                         .issue = .{
                             .title = issue.title,
@@ -604,7 +602,7 @@ pub fn main(init: std.process.Init) !void {
                 const ours = [_]evt.EventWithId{ .{
                     .id = issue_events[issue_data.len - 4].id,
                     .timestamp = 100,
-                    .author_email = user_data[1].email,
+                    .author = .{ .name = user_data[1].name, .email = user_data[1].email },
                     .event = .{ .issue = .{
                         .title = "Crash when resizing the window during the splash animation",
                         .description = title_issue.description,
@@ -613,7 +611,7 @@ pub fn main(init: std.process.Init) !void {
                 }, .{
                     .id = issue_events[issue_data.len - 3].id,
                     .timestamp = 101,
-                    .author_email = user_data[1].email,
+                    .author = .{ .name = user_data[1].name, .email = user_data[1].email },
                     .event = .{ .issue = .{
                         .title = sync_issue.title,
                         .description = "The sync engine's coverage is unit tests only, with every transport mocked out." ++ "\n\n" ++
@@ -623,7 +621,7 @@ pub fn main(init: std.process.Init) !void {
                 }, .{
                     .id = issue_events[issue_data.len - 2].id,
                     .timestamp = 102,
-                    .author_email = user_data[1].email,
+                    .author = .{ .name = user_data[1].name, .email = user_data[1].email },
                     .event = .{ .issue = .{
                         .title = desc_issue.title,
                         .description = tz_p1 ++ "\n\n" ++ tz_p2 ++ "\n\n" ++ tz_p4 ++ "\n\n" ++
@@ -634,7 +632,7 @@ pub fn main(init: std.process.Init) !void {
                 const theirs = [_]evt.EventWithId{ .{
                     .id = issue_events[issue_data.len - 4].id,
                     .timestamp = 103,
-                    .author_email = user_data[2].email,
+                    .author = .{ .name = user_data[2].name, .email = user_data[2].email },
                     .event = .{ .issue = .{
                         .title = "Segfault on early window resize",
                         .description = title_issue.description,
@@ -643,7 +641,7 @@ pub fn main(init: std.process.Init) !void {
                 }, .{
                     .id = issue_events[issue_data.len - 3].id,
                     .timestamp = 104,
-                    .author_email = user_data[2].email,
+                    .author = .{ .name = user_data[2].name, .email = user_data[2].email },
                     .event = .{ .issue = .{
                         .title = sync_issue.title,
                         .description = sync_p1 ++ "\n\n" ++ sync_p2 ++ "\n\n" ++
@@ -653,7 +651,7 @@ pub fn main(init: std.process.Init) !void {
                 }, .{
                     .id = issue_events[issue_data.len - 2].id,
                     .timestamp = 105,
-                    .author_email = user_data[2].email,
+                    .author = .{ .name = user_data[2].name, .email = user_data[2].email },
                     .event = .{ .issue = .{
                         .title = desc_issue.title,
                         .description = tz_p1 ++ "\n\n" ++ tz_p2 ++ "\n\n" ++
@@ -671,7 +669,7 @@ pub fn main(init: std.process.Init) !void {
                 for (theirs, 0..) |event, i| {
                     json.clearRetainingCapacity();
                     try std.json.Stringify.value(event, .{}, &json.writer);
-                    const author = try std.fmt.allocPrint(allocator, "haxy <{s}>", .{event.author_email});
+                    const author = try std.fmt.allocPrint(allocator, "{s} <{s}>", .{ event.author.name, event.author.email });
                     defer allocator.free(author);
                     _ = try template_repo.commitAtRef(io, allocator, .{
                         .author = author,
@@ -717,7 +715,7 @@ pub fn main(init: std.process.Init) !void {
                 event.* = .{
                     .id = std.fmt.bytesToHex(comment_ids[i], .lower),
                     .timestamp = @intCast(200 + i),
-                    .author_email = user_data[(i + 1) % user_data.len].email,
+                    .author = .{ .name = user_data[(i + 1) % user_data.len].name, .email = user_data[(i + 1) % user_data.len].email },
                     .event = .{ .comment = .{
                         .thread_id = issue_events[issue_events.len - 1].id,
                         .parent_id = switch (i) {

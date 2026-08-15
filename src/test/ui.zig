@@ -112,7 +112,7 @@ test "sync creates missing event branches and preserves head" {
         const id = [_]u8{1} ** evt.event_id_size;
         try evt.consume(.git, .{}, io, allocator, &local, evt.events_ref, &.{.{
             .id = std.fmt.bytesToHex(id, .lower),
-            .author_email = "user@haxy",
+            .author = .{ .name = "haxy", .email = "user@haxy" },
             .event = .{ .issue = .{ .title = "sync", .description = "", .tags = "" } },
         }});
     }
@@ -124,7 +124,7 @@ test "sync creates missing event branches and preserves head" {
         const id = [_]u8{2} ** evt.event_id_size;
         try evt.consume(.git, .{}, io, allocator, &local, evt.events_ref, &.{.{
             .id = std.fmt.bytesToHex(id, .lower),
-            .author_email = "user@haxy",
+            .author = .{ .name = "haxy", .email = "user@haxy" },
             .event = .{ .issue = .{ .title = "local", .description = "", .tags = "" } },
         }});
     }
@@ -134,7 +134,7 @@ test "sync creates missing event branches and preserves head" {
         const id = [_]u8{3} ** evt.event_id_size;
         try evt.consume(.git, .{}, io, allocator, &remote, evt.events_ref, &.{.{
             .id = std.fmt.bytesToHex(id, .lower),
-            .author_email = "user@haxy",
+            .author = .{ .name = "haxy", .email = "user@haxy" },
             .event = .{ .issue = .{ .title = "remote", .description = "", .tags = "" } },
         }});
     }

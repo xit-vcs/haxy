@@ -383,16 +383,16 @@ fn handleAnsi(
 
 // the author for an event created by this request, or null when the request
 // may not create one. local mode has no accounts, so it authors anonymously.
-fn eventAuthorEmail(
+fn eventAuthor(
     io: std.Io,
     allocator: std.mem.Allocator,
     arena: *std.heap.ArenaAllocator,
     request: *std.http.Server.Request,
     host: Host,
-) !?[]const u8 {
+) !?evt.CommitAuthor {
     const remote = switch (host) {
         .remote => |remote| remote,
-        .local => return "user@haxy", // TODO: try the repo's git config user.email first
+        .local => |src| return try ui.localAuthor(src, io, allocator, arena),
     };
     const token = getCookieValue(request, cookie_name) orelse return null;
     var user_id: [evt.event_id_size]u8 = undefined;
@@ -402,7 +402,7 @@ fn eventAuthorEmail(
     defer repo.deinit(io, allocator);
     const moment = try evt.currentMoment(evt.admin_repo_opts, &repo);
     const user = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, &user_id)) orelse return null;
-    return user.event.email;
+    return .{ .name = user.event.name, .email = user.event.email };
 }
 
 // refuse a write from a request with no logged-in user. the body goes unread,
@@ -446,7 +446,7 @@ fn handleIssueNew(
 ) !void {
     var author_arena = std.heap.ArenaAllocator.init(allocator);
     defer author_arena.deinit();
-    const author_email = (try eventAuthorEmail(io, allocator, &author_arena, request, host)) orelse return respondLoginRequired(request);
+    const author = (try eventAuthor(io, allocator, &author_arena, request, host)) orelse return respondLoginRequired(request);
 
     var body_buf: [256]u8 = undefined;
     const reader = request.readerExpectNone(&body_buf);
@@ -481,7 +481,7 @@ fn handleIssueNew(
     const event = evt.EventWithId{
         .id = event_id_hex,
         .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
-        .author_email = author_email,
+        .author = author,
         .event = .{ .issue = .{
             .title = title,
             .description = description,
@@ -530,7 +530,7 @@ fn handleIssueNew(
             }
             switch (src.repo_kind) {
                 inline else => |repo_kind| {
-                    var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, .{ .path = src.path });
+                    var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, src.localInitOpts());
                     defer any_repo.deinit(io, allocator);
                     switch (any_repo) {
                         inline else => |*repo| try evt.consume(repo_kind, repo.self_repo_opts, io, allocator, repo, evt.events_ref, &[_]evt.EventWithId{event}),
@@ -595,7 +595,7 @@ fn handleCommentNew(
 
     var author_arena = std.heap.ArenaAllocator.init(allocator);
     defer author_arena.deinit();
-    const author_email = (try eventAuthorEmail(io, allocator, &author_arena, request, host)) orelse return respondLoginRequired(request);
+    const author = (try eventAuthor(io, allocator, &author_arena, request, host)) orelse return respondLoginRequired(request);
 
     var body_buf: [256]u8 = undefined;
     const reader = request.readerExpectNone(&body_buf);
@@ -646,7 +646,7 @@ fn handleCommentNew(
 
             var repo = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = repo_path });
             defer repo.deinit(io, allocator);
-            event_id_hex = try evt.Comment.create(.xit, .{}, io, allocator, &repo, &thread_id_hex, &parent_id_hex, body, author_email);
+            event_id_hex = try evt.Comment.create(.xit, .{}, io, allocator, &repo, &thread_id_hex, &parent_id_hex, body, author);
         },
         .local => |src| {
             if (parts.repo_base.len != 0) {
@@ -658,10 +658,10 @@ fn handleCommentNew(
             }
             switch (src.repo_kind) {
                 inline else => |repo_kind| {
-                    var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, .{ .path = src.path });
+                    var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, src.localInitOpts());
                     defer any_repo.deinit(io, allocator);
                     switch (any_repo) {
-                        inline else => |*repo| event_id_hex = try evt.Comment.create(repo_kind, repo.self_repo_opts, io, allocator, repo, &thread_id_hex, &parent_id_hex, body, author_email),
+                        inline else => |*repo| event_id_hex = try evt.Comment.create(repo_kind, repo.self_repo_opts, io, allocator, repo, &thread_id_hex, &parent_id_hex, body, author),
                     }
                 },
             }
@@ -684,7 +684,7 @@ fn updateComment(
     host: Host,
     parts: CommentBaseParts,
     body: []const u8,
-    author_email: []const u8,
+    author: evt.CommitAuthor,
 ) !void {
     const comment_id = parts.comment_id orelse return error.NotFound;
     const thread_id = std.fmt.bytesToHex(parts.thread_id, .lower);
@@ -702,16 +702,16 @@ fn updateComment(
 
             var repo = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = repo_path });
             defer repo.deinit(io, allocator);
-            try evt.Comment.update(.xit, .{}, io, allocator, &repo, &thread_id, &comment_id, body, author_email);
+            try evt.Comment.update(.xit, .{}, io, allocator, &repo, &thread_id, &comment_id, body, author);
         },
         .local => |src| {
             if (parts.repo_base.len != 0) return error.NotFound;
             switch (src.repo_kind) {
                 inline else => |repo_kind| {
-                    var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, .{ .path = src.path });
+                    var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, src.localInitOpts());
                     defer any_repo.deinit(io, allocator);
                     switch (any_repo) {
-                        inline else => |*repo| try evt.Comment.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &thread_id, &comment_id, body, author_email),
+                        inline else => |*repo| try evt.Comment.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &thread_id, &comment_id, body, author),
                     }
                 },
             }
@@ -746,7 +746,7 @@ fn handleCommentEdit(
 ) !void {
     var author_arena = std.heap.ArenaAllocator.init(allocator);
     defer author_arena.deinit();
-    const author_email = (try eventAuthorEmail(io, allocator, &author_arena, request, host)) orelse return respondLoginRequired(request);
+    const author = (try eventAuthor(io, allocator, &author_arena, request, host)) orelse return respondLoginRequired(request);
 
     var body_buf: [256]u8 = undefined;
     const reader = request.readerExpectNone(&body_buf);
@@ -768,7 +768,7 @@ fn handleCommentEdit(
     }
 
     const not_found = "comment not found";
-    updateComment(io, allocator, host, parts, body, author_email) catch |err| switch (err) {
+    updateComment(io, allocator, host, parts, body, author) catch |err| switch (err) {
         error.NotFound => {
             try request.respond(not_found, .{
                 .status = .not_found,
@@ -809,7 +809,7 @@ fn updateIssue(
     host: Host,
     parts: IssueBaseParts,
     update: evt.Issue.Update,
-    author_email: []const u8,
+    author: evt.CommitAuthor,
 ) !void {
     switch (host) {
         .remote => |remote| {
@@ -825,7 +825,7 @@ fn updateIssue(
 
             var repo = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = repo_path });
             defer repo.deinit(io, allocator);
-            try evt.Issue.update(.xit, .{}, io, allocator, &repo, &parts.id_bytes, update, author_email);
+            try evt.Issue.update(.xit, .{}, io, allocator, &repo, &parts.id_bytes, update, author);
         },
         .local => |src| {
             // the local forms post to "/issue:<id>/...", so the repo base
@@ -833,10 +833,10 @@ fn updateIssue(
             if (parts.repo_base.len != 0) return error.NotFound;
             switch (src.repo_kind) {
                 inline else => |repo_kind| {
-                    var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, .{ .path = src.path });
+                    var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, src.localInitOpts());
                     defer any_repo.deinit(io, allocator);
                     switch (any_repo) {
-                        inline else => |*repo| try evt.Issue.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &parts.id_bytes, update, author_email),
+                        inline else => |*repo| try evt.Issue.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &parts.id_bytes, update, author),
                     }
                 },
             }
@@ -866,9 +866,9 @@ fn handleIssueStatus(
 
     var author_arena = std.heap.ArenaAllocator.init(allocator);
     defer author_arena.deinit();
-    const author_email = (try eventAuthorEmail(io, allocator, &author_arena, request, host)) orelse return respondLoginRequired(request);
+    const author = (try eventAuthor(io, allocator, &author_arena, request, host)) orelse return respondLoginRequired(request);
 
-    updateIssue(io, allocator, host, parts, .{ .status = status }, author_email) catch |err| switch (err) {
+    updateIssue(io, allocator, host, parts, .{ .status = status }, author) catch |err| switch (err) {
         error.NotFound => {
             try request.respond(not_found, .{
                 .status = .not_found,
@@ -901,7 +901,7 @@ fn handleIssueEdit(
 ) !void {
     var author_arena = std.heap.ArenaAllocator.init(allocator);
     defer author_arena.deinit();
-    const author_email = (try eventAuthorEmail(io, allocator, &author_arena, request, host)) orelse return respondLoginRequired(request);
+    const author = (try eventAuthor(io, allocator, &author_arena, request, host)) orelse return respondLoginRequired(request);
 
     var body_buf: [256]u8 = undefined;
     const reader = request.readerExpectNone(&body_buf);
@@ -943,7 +943,7 @@ fn handleIssueEdit(
         .title = title,
         .tags = tags,
         .description = description,
-    } }, author_email) catch |err| switch (err) {
+    } }, author) catch |err| switch (err) {
         error.NotFound => {
             try request.respond(not_found, .{
                 .status = .not_found,
@@ -972,7 +972,7 @@ fn handleIssueResolve(
 ) !void {
     var author_arena = std.heap.ArenaAllocator.init(allocator);
     defer author_arena.deinit();
-    const author_email = (try eventAuthorEmail(io, allocator, &author_arena, request, host)) orelse return respondLoginRequired(request);
+    const author = (try eventAuthor(io, allocator, &author_arena, request, host)) orelse return respondLoginRequired(request);
 
     var body_buf: [256]u8 = undefined;
     const reader = request.readerExpectNone(&body_buf);
@@ -1008,7 +1008,7 @@ fn handleIssueResolve(
         .title = title,
         .tags = tags,
         .hunks = hunks.items,
-    } }, author_email) catch |err| switch (err) {
+    } }, author) catch |err| switch (err) {
         error.NotFound => {
             try request.respond(not_found, .{
                 .status = .not_found,

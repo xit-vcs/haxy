@@ -645,7 +645,7 @@ pub fn sync(io: std.Io, allocator: std.mem.Allocator, source: ui.RepoSource) !?[
 
     switch (source.repo_kind) {
         inline else => |repo_kind| {
-            var any_repo = try rp.AnyRepo(repo_kind, .{ .ProgressCtx = Header.Progress }).open(io, allocator, .{ .path = source.path });
+            var any_repo = try rp.AnyRepo(repo_kind, .{ .ProgressCtx = Header.Progress }).open(io, allocator, source.localInitOpts());
             defer any_repo.deinit(io, allocator);
             switch (any_repo) {
                 inline else => |*repo| {

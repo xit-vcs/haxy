@@ -184,7 +184,7 @@ pub fn init(
             const gpa = arena.child_allocator;
             switch (src.repo_kind) {
                 inline else => |repo_kind| {
-                    var any_repo = rp.AnyRepo(repo_kind, .{}).open(io, gpa, .{ .path = src.path }) catch break :read;
+                    var any_repo = rp.AnyRepo(repo_kind, .{}).open(io, gpa, src.localInitOpts()) catch break :read;
                     defer any_repo.deinit(io, gpa);
                     switch (any_repo) {
                         inline else => |*opened| {

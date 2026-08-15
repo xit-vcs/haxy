@@ -5,7 +5,7 @@ const rp = xit.repo;
 const rf = xit.ref;
 const hash = xit.hash;
 
-const author_email = "user@haxy";
+const author = evt.CommitAuthor{ .name = "haxy", .email = "user@haxy" };
 
 test "rebase" {
     const io = std.testing.io;
@@ -48,7 +48,7 @@ test "rebase" {
     const events_to_consume = [_]evt.EventWithId{
         .{
             .id = std.fmt.bytesToHex(first_event_id, .lower),
-            .author_email = author_email,
+            .author = author,
             .event = .{
                 .issue = .{
                     .title = "Login form clears password on validation error",
@@ -60,7 +60,7 @@ test "rebase" {
         // this event edits the previous one because it has the same id
         .{
             .id = std.fmt.bytesToHex(first_event_id, .lower),
-            .author_email = author_email,
+            .author = author,
             .event = .{
                 .issue = .{
                     .title = "Login form clears password on validation error",
@@ -71,7 +71,7 @@ test "rebase" {
         },
         .{
             .id = std.fmt.bytesToHex(evt.EventWithId.randomId(prng.random()), .lower),
-            .author_email = author_email,
+            .author = author,
             .event = .{
                 .issue = .{
                     .title = "Search results ignore archived project filter",
@@ -82,7 +82,7 @@ test "rebase" {
         },
         .{
             .id = std.fmt.bytesToHex(evt.EventWithId.randomId(prng.random()), .lower),
-            .author_email = author_email,
+            .author = author,
             .event = .{
                 .issue = .{
                     .title = "Issue list does not persist selected sort order",
@@ -148,7 +148,7 @@ test "rebase" {
     const events_to_consume2 = [_]evt.EventWithId{
         .{
             .id = std.fmt.bytesToHex(evt.EventWithId.randomId(prng.random()), .lower),
-            .author_email = author_email,
+            .author = author,
             .event = .{
                 .issue = .{
                     .title = "Double clicking causes the form to submit twice",
@@ -316,7 +316,7 @@ test "merge" {
     const events_to_consume = [_]evt.EventWithId{
         .{
             .id = std.fmt.bytesToHex(evt.EventWithId.randomId(prng.random()), .lower),
-            .author_email = author_email,
+            .author = author,
             .event = .{
                 .issue = .{
                     .title = "Login form clears password on validation error",
@@ -327,7 +327,7 @@ test "merge" {
         },
         .{
             .id = std.fmt.bytesToHex(evt.EventWithId.randomId(prng.random()), .lower),
-            .author_email = author_email,
+            .author = author,
             .event = .{
                 .issue = .{
                     .title = "Search results ignore archived project filter",
@@ -338,7 +338,7 @@ test "merge" {
         },
         .{
             .id = std.fmt.bytesToHex(evt.EventWithId.randomId(prng.random()), .lower),
-            .author_email = author_email,
+            .author = author,
             .event = .{
                 .issue = .{
                     .title = "Issue list does not persist selected sort order",
@@ -403,7 +403,7 @@ test "merge" {
     const events_to_consume2 = [_]evt.EventWithId{
         .{
             .id = std.fmt.bytesToHex(evt.EventWithId.randomId(prng.random()), .lower),
-            .author_email = author_email,
+            .author = author,
             .event = .{
                 .issue = .{
                     .title = "Kanban card status badge falls behind after drag",
@@ -414,7 +414,7 @@ test "merge" {
         },
         .{
             .id = std.fmt.bytesToHex(evt.EventWithId.randomId(prng.random()), .lower),
-            .author_email = author_email,
+            .author = author,
             .event = .{
                 .issue = .{
                     .title = "Assignee autocomplete omits recently invited users",
@@ -425,7 +425,7 @@ test "merge" {
         },
         .{
             .id = std.fmt.bytesToHex(evt.EventWithId.randomId(prng.random()), .lower),
-            .author_email = author_email,
+            .author = author,
             .event = .{
                 .issue = .{
                     .title = "Add due date warning for issues blocked by dependencies",
@@ -599,7 +599,7 @@ test "merge" {
     const events_to_consume3 = [_]evt.EventWithId{
         .{
             .id = events_to_consume[0].id,
-            .author_email = author_email,
+            .author = author,
             .event = .{
                 .issue = .{
                     .title = "Login form clears password on validation error",
@@ -610,7 +610,7 @@ test "merge" {
         },
         .{
             .id = events_to_consume[0].id,
-            .author_email = author_email,
+            .author = author,
             .event = .{
                 .issue = .{
                     .title = "Login form clears password on validation error",
@@ -743,7 +743,7 @@ test "merge" {
 
         // the other branch never saw the conflict and rewrites an unrelated
         // field
-        const event = evt.EventWithId{ .id = events_to_consume3[1].id, .author_email = author_email, .event = .{ .issue = .{
+        const event = evt.EventWithId{ .id = events_to_consume3[1].id, .author = author, .event = .{ .issue = .{
             .title = their_issue.title,
             .description = "Rewritten on a branch that never merged.",
             .tags = their_issue.tags,
@@ -781,7 +781,7 @@ test "merge" {
     //
 
     {
-        try evt.Issue.update(.xit, repo_opts, io, allocator, &repo, &issue_id, .{ .status = .closed }, author_email);
+        try evt.Issue.update(.xit, repo_opts, io, allocator, &repo, &issue_id, .{ .status = .closed }, author);
 
         const haxy_moment = try evt.currentMoment(repo_opts, &repo);
         const conflicts_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Issue.conflicts_key)) orelse return error.NotFound;
@@ -798,7 +798,7 @@ test "merge" {
             .title = "Login form clears password on validation error",
             .tags = "bug priority-medium ui",
             .description = "Submitting an invalid email address resets the password field.",
-        } }, author_email);
+        } }, author);
     }
 
     //
@@ -814,7 +814,7 @@ test "merge" {
 
         // the other branch changes the record on a commit that predates the
         // resolution, so it still carries the conflict
-        const event = evt.EventWithId{ .id = events_to_consume3[0].id, .author_email = author_email, .event = .{ .issue = .{
+        const event = evt.EventWithId{ .id = events_to_consume3[0].id, .author = author, .event = .{ .issue = .{
             .title = conflicted_issue.title,
             .description = conflicted_issue.description,
             .tags = conflicted_issue.tags,
@@ -865,7 +865,7 @@ test "merge" {
 
         // the events branch only retitles the second issue
         {
-            const event = evt.EventWithId{ .id = events_to_consume[1].id, .author_email = author_email, .event = .{ .issue = .{
+            const event = evt.EventWithId{ .id = events_to_consume[1].id, .author = author, .event = .{ .issue = .{
                 .title = "Search results ignore the archived project filter",
                 .description = second_issue.description,
                 .tags = second_issue.tags,
@@ -879,7 +879,7 @@ test "merge" {
         // of its tags, then retags the third issue
         {
             json.clearRetainingCapacity();
-            const event = evt.EventWithId{ .id = events_to_consume[1].id, .author_email = author_email, .event = .{ .issue = .{
+            const event = evt.EventWithId{ .id = events_to_consume[1].id, .author = author, .event = .{ .issue = .{
                 .title = second_issue.title,
                 .description = "Archived projects are ranked before the flag is applied.",
                 .tags = "bug search",
@@ -890,7 +890,7 @@ test "merge" {
         }
         {
             json.clearRetainingCapacity();
-            const event = evt.EventWithId{ .id = events_to_consume[2].id, .author_email = author_email, .event = .{ .issue = .{
+            const event = evt.EventWithId{ .id = events_to_consume[2].id, .author = author, .event = .{ .issue = .{
                 .title = third_issue.title,
                 .description = third_issue.description,
                 .tags = "enhancement roadmap",
@@ -963,7 +963,7 @@ test "merge" {
 
         // we retitle one of the two the other branch is about to drop
         {
-            const event = evt.EventWithId{ .id = events_to_consume2[1].id, .author_email = author_email, .event = .{ .issue = .{
+            const event = evt.EventWithId{ .id = events_to_consume2[1].id, .author = author, .event = .{ .issue = .{
                 .title = "Kept by the edit",
                 .description = edited_issue.description,
                 .tags = edited_issue.tags,
@@ -975,13 +975,13 @@ test "merge" {
         // the other branch deletes both
         {
             json.clearRetainingCapacity();
-            const event = evt.EventWithId{ .id = events_to_consume2[0].id, .author_email = author_email, .event = .{ .issue = null } };
+            const event = evt.EventWithId{ .id = events_to_consume2[0].id, .author = author, .event = .{ .issue = null } };
             try std.json.Stringify.value(event, .{}, &json.writer);
             _ = try repo.commitAtRef(io, allocator, .{ .parent_oids = &.{base_oid}, .message = json.written() }, null, other_events_ref);
         }
         {
             json.clearRetainingCapacity();
-            const event = evt.EventWithId{ .id = events_to_consume2[1].id, .author_email = author_email, .event = .{ .issue = null } };
+            const event = evt.EventWithId{ .id = events_to_consume2[1].id, .author = author, .event = .{ .issue = null } };
             try std.json.Stringify.value(event, .{}, &json.writer);
             _ = try repo.commitAtRef(io, allocator, .{ .message = json.written() }, null, other_events_ref);
         }
@@ -1099,11 +1099,10 @@ test "user and repo" {
     const events_to_consume = [_]evt.EventWithId{
         .{
             .id = std.fmt.bytesToHex(user_event_id, .lower),
-            .author_email = author_email,
+            .author = author,
             .event = .{
                 .user = .{
                     .name = "alice",
-                    .display_name = "Alice Example",
                     .email = "alice@example.test",
                     .password_hash = first_password_hash,
                 },
@@ -1112,11 +1111,10 @@ test "user and repo" {
         // this event edits the previous one because it has the same id
         .{
             .id = std.fmt.bytesToHex(user_event_id, .lower),
-            .author_email = author_email,
+            .author = author,
             .event = .{
                 .user = .{
                     .name = "alice",
-                    .display_name = "Alice Example",
                     .email = "alice@example.test",
                     .password_hash = second_password_hash,
                 },
@@ -1124,7 +1122,7 @@ test "user and repo" {
         },
         .{
             .id = std.fmt.bytesToHex(repo_event_id, .lower),
-            .author_email = author_email,
+            .author = author,
             .event = .{
                 .repo = .{
                     .user_id = &user_event_id,
@@ -1186,7 +1184,7 @@ test "user and repo" {
     const events_to_consume2 = [_]evt.EventWithId{
         .{
             .id = std.fmt.bytesToHex(repo_event_id, .lower),
-            .author_email = author_email,
+            .author = author,
             .event = .{ .repo = null },
         },
     };
@@ -1220,7 +1218,7 @@ test "user and repo" {
     // a non-null payload restores the repo and its indexes
     try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &[_]evt.EventWithId{.{
         .id = std.fmt.bytesToHex(repo_event_id, .lower),
-        .author_email = author_email,
+        .author = author,
         .event = events_to_consume[2].event,
     }});
 
@@ -1247,7 +1245,7 @@ test "user and repo" {
     const events_to_consume3 = [_]evt.EventWithId{
         .{
             .id = std.fmt.bytesToHex(user_event_id, .lower),
-            .author_email = author_email,
+            .author = author,
             .event = .{ .user = null },
         },
     };
@@ -1337,11 +1335,11 @@ test "repos and users paginate newest first" {
     // one user, then four repos, each with its own creation timestamp (user@100,
     // repos@101..104)
     const events = [_]evt.EventWithId{
-        .{ .id = std.fmt.bytesToHex(user_id, .lower), .author_email = author_email, .timestamp = 100, .event = .{ .user = .{ .name = "alice", .display_name = "Alice", .email = "alice@example.test", .password_hash = pw } } },
-        .{ .id = std.fmt.bytesToHex(repo_ids[0], .lower), .author_email = author_email, .timestamp = 101, .event = .{ .repo = .{ .user_id = &user_id, .name = "repo0", .description = "d0" } } },
-        .{ .id = std.fmt.bytesToHex(repo_ids[1], .lower), .author_email = author_email, .timestamp = 102, .event = .{ .repo = .{ .user_id = &user_id, .name = "repo1", .description = "d1" } } },
-        .{ .id = std.fmt.bytesToHex(repo_ids[2], .lower), .author_email = author_email, .timestamp = 103, .event = .{ .repo = .{ .user_id = &user_id, .name = "repo2", .description = "d2" } } },
-        .{ .id = std.fmt.bytesToHex(repo_ids[3], .lower), .author_email = author_email, .timestamp = 104, .event = .{ .repo = .{ .user_id = &user_id, .name = "repo3", .description = "d3" } } },
+        .{ .id = std.fmt.bytesToHex(user_id, .lower), .author = author, .timestamp = 100, .event = .{ .user = .{ .name = "alice", .email = "alice@example.test", .password_hash = pw } } },
+        .{ .id = std.fmt.bytesToHex(repo_ids[0], .lower), .author = author, .timestamp = 101, .event = .{ .repo = .{ .user_id = &user_id, .name = "repo0", .description = "d0" } } },
+        .{ .id = std.fmt.bytesToHex(repo_ids[1], .lower), .author = author, .timestamp = 102, .event = .{ .repo = .{ .user_id = &user_id, .name = "repo1", .description = "d1" } } },
+        .{ .id = std.fmt.bytesToHex(repo_ids[2], .lower), .author = author, .timestamp = 103, .event = .{ .repo = .{ .user_id = &user_id, .name = "repo2", .description = "d2" } } },
+        .{ .id = std.fmt.bytesToHex(repo_ids[3], .lower), .author = author, .timestamp = 104, .event = .{ .repo = .{ .user_id = &user_id, .name = "repo3", .description = "d3" } } },
     };
     try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &events);
 
@@ -1357,7 +1355,7 @@ test "repos and users paginate newest first" {
 
     // deleting repo1 retains its place in the canonical order
     try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &[_]evt.EventWithId{
-        .{ .id = std.fmt.bytesToHex(repo_ids[1], .lower), .author_email = author_email, .timestamp = 200, .event = .{ .repo = null } },
+        .{ .id = std.fmt.bytesToHex(repo_ids[1], .lower), .author = author, .timestamp = 200, .event = .{ .repo = null } },
     });
     {
         const moment = try evt.currentMoment(repo_opts, &repo);
@@ -1366,7 +1364,7 @@ test "repos and users paginate newest first" {
 
     // update repo0 at a later timestamp -> keeps its original place
     try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &[_]evt.EventWithId{
-        .{ .id = std.fmt.bytesToHex(repo_ids[0], .lower), .author_email = author_email, .timestamp = 300, .event = .{ .repo = .{ .user_id = &user_id, .name = "repo0", .description = "updated" } } },
+        .{ .id = std.fmt.bytesToHex(repo_ids[0], .lower), .author = author, .timestamp = 300, .event = .{ .repo = .{ .user_id = &user_id, .name = "repo0", .description = "updated" } } },
     });
     {
         const moment = try evt.currentMoment(repo_opts, &repo);
