@@ -9,15 +9,12 @@ const work = xit.workdir;
 const hash = xit.hash;
 const net = xit.net;
 
-const http_port: u16 = 3000;
-const ssh_port: u16 = 3001;
-
 test "fetch small" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    try testFetch(.xit, .{ .wire = .http }, io, allocator);
+    try testFetch(.xit, .{ .wire = .http }, 3000, io, allocator);
     if (.windows != builtin.os.tag) {
-        try testFetch(.xit, .{ .wire = .ssh }, io, allocator);
+        try testFetch(.xit, .{ .wire = .ssh }, 3002, io, allocator);
     }
 }
 
@@ -25,7 +22,7 @@ test "push small" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
     if (.windows != builtin.os.tag) {
-        try testPush(.xit, .{ .wire = .ssh }, io, allocator);
+        try testPush(.xit, .{ .wire = .ssh }, 3004, io, allocator);
     }
 }
 
@@ -33,7 +30,7 @@ test "push creates missing repo under serve" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
     if (.windows != builtin.os.tag) {
-        try testPushCreatesMissingRepo(.xit, .{ .wire = .ssh }, io, allocator);
+        try testPushCreatesMissingRepo(.xit, .{ .wire = .ssh }, 3006, io, allocator);
     }
 }
 
@@ -41,34 +38,34 @@ test "push events" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
     if (.windows != builtin.os.tag) {
-        try testPushEvents(.xit, .{ .wire = .ssh }, io, allocator);
+        try testPushEvents(.xit, .{ .wire = .ssh }, 3008, io, allocator);
     }
 }
 
 test "clone small" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    try testClone(.xit, .{ .wire = .http }, false, io, allocator);
+    try testClone(.xit, .{ .wire = .http }, false, 3010, io, allocator);
     if (.windows != builtin.os.tag) {
-        try testClone(.xit, .{ .wire = .ssh }, false, io, allocator);
+        try testClone(.xit, .{ .wire = .ssh }, false, 3012, io, allocator);
     }
 }
 
 test "clone small subprocess" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    try testClone(.git, .{ .wire = .http }, true, io, allocator);
+    try testClone(.git, .{ .wire = .http }, true, 3014, io, allocator);
     if (.windows != builtin.os.tag) {
-        try testClone(.git, .{ .wire = .ssh }, true, io, allocator);
+        try testClone(.git, .{ .wire = .ssh }, true, 3016, io, allocator);
     }
 }
 
 test "fetch large subprocess" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    try testFetchLarge(.git, .{ .wire = .http }, true, io, allocator);
+    try testFetchLarge(.git, .{ .wire = .http }, true, 3018, io, allocator);
     if (.windows != builtin.os.tag) {
-        try testFetchLarge(.git, .{ .wire = .ssh }, true, io, allocator);
+        try testFetchLarge(.git, .{ .wire = .ssh }, true, 3020, io, allocator);
     }
 }
 
@@ -76,7 +73,7 @@ test "push large subprocess" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
     if (.windows != builtin.os.tag) {
-        try testPushLarge(.git, .{ .wire = .ssh }, true, io, allocator);
+        try testPushLarge(.git, .{ .wire = .ssh }, true, 3022, io, allocator);
     }
 }
 
@@ -84,6 +81,7 @@ fn runServer(
     io: std.Io,
     allocator: std.mem.Allocator,
     comptime temp_dir_name: []const u8,
+    comptime port: u16,
 ) !std.process.Child {
     {
         const priv_key_file = try std.Io.Dir.cwd().createFile(io, temp_dir_name ++ "/key", .{});
@@ -112,8 +110,8 @@ fn runServer(
     const haxy_path = try std.fs.path.join(allocator, &.{ cwd_path, "zig-out/bin/haxy" });
     defer allocator.free(haxy_path);
 
-    const http_listen_arg = std.fmt.comptimePrint("127.0.0.1:{}", .{http_port});
-    const ssh_listen_arg = std.fmt.comptimePrint("127.0.0.1:{}", .{ssh_port});
+    const http_listen_arg = std.fmt.comptimePrint("127.0.0.1:{}", .{port});
+    const ssh_listen_arg = std.fmt.comptimePrint("127.0.0.1:{}", .{port + 1});
 
     const process = try std.process.spawn(io, .{
         .argv = &.{ haxy_path, "serve", "--http-listen", http_listen_arg, "--ssh-listen", ssh_listen_arg, "--data-dir", temp_dir_name },
@@ -122,7 +120,7 @@ fn runServer(
         .stderr = .ignore,
     });
 
-    const address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", http_port);
+    const address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
     for (0..50) |_| {
         const stream = address.connect(io, .{ .mode = .stream }) catch {
             try std.Io.sleep(io, .fromMilliseconds(100), .real);
@@ -138,6 +136,7 @@ fn runServer(
 fn testFetch(
     comptime repo_kind: rp.RepoKind,
     comptime transport_def: net.TransportDefinition,
+    comptime port: u16,
     io: std.Io,
     allocator: std.mem.Allocator,
 ) !void {
@@ -155,7 +154,7 @@ fn testFetch(
     defer temp_dir.close(io);
 
     // init server
-    var server_process = try runServer(io, allocator, temp_dir_name);
+    var server_process = try runServer(io, allocator, temp_dir_name, port);
     defer _ = server_process.kill(io);
 
     // register the repo under admin and locate its on-disk directory
@@ -196,7 +195,7 @@ fn testFetch(
 
     // add remote
     {
-        const remote_url = try remoteUrl(transport_def, allocator, "testrepo");
+        const remote_url = try remoteUrl(transport_def, allocator, "testrepo", port);
         defer allocator.free(remote_url);
 
         try client_repo.addRemote(io, allocator, .{ .name = "origin", .value = remote_url });
@@ -216,7 +215,7 @@ fn testFetch(
         .file => false,
         .wire => |wire_kind| .ssh == wire_kind,
     };
-    const ssh_cmd_maybe = try sshCommand(is_ssh, allocator, cwd_path, temp_dir_name);
+    const ssh_cmd_maybe = try sshCommand(is_ssh, allocator, cwd_path, temp_dir_name, port);
     defer if (ssh_cmd_maybe) |ssh_cmd| allocator.free(ssh_cmd);
 
     try client_repo.fetch(
@@ -277,6 +276,7 @@ fn testFetch(
 fn testPush(
     comptime repo_kind: rp.RepoKind,
     comptime transport_def: net.TransportDefinition,
+    comptime port: u16,
     io: std.Io,
     allocator: std.mem.Allocator,
 ) !void {
@@ -294,7 +294,7 @@ fn testPush(
     defer temp_dir.close(io);
 
     // init server
-    var server_process = try runServer(io, allocator, temp_dir_name);
+    var server_process = try runServer(io, allocator, temp_dir_name, port);
     defer _ = server_process.kill(io);
 
     // register the repo under admin and locate its on-disk directory
@@ -338,7 +338,7 @@ fn testPush(
 
     // add remote
     {
-        const remote_url = try remoteUrl(transport_def, allocator, "testrepo");
+        const remote_url = try remoteUrl(transport_def, allocator, "testrepo", port);
         defer allocator.free(remote_url);
 
         try client_repo.addRemote(io, allocator, .{ .name = "origin", .value = remote_url });
@@ -353,7 +353,7 @@ fn testPush(
         .file => false,
         .wire => |wire_kind| .ssh == wire_kind,
     };
-    const ssh_cmd_maybe = try sshCommand(is_ssh, allocator, cwd_path, temp_dir_name);
+    const ssh_cmd_maybe = try sshCommand(is_ssh, allocator, cwd_path, temp_dir_name, port);
     defer if (ssh_cmd_maybe) |ssh_cmd| allocator.free(ssh_cmd);
 
     try client_repo.push(
@@ -515,6 +515,7 @@ fn testPush(
 fn testPushCreatesMissingRepo(
     comptime repo_kind: rp.RepoKind,
     comptime transport_def: net.TransportDefinition,
+    comptime port: u16,
     io: std.Io,
     allocator: std.mem.Allocator,
 ) !void {
@@ -530,7 +531,7 @@ fn testPushCreatesMissingRepo(
     defer cwd.deleteTree(io, temp_dir_name) catch {};
     defer temp_dir.close(io);
 
-    var server_process = try runServer(io, allocator, temp_dir_name);
+    var server_process = try runServer(io, allocator, temp_dir_name, port);
     defer _ = server_process.kill(io);
 
     const cwd_path = try std.process.currentPathAlloc(io, allocator);
@@ -555,7 +556,7 @@ fn testPushCreatesMissingRepo(
     // the repo is not pre-registered; the push should mint the repo event under
     // admin and create the repo on disk
     {
-        const remote_url = try remoteUrl(transport_def, allocator, "testrepo");
+        const remote_url = try remoteUrl(transport_def, allocator, "testrepo", port);
         defer allocator.free(remote_url);
 
         try client_repo.addRemote(io, allocator, .{ .name = "origin", .value = remote_url });
@@ -566,7 +567,7 @@ fn testPushCreatesMissingRepo(
         .file => false,
         .wire => |wire_kind| .ssh == wire_kind,
     };
-    const ssh_cmd_maybe = try sshCommand(is_ssh, allocator, cwd_path, temp_dir_name);
+    const ssh_cmd_maybe = try sshCommand(is_ssh, allocator, cwd_path, temp_dir_name, port);
     defer if (ssh_cmd_maybe) |ssh_cmd| allocator.free(ssh_cmd);
 
     try client_repo.push(
@@ -596,6 +597,7 @@ fn testPushCreatesMissingRepo(
 fn testPushEvents(
     comptime repo_kind: rp.RepoKind,
     comptime transport_def: net.TransportDefinition,
+    comptime port: u16,
     io: std.Io,
     allocator: std.mem.Allocator,
 ) !void {
@@ -613,7 +615,7 @@ fn testPushEvents(
     defer temp_dir.close(io);
 
     // init server
-    var server_process = try runServer(io, allocator, temp_dir_name);
+    var server_process = try runServer(io, allocator, temp_dir_name, port);
     defer _ = server_process.kill(io);
 
     // register the repo under admin and locate its on-disk directory
@@ -636,7 +638,7 @@ fn testPushEvents(
 
     // add remote
     {
-        const remote_url = try remoteUrl(transport_def, allocator, "testrepo");
+        const remote_url = try remoteUrl(transport_def, allocator, "testrepo", port);
         defer allocator.free(remote_url);
 
         try client_repo.addRemote(io, allocator, .{ .name = "origin", .value = remote_url });
@@ -646,7 +648,7 @@ fn testPushEvents(
         .file => false,
         .wire => |wire_kind| .ssh == wire_kind,
     };
-    const ssh_cmd_maybe = try sshCommand(is_ssh, allocator, cwd_path, temp_dir_name);
+    const ssh_cmd_maybe = try sshCommand(is_ssh, allocator, cwd_path, temp_dir_name, port);
     defer if (ssh_cmd_maybe) |ssh_cmd| allocator.free(ssh_cmd);
 
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -758,6 +760,7 @@ fn testClone(
     comptime repo_kind: rp.RepoKind,
     comptime transport_def: net.TransportDefinition,
     comptime shell_out_to_git: bool,
+    comptime port: u16,
     io: std.Io,
     allocator: std.mem.Allocator,
 ) !void {
@@ -775,7 +778,7 @@ fn testClone(
     defer temp_dir.close(io);
 
     // init server
-    var server_process = try runServer(io, allocator, temp_dir_name);
+    var server_process = try runServer(io, allocator, temp_dir_name, port);
     defer _ = server_process.kill(io);
 
     const cwd_path = try std.process.currentPathAlloc(io, allocator);
@@ -830,7 +833,7 @@ fn testClone(
     defer allocator.free(client_path);
 
     // get remote url
-    const remote_url = try remoteUrl(transport_def, allocator, "testrepo");
+    const remote_url = try remoteUrl(transport_def, allocator, "testrepo", port);
     defer allocator.free(remote_url);
 
     const is_ssh = switch (transport_def) {
@@ -841,7 +844,7 @@ fn testClone(
     if (shell_out_to_git) {
         const priv_key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "key" });
         defer allocator.free(priv_key_path);
-        const ssh_config_arg = try std.fmt.allocPrint(allocator, "core.sshCommand=ssh -p {} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o IdentityFile={s}", .{ ssh_port, priv_key_path });
+        const ssh_config_arg = try std.fmt.allocPrint(allocator, "core.sshCommand=ssh -p {} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o IdentityFile={s}", .{ port + 1, priv_key_path });
         defer allocator.free(ssh_config_arg);
 
         {
@@ -1004,7 +1007,7 @@ fn testClone(
             goodbye_txt.close(io);
         }
     } else {
-        const ssh_cmd_maybe = try sshCommand(is_ssh, allocator, cwd_path, temp_dir_name);
+        const ssh_cmd_maybe = try sshCommand(is_ssh, allocator, cwd_path, temp_dir_name, port);
         defer if (ssh_cmd_maybe) |ssh_cmd| allocator.free(ssh_cmd);
 
         // clone repo
@@ -1036,6 +1039,7 @@ fn testFetchLarge(
     comptime repo_kind: rp.RepoKind,
     comptime transport_def: net.TransportDefinition,
     comptime shell_out_to_git: bool,
+    comptime port: u16,
     io: std.Io,
     allocator: std.mem.Allocator,
 ) !void {
@@ -1053,7 +1057,7 @@ fn testFetchLarge(
     defer temp_dir.close(io);
 
     // init server
-    var server_process = try runServer(io, allocator, temp_dir_name);
+    var server_process = try runServer(io, allocator, temp_dir_name, port);
     defer _ = server_process.kill(io);
 
     const cwd_path = try std.process.currentPathAlloc(io, allocator);
@@ -1103,7 +1107,7 @@ fn testFetchLarge(
 
     // add remote
     {
-        const remote_url = try remoteUrl(transport_def, allocator, "testrepo");
+        const remote_url = try remoteUrl(transport_def, allocator, "testrepo", port);
         defer allocator.free(remote_url);
 
         try client_repo.addRemote(io, allocator, .{ .name = "origin", .value = remote_url });
@@ -1118,7 +1122,7 @@ fn testFetchLarge(
     if (shell_out_to_git) {
         const priv_key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "key" });
         defer allocator.free(priv_key_path);
-        const ssh_config_arg = try std.fmt.allocPrint(allocator, "core.sshCommand=ssh -p {} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o IdentityFile={s}", .{ ssh_port, priv_key_path });
+        const ssh_config_arg = try std.fmt.allocPrint(allocator, "core.sshCommand=ssh -p {} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o IdentityFile={s}", .{ port + 1, priv_key_path });
         defer allocator.free(ssh_config_arg);
 
         {
@@ -1181,7 +1185,7 @@ fn testFetchLarge(
             "+refs/heads/master:refs/heads/master",
         };
 
-        const ssh_cmd_maybe = try sshCommand(is_ssh, allocator, cwd_path, temp_dir_name);
+        const ssh_cmd_maybe = try sshCommand(is_ssh, allocator, cwd_path, temp_dir_name, port);
         defer if (ssh_cmd_maybe) |ssh_cmd| allocator.free(ssh_cmd);
 
         try client_repo.fetch(
@@ -1208,6 +1212,7 @@ fn testPushLarge(
     comptime repo_kind: rp.RepoKind,
     comptime transport_def: net.TransportDefinition,
     comptime shell_out_to_git: bool,
+    comptime port: u16,
     io: std.Io,
     allocator: std.mem.Allocator,
 ) !void {
@@ -1225,7 +1230,7 @@ fn testPushLarge(
     defer temp_dir.close(io);
 
     // init server
-    var server_process = try runServer(io, allocator, temp_dir_name);
+    var server_process = try runServer(io, allocator, temp_dir_name, port);
     defer _ = server_process.kill(io);
 
     const cwd_path = try std.process.currentPathAlloc(io, allocator);
@@ -1307,7 +1312,7 @@ fn testPushLarge(
 
     // add remote
     {
-        const remote_url = try remoteUrl(transport_def, allocator, "testrepo");
+        const remote_url = try remoteUrl(transport_def, allocator, "testrepo", port);
         defer allocator.free(remote_url);
 
         try client_repo.addRemote(io, allocator, .{ .name = "origin", .value = remote_url });
@@ -1322,7 +1327,7 @@ fn testPushLarge(
     if (shell_out_to_git) {
         const priv_key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "key" });
         defer allocator.free(priv_key_path);
-        const ssh_config_arg = try std.fmt.allocPrint(allocator, "core.sshCommand=ssh -p {} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o IdentityFile={s}", .{ ssh_port, priv_key_path });
+        const ssh_config_arg = try std.fmt.allocPrint(allocator, "core.sshCommand=ssh -p {} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o IdentityFile={s}", .{ port + 1, priv_key_path });
         defer allocator.free(ssh_config_arg);
 
         // shell out to git so it will send delta objects
@@ -1341,7 +1346,7 @@ fn testPushLarge(
             return error.GitCommandFailed;
         }
     } else {
-        const ssh_cmd_maybe = try sshCommand(is_ssh, allocator, cwd_path, temp_dir_name);
+        const ssh_cmd_maybe = try sshCommand(is_ssh, allocator, cwd_path, temp_dir_name, port);
         defer if (ssh_cmd_maybe) |ssh_cmd| allocator.free(ssh_cmd);
 
         try client_repo.push(
@@ -1443,12 +1448,13 @@ fn remoteUrl(
     comptime transport_def: net.TransportDefinition,
     allocator: std.mem.Allocator,
     repo_name: []const u8,
+    port: u16,
 ) ![]u8 {
     return switch (transport_def) {
         .file => unreachable,
         .wire => |wire_kind| switch (wire_kind) {
-            .http => try std.fmt.allocPrint(allocator, "http://localhost:{}/admin/{s}", .{ http_port, repo_name }),
-            .raw => try std.fmt.allocPrint(allocator, "git://localhost:{}/admin/{s}", .{ http_port, repo_name }),
+            .http => try std.fmt.allocPrint(allocator, "http://localhost:{}/admin/{s}", .{ port, repo_name }),
+            .raw => try std.fmt.allocPrint(allocator, "git://localhost:{}/admin/{s}", .{ port, repo_name }),
             .ssh => try std.fmt.allocPrint(allocator, "git@localhost:admin/{s}", .{repo_name}),
         },
     };
@@ -1462,11 +1468,12 @@ fn sshCommand(
     allocator: std.mem.Allocator,
     cwd_path: []const u8,
     temp_dir_name: []const u8,
+    port: u16,
 ) !?[]u8 {
     if (!is_ssh) return null;
 
     const priv_key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "key" });
     defer allocator.free(priv_key_path);
 
-    return try std.fmt.allocPrint(allocator, "ssh -p {} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o IdentitiesOnly=yes -o IdentityFile=\"{s}\"", .{ ssh_port, priv_key_path });
+    return try std.fmt.allocPrint(allocator, "ssh -p {} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o IdentitiesOnly=yes -o IdentityFile=\"{s}\"", .{ port + 1, priv_key_path });
 }
