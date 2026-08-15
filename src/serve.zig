@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const xit = @import("xit");
 const rp = xit.repo;
 const ui = @import("./ui.zig");
@@ -70,16 +69,11 @@ pub fn run(
     const admin_repo_path = try std.fs.path.resolve(allocator, &.{ data_dir_path, "admin" });
     defer allocator.free(admin_repo_path);
 
-    // a debug build is a dev run, so a taken port falls back to a random one;
-    // a release build fails, since whatever points at the configured port
-    // would silently break.
-    const fallback = builtin.mode == .Debug;
-
     // create http listener
 
     var http_maybe: ?BoundListener = if (options.http_listen) |value| blk: {
         const address = try parseListenAddress(value);
-        break :blk .{ .address = address, .server = try listenWithFallback(io, address, fallback) };
+        break :blk .{ .address = address, .server = try listen(io, address, .reuse) };
     } else null;
     defer if (http_maybe) |*http| http.deinit(io);
 
@@ -90,7 +84,7 @@ pub fn run(
     // create wui listener
 
     const wui_listen_address = try parseListenAddress(options.wui_listen);
-    var wui_server = try listenWithFallback(io, wui_listen_address, fallback);
+    var wui_server = try listen(io, wui_listen_address, .reuse);
     defer wui_server.deinit(io);
 
     // create ssh listener and its session state
@@ -98,7 +92,7 @@ pub fn run(
     const clone_http_port: ?u16 = if (http_maybe) |*http| http.port() else null;
     var ssh_maybe: ?SshService = if (options.ssh_listen) |value| blk: {
         const address = try parseListenAddress(value);
-        var listener = BoundListener{ .address = address, .server = try listenWithFallback(io, address, fallback) };
+        var listener = BoundListener{ .address = address, .server = try listen(io, address, .reuse) };
         errdefer listener.deinit(io);
         const ssh_port = listener.port();
         break :blk .{
@@ -168,7 +162,7 @@ pub fn runLocal(
     // always fall back, so another instance viewing a second repo just binds
     // its own port
     const wui_listen_address = try parseListenAddress((Options{}).wui_listen);
-    var wui_server = try listenWithFallback(io, wui_listen_address, true);
+    var wui_server = try listen(io, wui_listen_address, .fallback);
     defer wui_server.deinit(io);
 
     var tasks: std.Io.Group = .init;
@@ -211,19 +205,27 @@ fn runWebListener(
     }, handle);
 }
 
-// bind the address. when it's taken, fall back to an OS-assigned port, or
-// fail without `fallback`. no reuse_address: on linux it also sets
-// SO_REUSEPORT, which would let this bind silently share a port an
-// already-running server holds rather than seeing it as taken.
-fn listenWithFallback(io: std.Io, listen_address: ListenAddress, fallback: bool) !std.Io.net.Server {
+// what a listener does with a port that is already taken
+const PortPolicy = enum {
+    // bind it anyway, so a restart isn't blocked by the last run's connections
+    // sitting in TIME_WAIT. on linux this also sets SO_REUSEPORT, so a server
+    // already holding the port ends up sharing it.
+    reuse,
+    // leave it to whoever holds it and take an OS-assigned port instead
+    fallback,
+};
+
+fn listen(io: std.Io, listen_address: ListenAddress, policy: PortPolicy) !std.Io.net.Server {
     const address = try std.Io.net.IpAddress.parseIp4(listen_address.host, listen_address.port);
-    return address.listen(io, .{}) catch |listen_err| switch (listen_err) {
-        error.AddressInUse => blk: {
-            if (!fallback) return listen_err;
-            const any_port = try std.Io.net.IpAddress.parseIp4(listen_address.host, 0);
-            break :blk try any_port.listen(io, .{});
+    return switch (policy) {
+        .reuse => try address.listen(io, .{ .reuse_address = true }),
+        .fallback => address.listen(io, .{}) catch |listen_err| switch (listen_err) {
+            error.AddressInUse => blk: {
+                const any_port = try std.Io.net.IpAddress.parseIp4(listen_address.host, 0);
+                break :blk try any_port.listen(io, .{});
+            },
+            else => |e| return e,
         },
-        else => |e| return e,
     };
 }
 
