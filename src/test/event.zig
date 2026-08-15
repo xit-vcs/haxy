@@ -949,7 +949,7 @@ test "merge" {
     }
 
     //
-    // a deletion on the other branch carries over, unless we edited the issue,
+    // a removal on the other branch carries over, unless we edited the issue,
     // in which case the edit wins
     //
 
@@ -972,7 +972,7 @@ test "merge" {
             _ = try repo.commitAtRef(io, allocator, .{ .message = json.written() }, null, evt.events_ref);
         }
 
-        // the other branch deletes both
+        // the other branch removes both
         {
             json.clearRetainingCapacity();
             const event = evt.EventWithId{ .id = events_to_consume2[0].id, .author = author, .event = .{ .issue = null } };
@@ -1000,11 +1000,11 @@ test "merge" {
 
         const haxy_moment = try evt.currentMoment(repo_opts, &repo);
 
-        // the one we left alone is tombstoned, and its tags left the index
+        // the one we left alone is removed, and its tags left the index
         var dropped_id: [evt.event_id_size]u8 = undefined;
         _ = try std.fmt.hexToBytes(&dropped_id, &events_to_consume2[0].id);
         const dropped = try readIssue(Repo.DB, repo_opts.hash, haxy_moment, &arena, &dropped_id);
-        try std.testing.expect(dropped.deleted);
+        try std.testing.expect(dropped.removed);
 
         const tag_to_issues_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, "tag+status->issue-id-set")) orelse return error.NotFound;
         const tag_to_issues = try Repo.DB.SortedMap(.read_only).init(tag_to_issues_cursor);
@@ -1014,7 +1014,7 @@ test "merge" {
         var kept_id: [evt.event_id_size]u8 = undefined;
         _ = try std.fmt.hexToBytes(&kept_id, &events_to_consume2[1].id);
         const kept = try readIssue(Repo.DB, repo_opts.hash, haxy_moment, &arena, &kept_id);
-        try std.testing.expect(!kept.deleted);
+        try std.testing.expect(!kept.removed);
         try std.testing.expectEqualStrings("Kept by the edit", kept.event.title);
     }
 }
@@ -1202,7 +1202,7 @@ test "user and repo" {
         const repo_cursor = try event_id_to_repo.getCursor(hash.hashInt(repo_opts.hash, &repo_event_id)) orelse return error.NotFound;
         const repo_map = try Repo.DB.HashMap(.read_only).init(repo_cursor);
         const repo_event = try evt.read(evt.Repo.Record, Repo.DB, repo_opts.hash, &arena, repo_map);
-        try std.testing.expect(repo_event.deleted);
+        try std.testing.expect(repo_event.removed);
 
         // get the repos created by the user
         const user_id_to_repo_id_set_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, "user-id->repo-id-set")) orelse return error.NotFound;
@@ -1229,7 +1229,7 @@ test "user and repo" {
         const repo_cursor = try event_id_to_repo.getCursor(hash.hashInt(repo_opts.hash, &repo_event_id)) orelse return error.NotFound;
         const repo_map = try Repo.DB.HashMap(.read_only).init(repo_cursor);
         const repo_event = try evt.read(evt.Repo.Record, Repo.DB, repo_opts.hash, &arena, repo_map);
-        try std.testing.expect(!repo_event.deleted);
+        try std.testing.expect(!repo_event.removed);
 
         const user_id_to_repo_id_set_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, "user-id->repo-id-set")) orelse return error.NotFound;
         const user_id_to_repo_id_set = try Repo.DB.HashMap(.read_only).init(user_id_to_repo_id_set_cursor);
@@ -1263,15 +1263,15 @@ test "user and repo" {
         const user_cursor = try event_id_to_user.getCursor(hash.hashInt(repo_opts.hash, &user_event_id)) orelse return error.NotFound;
         const user_map = try Repo.DB.HashMap(.read_only).init(user_cursor);
         const user_event = try evt.read(evt.User.Record, Repo.DB, repo_opts.hash, &arena, user_map);
-        try std.testing.expect(user_event.deleted);
+        try std.testing.expect(user_event.removed);
 
-        // deleting the user tombstones their active repos too
+        // removing the user removes their active repos too
         const event_id_to_repo_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, "event-id->repo")) orelse return error.NotFound;
         const event_id_to_repo = try Repo.DB.HashMap(.read_only).init(event_id_to_repo_cursor);
         const repo_cursor = try event_id_to_repo.getCursor(hash.hashInt(repo_opts.hash, &repo_event_id)) orelse return error.NotFound;
         const repo_map = try Repo.DB.HashMap(.read_only).init(repo_cursor);
         const repo_event = try evt.read(evt.Repo.Record, Repo.DB, repo_opts.hash, &arena, repo_map);
-        try std.testing.expect(repo_event.deleted);
+        try std.testing.expect(repo_event.removed);
     }
 }
 
@@ -1353,7 +1353,7 @@ test "repos and users paginate newest first" {
         try std.testing.expectEqual(1, try uset.count());
     }
 
-    // deleting repo1 retains its place in the canonical order
+    // removing repo1 retains its place in the canonical order
     try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &[_]evt.EventWithId{
         .{ .id = std.fmt.bytesToHex(repo_ids[1], .lower), .author = author, .timestamp = 200, .event = .{ .repo = null } },
     });

@@ -11,7 +11,7 @@ parent_id: [evt.event_id_size * 2]u8,
 // from there rather than from the payload.
 pub const Record = struct {
     event: Self,
-    deleted: bool = false,
+    removed: bool = false,
     author_email: ?[]const u8 = null,
     created_ts: u64 = 0, // the commit timestamp of the event that created this attachment
     name: []const u8,
@@ -80,7 +80,7 @@ pub fn consume(
         record
     else blk: {
         var record = existing_record_maybe orelse return error.EventNotFound;
-        record.deleted = true;
+        record.removed = true;
         break :blk record;
     };
 
@@ -106,7 +106,7 @@ pub fn consume(
     const attachment_cursor = try event_id_to_attachment.putCursor(attachment_key);
     const attachment = try DB.HashMap(.read_write).init(attachment_cursor);
     try evt.upsert(Record, DB, hash_kind, attachment, record_to_write);
-    try evt.indexEvent(DB, hash_kind, haxy_moment, event_id, .attach, record_to_write.created_ts);
+    try evt.indexEvent(DB, hash_kind, haxy_moment, event_id, .attach, record_to_write.created_ts, record_to_write.removed);
 
     if (existing_cursor_maybe == null) {
         const attachment_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, id_set_key));
@@ -114,7 +114,7 @@ pub fn consume(
         try attachment_id_set.put(&evt.orderKeyDesc(record_to_write.created_ts, event_id));
     }
 
-    // tombstones stay in the parent's set; the views skip them
+    // removed attachments stay in the parent's set; the views skip them
     const parent_attachments_cursor = try parent_id_to_attachment_id_set.putCursor(hash.hashInt(hash_kind, &record_to_write.event.parent_id));
     const parent_attachments = try DB.SortedSet(.read_write).init(parent_attachments_cursor);
     try parent_attachments.put(&evt.orderKey(record_to_write.created_ts, event_id));

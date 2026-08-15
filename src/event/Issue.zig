@@ -13,7 +13,7 @@ status: Status = .open,
 // what the db stores: the event's data plus the commit-derived fields
 pub const Record = struct {
     event: Self,
-    deleted: bool = false,
+    removed: bool = false,
     author_email: ?[]const u8 = null,
     created_ts: u64 = 0, // the commit timestamp of the event that first created this issue
 };
@@ -104,7 +104,7 @@ pub fn consume(
         record
     else blk: {
         var record = existing_record_maybe orelse return error.EventNotFound;
-        record.deleted = true;
+        record.removed = true;
         break :blk record;
     };
 
@@ -115,7 +115,7 @@ pub fn consume(
 
         // drop the old status's and tags' entries; active values are re-added below
         const order_key = evt.orderKeyDesc(existing_record.created_ts, event_id);
-        if (!existing_record.deleted) {
+        if (!existing_record.removed) {
             const status_set = try statusSet(DB, status_to_issues, existing_record.event.status);
             _ = try status_set.remove(&order_key);
             try removeFromTagSets(DB, tag_to_issues, existing_record.event.tags, existing_record.event.status, &order_key);
@@ -123,7 +123,7 @@ pub fn consume(
 
         // any event settles the conflict, since resolving in the ui may
         // keep our own values and so change nothing to detect
-        if (event_oid != null or record_to_write.deleted) _ = try conflicts.remove(&order_key);
+        if (event_oid != null or record_to_write.removed) _ = try conflicts.remove(&order_key);
     }
 
     try evt.writeOid(Self, DB, hash_kind, issue_id_to_field_to_oid, issue_key, if (existing_record_maybe) |existing| existing.event else null, record_to_write.event, event_oid);
@@ -131,18 +131,18 @@ pub fn consume(
     const issue_cursor = try event_id_to_issue.putCursor(issue_key);
     const issue = try DB.HashMap(.read_write).init(issue_cursor);
     try evt.upsert(Record, DB, hash_kind, issue, record_to_write);
-    try evt.indexEvent(DB, hash_kind, haxy_moment, event_id, .issue, record_to_write.created_ts);
+    try evt.indexEvent(DB, hash_kind, haxy_moment, event_id, .issue, record_to_write.created_ts, record_to_write.removed);
 
     const order_key = evt.orderKeyDesc(record_to_write.created_ts, event_id);
 
-    // the id set retains tombstones so merges can carry deletions
+    // the id set retains removed records so merges can carry removals
     if (existing_cursor_maybe == null) {
         const issue_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, id_set_key));
         const issue_id_set = try DB.SortedSet(.read_write).init(issue_id_set_cursor);
         try issue_id_set.put(&order_key);
     }
 
-    if (!record_to_write.deleted) {
+    if (!record_to_write.removed) {
         const status_set = try statusSet(DB, status_to_issues, record_to_write.event.status);
         try status_set.put(&order_key);
 
@@ -204,6 +204,7 @@ pub fn update(
     defer arena.deinit();
 
     const issue = (try readById(repo_kind, repo_opts, io, allocator, &arena, repo, id_bytes)) orelse return error.NotFound;
+    if (issue.removed) return error.NotFound;
 
     var updated = issue.event;
     switch (change) {

@@ -175,5 +175,5 @@ test "sync creates missing event branches and preserves head" {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const status = try Events.Header.local(.git, .{}, arena.allocator(), &local, io, null);
-    try std.testing.expectEqualStrings("nothing to sync", status.status);
+    try std.testing.expectEqualStrings("nothing to sync", status.sync_status orelse return error.TestExpectedEqual);
 }

@@ -98,7 +98,7 @@ fn tick(min_height: u32, max_width: u32) !void {
             // gets focus and Enter falls through to the wasm.
             switch (child.focus.kind) {
                 .text_input, .text_input_password, .text_area => _focusInput(@intCast(gid)),
-                .custom => |custom| if (std.mem.eql(u8, custom, "submit") or std.mem.startsWith(u8, custom, ui.file_input_prefix)) _focusInput(@intCast(gid)),
+                .custom => |custom| if (std.mem.eql(u8, custom, "submit") or std.mem.startsWith(u8, custom, ui.submit_action_prefix) or std.mem.startsWith(u8, custom, ui.file_input_prefix)) _focusInput(@intCast(gid)),
                 else => {},
             }
 

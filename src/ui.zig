@@ -117,6 +117,8 @@ pub const RoutablePage = union(enum) {
 
     pub const IssuesView = enum { open, closed, tags, new, edit, description, new_comment, edit_comment, conflicts, resolve };
 
+    pub const EventsView = enum { active, removed };
+
     pub const RefOrOid = enum {
         branch,
         tag,
@@ -289,6 +291,7 @@ pub const RoutablePage = union(enum) {
 
     pub const RepoEventsRoute = struct {
         name: Array(repo_identity_max_len),
+        view: EventsView = .active,
         kind: ?evt.EventKind = null,
         selected: Array(evt.event_id_size * 2) = .{},
     };
@@ -347,10 +350,11 @@ pub const RoutablePage = union(enum) {
     }
 
     // build the events list or a window rooted at one event.
-    pub fn repoEventsRoute(identity: []const u8, kind: ?evt.EventKind, selected: []const u8) ?RoutablePage {
+    pub fn repoEventsRoute(identity: []const u8, view: EventsView, kind: ?evt.EventKind, selected: []const u8) ?RoutablePage {
         if ((kind == null) != (selected.len == 0)) return null;
         return .{ .repo_events = .{
             .name = Array(repo_identity_max_len).from(identity) orelse return null,
+            .view = view,
             .kind = kind,
             .selected = Array(evt.event_id_size * 2).from(selected) orelse return null,
         } };
@@ -576,7 +580,7 @@ pub const RoutablePage = union(enum) {
                 break :blk if (e.kind) |kind|
                     try std.fmt.allocPrint(arena.allocator(), "{s}/event:{s}/kind:{s}", .{ prefix, e.selected.slice(), @tagName(kind) })
                 else
-                    try std.fmt.allocPrint(arena.allocator(), "{s}/events", .{prefix});
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/events/{s}", .{ prefix, @tagName(e.view) });
             },
             .repo_settings => |name| try std.fmt.allocPrint(arena.allocator(), "{s}/settings", .{try repoUrlPrefix(arena, name.slice())}),
             .repo_auth => |name| try std.fmt.allocPrint(arena.allocator(), "{s}/auth", .{try repoUrlPrefix(arena, name.slice())}),
@@ -764,15 +768,20 @@ pub const RoutablePage = union(enum) {
             if (std.mem.eql(u8, w, "new")) return if (tag_value.len == 0) repoIssuesNewRoute(pair) else null;
             return null;
         }
-        if (std.mem.eql(u8, tab, "events"))
-            return if (segments.next() == null) repoEventsRoute(pair, null, "") else null;
+        if (std.mem.eql(u8, tab, "events")) {
+            const view = if (segments.next()) |word|
+                std.meta.stringToEnum(EventsView, word) orelse return null
+            else
+                .active;
+            return if (segments.next() == null) repoEventsRoute(pair, view, null, "") else null;
+        }
         if (std.mem.startsWith(u8, tab, "event:")) {
             const event_id = tab["event:".len..];
             const kind_segment = segments.next() orelse return null;
             if (!std.mem.startsWith(u8, kind_segment, "kind:")) return null;
             const kind = std.meta.stringToEnum(evt.EventKind, kind_segment["kind:".len..]) orelse return null;
             if (event_id.len == 0 or segments.next() != null) return null;
-            return repoEventsRoute(pair, kind, event_id);
+            return repoEventsRoute(pair, .active, kind, event_id);
         }
         if (std.mem.eql(u8, tab, files_seg)) {
             params.scanPairs(&segments) catch return null;
@@ -832,6 +841,7 @@ pub const RoutablePage = union(enum) {
                 a_i.comments_start == b.repo_issues.comments_start and
                 std.mem.eql(u8, a_i.comment.slice(), b.repo_issues.comment.slice()),
             .repo_events => |a_e| std.mem.eql(u8, a_e.name.slice(), b.repo_events.name.slice()) and
+                a_e.view == b.repo_events.view and
                 a_e.kind == b.repo_events.kind and
                 std.mem.eql(u8, a_e.selected.slice(), b.repo_events.selected.slice()),
             .repo_settings => |a_name| std.mem.eql(u8, a_name.slice(), b.repo_settings.slice()),
@@ -1367,6 +1377,9 @@ pub const raw_link_prefix = "ax:";
 // a button the web overlay covers with a file picker that posts the chosen
 // file to the url after the prefix
 pub const file_input_prefix = "file:";
+
+// a submit button that overrides its enclosing form's action
+pub const submit_action_prefix = "submit:";
 
 // the url an `ax:` link points at, or null for anything else. a host that
 // suppresses the anchor's own navigation needs this to follow the link.

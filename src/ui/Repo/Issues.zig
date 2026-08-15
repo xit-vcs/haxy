@@ -573,6 +573,7 @@ pub const View = struct {
     description_id: [stack_child_max]?usize,
     author_id: [stack_child_max]?usize,
     status_button_id: [stack_child_max]?usize,
+    remove_button_id: [stack_child_max]?usize,
 
     const header_index: usize = 0;
     const stack_index: usize = 1;
@@ -764,6 +765,7 @@ pub const View = struct {
             .description_id = @splat(null),
             .author_id = @splat(null),
             .status_button_id = @splat(null),
+            .remove_button_id = @splat(null),
         };
     }
 
@@ -1408,6 +1410,7 @@ pub const View = struct {
         inner.getFocus().child_id = null;
         self.author_id[index] = null;
         self.status_button_id[index] = null;
+        self.remove_button_id[index] = null;
 
         // the tool row: the open/close and edit buttons; the description page
         // shows none.
@@ -1488,6 +1491,22 @@ pub const View = struct {
                     button.getFocus().kind = .{ .custom = try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}) };
                     try row.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = .{ .width = "edit".len + 2, .height = null } });
                 }
+            }
+
+            if (self.session.data.is_local or self.session.data.user_id != null) {
+                const issue_route = ui.RoutablePage.repoIssueCommentsRoute(self.data.identity, entry.id, 0) orelse return error.RouteTooLong;
+                const remove_url = try std.fmt.allocPrint(pa, "{s}/remove", .{try issue_route.toUrl(self.session.page_arena)});
+                const kind: []const u8 = if (entry.conflicted) blk: {
+                    row.getFocus().kind = .{ .custom = try std.fmt.allocPrint(pa, "form:{s}", .{remove_url}) };
+                    break :blk "submit";
+                } else try std.fmt.allocPrint(pa, "{s}{s}", .{ ui.submit_action_prefix, remove_url });
+
+                var remove = try wgt.TextBox(ui.Widget).init(allocator, "✕", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+                errdefer remove.deinit(allocator);
+                remove.getFocus().focusable = true;
+                remove.getFocus().kind = .{ .custom = kind };
+                self.remove_button_id[index] = remove.getFocus().id;
+                try row.children.put(allocator, remove.getFocus().id, .{ .widget = .{ .text_box = remove }, .rect = null, .min_size = .{ .width = 3, .height = null } });
             }
 
             // the leftmost button: the attachment button when the session has
@@ -1587,7 +1606,8 @@ pub const View = struct {
             break :blk tb.getFocus().id;
         };
 
-        try Attachment.appendRows(allocator, inner, self.session, self.data.identity, entry.attachments);
+        const parent_route = ui.RoutablePage.repoIssueCommentsRoute(self.data.identity, entry.id, 0) orelse return error.RouteTooLong;
+        try Attachment.appendRows(allocator, inner, self.session, self.data.identity, try parent_route.toUrl(self.session.page_arena), entry.attachments);
 
         if (!description_page) {
             var reply = try Comment.linkBox(allocator, self.session, "new comment", ui.RoutablePage.repoCommentNewRoute(self.data.identity, entry.id, "") orelse return error.RouteTooLong);
@@ -1716,7 +1736,7 @@ pub const View = struct {
             else => {},
         }
         if (self.data.comment_page != null and std.mem.eql(u8, self.window(index).issues[self.detailed_index[index] orelse return].id, self.data.selected_id)) {
-            try self.commentInput(index, key, root_focus);
+            try self.commentInput(allocator, index, key, root_focus);
         } else if (self.toolRowFocused(index)) {
             try self.toolRowInput(allocator, index, key, root_focus);
         } else if (self.titleFocused(index)) {
@@ -1727,9 +1747,31 @@ pub const View = struct {
             try self.tagsInput(index, key, root_focus);
         } else if (self.descriptionFocused(index)) {
             try self.descriptionInput(index, key, root_focus);
-        } else {
-            try self.commentInput(index, key, root_focus);
+        } else if (try self.attachmentInput(allocator, index, key, root_focus)) {} else {
+            try self.commentInput(allocator, index, key, root_focus);
         }
+    }
+
+    fn attachmentInput(self: *View, allocator: std.mem.Allocator, index: usize, key: Key, root_focus: *Focus) !bool {
+        const child_index = self.focusedDetailChild(index, root_focus) orelse return false;
+        const child = &self.detailInner(index).children.values()[child_index].widget;
+        const row = switch (child.*) {
+            .box => |*box| box,
+            else => return false,
+        };
+        const attachment_id = Attachment.removeId(row) orelse return false;
+        if (row.children.count() < 2) return false;
+        const remove_id = row.children.keys()[1];
+        switch (key) {
+            .arrow_left => if (!self.moveCommentHorizontal(index, root_focus, false)) try self.focusList(index, root_focus),
+            .arrow_right => _ = self.moveCommentHorizontal(index, root_focus, true),
+            .arrow_up => _ = self.moveDetailVertical(index, root_focus, false),
+            .arrow_down => _ = self.moveDetailVertical(index, root_focus, true),
+            .enter => if (row.getFocus().child_id == remove_id) try self.removeEvent(allocator, .attach, attachment_id),
+            .mouse => |mouse| if (inp.leftClickOn(root_focus, remove_id, mouse)) try self.removeEvent(allocator, .attach, attachment_id),
+            else => {},
+        }
+        return true;
     }
 
     // the tool row: enter or a click on the open/close button flips the
@@ -1740,6 +1782,7 @@ pub const View = struct {
         const row = self.toolRow(index);
         const cur = if (row.getFocus().child_id) |cid| row.children.getIndex(cid) orelse return else return;
         const on_status = if (self.status_button_id[index]) |id| row.getFocus().child_id == id else false;
+        const on_remove = if (self.remove_button_id[index]) |id| row.getFocus().child_id == id else false;
         switch (key) {
             .arrow_left => if (cur > first_in_row_index) root_focus.setFocus(row.children.keys()[cur - 1]) else try self.focusList(index, root_focus),
             .arrow_right => if (cur + 1 < row.children.count()) root_focus.setFocus(row.children.keys()[cur + 1]),
@@ -1748,8 +1791,11 @@ pub const View = struct {
                 self.focusDetailEdge(index, root_focus, false);
                 self.detailScroll(index).y = 0;
             },
-            .enter => if (on_status) try self.toggleIssueStatus(allocator, index),
-            .mouse => |mouse| if (self.status_button_id[index]) |id| {
+            .enter => if (on_remove) try self.removeIssue(allocator, index) else if (on_status) try self.toggleIssueStatus(allocator, index),
+            .mouse => |mouse| if (self.remove_button_id[index]) |id| {
+                if (inp.leftClickOn(root_focus, id, mouse)) return self.removeIssue(allocator, index);
+                if (self.status_button_id[index]) |status_id| if (inp.leftClickOn(root_focus, status_id, mouse)) try self.toggleIssueStatus(allocator, index);
+            } else if (self.status_button_id[index]) |id| {
                 if (inp.leftClickOn(root_focus, id, mouse)) try self.toggleIssueStatus(allocator, index);
             },
             else => {},
@@ -1811,14 +1857,27 @@ pub const View = struct {
         sc.clampToContent();
     }
 
-    fn commentInput(self: *View, index: usize, key: Key, root_focus: *Focus) !void {
+    fn commentInput(self: *View, allocator: std.mem.Allocator, index: usize, key: Key, root_focus: *Focus) !void {
+        const item = self.focusedComment(index, root_focus);
         switch (key) {
             .arrow_left => if (!self.moveCommentHorizontal(index, root_focus, false)) return self.focusList(index, root_focus),
             .arrow_right => _ = self.moveCommentHorizontal(index, root_focus, true),
             .arrow_up => _ = self.moveDetailVertical(index, root_focus, false),
             .arrow_down => _ = self.moveDetailVertical(index, root_focus, true),
+            .enter => if (item) |comment| if (comment.removeFocused()) try self.removeComment(allocator, comment),
+            .mouse => |mouse| if (item) |comment| if (comment.remove_button_id) |id| {
+                if (inp.leftClickOn(root_focus, id, mouse)) try self.removeComment(allocator, comment);
+            },
             else => return,
         }
+    }
+
+    fn focusedComment(self: *View, index: usize, root_focus: *Focus) ?*Comment.Item {
+        const child_index = self.focusedDetailChild(index, root_focus) orelse return null;
+        return switch (self.detailInner(index).children.values()[child_index].widget) {
+            .repo_comment => |*comment| comment,
+            else => null,
+        };
     }
 
     // page the detail scroll, then focus the first or last visible widget.
@@ -2381,6 +2440,40 @@ pub const View = struct {
         }
 
         const route = ui.RoutablePage.repoIssuesRoute(self.data.identity, entry.issue.event.status, "", entry.id) orelse return;
+        try self.session.navigate(route);
+    }
+
+    fn removeIssue(self: *View, allocator: std.mem.Allocator, index: usize) !void {
+        const sel = self.detailed_index[index] orelse return;
+        const entry = self.window(index).issues[sel];
+
+        var id_bytes: [evt.event_id_size]u8 = undefined;
+        _ = std.fmt.hexToBytes(&id_bytes, entry.id) catch return;
+        try self.removeEvent(allocator, .issue, id_bytes);
+    }
+
+    fn removeComment(self: *View, allocator: std.mem.Allocator, comment: *Comment.Item) !void {
+        try self.removeEvent(allocator, .comment, comment.id);
+    }
+
+    fn removeEvent(self: *View, allocator: std.mem.Allocator, kind: evt.EventKind, id: [evt.event_id_size]u8) !void {
+        if (comptime wasm) return;
+        const io = self.session.io orelse return;
+        const src = self.data.repo_source orelse return;
+        const author = (try self.session.eventAuthor()) orelse return;
+
+        switch (src.repo_kind) {
+            inline else => |repo_kind| {
+                var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, src.localInitOpts());
+                defer any_repo.deinit(io, allocator);
+                switch (any_repo) {
+                    inline else => |*repo| try evt.remove(repo_kind, repo.self_repo_opts, io, allocator, repo, &id, kind, author),
+                }
+            },
+        }
+
+        const id_hex = std.fmt.bytesToHex(id, .lower);
+        const route = ui.RoutablePage.repoEventsRoute(self.data.identity, .removed, kind, &id_hex) orelse return;
         try self.session.navigate(route);
     }
 

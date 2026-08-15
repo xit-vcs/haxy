@@ -138,6 +138,8 @@ fn idBytes(id: []const u8) ?[evt.event_id_size]u8 {
 
 pub const Item = struct {
     box: wgt.Box(ui.Widget),
+    id: [evt.event_id_size]u8,
+    remove_button_id: ?usize,
 
     const metadata_index: usize = 0;
     const body_index: usize = 1;
@@ -147,6 +149,7 @@ pub const Item = struct {
     pub fn init(allocator: std.mem.Allocator, session: *ui.Session, identity: []const u8, entry: CommentWithId) !Item {
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert });
         errdefer box.deinit(allocator);
+        var remove_button_id: ?usize = null;
 
         {
             var bar = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
@@ -164,9 +167,11 @@ pub const Item = struct {
             errdefer reply.deinit(allocator);
             try bar.children.put(allocator, reply.getFocus().id, .{ .widget = .{ .text_box = reply }, .rect = null, .min_size = .{ .width = "new reply".len + 2, .height = null } });
 
-            var edit = try linkBox(allocator, session, "edit comment", ui.RoutablePage.repoCommentEditRoute(identity, &entry.comment.event.thread_id, &entry.id) orelse return error.RouteTooLong);
-            errdefer edit.deinit(allocator);
-            try bar.children.put(allocator, edit.getFocus().id, .{ .widget = .{ .text_box = edit }, .rect = null, .min_size = .{ .width = "edit comment".len + 2, .height = null } });
+            if (!entry.comment.removed) {
+                var edit = try linkBox(allocator, session, "edit comment", ui.RoutablePage.repoCommentEditRoute(identity, &entry.comment.event.thread_id, &entry.id) orelse return error.RouteTooLong);
+                errdefer edit.deinit(allocator);
+                try bar.children.put(allocator, edit.getFocus().id, .{ .widget = .{ .text_box = edit }, .rect = null, .min_size = .{ .width = "edit comment".len + 2, .height = null } });
+            }
 
             var permalink = try linkBox(allocator, session, "permalink", ui.RoutablePage.repoCommentsRoute(identity, &entry.comment.event.thread_id, &entry.id, 0) orelse return error.RouteTooLong);
             errdefer permalink.deinit(allocator);
@@ -190,11 +195,22 @@ pub const Item = struct {
                 try bar.children.put(allocator, parent.getFocus().id, .{ .widget = .{ .text_box = parent }, .rect = null, .min_size = .{ .width = @max(parent_text.len, " replying to ".len) + 2, .height = null } });
             }
 
+            if (!entry.comment.removed and (session.data.is_local or session.data.user_id != null)) {
+                const route = ui.RoutablePage.repoCommentsRoute(identity, &entry.comment.event.thread_id, &entry.id, 0) orelse return error.RouteTooLong;
+                bar.getFocus().kind = .{ .custom = try std.fmt.allocPrint(session.page_arena.allocator(), "form:{s}/remove", .{try route.toUrl(session.page_arena)}) };
+                var remove = try wgt.TextBox(ui.Widget).init(allocator, "✕", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+                errdefer remove.deinit(allocator);
+                remove.getFocus().focusable = true;
+                remove.getFocus().kind = .{ .custom = "submit" };
+                remove_button_id = remove.getFocus().id;
+                try bar.children.put(allocator, remove.getFocus().id, .{ .widget = .{ .text_box = remove }, .rect = null, .min_size = .{ .width = 3, .height = null } });
+            }
+
             bar.getFocus().child_id = bar.children.keys()[metadata_first_link_index];
             try box.children.put(allocator, bar.getFocus().id, .{ .widget = .{ .box = bar }, .rect = null, .min_size = null });
         }
 
-        const body_text = if (entry.comment.deleted) "(deleted)" else entry.comment.event.body;
+        const body_text = if (entry.comment.removed) "(removed)" else entry.comment.event.body;
         var body_box = try wgt.TextBox(ui.Widget).init(allocator, body_text, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .word });
         errdefer body_box.deinit(allocator);
         body_box.getFocus().focusable = true;
@@ -206,7 +222,11 @@ pub const Item = struct {
 
         box.getFocus().child_id = box.children.keys()[metadata_index];
 
-        return .{ .box = box };
+        return .{
+            .box = box,
+            .id = idBytes(&entry.id) orelse return error.InvalidEventId,
+            .remove_button_id = remove_button_id,
+        };
     }
 
     fn metadata(self: *Item) *wgt.Box(ui.Widget) {
@@ -219,6 +239,11 @@ pub const Item = struct {
 
     pub fn bodyFocused(self: *Item) bool {
         return self.box.getFocus().child_id == self.body().getFocus().id;
+    }
+
+    pub fn removeFocused(self: *Item) bool {
+        const id = self.remove_button_id orelse return false;
+        return self.metadata().getFocus().child_id == id;
     }
 
     pub fn focusMetadata(self: *Item, root_focus: *Focus) void {

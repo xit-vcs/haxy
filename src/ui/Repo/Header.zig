@@ -120,7 +120,7 @@ pub const View = struct {
         const refs_link = try std.fmt.allocPrint(aa, "ai:{s}", .{try refs_route.toUrl(session.page_arena)});
         const issues_route = ui.RoutablePage.repoIssuesRoute(identity, .open, data.issues_tag, "") orelse return error.RouteTooLong;
         const issues_link = try std.fmt.allocPrint(aa, "ai:{s}", .{try issues_route.toUrl(session.page_arena)});
-        const events_route = ui.RoutablePage.repoEventsRoute(identity, null, "") orelse return error.RouteTooLong;
+        const events_route = ui.RoutablePage.repoEventsRoute(identity, .active, null, "") orelse return error.RouteTooLong;
         const events_link = try std.fmt.allocPrint(aa, "ai:{s}", .{try events_route.toUrl(session.page_arena)});
         const settings_route = ui.RoutablePage{ .repo_settings = Array.from(identity) orelse return error.RouteTooLong };
         const settings_link = try std.fmt.allocPrint(aa, "ai:{s}", .{try settings_route.toUrl(session.page_arena)});

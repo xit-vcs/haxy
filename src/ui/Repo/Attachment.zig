@@ -11,7 +11,7 @@ pub const WithId = struct {
     name: []const u8,
 };
 
-// every attachment on a parent event, oldest first. tombstoned ones are
+// every attachment on a parent event, oldest first. removed ones are
 // left out.
 pub fn load(
     comptime hash_kind: hash.HashKind,
@@ -30,7 +30,7 @@ pub fn load(
     while (try iter.next()) |cursor_val| {
         const id_bytes = try evt.readOrderKeyId(DB, cursor_val);
         const record = (try evt.Attachment.readById(DB, hash_kind, haxy_moment, arena, &id_bytes)) orelse continue;
-        if (record.deleted) continue;
+        if (record.removed) continue;
         try attachments.append(arena.allocator(), .{
             .id = std.fmt.bytesToHex(id_bytes, .lower),
             .name = record.name,
@@ -46,10 +46,14 @@ pub fn appendRows(
     box: *wgt.Box(ui.Widget),
     session: *ui.Session,
     identity: []const u8,
+    parent_url: []const u8,
     attachments: []const WithId,
 ) !void {
     const pa = session.page_arena.allocator();
     for (attachments) |entry| {
+        var row = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
+        errdefer row.deinit(allocator);
+
         var tb = try wgt.TextBox(ui.Widget).init(allocator, entry.name, .{
             .border_style = .single,
             .rounded_corners = true,
@@ -59,8 +63,38 @@ pub fn appendRows(
         errdefer tb.deinit(allocator);
         tb.getFocus().focusable = true;
         tb.getFocus().kind = .{ .custom = try std.fmt.allocPrint(pa, "{s}{s}", .{ ui.raw_link_prefix, try url(session.page_arena, identity, &entry.id) }) };
-        try box.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
+        try row.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
+
+        if (session.data.is_local or session.data.user_id != null) {
+            row.getFocus().kind = .{ .custom = try std.fmt.allocPrint(pa, "form:{s}/attachment:{s}/remove", .{ parent_url, &entry.id }) };
+            var remove = try wgt.TextBox(ui.Widget).init(allocator, "✕", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            errdefer remove.deinit(allocator);
+            remove.getFocus().focusable = true;
+            remove.getFocus().kind = .{ .custom = "submit" };
+            try row.children.put(allocator, remove.getFocus().id, .{ .widget = .{ .text_box = remove }, .rect = null, .min_size = .{ .width = 3, .height = null } });
+        }
+
+        row.getFocus().child_id = row.children.keys()[0];
+        try box.children.put(allocator, row.getFocus().id, .{ .widget = .{ .box = row }, .rect = null, .min_size = null });
     }
+}
+
+// the attachment id carried by a removable row
+pub fn removeId(row: *wgt.Box(ui.Widget)) ?[evt.event_id_size]u8 {
+    const prefix = "form:";
+    const infix = "/attachment:";
+    const suffix = "/remove";
+    const action = switch (row.getFocus().kind) {
+        .custom => |custom| custom,
+        else => return null,
+    };
+    if (!std.mem.startsWith(u8, action, prefix) or !std.mem.endsWith(u8, action, suffix)) return null;
+    const at = std.mem.lastIndexOf(u8, action, infix) orelse return null;
+    const id = action[at + infix.len .. action.len - suffix.len];
+    if (id.len != evt.event_id_size * 2) return null;
+    var bytes: [evt.event_id_size]u8 = undefined;
+    _ = std.fmt.hexToBytes(&bytes, id) catch return null;
+    return bytes;
 }
 
 // the url an attachment's bytes are served from

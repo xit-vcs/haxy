@@ -63,11 +63,12 @@ pub const EventKind = enum {
     attach,
 };
 
-// every logical event's kind and creation-ordered id set
+// every logical event's kind and creation-ordered active/removed id sets
 pub const event_index_key = "event-id->kind";
-pub const event_id_set_key = "event-id-set";
+pub const active_event_id_set_key = "active-event-id-set";
+pub const removed_event_id_set_key = "removed-event-id-set";
 
-// a null payload deletes the record
+// a null payload removes the record
 pub const Event = union(EventKind) {
     user: ?User,
     repo: ?Repo,
@@ -162,6 +163,48 @@ pub const EventWithId = struct {
         return id_bytes;
     }
 };
+
+// remove an event by emitting a null payload
+pub fn remove(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    repo: *rp.Repo(repo_kind, repo_opts),
+    id: *const [event_id_size]u8,
+    kind: EventKind,
+    author: CommitAuthor,
+) !void {
+    const DB = EventDB(repo_opts.hash);
+    var event_db_maybe: ?LocalEventDB(repo_opts.hash) = if (repo_kind == .git) try LocalEventDB(repo_opts.hash).openReadOnly(io, allocator, repo.core.repo_dir) else null;
+    defer if (event_db_maybe) |*event_db| event_db.deinit(io, allocator);
+    const moment = (if (event_db_maybe) |*event_db|
+        currentMomentFromDb(repo_opts.hash, event_db.db)
+    else if (repo_kind == .git)
+        return error.EventNotFound
+    else
+        currentMoment(repo_opts, repo)) catch return error.EventNotFound;
+    const kind_map_cursor = try moment.getCursor(hash.hashInt(repo_opts.hash, event_index_key)) orelse return error.EventNotFound;
+    const kind_map = try DB.HashMap(.read_only).init(kind_map_cursor);
+    const stored_kind = (try readEventKind(repo_opts.hash, kind_map, id)) orelse return error.EventNotFound;
+    if (stored_kind != kind) return error.EventNotFound;
+    if (event_db_maybe) |*event_db| event_db.deinit(io, allocator);
+    event_db_maybe = null;
+
+    const event: Event = switch (kind) {
+        .user => .{ .user = null },
+        .repo => .{ .repo = null },
+        .issue => .{ .issue = null },
+        .comment => .{ .comment = null },
+        .attach => .{ .attach = null },
+    };
+    try consume(repo_kind, repo_opts, io, allocator, repo, events_ref, &.{.{
+        .id = std.fmt.bytesToHex(id.*, .lower),
+        .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
+        .author = author,
+        .event = event,
+    }});
+}
 
 // commit `events` (if any) as JSON commit messages on `ref`, then consume the
 // events on `ref` into the db the repo's views read: the repo's own db for a
@@ -949,7 +992,7 @@ fn mergeFields(
 // three-way merge of one kind's records from a merge parent. kinds that expose
 // conflicts merge field by field; the others take one whole record. the result
 // goes through the kind's `consume`, which re-derives the indexes from it. a
-// deletion carries over unless the other side changed the record, so a merge
+// removal carries over unless the other side changed the record, so a merge
 // never fails.
 pub fn merge(
     comptime T: type,
@@ -1038,14 +1081,14 @@ pub fn merge(
                     merged = target_record;
                     merged.event = mergeFields(T, if (baseline_record) |baseline| baseline.event else null, target_record.event, parent_record.event, &outcome);
 
-                    // merge the tombstone separately from serialized fields. a deletion
+                    // merge the removed state separately from serialized fields. removal
                     // carries over an unchanged record, while an edit or restoration
                     // keeps it active.
-                    merged.deleted = if (target_record.deleted == parent_record.deleted)
-                        target_record.deleted
+                    merged.removed = if (target_record.removed == parent_record.removed)
+                        target_record.removed
                     else if (baseline_record) |baseline| blk: {
-                        const active = if (!target_record.deleted) target_record else parent_record;
-                        if (active.deleted != baseline.deleted) break :blk false;
+                        const active = if (!target_record.removed) target_record else parent_record;
+                        if (active.removed != baseline.removed) break :blk false;
                         if (!fieldsEqual(T, active.event, baseline.event)) break :blk false;
                         break :blk true;
                     } else false;
@@ -1053,15 +1096,15 @@ pub fn merge(
                 .target_wins => {
                     // an uncontested parent change carries over. if both sides
                     // changed the record, the target wins as a whole, except that
-                    // an edit or restoration wins over a deletion.
+                    // an edit or restoration wins over a removal.
                     const target_changed = if (baseline_slot) |slot|
                         !target_record_cursor.slot().eql(slot)
                     else
                         true;
                     merged = if (!target_changed)
                         parent_record
-                    else if (target_record.deleted != parent_record.deleted)
-                        if (target_record.deleted) parent_record else target_record
+                    else if (target_record.removed != parent_record.removed)
+                        if (target_record.removed) parent_record else target_record
                     else
                         target_record;
                 },
@@ -1071,7 +1114,7 @@ pub fn merge(
         // the index is unique, so a key the target gave to a different record
         // leaves this one out rather than stranding that one behind a name it
         // no longer owns
-        if (!merged.deleted and @hasDecl(T, "name_index_key")) {
+        if (!merged.removed and @hasDecl(T, "name_index_key")) {
             const index_key = try merged.indexKey(arena.allocator());
             const name_index_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, T.name_index_key));
             const name_index = try DB.HashMap(.read_write).init(name_index_cursor);
@@ -1091,8 +1134,8 @@ pub fn merge(
             .target_wins => continue,
         }
 
-        // tombstones do not carry field conflicts
-        if (merged.deleted) continue;
+        // removed records do not carry field conflicts
+        if (merged.removed) continue;
 
         const conflicts_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, T.conflicts_key));
         const conflicts = try DB.SortedMap(.read_write).init(conflicts_cursor);
@@ -1229,7 +1272,7 @@ pub fn orderKeyDesc(timestamp: u64, event_id: *const [event_id_size]u8) [@sizeOf
 }
 
 // add or refresh one entry in the global logical-event index. updates and
-// tombstones preserve created_ts, so the key never moves.
+// removed records preserve created_ts, so the key never moves.
 pub fn indexEvent(
     comptime DB: type,
     comptime hash_kind: hash.HashKind,
@@ -1237,14 +1280,34 @@ pub fn indexEvent(
     event_id: *const [event_id_size]u8,
     kind: EventKind,
     created_ts: u64,
+    removed: bool,
 ) !void {
     const kind_map_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, event_index_key));
     const kind_map = try DB.HashMap(.read_write).init(kind_map_cursor);
     try kind_map.put(hash.hashInt(hash_kind, event_id), .{ .bytes = @tagName(kind) });
 
-    const id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, event_id_set_key));
-    const id_set = try DB.SortedSet(.read_write).init(id_set_cursor);
-    try id_set.put(&orderKeyDesc(created_ts, event_id));
+    const active_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, active_event_id_set_key));
+    const active = try DB.SortedSet(.read_write).init(active_cursor);
+    const removed_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, removed_event_id_set_key));
+    const removed_set = try DB.SortedSet(.read_write).init(removed_cursor);
+    const order_key = orderKeyDesc(created_ts, event_id);
+    if (removed) {
+        _ = try active.remove(&order_key);
+        try removed_set.put(&order_key);
+    } else {
+        _ = try removed_set.remove(&order_key);
+        try active.put(&order_key);
+    }
+}
+
+pub fn readEventKind(
+    comptime hash_kind: hash.HashKind,
+    kind_map: anytype,
+    id: *const [event_id_size]u8,
+) !?EventKind {
+    const cursor = try kind_map.getCursor(hash.hashInt(hash_kind, id)) orelse return null;
+    var buffer: [64]u8 = undefined;
+    return std.meta.stringToEnum(EventKind, try cursor.readBytes(&buffer)) orelse error.InvalidEventKind;
 }
 
 // the event id embedded in a set entry's order key

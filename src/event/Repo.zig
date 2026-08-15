@@ -10,7 +10,7 @@ description: []const u8,
 // what the db stores: the event's data plus the commit-derived fields
 pub const Record = struct {
     event: Self,
-    deleted: bool = false,
+    removed: bool = false,
     created_ts: u64 = 0, // the commit timestamp of the event that first created this repo
 
     // a repo's key in the name index. it's unique per owner, so the read side
@@ -69,11 +69,11 @@ pub fn consume(
         record
     else blk: {
         var record = existing_record_maybe orelse return error.EventNotFound;
-        record.deleted = true;
+        record.removed = true;
         break :blk record;
     };
 
-    if (!record_to_write.deleted) try validateName(record_to_write.event.name);
+    if (!record_to_write.removed) try validateName(record_to_write.event.name);
 
     const user_id_to_repo_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, "user-id->repo-id-set"));
     const user_id_to_repo_id_set = try DB.HashMap(.read_write).init(user_id_to_repo_id_set_cursor);
@@ -84,7 +84,7 @@ pub fn consume(
         const order_key = evt.orderKeyDesc(existing_record.created_ts, event_id);
 
         // drop the old active indexes; active values are re-added below
-        if (!existing_record.deleted) {
+        if (!existing_record.removed) {
             const existing_path = try existing_record.indexKey(arena.allocator());
             _ = try name_to_repo_id.remove(hash.hashInt(hash_kind, existing_path));
 
@@ -97,18 +97,18 @@ pub fn consume(
     const repo_cursor = try event_id_to_repo.putCursor(repo_key);
     const repo = try DB.HashMap(.read_write).init(repo_cursor);
     try evt.upsert(Record, DB, hash_kind, repo, record_to_write);
-    try evt.indexEvent(DB, hash_kind, haxy_moment, event_id, .repo, record_to_write.created_ts);
+    try evt.indexEvent(DB, hash_kind, haxy_moment, event_id, .repo, record_to_write.created_ts, record_to_write.removed);
 
     const order_key = evt.orderKeyDesc(record_to_write.created_ts, event_id);
 
-    // the id set retains tombstones so merges can carry deletions
+    // the id set retains removed records so merges can carry removals
     if (existing_cursor_maybe == null) {
         const repo_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, id_set_key));
         const repo_id_set = try DB.SortedSet(.read_write).init(repo_id_set_cursor);
         try repo_id_set.put(&order_key);
     }
 
-    if (!record_to_write.deleted) {
+    if (!record_to_write.removed) {
         const repo_path = try record_to_write.indexKey(arena.allocator());
         try name_to_repo_id.put(hash.hashInt(hash_kind, repo_path), .{ .bytes = event_id });
 

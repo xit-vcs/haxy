@@ -590,7 +590,7 @@ pub fn main(init: std.process.Init) !void {
             // merge. the 4th-newest issue conflicts on title and tags; the
             // 3rd-newest on its description with every hunk auto-resolving
             // (each side reworks a different paragraph); the 2nd-newest on
-            // its description with a deletion conflict (ours removes a
+            // its description with a removal conflict (ours removes a
             // paragraph theirs rewords) and an insertion conflict (each side
             // appends a different closing paragraph).
             {

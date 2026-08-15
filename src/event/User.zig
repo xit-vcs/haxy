@@ -14,7 +14,7 @@ ssh_keys: []const u8 = "", // newline-separated authorized_keys lines (one OpenS
 // what the db stores: the event's data plus the commit-derived fields
 pub const Record = struct {
     event: Self,
-    deleted: bool = false,
+    removed: bool = false,
     created_ts: u64 = 0, // the commit timestamp of the event that first created this user
 
     // a user's key in the name index
@@ -90,18 +90,18 @@ pub fn consume(
         record
     else blk: {
         var record = existing_record_maybe orelse return error.EventNotFound;
-        record.deleted = true;
+        record.removed = true;
         break :blk record;
     };
 
-    if (!record_to_write.deleted) try validateName(record_to_write.event.name);
+    if (!record_to_write.removed) try validateName(record_to_write.event.name);
 
     if (existing_record_maybe) |existing_record| {
         // updates preserve the original creation timestamp
         record_to_write.created_ts = existing_record.created_ts;
 
         // drop the old active indexes; active values are re-added below
-        if (!existing_record.deleted) {
+        if (!existing_record.removed) {
             _ = try name_to_user_id.remove(hash.hashInt(hash_kind, existing_record.event.name));
             _ = try email_to_user_id.remove(hash.hashInt(hash_kind, existing_record.event.email));
         }
@@ -110,24 +110,24 @@ pub fn consume(
     const user_cursor = try event_id_to_user.putCursor(user_key);
     const user = try DB.HashMap(.read_write).init(user_cursor);
     try evt.upsert(Record, DB, hash_kind, user, record_to_write);
-    try evt.indexEvent(DB, hash_kind, haxy_moment, event_id, .user, record_to_write.created_ts);
+    try evt.indexEvent(DB, hash_kind, haxy_moment, event_id, .user, record_to_write.created_ts, record_to_write.removed);
 
     const order_key = evt.orderKeyDesc(record_to_write.created_ts, event_id);
 
-    // the id set retains tombstones so merges can carry deletions
+    // the id set retains removed records so merges can carry removals
     if (existing_cursor_maybe == null) {
         const user_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, id_set_key));
         const user_id_set = try DB.SortedSet(.read_write).init(user_id_set_cursor);
         try user_id_set.put(&order_key);
     }
 
-    if (!record_to_write.deleted) {
+    if (!record_to_write.removed) {
         try name_to_user_id.put(hash.hashInt(hash_kind, record_to_write.event.name), .{ .bytes = event_id });
         try email_to_user_id.put(hash.hashInt(hash_kind, record_to_write.event.email), .{ .bytes = event_id });
     }
 
-    const became_deleted = record_to_write.deleted and if (existing_record_maybe) |existing| !existing.deleted else true;
-    if (became_deleted) {
+    const became_removed = record_to_write.removed and if (existing_record_maybe) |existing| !existing.removed else true;
+    if (became_removed) {
         // the user's repos go with them: the repo name index is keyed by owner
         // id, so one left behind is listed but can never be resolved again
         const user_id_to_repo_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, "user-id->repo-id-set"));
@@ -135,7 +135,7 @@ pub fn consume(
         if (try user_id_to_repo_id_set.getCursor(user_key)) |user_repos_cursor| {
             const user_repos = try DB.SortedSet(.read_only).init(user_repos_cursor);
 
-            // collected up front, since deleting a repo removes it from this set
+            // collected up front, since removing a repo removes it from this set
             var repo_ids: std.ArrayList([evt.event_id_size]u8) = .empty;
             var repo_iter = try user_repos.iteratorFromIndex(0);
             while (try repo_iter.next()) |kv_pair_cursor| {

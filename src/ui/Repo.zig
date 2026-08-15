@@ -131,6 +131,10 @@ pub fn init(
         .repo_events => |e| e.kind,
         else => null,
     };
+    const events_view: ui.RoutablePage.EventsView = switch (route) {
+        .repo_events => |e| e.view,
+        else => .active,
+    };
     const events_selected: []const u8 = switch (route) {
         .repo_events => |*e| e.selected.slice(),
         else => "",
@@ -195,7 +199,7 @@ pub fn init(
                                 try Commits.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, session.haxy_moment, repo_identity.identity, requested_ref_or_oid, requested_ref_value, commits_content),
                                 try Refs.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, repo_identity.identity, refs_kind, refs_from),
                                 try Issues.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, issues_tag, issues_selected, issues_comment, issues_comments_start, issues_theirs, issues_view),
-                                try Events.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, events_kind, events_selected, session.local != null, session.data.sync_failure),
+                                try Events.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, events_view, events_kind, events_selected, session.local != null, session.data.sync_failure),
                             };
                         },
                     }
@@ -208,7 +212,7 @@ pub fn init(
             try Commits.emptyResult(aa, repo_identity.identity, requested_ref_or_oid orelse .branch, requested_ref_value, commits_content),
             try Refs.emptyResult(arena, repo_identity.identity, refs_kind, refs_from),
             try Issues.emptyResult(aa, repo_identity.identity, issues_tag, issues_selected, issues_comment, issues_comments_start, issues_theirs, issues_view),
-            try Events.empty(aa, repo_identity.identity, session.local != null, session.data.sync_failure),
+            try Events.empty(aa, repo_identity.identity, events_view, session.local != null, session.data.sync_failure),
         };
     };
     issues.repo_source = source;
@@ -359,7 +363,7 @@ pub const View = struct {
                 // the issues tab mirrors this page's tag filter (issue urls
                 // themselves never carry the tag).
                 .repo_issues => self.session.data.current_page = ui.RoutablePage.repoIssuesRoute(self.data.identity.slice(), .open, self.data.issues.tag, "") orelse self.session.data.current_page,
-                .repo_events => self.session.data.current_page = ui.RoutablePage.repoEventsRoute(self.data.identity.slice(), null, "") orelse self.session.data.current_page,
+                .repo_events => self.session.data.current_page = ui.RoutablePage.repoEventsRoute(self.data.identity.slice(), self.data.events.view, null, "") orelse self.session.data.current_page,
                 .home_settings => {
                     if (ui.RoutablePage.Array(ui.RoutablePage.repo_route_max_len).from(self.data.identity.slice())) |identity|
                         self.session.data.current_page = .{ .repo_settings = identity };

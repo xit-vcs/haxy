@@ -11,7 +11,7 @@ body: []const u8,
 // what the db stores: the event's data plus the commit-derived fields
 pub const Record = struct {
     event: Self,
-    deleted: bool = false,
+    removed: bool = false,
     author_email: ?[]const u8 = null,
     created_ts: u64 = 0, // the commit timestamp of the event that first created this comment
 };
@@ -62,7 +62,7 @@ pub fn consume(
         record
     else blk: {
         var record = existing_record_maybe orelse return error.EventNotFound;
-        record.deleted = true;
+        record.removed = true;
         break :blk record;
     };
 
@@ -86,7 +86,7 @@ pub fn consume(
     const comment_cursor = try event_id_to_comment.putCursor(comment_key);
     const comment = try DB.HashMap(.read_write).init(comment_cursor);
     try evt.upsert(Record, DB, hash_kind, comment, record_to_write);
-    try evt.indexEvent(DB, hash_kind, haxy_moment, event_id, .comment, record_to_write.created_ts);
+    try evt.indexEvent(DB, hash_kind, haxy_moment, event_id, .comment, record_to_write.created_ts, record_to_write.removed);
 
     if (existing_cursor_maybe == null) {
         const comment_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, id_set_key));
@@ -94,7 +94,7 @@ pub fn consume(
         try comment_id_set.put(&evt.orderKeyDesc(record_to_write.created_ts, event_id));
     }
 
-    // tombstones stay in the thread so their replies remain connected
+    // removed comments stay in the thread so their replies remain connected
     const thread_order_key = evt.orderKey(record_to_write.created_ts, event_id);
     const thread_comments_cursor = try thread_id_to_comment_id_set.putCursor(hash.hashInt(hash_kind, &record_to_write.event.thread_id));
     const thread_comments = try DB.SortedSet(.read_write).init(thread_comments_cursor);
@@ -164,6 +164,7 @@ pub fn update(
         evt.currentMoment(repo_opts, repo)) catch return error.NotFound;
     const comment = (try readById(DB, repo_opts.hash, moment, &arena, comment_id)) orelse return error.NotFound;
     if (!std.mem.eql(u8, &comment.event.thread_id, thread_id)) return error.NotFound;
+    if (comment.removed) return error.NotFound;
 
     var updated = comment.event;
     updated.body = body;

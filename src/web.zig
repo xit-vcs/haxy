@@ -100,7 +100,7 @@ fn handleRequest(
     if (method == .POST) {
         switch (host) {
             .remote => |remote| {
-                const PostRoute = enum { login, logout, ansi, new, edit, open, close, resolve, attach };
+                const PostRoute = enum { login, logout, ansi, new, edit, remove, open, close, resolve, attach };
                 inline for (@typeInfo(PostRoute).@"enum".fields) |field| {
                     const suffix = "/" ++ field.name;
                     if (std.mem.endsWith(u8, path, suffix)) {
@@ -111,6 +111,7 @@ fn handleRequest(
                             .ansi => handleAnsi(io, request, allocator, base, remote.admin_repo_path, remote.session_store),
                             .new => handleNew(io, request, allocator, base, host),
                             .edit => handleEdit(io, request, allocator, base, host),
+                            .remove => handleRemove(io, request, allocator, base, host),
                             .open => handleIssueStatus(io, request, allocator, base, host, .open),
                             .close => handleIssueStatus(io, request, allocator, base, host, .closed),
                             .resolve => handleIssueResolve(io, request, allocator, base, host),
@@ -120,7 +121,7 @@ fn handleRequest(
                 }
             },
             .local => |local| {
-                const PostRoute = enum { new, edit, open, close, resolve, sync, attach };
+                const PostRoute = enum { new, edit, remove, open, close, resolve, sync, attach };
                 inline for (@typeInfo(PostRoute).@"enum".fields) |field| {
                     const suffix = "/" ++ field.name;
                     if (std.mem.endsWith(u8, path, suffix)) {
@@ -128,6 +129,7 @@ fn handleRequest(
                         return switch (@field(PostRoute, field.name)) {
                             .new => handleNew(io, request, allocator, base, host),
                             .edit => handleEdit(io, request, allocator, base, host),
+                            .remove => handleRemove(io, request, allocator, base, host),
                             .open => handleIssueStatus(io, request, allocator, base, host, .open),
                             .close => handleIssueStatus(io, request, allocator, base, host, .closed),
                             .resolve => handleIssueResolve(io, request, allocator, base, host),
@@ -765,7 +767,7 @@ fn sendAttachment(
         evt.currentMoment(repo_opts, repo)) catch return respondAttachmentNotFound(request);
 
     const record = (try evt.Attachment.readById(DB, repo_opts.hash, haxy_moment, &arena, id)) orelse return respondAttachmentNotFound(request);
-    if (record.deleted) return respondAttachmentNotFound(request);
+    if (record.removed) return respondAttachmentNotFound(request);
     if (record.blob_oid.len != hash.hexLen(repo_opts.hash)) return respondAttachmentNotFound(request);
     const blob_oid: *const [hash.hexLen(repo_opts.hash)]u8 = @ptrCast(record.blob_oid.ptr);
 
@@ -1066,6 +1068,102 @@ fn issueBaseParts(base: []const u8) ?IssueBaseParts {
     const head = base[0 .. base.len - id_len];
     if (!std.mem.endsWith(u8, head, issues_infix)) return null;
     return .{ .repo_base = head[0 .. head.len - issues_infix.len], .id_bytes = id_bytes };
+}
+
+const RemoveParts = struct {
+    repo_base: []const u8,
+    kind: evt.EventKind,
+    id: [evt.event_id_size]u8,
+};
+
+// split a remove url into the repo and event it names
+fn removeParts(base: []const u8) ?RemoveParts {
+    if (attachmentRequest(base)) |attachment| {
+        const parent = attachParentParts(attachment.repo_base) orelse return null;
+        return .{
+            .repo_base = parent.repo_base,
+            .kind = .attach,
+            .id = attachment.id,
+        };
+    }
+    if (commentBaseParts(base)) |comment| if (comment.comment_id) |comment_id| return .{
+        .repo_base = comment.repo_base,
+        .kind = .comment,
+        .id = comment_id,
+    };
+    if (issueBaseParts(base)) |issue| return .{
+        .repo_base = issue.repo_base,
+        .kind = .issue,
+        .id = issue.id_bytes,
+    };
+    return null;
+}
+
+// remove the issue, comment or attachment named by the form's url
+fn handleRemove(
+    io: std.Io,
+    request: *std.http.Server.Request,
+    allocator: std.mem.Allocator,
+    base: []const u8,
+    host: Host,
+) !void {
+    const parts = removeParts(base) orelse return respondRemoveNotFound(request);
+
+    var author_arena = std.heap.ArenaAllocator.init(allocator);
+    defer author_arena.deinit();
+    const author = (try eventAuthor(io, allocator, &author_arena, request, host)) orelse return respondLoginRequired(request);
+
+    switch (host) {
+        .remote => |remote| {
+            const repo_prefix = "/repo/";
+            if (!std.mem.startsWith(u8, parts.repo_base, repo_prefix)) return respondRemoveNotFound(request);
+            const repos_dir = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(remote.admin_repo_path) orelse ".", "repos" });
+            defer allocator.free(repos_dir);
+            const repo_path = switch (try serve_common.resolveRepoPath(io, allocator, repos_dir, remote.admin_repo_path, parts.repo_base[repo_prefix.len..], false)) {
+                .ok => |p| p,
+                .invalid, .not_found => return respondRemoveNotFound(request),
+            };
+            defer allocator.free(repo_path);
+
+            var repo = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = repo_path });
+            defer repo.deinit(io, allocator);
+            evt.remove(.xit, .{}, io, allocator, &repo, &parts.id, parts.kind, author) catch |err| switch (err) {
+                error.EventNotFound => return respondRemoveNotFound(request),
+                else => |e| return e,
+            };
+        },
+        .local => |src| {
+            if (parts.repo_base.len != 0) return respondRemoveNotFound(request);
+            switch (src.repo_kind) {
+                inline else => |repo_kind| {
+                    var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, src.localInitOpts());
+                    defer any_repo.deinit(io, allocator);
+                    switch (any_repo) {
+                        inline else => |*repo| evt.remove(repo_kind, repo.self_repo_opts, io, allocator, repo, &parts.id, parts.kind, author) catch |err| switch (err) {
+                            error.EventNotFound => return respondRemoveNotFound(request),
+                            else => |e| return e,
+                        },
+                    }
+                },
+            }
+        },
+    }
+
+    const id = std.fmt.bytesToHex(parts.id, .lower);
+    const location = try std.fmt.allocPrint(allocator, "{s}/event:{s}/kind:{s}", .{ parts.repo_base, &id, @tagName(parts.kind) });
+    defer allocator.free(location);
+    try request.respond("", .{
+        .status = .see_other,
+        .keep_alive = false,
+        .extra_headers = &.{.{ .name = "location", .value = location }},
+    });
+}
+
+fn respondRemoveNotFound(request: *std.http.Server.Request) !void {
+    try request.respond("event not found", .{
+        .status = .not_found,
+        .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+    });
 }
 
 // re-emit the issue `parts` names with `update` applied, in the repo the
@@ -1774,10 +1872,14 @@ pub fn generateOverlay(allocator: std.mem.Allocator, root: *ui.Widget, session: 
                     try out.appendSlice(allocator, "</textarea>");
                 },
                 .custom => |custom| {
-                    if (std.mem.eql(u8, "submit", custom)) {
+                    if (std.mem.eql(u8, "submit", custom) or std.mem.startsWith(u8, custom, ui.submit_action_prefix)) {
                         try out.appendSlice(allocator, "<button type=\"submit\" data-focus-id=\"");
                         var id_buf: [32]u8 = undefined;
                         try out.appendSlice(allocator, try std.fmt.bufPrint(&id_buf, "{d}", .{inner_id}));
+                        if (std.mem.startsWith(u8, custom, ui.submit_action_prefix)) {
+                            try out.appendSlice(allocator, "\" formaction=\"");
+                            try appendEscapedHtml(allocator, &out, custom[ui.submit_action_prefix.len..]);
+                        }
                         try out.appendSlice(allocator, "\" style=\"left:");
                         var pos_buf: [128]u8 = undefined;
                         try out.appendSlice(allocator, try std.fmt.bufPrint(&pos_buf, "{d}ch;top:{d}em;width:{d}ch;height:{d}em", .{ r.x, r.y, r.size.width, r.size.height }));
