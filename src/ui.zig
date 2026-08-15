@@ -1317,6 +1317,7 @@ pub fn inputKey(allocator: std.mem.Allocator, root: *Widget, key: Key, session: 
                 if (crossPageLink(root_focus, gid, session.data)) |route| {
                     return session.navigate(route);
                 }
+                if (rawLink(root_focus, gid)) |url| return requestRawLink(session, url);
             }
             try root.input(allocator, key, root_focus);
         },
@@ -1341,6 +1342,10 @@ pub fn inputKey(allocator: std.mem.Allocator, root: *Widget, key: Key, session: 
                     if (crossPageLink(root_focus, focus_id, session.data)) |route| {
                         return session.navigate(route);
                     }
+                    if (rawLink(root_focus, focus_id)) |url| {
+                        if (!mouse.ctrl) try requestRawLink(session, url);
+                        return;
+                    }
                     root_focus.setFocus(focus_id);
                 }
                 // forward the press into the widget tree so buttons (and any
@@ -1353,6 +1358,37 @@ pub fn inputKey(allocator: std.mem.Allocator, root: *Widget, key: Key, session: 
         },
         else => try root.input(allocator, key, root.getFocus()),
     }
+}
+
+// a link to bytes the server serves directly rather than to a page route, so
+// it never resolves to a RoutablePage
+pub const raw_link_prefix = "ax:";
+
+// a button the web overlay covers with a file picker that posts the chosen
+// file to the url after the prefix
+pub const file_input_prefix = "file:";
+
+// the url an `ax:` link points at, or null for anything else. a host that
+// suppresses the anchor's own navigation needs this to follow the link.
+pub fn rawLink(root_focus: *Focus, focus_id: usize) ?[]const u8 {
+    const child = root_focus.children.get(focus_id) orelse return null;
+    const custom = switch (child.focus.kind) {
+        .custom => |c| c,
+        else => return null,
+    };
+    if (!std.mem.startsWith(u8, custom, raw_link_prefix)) return null;
+    return custom[raw_link_prefix.len..];
+}
+
+fn requestRawLink(session: *Session, url: []const u8) !void {
+    session.host_request = .{ .show_copyable_text = try terminalWebUrl(session.page_arena.allocator(), session, url) };
+}
+
+fn terminalWebUrl(allocator: std.mem.Allocator, session: *const Session, path: []const u8) ![]const u8 {
+    return if (session.web_port) |port|
+        try std.fmt.allocPrint(allocator, "http://localhost:{d}{s}", .{ port, path })
+    else
+        path;
 }
 
 // if the focus target at focus_id is an `a:` link that should navigate (a
@@ -2257,10 +2293,7 @@ pub const Footer = struct {
         self.url_width = 0;
         const aa = self.arena.allocator();
         const path = self.session.data.current_page.toUrl(&self.arena) catch return;
-        const text = if (self.session.web_port) |port|
-            std.fmt.allocPrint(aa, "http://localhost:{d}{s}", .{ port, path }) catch return
-        else
-            path;
+        const text = terminalWebUrl(aa, self.session, path) catch return;
         self.url = text;
 
         var grid = try Grid.init(allocator, .{ .width = width, .height = 1 });

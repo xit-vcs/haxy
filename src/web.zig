@@ -2,6 +2,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 const xit = @import("xit");
 const rp = xit.repo;
+const obj = xit.object;
+const hash = xit.hash;
 const evt = @import("./event.zig");
 const serve_common = @import("./serve_common.zig");
 const ui = @import("./ui.zig");
@@ -98,7 +100,7 @@ fn handleRequest(
     if (method == .POST) {
         switch (host) {
             .remote => |remote| {
-                const PostRoute = enum { login, logout, ansi, new, edit, open, close, resolve };
+                const PostRoute = enum { login, logout, ansi, new, edit, open, close, resolve, attach };
                 inline for (@typeInfo(PostRoute).@"enum".fields) |field| {
                     const suffix = "/" ++ field.name;
                     if (std.mem.endsWith(u8, path, suffix)) {
@@ -112,12 +114,13 @@ fn handleRequest(
                             .open => handleIssueStatus(io, request, allocator, base, host, .open),
                             .close => handleIssueStatus(io, request, allocator, base, host, .closed),
                             .resolve => handleIssueResolve(io, request, allocator, base, host),
+                            .attach => handleAttach(io, request, allocator, base, host),
                         };
                     }
                 }
             },
             .local => |local| {
-                const PostRoute = enum { new, edit, open, close, resolve, sync };
+                const PostRoute = enum { new, edit, open, close, resolve, sync, attach };
                 inline for (@typeInfo(PostRoute).@"enum".fields) |field| {
                     const suffix = "/" ++ field.name;
                     if (std.mem.endsWith(u8, path, suffix)) {
@@ -129,6 +132,7 @@ fn handleRequest(
                             .close => handleIssueStatus(io, request, allocator, base, host, .closed),
                             .resolve => handleIssueResolve(io, request, allocator, base, host),
                             .sync => handleSync(io, request, allocator, base, local),
+                            .attach => handleAttach(io, request, allocator, base, host),
                         };
                     }
                 }
@@ -152,6 +156,10 @@ fn handleRequest(
         });
         return;
     }
+
+    // an attachment serves raw bytes rather than a page, so it is matched
+    // before the routable pages
+    if (attachmentRequest(path)) |attachment| return serveAttachment(io, request, allocator, attachment, host);
 
     const current_page_maybe = switch (host) {
         .remote => ui.RoutablePage.fromUrl(path),
@@ -673,6 +681,266 @@ fn handleCommentNew(
     try request.respond("", .{
         .status = .see_other,
         .extra_headers = &.{.{ .name = "location", .value = location }},
+    });
+}
+
+const AttachmentRequest = struct {
+    repo_base: []const u8,
+    id: [evt.event_id_size]u8,
+};
+
+// an attachment url is its repo's base and the attachment's event id
+fn attachmentRequest(path: []const u8) ?AttachmentRequest {
+    const infix = "/attachment:";
+    const id_len = evt.event_id_size * 2;
+    const at = std.mem.lastIndexOf(u8, path, infix) orelse return null;
+    const tail = path[at + infix.len ..];
+    if (tail.len != id_len) return null;
+    var id: [evt.event_id_size]u8 = undefined;
+    _ = std.fmt.hexToBytes(&id, tail) catch return null;
+    return .{ .repo_base = path[0..at], .id = id };
+}
+
+// serve an attachment's bytes from the repo its url names
+fn serveAttachment(
+    io: std.Io,
+    request: *std.http.Server.Request,
+    allocator: std.mem.Allocator,
+    attachment: AttachmentRequest,
+    host: Host,
+) !void {
+    switch (host) {
+        .remote => |remote| {
+            const repo_prefix = "/repo/";
+            if (!std.mem.startsWith(u8, attachment.repo_base, repo_prefix)) return respondAttachmentNotFound(request);
+
+            const repos_dir = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(remote.admin_repo_path) orelse ".", "repos" });
+            defer allocator.free(repos_dir);
+            const repo_path = switch (try serve_common.resolveRepoPath(io, allocator, repos_dir, remote.admin_repo_path, attachment.repo_base[repo_prefix.len..], false)) {
+                .ok => |p| p,
+                .invalid, .not_found => return respondAttachmentNotFound(request),
+            };
+            defer allocator.free(repo_path);
+
+            var repo = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = repo_path });
+            defer repo.deinit(io, allocator);
+            try sendAttachment(.xit, .{}, io, request, allocator, &repo, &attachment.id);
+        },
+        .local => |src| {
+            // local routes elide the repo base
+            if (attachment.repo_base.len != 0) return respondAttachmentNotFound(request);
+            switch (src.repo_kind) {
+                inline else => |repo_kind| {
+                    var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, src.localInitOpts());
+                    defer any_repo.deinit(io, allocator);
+                    switch (any_repo) {
+                        inline else => |*repo| try sendAttachment(repo_kind, repo.self_repo_opts, io, request, allocator, repo, &attachment.id),
+                    }
+                },
+            }
+        },
+    }
+}
+
+fn sendAttachment(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    io: std.Io,
+    request: *std.http.Server.Request,
+    allocator: std.mem.Allocator,
+    repo: *rp.Repo(repo_kind, repo_opts),
+    id: *const [evt.event_id_size]u8,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const DB = evt.EventDB(repo_opts.hash);
+    var event_db_maybe: ?evt.LocalEventDB(repo_opts.hash) = if (repo_kind == .git) try evt.LocalEventDB(repo_opts.hash).openReadOnly(io, allocator, repo.core.repo_dir) else null;
+    defer if (event_db_maybe) |*event_db| event_db.deinit(io, allocator);
+    const haxy_moment = (if (event_db_maybe) |*event_db|
+        evt.currentMomentFromDb(repo_opts.hash, event_db.db)
+    else if (repo_kind == .git)
+        return respondAttachmentNotFound(request)
+    else
+        evt.currentMoment(repo_opts, repo)) catch return respondAttachmentNotFound(request);
+
+    const record = (try evt.Attachment.readById(DB, repo_opts.hash, haxy_moment, &arena, id)) orelse return respondAttachmentNotFound(request);
+    if (record.deleted) return respondAttachmentNotFound(request);
+    if (record.blob_oid.len != hash.hexLen(repo_opts.hash)) return respondAttachmentNotFound(request);
+    const blob_oid: *const [hash.hexLen(repo_opts.hash)]u8 = @ptrCast(record.blob_oid.ptr);
+
+    var moment = repo.core.latestMoment() catch return respondAttachmentNotFound(request);
+    const state = rp.Repo(repo_kind, repo_opts).State(.read_only){ .core = &repo.core, .extra = .{ .moment = &moment } };
+    var object_reader = obj.ObjectReader(repo_kind, repo_opts).init(state, io, allocator, blob_oid) catch return respondAttachmentNotFound(request);
+    defer object_reader.deinit();
+    if (object_reader.header().kind != .blob) return respondAttachmentNotFound(request);
+
+    const content_type = attachmentContentType(record.name);
+    const encoded_name = try ui.urlEncodeRef(allocator, record.name);
+    defer allocator.free(encoded_name);
+    const disposition = try std.fmt.allocPrint(allocator, "{s}; filename*=UTF-8''{s}", .{ if (content_type == null) "attachment" else "inline", encoded_name });
+    defer allocator.free(disposition);
+
+    var send_buf: [8192]u8 = undefined;
+    var body = try request.respondStreaming(&send_buf, .{
+        .content_length = object_reader.header().size,
+        .respond_options = .{
+            .extra_headers = &.{
+                .{ .name = "content-type", .value = content_type orelse "application/octet-stream" },
+                .{ .name = "content-disposition", .value = disposition },
+                // uploaded bytes are never sniffed into a type that could run
+                // as script on this origin
+                .{ .name = "x-content-type-options", .value = "nosniff" },
+            },
+        },
+    });
+    _ = try object_reader.interface.streamRemaining(&body.writer);
+    try body.end();
+}
+
+// the images a browser renders safely inline. anything else downloads as
+// opaque bytes, so an uploaded page can't run on this origin.
+fn attachmentContentType(name: []const u8) ?[]const u8 {
+    const types = [_]struct { ext: []const u8, value: []const u8 }{
+        .{ .ext = ".png", .value = "image/png" },
+        .{ .ext = ".jpg", .value = "image/jpeg" },
+        .{ .ext = ".jpeg", .value = "image/jpeg" },
+        .{ .ext = ".gif", .value = "image/gif" },
+        .{ .ext = ".webp", .value = "image/webp" },
+    };
+    for (types) |entry| {
+        if (name.len > entry.ext.len and std.ascii.eqlIgnoreCase(name[name.len - entry.ext.len ..], entry.ext)) return entry.value;
+    }
+    return null;
+}
+
+fn respondAttachmentNotFound(request: *std.http.Server.Request) !void {
+    try request.respond("attachment not found", .{
+        .status = .not_found,
+        .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+    });
+}
+
+fn respondAttachmentParentNotFound(request: *std.http.Server.Request) !void {
+    try request.respond("attachment parent not found", .{
+        .status = .not_found,
+        .keep_alive = false,
+        .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+    });
+}
+
+// the upload declares its file's name here, since the body is the file itself
+const attachment_name_header = "x-attachment-name";
+
+const AttachParentParts = struct {
+    repo_base: []const u8,
+    id_bytes: [evt.event_id_size]u8,
+};
+
+// what an attachment hangs off: the `<kind>:<id>` segment the form's page ends
+// with, whatever kind that is
+fn attachParentParts(base: []const u8) ?AttachParentParts {
+    const id_len = evt.event_id_size * 2;
+    if (base.len < id_len + 1) return null;
+    const head = base[0 .. base.len - id_len];
+    if (head[head.len - 1] != ':') return null;
+    var id_bytes: [evt.event_id_size]u8 = undefined;
+    _ = std.fmt.hexToBytes(&id_bytes, base[base.len - id_len ..]) catch return null;
+    const segment_at = std.mem.lastIndexOfScalar(u8, head, '/') orelse return null;
+    return .{ .repo_base = head[0..segment_at], .id_bytes = id_bytes };
+}
+
+// attach the posted file to the event the url names, then reload. the file is
+// the whole request body, so it streams from the socket into the object store
+// without being buffered.
+fn handleAttach(
+    io: std.Io,
+    request: *std.http.Server.Request,
+    allocator: std.mem.Allocator,
+    base: []const u8,
+    host: Host,
+) !void {
+    // reading the body invalidates the request head's memory, and the url is
+    // still needed to resolve the repo afterward
+    const base_copy = try allocator.dupe(u8, base);
+    defer allocator.free(base_copy);
+
+    const parts = attachParentParts(base_copy) orelse return respondAttachmentParentNotFound(request);
+
+    var author_arena = std.heap.ArenaAllocator.init(allocator);
+    defer author_arena.deinit();
+    const author = (try eventAuthor(io, allocator, &author_arena, request, host)) orelse return respondLoginRequired(request);
+
+    const name = (try attachmentName(allocator, request)) orelse return respondUploadError(request, .bad_request, "attachment needs a name");
+    defer allocator.free(name);
+    if (!evt.Attachment.nameValid(name)) return respondUploadError(request, .bad_request, "invalid attachment name");
+
+    const size = request.head.content_length orelse return respondUploadError(request, .length_required, "attachments must declare a content length");
+    if (size == 0) return respondUploadError(request, .bad_request, "attachment is empty");
+    if (size > evt.Attachment.max_size) return respondUploadError(request, .payload_too_large, "attachment is too large");
+
+    const parent_id_hex = std.fmt.bytesToHex(parts.id_bytes, .lower);
+
+    var body_buf: [4096]u8 = undefined;
+    const blob: evt.Blob = .{ .name = name, .size = size, .reader = try request.readerExpectContinue(&body_buf) };
+
+    switch (host) {
+        .remote => |remote| {
+            const repo_prefix = "/repo/";
+            if (!std.mem.startsWith(u8, parts.repo_base, repo_prefix)) return respondAttachmentParentNotFound(request);
+            const repos_dir = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(remote.admin_repo_path) orelse ".", "repos" });
+            defer allocator.free(repos_dir);
+            const repo_path = switch (try serve_common.resolveRepoPath(io, allocator, repos_dir, remote.admin_repo_path, parts.repo_base[repo_prefix.len..], false)) {
+                .ok => |p| p,
+                .invalid, .not_found => return respondAttachmentParentNotFound(request),
+            };
+            defer allocator.free(repo_path);
+
+            var repo = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = repo_path });
+            defer repo.deinit(io, allocator);
+            _ = evt.Attachment.create(.xit, .{}, io, allocator, &repo, &parent_id_hex, blob, author) catch |err| switch (err) {
+                error.ParentNotFound => return respondAttachmentParentNotFound(request),
+                else => return err,
+            };
+        },
+        .local => |src| {
+            if (parts.repo_base.len != 0) return respondAttachmentParentNotFound(request);
+            switch (src.repo_kind) {
+                inline else => |repo_kind| {
+                    var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, src.localInitOpts());
+                    defer any_repo.deinit(io, allocator);
+                    switch (any_repo) {
+                        inline else => |*repo| _ = evt.Attachment.create(repo_kind, repo.self_repo_opts, io, allocator, repo, &parent_id_hex, blob, author) catch |err| switch (err) {
+                            error.ParentNotFound => return respondAttachmentParentNotFound(request),
+                            else => return err,
+                        },
+                    }
+                },
+            }
+        },
+    }
+
+    // the client reloads the page itself
+    try request.respond("", .{ .status = .no_content, .keep_alive = false });
+}
+
+// the name the upload declares for its file, percent-encoded so it survives a
+// header
+fn attachmentName(allocator: std.mem.Allocator, request: *std.http.Server.Request) !?[]u8 {
+    var iter = request.iterateHeaders();
+    while (iter.next()) |header| {
+        if (!std.ascii.eqlIgnoreCase(header.name, attachment_name_header)) continue;
+        return try decodeFormValue(allocator, header.value);
+    }
+    return null;
+}
+
+// an upload that failed leaves the body partly read, so the connection closes
+fn respondUploadError(request: *std.http.Server.Request, status: std.http.Status, message: []const u8) !void {
+    try request.respond(message, .{
+        .status = status,
+        .keep_alive = false,
+        .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
     });
 }
 
@@ -1243,6 +1511,9 @@ fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: 
         const inpage_prefix = "ai:";
 
         fn init(str: []const u8) @This() {
+            if (std.mem.startsWith(u8, str, ui.raw_link_prefix)) {
+                return .{ .a = str[ui.raw_link_prefix.len..] };
+            }
             if (std.mem.startsWith(u8, str, inpage_prefix)) {
                 return .{ .a = str[inpage_prefix.len..] };
             }
@@ -1518,6 +1789,32 @@ pub fn generateOverlay(allocator: std.mem.Allocator, root: *ui.Widget, session: 
         }
 
         try out.appendSlice(allocator, "</form>");
+    }
+
+    // a file picker isn't part of a form: it posts its file straight to the url
+    // in its marker. it sits transparent over the button the tui drew, so
+    // clicking that button opens the browser's own dialog.
+    var file_iter = root_focus.children.iterator();
+    while (file_iter.next()) |entry| {
+        const child = entry.value_ptr.*;
+        const action_url = switch (child.focus.kind) {
+            .custom => |custom| if (std.mem.startsWith(u8, custom, ui.file_input_prefix))
+                custom[ui.file_input_prefix.len..]
+            else
+                continue,
+            else => continue,
+        };
+        const r = child.rect;
+
+        try out.appendSlice(allocator, "<input type=\"file\" data-action=\"");
+        try appendEscapedHtml(allocator, &out, action_url);
+        try out.appendSlice(allocator, "\" data-focus-id=\"");
+        var id_buf: [32]u8 = undefined;
+        try out.appendSlice(allocator, try std.fmt.bufPrint(&id_buf, "{d}", .{entry.key_ptr.*}));
+        try out.appendSlice(allocator, "\" style=\"opacity:0;left:");
+        var pos_buf: [128]u8 = undefined;
+        try out.appendSlice(allocator, try std.fmt.bufPrint(&pos_buf, "{d}ch;top:{d}em;width:{d}ch;height:{d}em", .{ r.x, r.y, r.size.width, r.size.height }));
+        try out.appendSlice(allocator, "\">");
     }
 
     return try out.toOwnedSlice(allocator);

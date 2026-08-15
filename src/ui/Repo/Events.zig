@@ -171,6 +171,7 @@ fn readCreatedTs(
         .repo => (try readRecord(evt.Repo, hash_kind, arena, haxy_moment, id) orelse return error.NotFound).created_ts,
         .issue => (try readRecord(evt.Issue, hash_kind, arena, haxy_moment, id) orelse return error.NotFound).created_ts,
         .comment => (try readRecord(evt.Comment, hash_kind, arena, haxy_moment, id) orelse return error.NotFound).created_ts,
+        .attach => (try readRecord(evt.Attachment, hash_kind, arena, haxy_moment, id) orelse return error.NotFound).created_ts,
     };
 }
 
@@ -220,6 +221,19 @@ fn readItem(
             const thread_kind = (try readKind(hash_kind, kind_map, &thread_id)) orelse return item;
             const route = switch (thread_kind) {
                 .issue => ui.RoutablePage.repoCommentsRoute(identity, &record.event.thread_id, item.id, 0),
+                else => null,
+            } orelse return item;
+            item.view_url = try route.toUrl(arena);
+        },
+        .attach => {
+            const record = (try readRecord(evt.Attachment, hash_kind, arena, haxy_moment, id)) orelse return null;
+            item.deleted = record.deleted;
+            item.author = try ui.Author.initFromEmail(admin_moment, arena, record.author_email);
+            var parent_id: [evt.event_id_size]u8 = undefined;
+            _ = std.fmt.hexToBytes(&parent_id, &record.event.parent_id) catch return error.InvalidEventId;
+            const parent_kind = (try readKind(hash_kind, kind_map, &parent_id)) orelse return item;
+            const route = switch (parent_kind) {
+                .issue => ui.RoutablePage.repoIssueCommentsRoute(identity, &record.event.parent_id, 0),
                 else => null,
             } orelse return item;
             item.view_url = try route.toUrl(arena);

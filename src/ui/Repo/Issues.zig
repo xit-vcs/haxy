@@ -14,6 +14,7 @@ const Focus = xitui.focus.Focus;
 const inp = @import("../input.zig");
 const diff3 = @import("../../diff3.zig");
 const Comment = @import("Comment.zig");
+const Attachment = @import("Attachment.zig");
 
 const wasm = builtin.target.cpu.arch == .wasm32;
 
@@ -37,6 +38,7 @@ pub const IssueWithId = struct {
     // whether the issue has an unresolved merge conflict
     conflicted: bool = false,
     comments: Comment.Window = .empty,
+    attachments: []const Attachment.WithId = &.{},
 };
 
 // one side of a conflicted field: its value and who set it
@@ -443,6 +445,7 @@ fn loadWindow(
                 &id_hex,
                 if (std.mem.eql(u8, &id_hex, selected_id)) comments_start else 0,
             ),
+            .attachments = try Attachment.load(hash_kind, arena, haxy_moment, &id_hex),
         });
     }
 
@@ -565,10 +568,11 @@ pub const View = struct {
     data: *const Self,
     session: *ui.Session,
     // per-split state, indexed like the stack's split children: the issue the
-    // pane shows, and its description and author text boxes' focus ids.
+    // pane shows, and its description, author and open/close button focus ids.
     detailed_index: [stack_child_max]?usize,
     description_id: [stack_child_max]?usize,
     author_id: [stack_child_max]?usize,
+    status_button_id: [stack_child_max]?usize,
 
     const header_index: usize = 0;
     const stack_index: usize = 1;
@@ -759,6 +763,7 @@ pub const View = struct {
             .detailed_index = @splat(null),
             .description_id = @splat(null),
             .author_id = @splat(null),
+            .status_button_id = @splat(null),
         };
     }
 
@@ -1402,6 +1407,7 @@ pub const View = struct {
         inner.children.clearAndFree(allocator);
         inner.getFocus().child_id = null;
         self.author_id[index] = null;
+        self.status_button_id[index] = null;
 
         // the tool row: the open/close and edit buttons; the description page
         // shows none.
@@ -1422,6 +1428,21 @@ pub const View = struct {
                 try row.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null });
             }
 
+            // a terminal has no file picker, so attaching is web only. the
+            // renderer covers this button with a file input, so clicking it
+            // opens the browser's own picker and posts what it chose.
+            if (!self.session.is_terminal and !entry.conflicted and (self.session.data.is_local or self.session.data.user_id != null)) {
+                const label = "add attachment";
+                var button = try wgt.TextBox(ui.Widget).init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+                errdefer button.deinit(allocator);
+                button.getFocus().focusable = true;
+                button.getFocus().kind = .{ .custom = if (self.data.identity.len == 0)
+                    try std.fmt.allocPrint(pa, "{s}/issue:{s}/attach", .{ ui.file_input_prefix, entry.id })
+                else
+                    try std.fmt.allocPrint(pa, "{s}/repo/{s}/issue:{s}/attach", .{ ui.file_input_prefix, self.data.identity, entry.id }) };
+                try row.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = .{ .width = label.len + 2, .height = null } });
+            }
+
             // a conflicted issue's only action is resolving it. the button
             // stays visible logged out; the resolve page shows the
             // unauthorized view then.
@@ -1435,12 +1456,14 @@ pub const View = struct {
                 try row.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = .{ .width = label.len + 2, .height = null } });
             } else {
                 // a logged-out session can't flip the status, so it gets no
-                // open/close button (and no form action on the row)
+                // open/close button
                 if (self.session.data.is_local or self.session.data.user_id != null) {
                     const action: []const u8 = switch (entry.issue.event.status) {
                         .open => "close",
                         .closed => "open",
                     };
+                    // the renderer distinguishes plain clickables from buttons
+                    // that should POST to a server route by the submit kind.
                     row.getFocus().kind = .{ .custom = if (self.data.identity.len == 0)
                         try std.fmt.allocPrint(pa, "form:/issue:{s}/{s}", .{ entry.id, action })
                     else
@@ -1449,9 +1472,10 @@ pub const View = struct {
                     var button = try wgt.TextBox(ui.Widget).init(allocator, action, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
                     errdefer button.deinit(allocator);
                     button.getFocus().focusable = true;
-                    // the renderer distinguishes plain clickables from buttons that
-                    // should POST to a server route by this kind.
+                    // the renderer distinguishes plain clickables from buttons
+                    // that should POST to a server route by this kind.
                     button.getFocus().kind = .{ .custom = "submit" };
+                    self.status_button_id[index] = button.getFocus().id;
                     try row.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = .{ .width = action.len + 2, .height = null } });
                 }
 
@@ -1466,9 +1490,10 @@ pub const View = struct {
                 }
             }
 
-            // the resolve button on a conflicted issue, else the open/close
-            // button when present, the edit button otherwise
-            row.getFocus().child_id = row.children.keys()[button_in_row_index];
+            // the leftmost button: the attachment button when the session has
+            // one, else the resolve button on a conflicted issue, the
+            // open/close button when present, the edit button otherwise
+            row.getFocus().child_id = row.children.keys()[first_in_row_index];
         }
 
         if (comment_page) |page| {
@@ -1561,6 +1586,8 @@ pub const View = struct {
             try inner.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
             break :blk tb.getFocus().id;
         };
+
+        try Attachment.appendRows(allocator, inner, self.session, self.data.identity, entry.attachments);
 
         if (!description_page) {
             var reply = try Comment.linkBox(allocator, self.session, "new comment", ui.RoutablePage.repoCommentNewRoute(self.data.identity, entry.id, "") orelse return error.RouteTooLong);
@@ -1712,9 +1739,9 @@ pub const View = struct {
     fn toolRowInput(self: *View, allocator: std.mem.Allocator, index: usize, key: Key, root_focus: *Focus) !void {
         const row = self.toolRow(index);
         const cur = if (row.getFocus().child_id) |cid| row.children.getIndex(cid) orelse return else return;
-        const on_status = cur == button_in_row_index and self.statusButton(index) != null;
+        const on_status = if (self.status_button_id[index]) |id| row.getFocus().child_id == id else false;
         switch (key) {
-            .arrow_left => if (cur > button_in_row_index) root_focus.setFocus(row.children.keys()[cur - 1]) else try self.focusList(index, root_focus),
+            .arrow_left => if (cur > first_in_row_index) root_focus.setFocus(row.children.keys()[cur - 1]) else try self.focusList(index, root_focus),
             .arrow_right => if (cur + 1 < row.children.count()) root_focus.setFocus(row.children.keys()[cur + 1]),
             .arrow_up => self.focusHeader(root_focus),
             .arrow_down => {
@@ -1722,8 +1749,8 @@ pub const View = struct {
                 self.detailScroll(index).y = 0;
             },
             .enter => if (on_status) try self.toggleIssueStatus(allocator, index),
-            .mouse => |mouse| if (self.statusButton(index)) |button| {
-                if (inp.leftClickOn(root_focus, button.getFocus().id, mouse)) try self.toggleIssueStatus(allocator, index);
+            .mouse => |mouse| if (self.status_button_id[index]) |id| {
+                if (inp.leftClickOn(root_focus, id, mouse)) try self.toggleIssueStatus(allocator, index);
             },
             else => {},
         }
@@ -2416,9 +2443,11 @@ pub const View = struct {
         }
     }
 
-    const button_in_row_index: usize = 1;
     const title_child_index: usize = 0;
     const tags_child_index: usize = 2;
+
+    // the tool row's first child after the spacer that pushes it right
+    const first_in_row_index: usize = 1;
 
     fn tagFlow(self: *View, index: usize) ?*ui.TagFlow {
         const inner = self.detailInner(index);
@@ -2433,22 +2462,6 @@ pub const View = struct {
         const inner = self.detailInner(index);
         const cid = inner.getFocus().child_id orelse return false;
         return inner.children.getIndex(cid) == tags_child_index and self.tagFlow(index) != null;
-    }
-
-    // the open/close button inside the detail frame's tool row, identified
-    // by its posting kind; a logged-out session's or conflicted issue's row
-    // has none.
-    fn statusButton(self: *View, index: usize) ?*wgt.TextBox(ui.Widget) {
-        const row = self.toolRow(index);
-        if (row.children.count() <= button_in_row_index) return null;
-        switch (row.children.values()[button_in_row_index].widget) {
-            .text_box => |*tb| switch (tb.box.focus.kind) {
-                .custom => |custom| if (std.mem.eql(u8, custom, "submit")) return tb,
-                else => {},
-            },
-            else => {},
-        }
-        return null;
     }
 
     fn toolRowFocused(self: *View, index: usize) bool {

@@ -152,6 +152,9 @@ const importObject = {
             // mousedown→focusin→tick→click sequence, which is what lets
             // the very first click on the submit button actually submit.
             if (html === currentOverlay) return;
+            // the initial wasm render can finish while a native picker is open.
+            // keep its input connected so its change event reaches document.
+            if (overlay.contains(document.activeElement) && document.activeElement.type === "file") return;
             currentOverlay = html;
             overlay.innerHTML = html;
         },
@@ -214,6 +217,23 @@ function sendEnter(form) {
     wasmInstance.exports._tick(minRows(), maxCols());
 }
 
+// upload as soon as the file dialog returns, so attaching is one click. the
+// file is the whole request body, so its name travels in a header.
+document.addEventListener("change", (event) => {
+    const t = event.target;
+    if (!t || t.tagName !== "INPUT" || t.type !== "file" || !t.dataset.action) return;
+    const file = t.files[0];
+    if (!file) return;
+    fetch(t.dataset.action, {
+        method: "POST",
+        headers: { "x-attachment-name": encodeURIComponent(file.name) },
+        body: file,
+    }).then((res) => {
+        if (res.ok) window.location.reload();
+        else res.text().then((message) => console.error("upload failed:", message));
+    });
+});
+
 WebAssembly.instantiateStreaming(fetch("/haxy.wasm"), importObject).then(async (result) => {
     wasmInstance = result.instance;
 
@@ -243,7 +263,13 @@ WebAssembly.instantiateStreaming(fetch("/haxy.wasm"), importObject).then(async (
             const tag = document.activeElement.tagName;
             const isArrow = event.key === "ArrowUp" || event.key === "ArrowDown" ||
                 event.key === "ArrowLeft" || event.key === "ArrowRight";
-            if (tag === "INPUT" && document.activeElement.readOnly &&
+            // a file picker is an input but behaves like a button: every key
+            // but an arrow is native (enter opens its dialog), and an arrow
+            // navigates away from it
+            if (tag === "INPUT" && document.activeElement.type === "file") {
+                if (!isArrow) return;
+                document.activeElement.blur();
+            } else if (tag === "INPUT" && document.activeElement.readOnly &&
                 ["Enter", "ArrowLeft", "ArrowRight"].includes(event.key)) {
                 event.preventDefault();
                 if (event.key === "Enter") {
@@ -253,14 +279,12 @@ WebAssembly.instantiateStreaming(fetch("/haxy.wasm"), importObject).then(async (
                 wasmInstance.exports._onKeyDown(event.keyCode);
                 wasmInstance.exports._tick(minRows(), maxCols());
                 return;
-            }
-            if (tag === "INPUT" && event.key === "Enter") {
+            } else if (tag === "INPUT" && event.key === "Enter") {
                 // enter in a text input never submits the form; only the
                 // submit button does
                 event.preventDefault();
                 return;
-            }
-            if (tag === "INPUT" && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
+            } else if (tag === "INPUT" && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
                 // up/down moves between widgets; left/right stay in the input
                 document.activeElement.blur();
             } else if (tag === "BUTTON" && isArrow) {
@@ -323,9 +347,12 @@ WebAssembly.instantiateStreaming(fetch("/haxy.wasm"), importObject).then(async (
         // a click's mousedown fires this focusin before the click event. ticking
         // here would rebuild #grid and destroy the node before its click lands,
         // swallowing the navigation and forcing a second click — so don't
-        // re-render for a grid element. overlay controls live outside #grid and
-        // survive the diff, so they still tick.
-        if (!grid.contains(t)) wasmInstance.exports._tick(minRows(), maxCols());
+        // re-render for a grid element. a file input is also skipped because a
+        // changed overlay would replace it between mousedown and click, before
+        // the browser opens its picker.
+        if (!grid.contains(t) && !(t.tagName === "INPUT" && t.type === "file")) {
+            wasmInstance.exports._tick(minRows(), maxCols());
+        }
     });
 
     grid.addEventListener("click", (event) => {

@@ -92,12 +92,13 @@ fn tick(min_height: u32, max_width: u32) !void {
     const root_focus = root_ptr.getFocus();
     if (root_focus.grandchild_id) |gid| {
         if (root_focus.children.get(gid)) |child| {
-            // browser-focus the focused overlay control (text input or submit button)
-            // so the browser handles typing and Enter-to-submit natively. without this
-            // the submit button never gets focus and Enter falls through to the wasm.
+            // browser-focus the focused overlay control (text input, submit button
+            // or file picker) so the browser handles typing, Enter-to-submit and
+            // Enter-to-open-the-picker natively. without this the control never
+            // gets focus and Enter falls through to the wasm.
             switch (child.focus.kind) {
                 .text_input, .text_input_password, .text_area => _focusInput(@intCast(gid)),
-                .custom => |custom| if (std.mem.eql(u8, custom, "submit")) _focusInput(@intCast(gid)),
+                .custom => |custom| if (std.mem.eql(u8, custom, "submit") or std.mem.startsWith(u8, custom, ui.file_input_prefix)) _focusInput(@intCast(gid)),
                 else => {},
             }
 
@@ -135,6 +136,11 @@ fn onKeyDown(key_code: u32) !void {
                 _navigate(url.ptr, @intCast(url.len));
                 return;
             }
+            // follow a link to bytes the server serves directly
+            if (ui.rawLink(root_ptr.getFocus(), gid)) |url| {
+                _navigate(url.ptr, @intCast(url.len));
+                return;
+            }
         }
     }
 
@@ -146,6 +152,11 @@ fn onMouseClick(focus_id: usize) !void {
     // follow a cross-page link
     if (ui.crossPageLink(root_ptr.getFocus(), focus_id, session.data)) |route| {
         const url = try route.toUrl(&page_arena);
+        _navigate(url.ptr, @intCast(url.len));
+        return;
+    }
+    // the grid suppresses the anchor's own navigation, so follow it here
+    if (ui.rawLink(root_ptr.getFocus(), focus_id)) |url| {
         _navigate(url.ptr, @intCast(url.len));
         return;
     }

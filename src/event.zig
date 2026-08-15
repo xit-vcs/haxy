@@ -10,6 +10,7 @@ pub const User = @import("event/User.zig");
 pub const Repo = @import("event/Repo.zig");
 pub const Issue = @import("event/Issue.zig");
 pub const Comment = @import("event/Comment.zig");
+pub const Attachment = @import("event/Attachment.zig");
 
 pub const event_id_size: usize = 16;
 
@@ -53,11 +54,13 @@ pub fn project(comptime T: type, source: anytype) T {
     return result;
 }
 
+// kept to eight bytes or fewer, so the db stores them as short bytes
 pub const EventKind = enum {
     user,
     repo,
     issue,
     comment,
+    attach,
 };
 
 // every logical event's kind and creation-ordered id set
@@ -70,6 +73,15 @@ pub const Event = union(EventKind) {
     repo: ?Repo,
     issue: ?Issue,
     comment: ?Comment,
+    attach: ?Attachment,
+};
+
+// a file committed alongside its event, as the one entry in that commit's tree.
+// it isn't serialized, so nothing about it reaches the commit message.
+pub const Blob = struct {
+    name: []const u8,
+    size: u64,
+    reader: *std.Io.Reader,
 };
 
 // who a commit is attributed to
@@ -83,6 +95,7 @@ pub const EventWithId = struct {
     event: Event,
     timestamp: u64 = 0, // not serialized, because it comes from the commit timestamp
     author: CommitAuthor, // not serialized, because it goes in the commit author line
+    blob: ?Blob = null, // not serialized, because it goes in the commit tree
 
     pub fn jsonStringify(self: EventWithId, jw: anytype) !void {
         try jw.beginObject();
@@ -130,6 +143,12 @@ pub const EventWithId = struct {
                 .comment => .{
                     .comment = if (json_event.data) |value|
                         try std.json.parseFromValueLeaky(Comment, arena.allocator(), value, .{ .ignore_unknown_fields = true })
+                    else
+                        null,
+                },
+                .attach => .{
+                    .attach = if (json_event.data) |value|
+                        try std.json.parseFromValueLeaky(Attachment, arena.allocator(), value, .{ .ignore_unknown_fields = true })
                     else
                         null,
                 },
@@ -316,18 +335,49 @@ fn mergeEventsInTransaction(
         }
     }
 
-    var local_commit = try obj.Object(repo_kind, repo_opts).initCommit(state.readOnly(), io, allocator, &local_oid);
-    defer local_commit.deinit();
-    var remote_commit = try obj.Object(repo_kind, repo_opts).initCommit(state.readOnly(), io, allocator, &remote_oid);
-    defer remote_commit.deinit();
-    if (!std.mem.eql(u8, &local_commit.content.commit.tree, &remote_commit.content.commit.tree)) return error.EventTreeConflict;
-
     const parent_oids = [_][hash.hexLen(repo_opts.hash)]u8{ local_oid, remote_oid };
+    var tree = try obj.Tree.init(allocator);
+    defer tree.deinit();
     _ = try obj.writeCommit(repo_kind, repo_opts, state, io, allocator, .{
         .message = "merge events",
         .parent_oids = &parent_oids,
-    }, null, events_ref);
+    }, &tree, events_ref);
     return true;
+}
+
+// the file an attach event carries: the one entry in its commit's tree. the
+// name and oid are allocated in `arena`.
+fn attachedFile(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    arena: *std.heap.ArenaAllocator,
+    tree_oid: *const [hash.hexLen(repo_opts.hash)]u8,
+) !struct { name: []const u8, oid: []const u8 } {
+    var tree_object = try obj.Object(repo_kind, repo_opts).init(state, io, allocator, tree_oid);
+    defer tree_object.deinit();
+
+    const entries = switch (tree_object.content) {
+        .tree => |tree| tree.entries,
+        else => return error.InvalidAttachment,
+    };
+    if (entries.count() != 1) return error.InvalidAttachment;
+    const entry = entries.values()[0];
+    if (entry.isTree()) return error.InvalidAttachment;
+    const name = entries.keys()[0];
+    if (!Attachment.nameValid(name)) return error.InvalidAttachment;
+
+    const oid = std.fmt.bytesToHex(entry.oid, .lower);
+    var object_reader = try obj.ObjectReader(repo_kind, repo_opts).init(state, io, allocator, &oid);
+    defer object_reader.deinit();
+    if (object_reader.header().kind != .blob) return error.InvalidAttachment;
+
+    return .{
+        .name = try arena.allocator().dupe(u8, name),
+        .oid = try arena.allocator().dupe(u8, &oid),
+    };
 }
 
 // commit each event as a JSON commit message on `ref` through `state`, so a
@@ -353,7 +403,24 @@ fn commitEvents(
         if (json.written().len > max_event_size) return error.EventTooLarge;
         const author = try std.fmt.allocPrint(allocator, "{s} <{s}>", .{ event.author.name, event.author.email });
         defer allocator.free(author);
-        _ = try obj.writeCommit(repo_kind, repo_opts, state, io, allocator, .{ .author = author, .message = json.written(), .timestamp = event.timestamp, .parent_oids = parent_oids }, null, ref);
+
+        // every event gets its own tree, with one entry when it carries a file
+        // and no entries otherwise
+        var tree = try obj.Tree.init(allocator);
+        defer tree.deinit();
+        if (event.blob) |blob| {
+            var oid_bytes = [_]u8{0} ** hash.byteLen(repo_opts.hash);
+            try obj.writeObject(repo_kind, repo_opts, state, io, blob.reader, .{ .kind = .blob, .size = blob.size }, &oid_bytes);
+            try tree.addBlobEntry(.{ .content = .{ .unix_permission = 0o644, .object_type = .regular_file } }, blob.name, &oid_bytes);
+        }
+
+        _ = try obj.writeCommit(repo_kind, repo_opts, state, io, allocator, .{
+            .author = author,
+            .message = json.written(),
+            .timestamp = event.timestamp,
+            .parent_oids = parent_oids,
+            .allow_empty = true,
+        }, &tree, ref);
         // later events parent on the ref's new tip
         parent_oids = null;
     }
@@ -751,6 +818,19 @@ pub fn consumeInTransaction(
                         .created_ts = created_ts,
                     } else null;
                     try Comment.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, record_maybe, &arena, &repo_event_oid);
+                },
+                .attach => |event_maybe| {
+                    const record_maybe: ?Attachment.Record = if (event_maybe) |event| blk: {
+                        const entry = try attachedFile(repo_kind, repo_opts, read_state, io, allocator, &arena, &commit_object.content.commit.tree);
+                        break :blk .{
+                            .event = event,
+                            .author_email = authorEmail(commit_object.content.commit.metadata.author orelse ""),
+                            .created_ts = created_ts,
+                            .name = entry.name,
+                            .blob_oid = entry.oid,
+                        };
+                    } else null;
+                    try Attachment.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, record_maybe, &arena, &repo_event_oid);
                 },
             }
         }
