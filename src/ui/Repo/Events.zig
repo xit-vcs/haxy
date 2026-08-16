@@ -479,9 +479,7 @@ pub const View = struct {
             ui.moveRowFocus(self.listBox(), self.listScroll(), root_focus, delta);
         } else switch (key) {
             .arrow_right => if (self.detailBox().children.count() > 0) root_focus.setFocus(self.detailScroll().getFocus().id),
-            .enter => if (self.selectedEventIndex() != null)
-                root_focus.setFocus(self.detailScroll().getFocus().id)
-            else if (self.eventWindow().next) |next| if (ui.RoutablePage.repoEventsRoute(self.data.identity, self.selectedView(), next.kind, next.id)) |route| try self.session.navigate(route),
+            .enter => if (self.selectedEventIndex() != null) root_focus.setFocus(self.detailScroll().getFocus().id),
             else => {},
         }
     }
