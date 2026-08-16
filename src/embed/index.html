@@ -33,6 +33,11 @@
             position: relative;
           }
 
+          body:has(#grid .scroll) {
+            height: 100vh;
+            overflow: hidden;
+          }
+
           /* each web-native Scroll widget: a box positioned over its viewport
              (left/top/width/height and per-axis overflow come inline, the latter
              from the widget's scroll direction) */
