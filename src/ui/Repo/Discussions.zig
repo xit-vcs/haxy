@@ -305,6 +305,7 @@ pub const Header = struct {
                 .edit => ui.RoutablePage.repoThreadEditRoute(.discussion, data.identity, data.selected_id) orelse return error.RouteTooLong,
                 .new_comment => ui.RoutablePage.repoThreadCommentNewRoute(.discussion, data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong,
                 .edit_comment => ui.RoutablePage.repoThreadCommentEditRoute(.discussion, data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong,
+                .remove => ui.RoutablePage.repoThreadRemoveRoute(.discussion, data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong,
                 else => ui.RoutablePage.repoThreadNewRoute(.discussion, data.identity) orelse return error.RouteTooLong,
             };
             const link = try std.fmt.allocPrint(aa, "ai:{s}", .{try route.toUrl(session.page_arena)});
@@ -312,6 +313,7 @@ pub const Header = struct {
                 .edit => "edit",
                 .new_comment => "reply",
                 .edit_comment => "edit",
+                .remove => "remove",
                 else => "new",
             };
             try addTab(allocator, &box, &tab_ids, label, link);

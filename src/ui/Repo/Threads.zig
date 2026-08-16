@@ -43,7 +43,6 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         description_id: [view_count]?usize,
         author_id: [view_count]?usize,
         status_button_id: [view_count]?usize,
-        remove_button_id: [view_count]?usize,
 
         const header_index: usize = 0;
         const stack_index: usize = 1;
@@ -74,7 +73,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         pub fn viewIndex(view: ViewKind) usize {
             const name = @tagName(view);
             if (std.mem.eql(u8, name, "tags")) return tags_view_index;
-            if (std.mem.eql(u8, name, "new") or std.mem.eql(u8, name, "edit") or std.mem.eql(u8, name, "new_comment") or std.mem.eql(u8, name, "edit_comment") or std.mem.eql(u8, name, "resolve")) return form_view_index;
+            if (std.mem.eql(u8, name, "new") or std.mem.eql(u8, name, "edit") or std.mem.eql(u8, name, "new_comment") or std.mem.eql(u8, name, "edit_comment") or std.mem.eql(u8, name, "remove") or std.mem.eql(u8, name, "resolve")) return form_view_index;
             if (std.mem.eql(u8, name, "conflicts")) return conflict_view_index;
             if (std.mem.eql(u8, name, "description")) unreachable;
             inline for (@typeInfo(Status).@"enum".fields, 0..) |field, index| {
@@ -119,6 +118,10 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
 
         fn editCommentRoute(identity: []const u8, thread_id: []const u8, comment_id: []const u8) ?ui.RoutablePage {
             return ui.RoutablePage.repoThreadCommentEditRoute(kind, identity, thread_id, comment_id);
+        }
+
+        fn removeRoute(identity: []const u8, thread_id: []const u8, comment_id: []const u8) ?ui.RoutablePage {
+            return ui.RoutablePage.repoThreadRemoveRoute(kind, identity, thread_id, comment_id);
         }
 
         fn editRoute(identity: []const u8, selected: []const u8) ?ui.RoutablePage {
@@ -229,7 +232,16 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             // logged-out session can't create events, so the unauthorized view
             // stands in.
             if (session.data.is_local or session.data.user_id != null) {
-                if (data.view == .new_comment or data.view == .edit_comment) {
+                if (data.view == .remove) {
+                    const aa = session.page_arena.allocator();
+                    const route = removeRoute(data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong;
+                    const action = try std.fmt.allocPrint(aa, "form:{s}", .{try route.toUrl(session.page_arena)});
+                    const event_name = if (data.comment_id.len == 0) @tagName(kind) else "comment";
+                    const label = try std.fmt.allocPrint(aa, "remove {s}", .{event_name});
+                    var center = try initRemoveForm(allocator, action, label);
+                    errdefer center.deinit(allocator);
+                    try stack.children.put(allocator, center.getFocus().id, .{ .center = center });
+                } else if (data.view == .new_comment or data.view == .edit_comment) {
                     const editing = data.view == .edit_comment;
                     const route = if (editing)
                         editCommentRoute(data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong
@@ -324,7 +336,6 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 .description_id = @splat(null),
                 .author_id = @splat(null),
                 .status_button_id = @splat(null),
-                .remove_button_id = @splat(null),
             };
         }
 
@@ -475,6 +486,25 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             try addSubmitButtonLabeled(allocator, &box, "submit");
             box.getFocus().child_id = box.children.keys()[comment_author_field_index];
             return box;
+        }
+
+        fn initRemoveForm(allocator: std.mem.Allocator, action: []const u8, label: []const u8) !ui.Center {
+            var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .rounded_corners = true, .direction = .vert });
+            errdefer box.deinit(allocator);
+            box.getFocus().kind = .{ .custom = action };
+
+            var prompt = try wgt.Text(ui.Widget).init(allocator, "are you sure?");
+            errdefer prompt.deinit(allocator);
+            try box.children.put(allocator, prompt.getFocus().id, .{ .widget = .{ .text = prompt }, .rect = null, .min_size = null });
+
+            var button = try wgt.TextBox(ui.Widget).init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            errdefer button.deinit(allocator);
+            button.getFocus().focusable = true;
+            button.getFocus().kind = .{ .custom = "submit" };
+            try box.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = null });
+            box.getFocus().child_id = button.getFocus().id;
+
+            return ui.Center.init(allocator, .{ .box = box });
         }
 
         // a form's submit button, then a spacer absorbing the leftover
@@ -729,6 +759,16 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             };
         }
 
+        fn removeForm(self: *This) ?*wgt.Box(ui.Widget) {
+            return switch (self.viewStack().children.values()[form_view_index]) {
+                .center => |*center| switch (center.child.*) {
+                    .box => |*box| box,
+                    else => null,
+                },
+                else => null,
+            };
+        }
+
         // the resolve form's scroll on the terminal (the web page scrolls itself)
         fn resolveScroll(self: *This) ?*wgt.Scroll(ui.Widget) {
             return switch (self.viewStack().children.values()[form_view_index]) {
@@ -831,12 +871,14 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                         .edit => editRoute(self.data.identity, self.data.selected_id),
                         .new_comment => newCommentRoute(self.data.identity, self.data.selected_id, self.data.comment_id),
                         .edit_comment => editCommentRoute(self.data.identity, self.data.selected_id, self.data.comment_id),
+                        .remove => removeRoute(self.data.identity, self.data.selected_id, self.data.comment_id),
                         .resolve => resolveRoute(self.data.identity, self.data.selected_id, self.data.theirs_picks),
                         else => newRoute(self.data.identity),
                     } else switch (self.data.view) {
                         .edit => editRoute(self.data.identity, self.data.selected_id),
                         .new_comment => newCommentRoute(self.data.identity, self.data.selected_id, self.data.comment_id),
                         .edit_comment => editCommentRoute(self.data.identity, self.data.selected_id, self.data.comment_id),
+                        .remove => removeRoute(self.data.identity, self.data.selected_id, self.data.comment_id),
                         else => newRoute(self.data.identity),
                     })
                 else if (has_conflicts and index == conflict_view_index)
@@ -976,7 +1018,6 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             inner.getFocus().child_id = null;
             self.author_id[index] = null;
             self.status_button_id[index] = null;
-            self.remove_button_id[index] = null;
 
             // the tool row: the open/close and edit buttons; the description page
             // shows none.
@@ -1056,18 +1097,11 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 }
 
                 if (self.session.data.is_local or self.session.data.user_id != null) {
-                    const thread_route = commentsRoute(self.data.identity, entry.id, 0) orelse return error.RouteTooLong;
-                    const remove_url = try std.fmt.allocPrint(pa, "{s}/remove", .{try thread_route.toUrl(self.session.page_arena)});
-                    const action_kind: []const u8 = if (entryConflicted(entry)) blk: {
-                        row.getFocus().kind = .{ .custom = try std.fmt.allocPrint(pa, "form:{s}", .{remove_url}) };
-                        break :blk "submit";
-                    } else try std.fmt.allocPrint(pa, "{s}{s}", .{ ui.submit_action_prefix, remove_url });
-
                     var remove = try wgt.TextBox(ui.Widget).init(allocator, "✕", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
                     errdefer remove.deinit(allocator);
                     remove.getFocus().focusable = true;
-                    remove.getFocus().kind = .{ .custom = action_kind };
-                    self.remove_button_id[index] = remove.getFocus().id;
+                    const route = removeRoute(self.data.identity, entry.id, "") orelse return error.RouteTooLong;
+                    remove.getFocus().kind = .{ .custom = try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}) };
                     try row.children.put(allocator, remove.getFocus().id, .{ .widget = .{ .text_box = remove }, .rect = null, .min_size = .{ .width = 3, .height = null } });
                 }
 
@@ -1227,7 +1261,9 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 return;
             }
             if (self.formViewActive()) {
-                if (has_conflicts and self.data.view == .resolve) {
+                if (self.data.view == .remove) {
+                    try self.removeFormInput(allocator, key, root_focus);
+                } else if (has_conflicts and self.data.view == .resolve) {
                     try self.resolveInput(allocator, key, root_focus);
                 } else if (self.data.view == .new_comment or self.data.view == .edit_comment) {
                     try self.commentFormInput(allocator, key, root_focus);
@@ -1346,7 +1382,6 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             const row = self.toolRow(index);
             const cur = if (row.getFocus().child_id) |cid| row.children.getIndex(cid) orelse return else return;
             const on_status = if (self.status_button_id[index]) |id| row.getFocus().child_id == id else false;
-            const on_remove = if (self.remove_button_id[index]) |id| row.getFocus().child_id == id else false;
             switch (key) {
                 .arrow_left => if (cur > first_in_row_index) root_focus.setFocus(row.children.keys()[cur - 1]) else try self.focusList(index, root_focus),
                 .arrow_right => if (cur + 1 < row.children.count()) root_focus.setFocus(row.children.keys()[cur + 1]),
@@ -1355,11 +1390,8 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     self.focusDetailEdge(index, root_focus, false);
                     self.detailScroll(index).y = 0;
                 },
-                .enter => if (on_remove) try self.removeThread(allocator, index) else if (on_status) try self.toggleStatus(allocator, index),
-                .mouse => |mouse| if (self.remove_button_id[index]) |id| {
-                    if (inp.leftClickOn(root_focus, id, mouse)) return self.removeThread(allocator, index);
-                    if (self.status_button_id[index]) |status_id| if (inp.leftClickOn(root_focus, status_id, mouse)) try self.toggleStatus(allocator, index);
-                } else if (self.status_button_id[index]) |id| {
+                .enter => if (on_status) try self.toggleStatus(allocator, index),
+                .mouse => |mouse| if (self.status_button_id[index]) |id| {
                     if (inp.leftClickOn(root_focus, id, mouse)) try self.toggleStatus(allocator, index);
                 },
                 else => {},
@@ -1422,26 +1454,14 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         }
 
         fn commentInput(self: *This, allocator: std.mem.Allocator, index: usize, key: Key, root_focus: *Focus) !void {
-            const item = self.focusedComment(index, root_focus);
+            _ = allocator;
             switch (key) {
                 .arrow_left => if (!self.moveCommentHorizontal(index, root_focus, false)) return self.focusList(index, root_focus),
                 .arrow_right => _ = self.moveCommentHorizontal(index, root_focus, true),
                 .arrow_up => _ = self.moveDetailVertical(index, root_focus, false),
                 .arrow_down => _ = self.moveDetailVertical(index, root_focus, true),
-                .enter => if (item) |comment| if (comment.removeFocused()) try self.removeComment(allocator, comment),
-                .mouse => |mouse| if (item) |comment| if (comment.remove_button_id) |id| {
-                    if (inp.leftClickOn(root_focus, id, mouse)) try self.removeComment(allocator, comment);
-                },
                 else => return,
             }
-        }
-
-        fn focusedComment(self: *This, index: usize, root_focus: *Focus) ?*Comment.Item {
-            const child_index = self.focusedDetailChild(index, root_focus) orelse return null;
-            return switch (self.detailInner(index).children.values()[child_index].widget) {
-                .repo_comment => |*comment| comment,
-                else => null,
-            };
         }
 
         // page the detail scroll, then focus the first or last visible widget.
@@ -1702,6 +1722,17 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     if (inp.leftClickOn(root_focus, submit.buttonId(), mouse)) try self.submitComment(allocator);
                 },
                 else => try child.widget.input(allocator, key, root_focus),
+            }
+        }
+
+        fn removeFormInput(self: *This, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
+            const form = self.removeForm() orelse return;
+            const button_id = form.children.keys()[1];
+            switch (key) {
+                .arrow_up, .back_tab => self.focusHeader(root_focus),
+                .enter => try self.submitRemove(allocator),
+                .mouse => |mouse| if (inp.leftClickOn(root_focus, button_id, mouse)) try self.submitRemove(allocator),
+                else => {},
             }
         }
 
@@ -2010,17 +2041,12 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             try self.session.navigate(route);
         }
 
-        fn removeThread(self: *This, allocator: std.mem.Allocator, index: usize) !void {
-            const sel = self.detailed_index[index] orelse return;
-            const entry = self.window(index).items[sel];
-
-            var id_bytes: [evt.event_id_size]u8 = undefined;
-            _ = std.fmt.hexToBytes(&id_bytes, entry.id) catch return;
-            try self.removeEvent(allocator, kind, id_bytes);
-        }
-
-        fn removeComment(self: *This, allocator: std.mem.Allocator, comment: *Comment.Item) !void {
-            try self.removeEvent(allocator, .comment, comment.id);
+        fn submitRemove(self: *This, allocator: std.mem.Allocator) !void {
+            const comment = self.data.comment_id.len != 0;
+            const event_id = if (comment) self.data.comment_id else self.data.selected_id;
+            var id: [evt.event_id_size]u8 = undefined;
+            _ = std.fmt.hexToBytes(&id, event_id) catch return;
+            try self.removeEvent(allocator, if (comment) .comment else kind, id);
         }
 
         fn removeEvent(self: *This, allocator: std.mem.Allocator, event_kind: evt.EventKind, id: [evt.event_id_size]u8) !void {

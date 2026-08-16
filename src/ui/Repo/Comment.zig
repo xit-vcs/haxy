@@ -138,8 +138,6 @@ fn idBytes(id: []const u8) ?[evt.event_id_size]u8 {
 
 pub const Item = struct {
     box: wgt.Box(ui.Widget),
-    id: [evt.event_id_size]u8,
-    remove_button_id: ?usize,
 
     const metadata_index: usize = 0;
     const body_index: usize = 1;
@@ -149,7 +147,6 @@ pub const Item = struct {
     pub fn init(allocator: std.mem.Allocator, session: *ui.Session, identity: []const u8, thread_kind: evt.EventKind, entry: CommentWithId) !Item {
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert });
         errdefer box.deinit(allocator);
-        var remove_button_id: ?usize = null;
 
         {
             var bar = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
@@ -196,13 +193,8 @@ pub const Item = struct {
             }
 
             if (!entry.comment.removed and (session.data.is_local or session.data.user_id != null)) {
-                const route = commentsRoute(thread_kind, identity, &entry.comment.event.thread_id, &entry.id, 0) orelse return error.RouteTooLong;
-                bar.getFocus().kind = .{ .custom = try std.fmt.allocPrint(session.page_arena.allocator(), "form:{s}/remove", .{try route.toUrl(session.page_arena)}) };
-                var remove = try wgt.TextBox(ui.Widget).init(allocator, "✕", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+                var remove = try linkBox(allocator, session, "✕", removeRoute(thread_kind, identity, &entry.comment.event.thread_id, &entry.id) orelse return error.RouteTooLong);
                 errdefer remove.deinit(allocator);
-                remove.getFocus().focusable = true;
-                remove.getFocus().kind = .{ .custom = "submit" };
-                remove_button_id = remove.getFocus().id;
                 try bar.children.put(allocator, remove.getFocus().id, .{ .widget = .{ .text_box = remove }, .rect = null, .min_size = .{ .width = 3, .height = null } });
             }
 
@@ -222,11 +214,7 @@ pub const Item = struct {
 
         box.getFocus().child_id = box.children.keys()[metadata_index];
 
-        return .{
-            .box = box,
-            .id = idBytes(&entry.id) orelse return error.InvalidEventId,
-            .remove_button_id = remove_button_id,
-        };
+        return .{ .box = box };
     }
 
     fn metadata(self: *Item) *wgt.Box(ui.Widget) {
@@ -239,11 +227,6 @@ pub const Item = struct {
 
     pub fn bodyFocused(self: *Item) bool {
         return self.box.getFocus().child_id == self.body().getFocus().id;
-    }
-
-    pub fn removeFocused(self: *Item) bool {
-        const id = self.remove_button_id orelse return false;
-        return self.metadata().getFocus().child_id == id;
     }
 
     pub fn focusMetadata(self: *Item, root_focus: *Focus) void {
@@ -349,6 +332,10 @@ fn commentNewRoute(kind: evt.EventKind, identity: []const u8, thread_id: []const
 
 fn commentEditRoute(kind: evt.EventKind, identity: []const u8, thread_id: []const u8, comment_id: []const u8) ?ui.RoutablePage {
     return ui.RoutablePage.repoThreadCommentEditRoute(kind, identity, thread_id, comment_id);
+}
+
+fn removeRoute(kind: evt.EventKind, identity: []const u8, thread_id: []const u8, comment_id: []const u8) ?ui.RoutablePage {
+    return ui.RoutablePage.repoThreadRemoveRoute(kind, identity, thread_id, comment_id);
 }
 
 pub fn linkBox(allocator: std.mem.Allocator, session: *ui.Session, text: []const u8, route: ui.RoutablePage) !wgt.TextBox(ui.Widget) {

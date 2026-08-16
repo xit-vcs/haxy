@@ -288,7 +288,7 @@ pub fn init(
                 .closed => closed_root = order_key,
             }
             // form urls keep their view; otherwise the issue's status picks it.
-            if (view != .edit and view != .new_comment and view != .edit_comment) resolved_view = switch (issue_event.event.status) {
+            if (view != .edit and view != .new_comment and view != .edit_comment and view != .remove) resolved_view = switch (issue_event.event.status) {
                 .open => .open,
                 .closed => .closed,
             };
@@ -608,6 +608,7 @@ pub const Header = struct {
                 .edit => ui.RoutablePage.repoThreadEditRoute(.issue, data.identity, data.selected_id) orelse return error.RouteTooLong,
                 .new_comment => ui.RoutablePage.repoThreadCommentNewRoute(.issue, data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong,
                 .edit_comment => ui.RoutablePage.repoThreadCommentEditRoute(.issue, data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong,
+                .remove => ui.RoutablePage.repoThreadRemoveRoute(.issue, data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong,
                 .resolve => ui.RoutablePage.repoIssuesResolveRoute(data.identity, data.selected_id, data.theirs_picks) orelse return error.RouteTooLong,
                 else => ui.RoutablePage.repoThreadNewRoute(.issue, data.identity) orelse return error.RouteTooLong,
             };
@@ -616,6 +617,7 @@ pub const Header = struct {
                 .edit => "edit",
                 .new_comment => "reply",
                 .edit_comment => "edit",
+                .remove => "remove",
                 .resolve => "resolve",
                 else => "new",
             };

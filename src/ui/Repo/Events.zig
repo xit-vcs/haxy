@@ -23,7 +23,7 @@ pub const Item = struct {
     view_url: ?[]const u8 = null,
 };
 
-pub const Cursor = struct {
+pub const EventRef = struct {
     id: []const u8,
     kind: evt.EventKind,
 };
@@ -31,11 +31,12 @@ pub const Cursor = struct {
 pub const Window = struct {
     count: usize = 0,
     events: []const Item = &.{},
-    next: ?Cursor = null,
+    next: ?EventRef = null,
 };
 
 identity: []const u8,
 view: ui.RoutablePage.EventsView,
+selected: ?EventRef,
 active: Window,
 removed: Window,
 header: Header,
@@ -93,6 +94,7 @@ pub fn init(
         const kind = selected_kind orelse return error.NotFound;
         const stored_kind = (try evt.readEventKind(repo_opts.hash, kind_map, &id)) orelse return error.NotFound;
         if (stored_kind != kind) return error.NotFound;
+        result.selected = .{ .id = try aa.dupe(u8, selected), .kind = kind };
         const meta = try readMeta(repo_opts.hash, arena, haxy_moment, kind, &id);
         result.view = if (meta.removed) .removed else .active;
         root_key = evt.orderKeyDesc(meta.created_ts, &id);
@@ -136,6 +138,7 @@ pub fn empty(aa: std.mem.Allocator, identity: []const u8, view: ui.RoutablePage.
     return .{
         .identity = try aa.dupe(u8, identity),
         .view = view,
+        .selected = null,
         .active = .{},
         .removed = .{},
         .header = if (local) try Header.empty(aa, failure) else Header.remote(),
@@ -399,7 +402,15 @@ pub const View = struct {
         if (self.header().getSelectedIndex()) |index|
             self.contentStack().getFocus().child_id = self.contentStack().children.keys()[index];
         const view = self.selectedView();
-        if (ui.RoutablePage.repoEventsRoute(self.data.identity, view, null, "")) |route|
+        var selected_kind: ?evt.EventKind = null;
+        var selected_id: []const u8 = "";
+        if (view == self.data.view) {
+            if (self.data.selected) |selected| {
+                selected_kind = selected.kind;
+                selected_id = selected.id;
+            }
+        }
+        if (ui.RoutablePage.repoEventsRoute(self.data.identity, view, selected_kind, selected_id)) |route|
             self.session.data.current_page = route;
         try self.refreshDetail(allocator);
 
