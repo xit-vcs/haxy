@@ -146,7 +146,7 @@ pub const Item = struct {
     const gap_index: usize = 2;
     const metadata_first_link_index: usize = 1;
 
-    pub fn init(allocator: std.mem.Allocator, session: *ui.Session, identity: []const u8, entry: CommentWithId) !Item {
+    pub fn init(allocator: std.mem.Allocator, session: *ui.Session, identity: []const u8, thread_kind: evt.EventKind, entry: CommentWithId) !Item {
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert });
         errdefer box.deinit(allocator);
         var remove_button_id: ?usize = null;
@@ -163,17 +163,17 @@ pub const Item = struct {
             errdefer author.deinit(allocator);
             try bar.children.put(allocator, author.getFocus().id, .{ .widget = .{ .text_box = author }, .rect = null, .min_size = null, .shrink = true });
 
-            var reply = try linkBox(allocator, session, "new reply", ui.RoutablePage.repoCommentNewRoute(identity, &entry.comment.event.thread_id, &entry.id) orelse return error.RouteTooLong);
+            var reply = try linkBox(allocator, session, "new reply", commentNewRoute(thread_kind, identity, &entry.comment.event.thread_id, &entry.id) orelse return error.RouteTooLong);
             errdefer reply.deinit(allocator);
             try bar.children.put(allocator, reply.getFocus().id, .{ .widget = .{ .text_box = reply }, .rect = null, .min_size = .{ .width = "new reply".len + 2, .height = null } });
 
             if (!entry.comment.removed) {
-                var edit = try linkBox(allocator, session, "edit comment", ui.RoutablePage.repoCommentEditRoute(identity, &entry.comment.event.thread_id, &entry.id) orelse return error.RouteTooLong);
+                var edit = try linkBox(allocator, session, "edit comment", commentEditRoute(thread_kind, identity, &entry.comment.event.thread_id, &entry.id) orelse return error.RouteTooLong);
                 errdefer edit.deinit(allocator);
                 try bar.children.put(allocator, edit.getFocus().id, .{ .widget = .{ .text_box = edit }, .rect = null, .min_size = .{ .width = "edit comment".len + 2, .height = null } });
             }
 
-            var permalink = try linkBox(allocator, session, "permalink", ui.RoutablePage.repoCommentsRoute(identity, &entry.comment.event.thread_id, &entry.id, 0) orelse return error.RouteTooLong);
+            var permalink = try linkBox(allocator, session, "permalink", commentsRoute(thread_kind, identity, &entry.comment.event.thread_id, &entry.id, 0) orelse return error.RouteTooLong);
             errdefer permalink.deinit(allocator);
             try bar.children.put(allocator, permalink.getFocus().id, .{ .widget = .{ .text_box = permalink }, .rect = null, .min_size = .{ .width = "permalink".len + 2, .height = null } });
 
@@ -190,13 +190,13 @@ pub const Item = struct {
                 });
                 errdefer parent.deinit(allocator);
                 parent.getFocus().focusable = true;
-                const route = ui.RoutablePage.repoCommentsRoute(identity, &entry.comment.event.thread_id, &entry.comment.event.parent_id, 0) orelse return error.RouteTooLong;
+                const route = commentsRoute(thread_kind, identity, &entry.comment.event.thread_id, &entry.comment.event.parent_id, 0) orelse return error.RouteTooLong;
                 parent.getFocus().kind = .{ .custom = try std.fmt.allocPrint(session.page_arena.allocator(), "a:{s}", .{try route.toUrl(session.page_arena)}) };
                 try bar.children.put(allocator, parent.getFocus().id, .{ .widget = .{ .text_box = parent }, .rect = null, .min_size = .{ .width = @max(parent_text.len, " replying to ".len) + 2, .height = null } });
             }
 
             if (!entry.comment.removed and (session.data.is_local or session.data.user_id != null)) {
-                const route = ui.RoutablePage.repoCommentsRoute(identity, &entry.comment.event.thread_id, &entry.id, 0) orelse return error.RouteTooLong;
+                const route = commentsRoute(thread_kind, identity, &entry.comment.event.thread_id, &entry.id, 0) orelse return error.RouteTooLong;
                 bar.getFocus().kind = .{ .custom = try std.fmt.allocPrint(session.page_arena.allocator(), "form:{s}/remove", .{try route.toUrl(session.page_arena)}) };
                 var remove = try wgt.TextBox(ui.Widget).init(allocator, "✕", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
                 errdefer remove.deinit(allocator);
@@ -299,8 +299,8 @@ pub const Item = struct {
 };
 
 // append one comment's metadata bar and body.
-pub fn appendComment(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), session: *ui.Session, identity: []const u8, entry: CommentWithId) !void {
-    var item = try Item.init(allocator, session, identity, entry);
+pub fn appendComment(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), session: *ui.Session, identity: []const u8, thread_kind: evt.EventKind, entry: CommentWithId) !void {
+    var item = try Item.init(allocator, session, identity, thread_kind, entry);
     errdefer item.deinit(allocator);
     try box.children.put(allocator, item.getFocus().id, .{ .widget = .{ .repo_comment = item }, .rect = null, .min_size = null });
 }
@@ -312,7 +312,7 @@ pub fn appendCount(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), count
     try box.children.put(allocator, count_box.getFocus().id, .{ .widget = .{ .text_box = count_box }, .rect = null, .min_size = null });
 }
 
-pub fn appendWindowNav(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), session: *ui.Session, identity: []const u8, thread_id: []const u8, selected_id: ?[]const u8, window: Window) !void {
+pub fn appendWindowNav(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), session: *ui.Session, identity: []const u8, thread_kind: evt.EventKind, thread_id: []const u8, selected_id: ?[]const u8, window: Window) !void {
     const has_prev = window.start > 0;
     const has_more = window.start < window.count and window.count - window.start > page_size;
     if (!has_prev and !has_more) return;
@@ -320,26 +320,44 @@ pub fn appendWindowNav(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), s
     errdefer row.deinit(allocator);
     if (has_prev) {
         const start = window.start -| page_size;
-        const route = if (selected_id) |id|
-            ui.RoutablePage.repoCommentsRoute(identity, thread_id, id, start)
-        else
-            ui.RoutablePage.repoIssueCommentsRoute(identity, thread_id, start);
+        const route = commentsRoute(thread_kind, identity, thread_id, selected_id, start);
         var previous = try linkBox(allocator, session, "← previous", route orelse return error.RouteTooLong);
         errdefer previous.deinit(allocator);
         try row.children.put(allocator, previous.getFocus().id, .{ .widget = .{ .text_box = previous }, .rect = null, .min_size = null });
     }
     if (has_more) {
         const start = window.start + page_size;
-        const route = if (selected_id) |id|
-            ui.RoutablePage.repoCommentsRoute(identity, thread_id, id, start)
-        else
-            ui.RoutablePage.repoIssueCommentsRoute(identity, thread_id, start);
+        const route = commentsRoute(thread_kind, identity, thread_id, selected_id, start);
         var next = try linkBox(allocator, session, "next →", route orelse return error.RouteTooLong);
         errdefer next.deinit(allocator);
         try row.children.put(allocator, next.getFocus().id, .{ .widget = .{ .text_box = next }, .rect = null, .min_size = null });
     }
     row.getFocus().child_id = row.children.keys()[0];
     try box.children.put(allocator, row.getFocus().id, .{ .widget = .{ .box = row }, .rect = null, .min_size = null });
+}
+
+fn commentsRoute(kind: evt.EventKind, identity: []const u8, thread_id: []const u8, selected_id: ?[]const u8, start: usize) ?ui.RoutablePage {
+    return switch (kind) {
+        .issue => if (selected_id) |id| ui.RoutablePage.repoCommentsRoute(identity, thread_id, id, start) else ui.RoutablePage.repoIssueCommentsRoute(identity, thread_id, start),
+        .discussion => if (selected_id) |id| ui.RoutablePage.repoDiscussionCommentRoute(identity, thread_id, id, start) else ui.RoutablePage.repoDiscussionCommentsRoute(identity, thread_id, start),
+        else => null,
+    };
+}
+
+fn commentNewRoute(kind: evt.EventKind, identity: []const u8, thread_id: []const u8, parent_id: []const u8) ?ui.RoutablePage {
+    return switch (kind) {
+        .issue => ui.RoutablePage.repoCommentNewRoute(identity, thread_id, parent_id),
+        .discussion => ui.RoutablePage.repoDiscussionCommentNewRoute(identity, thread_id, parent_id),
+        else => null,
+    };
+}
+
+fn commentEditRoute(kind: evt.EventKind, identity: []const u8, thread_id: []const u8, comment_id: []const u8) ?ui.RoutablePage {
+    return switch (kind) {
+        .issue => ui.RoutablePage.repoCommentEditRoute(identity, thread_id, comment_id),
+        .discussion => ui.RoutablePage.repoDiscussionCommentEditRoute(identity, thread_id, comment_id),
+        else => null,
+    };
 }
 
 pub fn linkBox(allocator: std.mem.Allocator, session: *ui.Session, text: []const u8, route: ui.RoutablePage) !wgt.TextBox(ui.Widget) {

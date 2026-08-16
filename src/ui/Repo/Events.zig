@@ -187,6 +187,7 @@ fn readMeta(
                 .user => evt.User,
                 .repo => evt.Repo,
                 .issue => evt.Issue,
+                .discussion => evt.Discussion,
                 .comment => evt.Comment,
                 .attach => evt.Attachment,
             };
@@ -231,6 +232,13 @@ fn readItem(
             const route = ui.RoutablePage.repoIssueCommentsRoute(identity, item.id, 0) orelse return error.RouteTooLong;
             item.view_url = try route.toUrl(arena);
         },
+        .discussion => {
+            const record = (try readRecord(evt.Discussion, hash_kind, arena, haxy_moment, id)) orelse return null;
+            item.author = try ui.Author.initFromEmail(admin_moment, arena, record.author_email);
+            if (!include_view_url) return item;
+            const route = ui.RoutablePage.repoDiscussionCommentsRoute(identity, item.id, 0) orelse return error.RouteTooLong;
+            item.view_url = try route.toUrl(arena);
+        },
         .comment => {
             const record = (try readRecord(evt.Comment, hash_kind, arena, haxy_moment, id)) orelse return null;
             item.author = try ui.Author.initFromEmail(admin_moment, arena, record.author_email);
@@ -240,6 +248,7 @@ fn readItem(
             const thread_kind = (try evt.readEventKind(hash_kind, kind_map, &thread_id)) orelse return item;
             const route = switch (thread_kind) {
                 .issue => ui.RoutablePage.repoCommentsRoute(identity, &record.event.thread_id, item.id, 0),
+                .discussion => ui.RoutablePage.repoDiscussionCommentRoute(identity, &record.event.thread_id, item.id, 0),
                 else => null,
             } orelse return item;
             item.view_url = try route.toUrl(arena);
@@ -253,6 +262,7 @@ fn readItem(
             const parent_kind = (try evt.readEventKind(hash_kind, kind_map, &parent_id)) orelse return item;
             const route = switch (parent_kind) {
                 .issue => ui.RoutablePage.repoIssueCommentsRoute(identity, &record.event.parent_id, 0),
+                .discussion => ui.RoutablePage.repoDiscussionCommentsRoute(identity, &record.event.parent_id, 0),
                 else => null,
             } orelse return item;
             item.view_url = try route.toUrl(arena);

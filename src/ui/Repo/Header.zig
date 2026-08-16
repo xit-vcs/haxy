@@ -25,10 +25,11 @@ ref_or_oid_value: []const u8,
 // the issues tab's tag filter, url-encoded ("" = unfiltered), so the tab links
 // back to the filtered list.
 issues_tag: []const u8,
+discussions_tag: []const u8,
 
 const Self = @This();
 
-pub fn init(arena: *std.heap.ArenaAllocator, name: []const u8, owner_name: []const u8, ref_or_oid: RefOrOid, ref_or_oid_value: []const u8, issues_tag: []const u8) !Self {
+pub fn init(arena: *std.heap.ArenaAllocator, name: []const u8, owner_name: []const u8, ref_or_oid: RefOrOid, ref_or_oid_value: []const u8, issues_tag: []const u8, discussions_tag: []const u8) !Self {
     return .{
         .name = name,
         .owner_name = owner_name,
@@ -37,6 +38,7 @@ pub fn init(arena: *std.heap.ArenaAllocator, name: []const u8, owner_name: []con
         .ref_or_oid = ref_or_oid,
         .ref_or_oid_value = ref_or_oid_value,
         .issues_tag = issues_tag,
+        .discussions_tag = discussions_tag,
     };
 }
 
@@ -120,6 +122,8 @@ pub const View = struct {
         const refs_link = try std.fmt.allocPrint(aa, "ai:{s}", .{try refs_route.toUrl(session.page_arena)});
         const issues_route = ui.RoutablePage.repoIssuesRoute(identity, .open, data.issues_tag, "") orelse return error.RouteTooLong;
         const issues_link = try std.fmt.allocPrint(aa, "ai:{s}", .{try issues_route.toUrl(session.page_arena)});
+        const discussions_route = ui.RoutablePage.repoDiscussionsRoute(identity, data.discussions_tag, "") orelse return error.RouteTooLong;
+        const discussions_link = try std.fmt.allocPrint(aa, "ai:{s}", .{try discussions_route.toUrl(session.page_arena)});
         const events_route = ui.RoutablePage.repoEventsRoute(identity, .active, null, "") orelse return error.RouteTooLong;
         const events_link = try std.fmt.allocPrint(aa, "ai:{s}", .{try events_route.toUrl(session.page_arena)});
         const settings_route = ui.RoutablePage{ .repo_settings = Array.from(identity) orelse return error.RouteTooLong };
@@ -133,6 +137,7 @@ pub const View = struct {
             .repo_commits => commits_link,
             .repo_refs => refs_link,
             .repo_issues => issues_link,
+            .repo_discussions => discussions_link,
             .repo_events => events_link,
             .repo_settings => settings_link,
             .repo_auth => auth_link,
@@ -197,6 +202,21 @@ pub const View = struct {
                 .widget = .{ .text_box = text_box },
                 .rect = null,
                 .min_size = .{ .width = "issues".len + 2, .height = null },
+            });
+        }
+
+        // discussions tab
+        {
+            var text_box = try wgt.TextBox(ui.Widget).init(allocator, "discussions", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            errdefer text_box.deinit(allocator);
+            text_box.getFocus().focusable = true;
+            text_box.getFocus().kind = .{ .custom = discussions_link };
+            try tab_ids.put(allocator, text_box.getFocus().id, {});
+            if (std.mem.eql(u8, discussions_link, current_link)) selected_tab = text_box.getFocus().id;
+            try box.children.put(allocator, text_box.getFocus().id, .{
+                .widget = .{ .text_box = text_box },
+                .rect = null,
+                .min_size = .{ .width = "discussions".len + 2, .height = null },
             });
         }
 

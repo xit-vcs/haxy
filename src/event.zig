@@ -9,6 +9,7 @@ const rf = xit.ref;
 pub const User = @import("event/User.zig");
 pub const Repo = @import("event/Repo.zig");
 pub const Issue = @import("event/Issue.zig");
+pub const Discussion = @import("event/Discussion.zig");
 pub const Comment = @import("event/Comment.zig");
 pub const Attachment = @import("event/Attachment.zig");
 
@@ -54,11 +55,11 @@ pub fn project(comptime T: type, source: anytype) T {
     return result;
 }
 
-// kept to eight bytes or fewer, so the db stores them as short bytes
 pub const EventKind = enum {
     user,
     repo,
     issue,
+    discussion,
     comment,
     attach,
 };
@@ -73,6 +74,7 @@ pub const Event = union(EventKind) {
     user: ?User,
     repo: ?Repo,
     issue: ?Issue,
+    discussion: ?Discussion,
     comment: ?Comment,
     attach: ?Attachment,
 };
@@ -141,6 +143,12 @@ pub const EventWithId = struct {
                     else
                         null,
                 },
+                .discussion => .{
+                    .discussion = if (json_event.data) |value|
+                        try std.json.parseFromValueLeaky(Discussion, arena.allocator(), value, .{ .ignore_unknown_fields = true })
+                    else
+                        null,
+                },
                 .comment => .{
                     .comment = if (json_event.data) |value|
                         try std.json.parseFromValueLeaky(Comment, arena.allocator(), value, .{ .ignore_unknown_fields = true })
@@ -195,6 +203,7 @@ pub fn remove(
         .user => .{ .user = null },
         .repo => .{ .repo = null },
         .issue => .{ .issue = null },
+        .discussion => .{ .discussion = null },
         .comment => .{ .comment = null },
         .attach => .{ .attach = null },
     };
@@ -853,6 +862,14 @@ pub fn consumeInTransaction(
                         .created_ts = created_ts,
                     } else null;
                     try Issue.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, record_maybe, &arena, &repo_event_oid);
+                },
+                .discussion => |event_maybe| {
+                    const record_maybe: ?Discussion.Record = if (event_maybe) |event| .{
+                        .event = event,
+                        .author_email = authorEmail(commit_object.content.commit.metadata.author orelse ""),
+                        .created_ts = created_ts,
+                    } else null;
+                    try Discussion.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, record_maybe, &arena, &repo_event_oid);
                 },
                 .comment => |event_maybe| {
                     const record_maybe: ?Comment.Record = if (event_maybe) |event| .{

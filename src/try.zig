@@ -729,6 +729,82 @@ pub fn main(init: std.process.Init) !void {
                 };
             }
             try evt.consume(.xit, .{}, io, allocator, &template_repo, evt.events_ref, &comment_events);
+
+            const discussion_data = [_]struct {
+                title: []const u8,
+                description: []const u8,
+                tags: []const u8,
+            }{
+                .{
+                    .title = "How should plugins declare capabilities?",
+                    .description = "I'd like the manifest to make privileged capabilities explicit without making simple plugins verbose.",
+                    .tags = "plugins design",
+                },
+                .{
+                    .title = "Ideas for making large repositories faster",
+                    .description = "This is a place to collect profiling results and discuss which indexing work is worth pursuing first.",
+                    .tags = "performance indexing",
+                },
+                .{
+                    .title = "What should the next release focus on?",
+                    .description = "Let's compare the most important reliability fixes with the larger features already in progress.",
+                    .tags = "release planning",
+                },
+                .{
+                    .title = "Improving keyboard navigation",
+                    .description = "Share workflows that still require a mouse and suggestions for making their focus behavior predictable.",
+                    .tags = "ui keyboard accessibility",
+                },
+                .{
+                    .title = "Configuration format discussion",
+                    .description = "Should the next configuration format favor strict validation or accept common conveniences such as trailing commas?",
+                    .tags = "config design",
+                },
+            };
+
+            var discussion_events: [discussion_data.len]evt.EventWithId = undefined;
+            for (discussion_data, 0..) |discussion, i| {
+                discussion_events[i] = .{
+                    .id = std.fmt.bytesToHex(evt.EventWithId.randomId(prng.random()), .lower),
+                    .timestamp = @intCast(300 + i),
+                    .author = .{ .name = user_data[i % user_data.len].name, .email = user_data[i % user_data.len].email },
+                    .event = .{ .discussion = .{
+                        .title = discussion.title,
+                        .description = discussion.description,
+                        .tags = discussion.tags,
+                    } },
+                };
+            }
+            try evt.consume(.xit, .{}, io, allocator, &template_repo, evt.events_ref, &discussion_events);
+
+            var discussion_comment_ids: [discussion_data.len][3][evt.event_id_size]u8 = undefined;
+            for (&discussion_comment_ids) |*ids| {
+                for (ids) |*id| id.* = evt.EventWithId.randomId(prng.random());
+            }
+            var discussion_comment_events: [discussion_data.len * 3]evt.EventWithId = undefined;
+            for (&discussion_comment_events, 0..) |*event, i| {
+                const discussion_index = i / 3;
+                const comment_index = i % 3;
+                event.* = .{
+                    .id = std.fmt.bytesToHex(discussion_comment_ids[discussion_index][comment_index], .lower),
+                    .timestamp = @intCast(400 + i),
+                    .author = .{ .name = user_data[(i + 1) % user_data.len].name, .email = user_data[(i + 1) % user_data.len].email },
+                    .event = .{ .comment = .{
+                        .thread_id = discussion_events[discussion_index].id,
+                        .parent_id = if (comment_index < 2)
+                            discussion_events[discussion_index].id
+                        else
+                            std.fmt.bytesToHex(discussion_comment_ids[discussion_index][0], .lower),
+                        .body = switch (comment_index) {
+                            0 => "My preference is to start with the smallest useful version and expand it after we have real usage to learn from.",
+                            1 => "It would help to write down the tradeoffs we are accepting so the decision is easy to revisit later.",
+                            2 => "Agreed. A narrow first version should also make it easier to keep the implementation understandable.",
+                            else => unreachable,
+                        },
+                    } },
+                };
+            }
+            try evt.consume(.xit, .{}, io, allocator, &template_repo, evt.events_ref, &discussion_comment_events);
         }
 
         // copy the template to each repo's on-disk location, named by its

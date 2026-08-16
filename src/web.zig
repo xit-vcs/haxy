@@ -438,7 +438,10 @@ fn handleNew(
 
     const issues_suffix = "/issues";
     if (std.mem.endsWith(u8, base, issues_suffix))
-        return handleIssueNew(io, request, allocator, base[0 .. base.len - issues_suffix.len], host);
+        return handleTopicNew(io, request, allocator, base[0 .. base.len - issues_suffix.len], host, .issue);
+    const discussions_suffix = "/discussions";
+    if (std.mem.endsWith(u8, base, discussions_suffix))
+        return handleTopicNew(io, request, allocator, base[0 .. base.len - discussions_suffix.len], host, .discussion);
 
     try request.respond("new event target not found", .{
         .status = .not_found,
@@ -446,13 +449,14 @@ fn handleNew(
     });
 }
 
-// create an issue in the repo the form's page names and redirect to it.
-fn handleIssueNew(
+// create an issue or discussion in the repo the form's page names and redirect to it.
+fn handleTopicNew(
     io: std.Io,
     request: *std.http.Server.Request,
     allocator: std.mem.Allocator,
     base: []const u8,
     host: Host,
+    kind: evt.EventKind,
 ) !void {
     var author_arena = std.heap.ArenaAllocator.init(allocator);
     defer author_arena.deinit();
@@ -474,8 +478,13 @@ fn handleIssueNew(
     const description = try std.mem.replaceOwned(u8, allocator, description_crlf, "\r\n", "\n");
     defer allocator.free(description);
 
-    if (!evt.Issue.fieldsValid(title, tags)) {
-        const form_location = try std.fmt.allocPrint(allocator, "{s}/issues/new", .{base});
+    const valid = switch (kind) {
+        .issue => evt.Issue.fieldsValid(title, tags),
+        .discussion => evt.Discussion.fieldsValid(title, tags),
+        else => unreachable,
+    };
+    if (!valid) {
+        const form_location = try std.fmt.allocPrint(allocator, "{s}/{s}s/new", .{ base, @tagName(kind) });
         defer allocator.free(form_location);
         try request.respond("", .{
             .status = .see_other,
@@ -492,11 +501,11 @@ fn handleIssueNew(
         .id = event_id_hex,
         .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
         .author = author,
-        .event = .{ .issue = .{
-            .title = title,
-            .description = description,
-            .tags = tags,
-        } },
+        .event = switch (kind) {
+            .issue => .{ .issue = .{ .title = title, .description = description, .tags = tags } },
+            .discussion => .{ .discussion = .{ .title = title, .description = description, .tags = tags } },
+            else => unreachable,
+        },
     };
 
     const not_found = "repo not found";
@@ -550,7 +559,7 @@ fn handleIssueNew(
         },
     }
 
-    const location = try std.fmt.allocPrint(allocator, "{s}/issue:{s}", .{ base, &event_id_hex });
+    const location = try std.fmt.allocPrint(allocator, "{s}/{s}:{s}", .{ base, @tagName(kind), &event_id_hex });
     defer allocator.free(location);
     try request.respond("", .{
         .status = .see_other,
@@ -560,33 +569,30 @@ fn handleIssueNew(
 
 const CommentBaseParts = struct {
     repo_base: []const u8,
+    thread_kind: evt.EventKind,
     thread_id: [evt.event_id_size]u8,
     comment_id: ?[evt.event_id_size]u8,
 };
 
 fn commentBaseParts(base: []const u8) ?CommentBaseParts {
-    const issue_infix = "/issue:";
-    const comment_infix = "/comment:";
-    const id_len = evt.event_id_size * 2;
-    const issue_at = std.mem.lastIndexOf(u8, base, issue_infix) orelse return null;
-    const tail = base[issue_at + issue_infix.len ..];
-    if (tail.len < id_len) return null;
-
+    const route = ui.RoutablePage.fromUrl(base) orelse ui.RoutablePage.fromUrlLocal(base) orelse return null;
+    const identity, const thread_kind, const thread_hex, const comment_hex = switch (route) {
+        .repo_issues => |*issue| .{ issue.name.slice(), evt.EventKind.issue, issue.selected.slice(), issue.comment.slice() },
+        .repo_discussions => |*discussion| .{ discussion.name.slice(), evt.EventKind.discussion, discussion.selected.slice(), discussion.comment.slice() },
+        else => return null,
+    };
     var thread_id: [evt.event_id_size]u8 = undefined;
-    _ = std.fmt.hexToBytes(&thread_id, tail[0..id_len]) catch return null;
-    var comment_id: ?[evt.event_id_size]u8 = null;
-    if (tail.len != id_len) {
-        if (tail.len != id_len + comment_infix.len + id_len) return null;
-        if (!std.mem.eql(u8, tail[id_len .. id_len + comment_infix.len], comment_infix)) return null;
+    _ = std.fmt.hexToBytes(&thread_id, thread_hex) catch return null;
+    const comment_id = if (comment_hex.len == 0) null else blk: {
         var id: [evt.event_id_size]u8 = undefined;
-        _ = std.fmt.hexToBytes(&id, tail[id_len + comment_infix.len ..]) catch return null;
-        comment_id = id;
-    }
-    return .{ .repo_base = base[0..issue_at], .thread_id = thread_id, .comment_id = comment_id };
+        _ = std.fmt.hexToBytes(&id, comment_hex) catch return null;
+        break :blk id;
+    };
+    const repo_base_len = if (identity.len == 0) 0 else "/repo/".len + identity.len;
+    return .{ .repo_base = base[0..repo_base_len], .thread_kind = thread_kind, .thread_id = thread_id, .comment_id = comment_id };
 }
 
-// create a reply from an issue or comment /new form, then redirect to its
-// permalink. the rest of the url identifies the thread and parent.
+// create a reply and redirect to its permalink.
 fn handleCommentNew(
     io: std.Io,
     request: *std.http.Server.Request,
@@ -678,7 +684,7 @@ fn handleCommentNew(
         },
     }
 
-    const location = try std.fmt.allocPrint(allocator, "{s}/issue:{s}/comment:{s}", .{ parts.repo_base, &thread_id_hex, &event_id_hex });
+    const location = try std.fmt.allocPrint(allocator, "{s}/{s}:{s}/comment:{s}", .{ parts.repo_base, @tagName(parts.thread_kind), &thread_id_hex, &event_id_hex });
     defer allocator.free(location);
     try request.respond("", .{
         .status = .see_other,
@@ -989,8 +995,7 @@ fn updateComment(
     }
 }
 
-// edit actions share a suffix; the base identifies whether the form names an
-// issue or comment.
+// edit actions share a suffix; the base identifies the event being edited.
 fn handleEdit(
     io: std.Io,
     request: *std.http.Server.Request,
@@ -998,10 +1003,9 @@ fn handleEdit(
     base: []const u8,
     host: Host,
 ) !void {
-    if (commentBaseParts(base)) |parts| {
-        if (parts.comment_id != null) return handleCommentEdit(io, request, allocator, base, host, parts);
-    }
-    return handleIssueEdit(io, request, allocator, base, host);
+    const parts = commentBaseParts(base) orelse return respondRemoveNotFound(request);
+    if (parts.comment_id != null) return handleCommentEdit(io, request, allocator, base, host, parts);
+    return handleTopicEdit(io, request, allocator, base, host, parts);
 }
 
 // replace the body of the comment the url names, then redirect to its
@@ -1055,19 +1059,11 @@ fn handleCommentEdit(
     });
 }
 
-// split an issue url ("/repo/<owner>/<name>/issue:<id>", identity elided in
-// local mode) into what precedes "/issue:" and the decoded id, null when it
-// isn't one. the repo base is validated per host in updateIssue.
 const IssueBaseParts = struct { repo_base: []const u8, id_bytes: [evt.event_id_size]u8 };
 fn issueBaseParts(base: []const u8) ?IssueBaseParts {
-    const issues_infix = "/issue:";
-    const id_len = evt.event_id_size * 2;
-    if (base.len < issues_infix.len + id_len) return null;
-    var id_bytes: [evt.event_id_size]u8 = undefined;
-    _ = std.fmt.hexToBytes(&id_bytes, base[base.len - id_len ..]) catch return null;
-    const head = base[0 .. base.len - id_len];
-    if (!std.mem.endsWith(u8, head, issues_infix)) return null;
-    return .{ .repo_base = head[0 .. head.len - issues_infix.len], .id_bytes = id_bytes };
+    const parts = commentBaseParts(base) orelse return null;
+    if (parts.thread_kind != .issue or parts.comment_id != null) return null;
+    return .{ .repo_base = parts.repo_base, .id_bytes = parts.thread_id };
 }
 
 const RemoveParts = struct {
@@ -1086,20 +1082,15 @@ fn removeParts(base: []const u8) ?RemoveParts {
             .id = attachment.id,
         };
     }
-    if (commentBaseParts(base)) |comment| if (comment.comment_id) |comment_id| return .{
-        .repo_base = comment.repo_base,
-        .kind = .comment,
-        .id = comment_id,
-    };
-    if (issueBaseParts(base)) |issue| return .{
-        .repo_base = issue.repo_base,
-        .kind = .issue,
-        .id = issue.id_bytes,
+    if (commentBaseParts(base)) |thread| return .{
+        .repo_base = thread.repo_base,
+        .kind = if (thread.comment_id != null) .comment else thread.thread_kind,
+        .id = thread.comment_id orelse thread.thread_id,
     };
     return null;
 }
 
-// remove the issue, comment or attachment named by the form's url
+// remove the event named by the form's url
 fn handleRemove(
     io: std.Io,
     request: *std.http.Server.Request,
@@ -1210,6 +1201,48 @@ fn updateIssue(
     }
 }
 
+fn updateDiscussion(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    host: Host,
+    repo_base: []const u8,
+    id: *const [evt.event_id_size]u8,
+    title: []const u8,
+    tags: []const u8,
+    description: []const u8,
+    author: evt.CommitAuthor,
+) !void {
+    switch (host) {
+        .remote => |remote| {
+            const repo_prefix = "/repo/";
+            if (!std.mem.startsWith(u8, repo_base, repo_prefix)) return error.NotFound;
+            const repos_dir = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(remote.admin_repo_path) orelse ".", "repos" });
+            defer allocator.free(repos_dir);
+            const repo_path = switch (try serve_common.resolveRepoPath(io, allocator, repos_dir, remote.admin_repo_path, repo_base[repo_prefix.len..], false)) {
+                .ok => |p| p,
+                .invalid, .not_found => return error.NotFound,
+            };
+            defer allocator.free(repo_path);
+
+            var repo = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = repo_path });
+            defer repo.deinit(io, allocator);
+            try evt.Discussion.update(.xit, .{}, io, allocator, &repo, id, title, tags, description, author);
+        },
+        .local => |src| {
+            if (repo_base.len != 0) return error.NotFound;
+            switch (src.repo_kind) {
+                inline else => |repo_kind| {
+                    var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, src.localInitOpts());
+                    defer any_repo.deinit(io, allocator);
+                    switch (any_repo) {
+                        inline else => |*repo| try evt.Discussion.update(repo_kind, repo.self_repo_opts, io, allocator, repo, id, title, tags, description, author),
+                    }
+                },
+            }
+        },
+    }
+}
+
 // set the status of the issue the url names (base is
 // "/repo/<owner>/<name>/issue:<id>", identity elided in local mode) by
 // re-emitting its event, then redirect back to it
@@ -1254,16 +1287,14 @@ fn handleIssueStatus(
     });
 }
 
-// replace the title/tags/description of the issue the url names (base is
-// "/repo/<owner>/<name>/issue:<id>", identity elided in local mode; the
-// form posts to "<base>/edit") by re-emitting its event with its status
-// preserved, then redirect back to it
-fn handleIssueEdit(
+// replace the title, tags and description of an issue or discussion.
+fn handleTopicEdit(
     io: std.Io,
     request: *std.http.Server.Request,
     allocator: std.mem.Allocator,
     base: []const u8,
     host: Host,
+    parts: CommentBaseParts,
 ) !void {
     var author_arena = std.heap.ArenaAllocator.init(allocator);
     defer author_arena.deinit();
@@ -1286,7 +1317,12 @@ fn handleIssueEdit(
     defer allocator.free(description);
 
     // invalid fields send the user back to the edit form
-    if (!evt.Issue.fieldsValid(title, tags)) {
+    const valid = switch (parts.thread_kind) {
+        .issue => evt.Issue.fieldsValid(title, tags),
+        .discussion => evt.Discussion.fieldsValid(title, tags),
+        else => unreachable,
+    };
+    if (!valid) {
         const form_location = try std.fmt.allocPrint(allocator, "{s}/edit", .{base});
         defer allocator.free(form_location);
         try request.respond("", .{
@@ -1296,20 +1332,20 @@ fn handleIssueEdit(
         return;
     }
 
-    const not_found = "issue not found";
-    const parts = issueBaseParts(base) orelse {
-        try request.respond(not_found, .{
-            .status = .not_found,
-            .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
-        });
-        return;
+    const not_found = switch (parts.thread_kind) {
+        .issue => "issue not found",
+        .discussion => "discussion not found",
+        else => unreachable,
     };
-
-    updateIssue(io, allocator, host, parts, .{ .fields = .{
-        .title = title,
-        .tags = tags,
-        .description = description,
-    } }, author) catch |err| switch (err) {
+    (switch (parts.thread_kind) {
+        .issue => updateIssue(io, allocator, host, .{ .repo_base = parts.repo_base, .id_bytes = parts.thread_id }, .{ .fields = .{
+            .title = title,
+            .tags = tags,
+            .description = description,
+        } }, author),
+        .discussion => updateDiscussion(io, allocator, host, parts.repo_base, &parts.thread_id, title, tags, description, author),
+        else => unreachable,
+    }) catch |err| switch (err) {
         error.NotFound => {
             try request.respond(not_found, .{
                 .status = .not_found,
