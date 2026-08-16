@@ -106,67 +106,35 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         }
 
         fn commentsRoute(identity: []const u8, selected: []const u8, start: usize) ?ui.RoutablePage {
-            return switch (kind) {
-                .issue => ui.RoutablePage.repoIssueCommentsRoute(identity, selected, start),
-                .discussion => ui.RoutablePage.repoDiscussionCommentsRoute(identity, selected, start),
-                else => @compileError("unsupported thread event kind"),
-            };
+            return ui.RoutablePage.repoThreadCommentsRoute(kind, identity, selected, start);
         }
 
         fn commentRoute(identity: []const u8, thread_id: []const u8, comment_id: []const u8, start: usize) ?ui.RoutablePage {
-            return switch (kind) {
-                .issue => ui.RoutablePage.repoCommentsRoute(identity, thread_id, comment_id, start),
-                .discussion => ui.RoutablePage.repoDiscussionCommentRoute(identity, thread_id, comment_id, start),
-                else => @compileError("unsupported thread event kind"),
-            };
+            return ui.RoutablePage.repoThreadCommentRoute(kind, identity, thread_id, comment_id, start);
         }
 
         fn newCommentRoute(identity: []const u8, thread_id: []const u8, parent_id: []const u8) ?ui.RoutablePage {
-            return switch (kind) {
-                .issue => ui.RoutablePage.repoCommentNewRoute(identity, thread_id, parent_id),
-                .discussion => ui.RoutablePage.repoDiscussionCommentNewRoute(identity, thread_id, parent_id),
-                else => @compileError("unsupported thread event kind"),
-            };
+            return ui.RoutablePage.repoThreadCommentNewRoute(kind, identity, thread_id, parent_id);
         }
 
         fn editCommentRoute(identity: []const u8, thread_id: []const u8, comment_id: []const u8) ?ui.RoutablePage {
-            return switch (kind) {
-                .issue => ui.RoutablePage.repoCommentEditRoute(identity, thread_id, comment_id),
-                .discussion => ui.RoutablePage.repoDiscussionCommentEditRoute(identity, thread_id, comment_id),
-                else => @compileError("unsupported thread event kind"),
-            };
+            return ui.RoutablePage.repoThreadCommentEditRoute(kind, identity, thread_id, comment_id);
         }
 
         fn editRoute(identity: []const u8, selected: []const u8) ?ui.RoutablePage {
-            return switch (kind) {
-                .issue => ui.RoutablePage.repoIssuesEditRoute(identity, selected),
-                .discussion => ui.RoutablePage.repoDiscussionsEditRoute(identity, selected),
-                else => @compileError("unsupported thread event kind"),
-            };
+            return ui.RoutablePage.repoThreadEditRoute(kind, identity, selected);
         }
 
         fn newRoute(identity: []const u8) ?ui.RoutablePage {
-            return switch (kind) {
-                .issue => ui.RoutablePage.repoIssuesNewRoute(identity),
-                .discussion => ui.RoutablePage.repoDiscussionsNewRoute(identity),
-                else => @compileError("unsupported thread event kind"),
-            };
+            return ui.RoutablePage.repoThreadNewRoute(kind, identity);
         }
 
         fn descriptionRoute(identity: []const u8, selected: []const u8) ?ui.RoutablePage {
-            return switch (kind) {
-                .issue => ui.RoutablePage.repoIssuesDescriptionRoute(identity, selected),
-                .discussion => ui.RoutablePage.repoDiscussionsDescriptionRoute(identity, selected),
-                else => @compileError("unsupported thread event kind"),
-            };
+            return ui.RoutablePage.repoThreadDescriptionRoute(kind, identity, selected);
         }
 
         fn tagsRoute(identity: []const u8, tag: []const u8) ?ui.RoutablePage {
-            return switch (kind) {
-                .issue => ui.RoutablePage.repoIssuesTagsRoute(identity, tag),
-                .discussion => ui.RoutablePage.repoDiscussionsTagsRoute(identity, tag),
-                else => @compileError("unsupported thread event kind"),
-            };
+            return ui.RoutablePage.repoThreadTagsRoute(kind, identity, tag);
         }
 
         fn conflictsRoute(identity: []const u8, selected: []const u8) ?ui.RoutablePage {

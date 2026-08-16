@@ -229,14 +229,14 @@ fn readItem(
             const record = (try readRecord(evt.Issue, hash_kind, arena, haxy_moment, id)) orelse return null;
             item.author = try ui.Author.initFromEmail(admin_moment, arena, record.author_email);
             if (!include_view_url) return item;
-            const route = ui.RoutablePage.repoIssueCommentsRoute(identity, item.id, 0) orelse return error.RouteTooLong;
+            const route = ui.RoutablePage.repoThreadCommentsRoute(.issue, identity, item.id, 0) orelse return error.RouteTooLong;
             item.view_url = try route.toUrl(arena);
         },
         .discussion => {
             const record = (try readRecord(evt.Discussion, hash_kind, arena, haxy_moment, id)) orelse return null;
             item.author = try ui.Author.initFromEmail(admin_moment, arena, record.author_email);
             if (!include_view_url) return item;
-            const route = ui.RoutablePage.repoDiscussionCommentsRoute(identity, item.id, 0) orelse return error.RouteTooLong;
+            const route = ui.RoutablePage.repoThreadCommentsRoute(.discussion, identity, item.id, 0) orelse return error.RouteTooLong;
             item.view_url = try route.toUrl(arena);
         },
         .comment => {
@@ -246,11 +246,7 @@ fn readItem(
             var thread_id: [evt.event_id_size]u8 = undefined;
             _ = std.fmt.hexToBytes(&thread_id, &record.event.thread_id) catch return error.InvalidEventId;
             const thread_kind = (try evt.readEventKind(hash_kind, kind_map, &thread_id)) orelse return item;
-            const route = switch (thread_kind) {
-                .issue => ui.RoutablePage.repoCommentsRoute(identity, &record.event.thread_id, item.id, 0),
-                .discussion => ui.RoutablePage.repoDiscussionCommentRoute(identity, &record.event.thread_id, item.id, 0),
-                else => null,
-            } orelse return item;
+            const route = ui.RoutablePage.repoThreadCommentRoute(thread_kind, identity, &record.event.thread_id, item.id, 0) orelse return item;
             item.view_url = try route.toUrl(arena);
         },
         .attach => {
@@ -260,11 +256,7 @@ fn readItem(
             var parent_id: [evt.event_id_size]u8 = undefined;
             _ = std.fmt.hexToBytes(&parent_id, &record.event.parent_id) catch return error.InvalidEventId;
             const parent_kind = (try evt.readEventKind(hash_kind, kind_map, &parent_id)) orelse return item;
-            const route = switch (parent_kind) {
-                .issue => ui.RoutablePage.repoIssueCommentsRoute(identity, &record.event.parent_id, 0),
-                .discussion => ui.RoutablePage.repoDiscussionCommentsRoute(identity, &record.event.parent_id, 0),
-                else => null,
-            } orelse return item;
+            const route = ui.RoutablePage.repoThreadCommentsRoute(parent_kind, identity, &record.event.parent_id, 0) orelse return item;
             item.view_url = try route.toUrl(arena);
         },
     }

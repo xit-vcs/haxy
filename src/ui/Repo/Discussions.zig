@@ -290,7 +290,7 @@ pub const Header = struct {
 
         // tags tab, labeled with the active tag filter
         {
-            const tags_route = ui.RoutablePage.repoDiscussionsTagsRoute(data.identity, data.tag) orelse return error.RouteTooLong;
+            const tags_route = ui.RoutablePage.repoThreadTagsRoute(.discussion, data.identity, data.tag) orelse return error.RouteTooLong;
             const tags_link = try std.fmt.allocPrint(aa, "ai:{s}", .{try tags_route.toUrl(session.page_arena)});
             const label = if (data.tag.len == 0) "tags" else blk: {
                 const decoded = std.Uri.percentDecodeInPlace(try aa.dupe(u8, data.tag));
@@ -302,10 +302,10 @@ pub const Header = struct {
         // new-discussion tab; an edit or comment url shows its tab in this place
         {
             const route = switch (data.view) {
-                .edit => ui.RoutablePage.repoDiscussionsEditRoute(data.identity, data.selected_id) orelse return error.RouteTooLong,
-                .new_comment => ui.RoutablePage.repoDiscussionCommentNewRoute(data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong,
-                .edit_comment => ui.RoutablePage.repoDiscussionCommentEditRoute(data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong,
-                else => ui.RoutablePage.repoDiscussionsNewRoute(data.identity) orelse return error.RouteTooLong,
+                .edit => ui.RoutablePage.repoThreadEditRoute(.discussion, data.identity, data.selected_id) orelse return error.RouteTooLong,
+                .new_comment => ui.RoutablePage.repoThreadCommentNewRoute(.discussion, data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong,
+                .edit_comment => ui.RoutablePage.repoThreadCommentEditRoute(.discussion, data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong,
+                else => ui.RoutablePage.repoThreadNewRoute(.discussion, data.identity) orelse return error.RouteTooLong,
             };
             const link = try std.fmt.allocPrint(aa, "ai:{s}", .{try route.toUrl(session.page_arena)});
             const label: []const u8 = switch (data.view) {

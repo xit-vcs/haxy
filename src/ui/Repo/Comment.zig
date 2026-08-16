@@ -337,27 +337,18 @@ pub fn appendWindowNav(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), s
 }
 
 fn commentsRoute(kind: evt.EventKind, identity: []const u8, thread_id: []const u8, selected_id: ?[]const u8, start: usize) ?ui.RoutablePage {
-    return switch (kind) {
-        .issue => if (selected_id) |id| ui.RoutablePage.repoCommentsRoute(identity, thread_id, id, start) else ui.RoutablePage.repoIssueCommentsRoute(identity, thread_id, start),
-        .discussion => if (selected_id) |id| ui.RoutablePage.repoDiscussionCommentRoute(identity, thread_id, id, start) else ui.RoutablePage.repoDiscussionCommentsRoute(identity, thread_id, start),
-        else => null,
-    };
+    return if (selected_id) |id|
+        ui.RoutablePage.repoThreadCommentRoute(kind, identity, thread_id, id, start)
+    else
+        ui.RoutablePage.repoThreadCommentsRoute(kind, identity, thread_id, start);
 }
 
 fn commentNewRoute(kind: evt.EventKind, identity: []const u8, thread_id: []const u8, parent_id: []const u8) ?ui.RoutablePage {
-    return switch (kind) {
-        .issue => ui.RoutablePage.repoCommentNewRoute(identity, thread_id, parent_id),
-        .discussion => ui.RoutablePage.repoDiscussionCommentNewRoute(identity, thread_id, parent_id),
-        else => null,
-    };
+    return ui.RoutablePage.repoThreadCommentNewRoute(kind, identity, thread_id, parent_id);
 }
 
 fn commentEditRoute(kind: evt.EventKind, identity: []const u8, thread_id: []const u8, comment_id: []const u8) ?ui.RoutablePage {
-    return switch (kind) {
-        .issue => ui.RoutablePage.repoCommentEditRoute(identity, thread_id, comment_id),
-        .discussion => ui.RoutablePage.repoDiscussionCommentEditRoute(identity, thread_id, comment_id),
-        else => null,
-    };
+    return ui.RoutablePage.repoThreadCommentEditRoute(kind, identity, thread_id, comment_id);
 }
 
 pub fn linkBox(allocator: std.mem.Allocator, session: *ui.Session, text: []const u8, route: ui.RoutablePage) !wgt.TextBox(ui.Widget) {

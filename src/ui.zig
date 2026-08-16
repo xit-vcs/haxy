@@ -387,78 +387,6 @@ pub const RoutablePage = union(enum) {
         } };
     }
 
-    // build a selected issue route at one of its comment windows.
-    pub fn repoIssueCommentsRoute(identity: []const u8, selected: []const u8, start: usize) ?RoutablePage {
-        var route = repoIssuesRoute(identity, .open, "", selected) orelse return null;
-        route.repo_issues.comments_start = start;
-        return route;
-    }
-
-    // build a comment permalink route at one of its immediate-reply windows.
-    pub fn repoCommentsRoute(identity: []const u8, thread: []const u8, selected: []const u8, start: usize) ?RoutablePage {
-        if (thread.len == 0 or selected.len == 0) return null;
-        var route = repoIssueCommentsRoute(identity, thread, start) orelse return null;
-        route.repo_issues.comment = Array(evt.event_id_size * 2).from(selected) orelse return null;
-        return route;
-    }
-
-    // build the form route for replying to an issue or one of its comments.
-    pub fn repoCommentNewRoute(identity: []const u8, thread: []const u8, parent_id: []const u8) ?RoutablePage {
-        if (thread.len == 0) return null;
-        var route = repoIssueCommentsRoute(identity, thread, 0) orelse return null;
-        route.repo_issues.comment = Array(evt.event_id_size * 2).from(parent_id) orelse return null;
-        route.repo_issues.view = .new_comment;
-        return route;
-    }
-
-    // build the form route for editing a comment.
-    pub fn repoCommentEditRoute(identity: []const u8, thread: []const u8, comment_id: []const u8) ?RoutablePage {
-        if (thread.len == 0 or comment_id.len == 0) return null;
-        var route = repoCommentsRoute(identity, thread, comment_id, 0) orelse return null;
-        route.repo_issues.view = .edit_comment;
-        return route;
-    }
-
-    // build a `.repo_issues` route showing tags view, keeping the url-encoded
-    // `tag` filter ("" = unfiltered).
-    pub fn repoIssuesTagsRoute(identity: []const u8, tag: []const u8) ?RoutablePage {
-        return .{ .repo_issues = .{
-            .name = Array(repo_route_max_len).from(identity) orelse return null,
-            .tag = Array(issue_tag_route_max_len).from(tag) orelse return null,
-            .view = .tags,
-        } };
-    }
-
-    // build a `.repo_issues` route showing new-issue form.
-    pub fn repoIssuesNewRoute(identity: []const u8) ?RoutablePage {
-        return .{ .repo_issues = .{
-            .name = Array(repo_route_max_len).from(identity) orelse return null,
-            .view = .new,
-        } };
-    }
-
-    // build a `.repo_issues` route showing the edit form for the issue with
-    // hex event id `selected`.
-    pub fn repoIssuesEditRoute(identity: []const u8, selected: []const u8) ?RoutablePage {
-        if (selected.len == 0) return null;
-        return .{ .repo_issues = .{
-            .name = Array(repo_route_max_len).from(identity) orelse return null,
-            .selected = Array(evt.event_id_size * 2).from(selected) orelse return null,
-            .view = .edit,
-        } };
-    }
-
-    // build a `.repo_issues` route showing the whole description of the issue
-    // with hex event id `selected`.
-    pub fn repoIssuesDescriptionRoute(identity: []const u8, selected: []const u8) ?RoutablePage {
-        if (selected.len == 0) return null;
-        return .{ .repo_issues = .{
-            .name = Array(repo_route_max_len).from(identity) orelse return null,
-            .selected = Array(evt.event_id_size * 2).from(selected) orelse return null,
-            .view = .description,
-        } };
-    }
-
     pub fn repoDiscussionsRoute(identity: []const u8, tag: []const u8, selected: []const u8) ?RoutablePage {
         return .{ .repo_discussions = .{
             .name = Array(repo_route_max_len).from(identity) orelse return null,
@@ -467,65 +395,113 @@ pub const RoutablePage = union(enum) {
         } };
     }
 
-    pub fn repoDiscussionCommentsRoute(identity: []const u8, selected: []const u8, start: usize) ?RoutablePage {
-        var route = repoDiscussionsRoute(identity, "", selected) orelse return null;
-        route.repo_discussions.comments_start = start;
+    // build the default list route for a thread event kind.
+    pub fn repoThreadRoute(kind: evt.EventKind, identity: []const u8, tag: []const u8, selected: []const u8) ?RoutablePage {
+        return switch (kind) {
+            .issue => repoIssuesRoute(identity, .open, tag, selected),
+            .discussion => repoDiscussionsRoute(identity, tag, selected),
+            else => null,
+        };
+    }
+
+    // build a selected thread route at one of its comment windows.
+    pub fn repoThreadCommentsRoute(kind: evt.EventKind, identity: []const u8, selected: []const u8, start: usize) ?RoutablePage {
+        var route = repoThreadRoute(kind, identity, "", selected) orelse return null;
+        switch (route) {
+            .repo_issues => |*thread| thread.comments_start = start,
+            .repo_discussions => |*thread| thread.comments_start = start,
+            else => unreachable,
+        }
         return route;
     }
 
-    pub fn repoDiscussionCommentRoute(identity: []const u8, discussion: []const u8, selected: []const u8, start: usize) ?RoutablePage {
-        if (discussion.len == 0 or selected.len == 0) return null;
-        var route = repoDiscussionCommentsRoute(identity, discussion, start) orelse return null;
-        route.repo_discussions.comment = Array(evt.event_id_size * 2).from(selected) orelse return null;
+    // build a comment permalink route at one of its immediate-reply windows.
+    pub fn repoThreadCommentRoute(kind: evt.EventKind, identity: []const u8, thread_id: []const u8, comment_id: []const u8, start: usize) ?RoutablePage {
+        if (thread_id.len == 0 or comment_id.len == 0) return null;
+        var route = repoThreadCommentsRoute(kind, identity, thread_id, start) orelse return null;
+        const comment = Array(evt.event_id_size * 2).from(comment_id) orelse return null;
+        switch (route) {
+            .repo_issues => |*thread| thread.comment = comment,
+            .repo_discussions => |*thread| thread.comment = comment,
+            else => unreachable,
+        }
         return route;
     }
 
-    pub fn repoDiscussionCommentNewRoute(identity: []const u8, discussion: []const u8, parent_id: []const u8) ?RoutablePage {
-        if (discussion.len == 0) return null;
-        var route = repoDiscussionCommentsRoute(identity, discussion, 0) orelse return null;
-        route.repo_discussions.comment = Array(evt.event_id_size * 2).from(parent_id) orelse return null;
-        route.repo_discussions.view = .new_comment;
+    // build the form route for replying to a thread or one of its comments.
+    pub fn repoThreadCommentNewRoute(kind: evt.EventKind, identity: []const u8, thread_id: []const u8, parent_id: []const u8) ?RoutablePage {
+        if (thread_id.len == 0) return null;
+        var route = repoThreadCommentsRoute(kind, identity, thread_id, 0) orelse return null;
+        const parent_event_id = Array(evt.event_id_size * 2).from(parent_id) orelse return null;
+        switch (route) {
+            .repo_issues => |*thread| {
+                thread.comment = parent_event_id;
+                thread.view = .new_comment;
+            },
+            .repo_discussions => |*thread| {
+                thread.comment = parent_event_id;
+                thread.view = .new_comment;
+            },
+            else => unreachable,
+        }
         return route;
     }
 
-    pub fn repoDiscussionCommentEditRoute(identity: []const u8, discussion: []const u8, comment_id: []const u8) ?RoutablePage {
-        if (discussion.len == 0 or comment_id.len == 0) return null;
-        var route = repoDiscussionCommentRoute(identity, discussion, comment_id, 0) orelse return null;
-        route.repo_discussions.view = .edit_comment;
+    // build the form route for editing a comment.
+    pub fn repoThreadCommentEditRoute(kind: evt.EventKind, identity: []const u8, thread_id: []const u8, comment_id: []const u8) ?RoutablePage {
+        var route = repoThreadCommentRoute(kind, identity, thread_id, comment_id, 0) orelse return null;
+        switch (route) {
+            .repo_issues => |*thread| thread.view = .edit_comment,
+            .repo_discussions => |*thread| thread.view = .edit_comment,
+            else => unreachable,
+        }
         return route;
     }
 
-    pub fn repoDiscussionsTagsRoute(identity: []const u8, tag: []const u8) ?RoutablePage {
-        return .{ .repo_discussions = .{
-            .name = Array(repo_route_max_len).from(identity) orelse return null,
-            .tag = Array(discussion_tag_route_max_len).from(tag) orelse return null,
-            .view = .tags,
-        } };
+    // build a thread tags route, keeping its url-encoded tag filter.
+    pub fn repoThreadTagsRoute(kind: evt.EventKind, identity: []const u8, tag: []const u8) ?RoutablePage {
+        var route = repoThreadRoute(kind, identity, tag, "") orelse return null;
+        switch (route) {
+            .repo_issues => |*thread| thread.view = .tags,
+            .repo_discussions => |*thread| thread.view = .tags,
+            else => unreachable,
+        }
+        return route;
     }
 
-    pub fn repoDiscussionsNewRoute(identity: []const u8) ?RoutablePage {
-        return .{ .repo_discussions = .{
-            .name = Array(repo_route_max_len).from(identity) orelse return null,
-            .view = .new,
-        } };
+    // build a new-thread form route.
+    pub fn repoThreadNewRoute(kind: evt.EventKind, identity: []const u8) ?RoutablePage {
+        var route = repoThreadRoute(kind, identity, "", "") orelse return null;
+        switch (route) {
+            .repo_issues => |*thread| thread.view = .new,
+            .repo_discussions => |*thread| thread.view = .new,
+            else => unreachable,
+        }
+        return route;
     }
 
-    pub fn repoDiscussionsEditRoute(identity: []const u8, selected: []const u8) ?RoutablePage {
+    // build the edit form route for a thread.
+    pub fn repoThreadEditRoute(kind: evt.EventKind, identity: []const u8, selected: []const u8) ?RoutablePage {
         if (selected.len == 0) return null;
-        return .{ .repo_discussions = .{
-            .name = Array(repo_route_max_len).from(identity) orelse return null,
-            .selected = Array(evt.event_id_size * 2).from(selected) orelse return null,
-            .view = .edit,
-        } };
+        var route = repoThreadRoute(kind, identity, "", selected) orelse return null;
+        switch (route) {
+            .repo_issues => |*thread| thread.view = .edit,
+            .repo_discussions => |*thread| thread.view = .edit,
+            else => unreachable,
+        }
+        return route;
     }
 
-    pub fn repoDiscussionsDescriptionRoute(identity: []const u8, selected: []const u8) ?RoutablePage {
+    // build a route showing a thread's whole description.
+    pub fn repoThreadDescriptionRoute(kind: evt.EventKind, identity: []const u8, selected: []const u8) ?RoutablePage {
         if (selected.len == 0) return null;
-        return .{ .repo_discussions = .{
-            .name = Array(repo_route_max_len).from(identity) orelse return null,
-            .selected = Array(evt.event_id_size * 2).from(selected) orelse return null,
-            .view = .description,
-        } };
+        var route = repoThreadRoute(kind, identity, "", selected) orelse return null;
+        switch (route) {
+            .repo_issues => |*thread| thread.view = .description,
+            .repo_discussions => |*thread| thread.view = .description,
+            else => unreachable,
+        }
+        return route;
     }
 
     // build a `.repo_issues` route showing the conflicts list, rooted at the
@@ -833,19 +809,19 @@ pub const RoutablePage = union(enum) {
                     const word = params.scanTail(&segments) catch return null;
                     if (word) |last| {
                         if (!params.only(&.{})) return null;
-                        if (std.mem.eql(u8, last, "new")) return repoCommentNewRoute(pair, issue_id, comment_id);
-                        if (std.mem.eql(u8, last, "edit")) return repoCommentEditRoute(pair, issue_id, comment_id);
+                        if (std.mem.eql(u8, last, "new")) return repoThreadCommentNewRoute(.issue, pair, issue_id, comment_id);
+                        if (std.mem.eql(u8, last, "edit")) return repoThreadCommentEditRoute(.issue, pair, issue_id, comment_id);
                         return null;
                     }
                     if (!params.only(&.{.start})) return null;
-                    return repoCommentsRoute(pair, issue_id, comment_id, params.start() orelse return null);
+                    return repoThreadCommentRoute(.issue, pair, issue_id, comment_id, params.start() orelse return null);
                 }
             }
             const word = params.scanTail(&segments) catch return null;
             if (word) |tail| {
-                if (std.mem.eql(u8, tail, "new")) return if (params.only(&.{})) repoCommentNewRoute(pair, issue_id, "") else null;
-                if (std.mem.eql(u8, tail, "edit")) return if (params.only(&.{})) repoIssuesEditRoute(pair, issue_id) else null;
-                if (std.mem.eql(u8, tail, "description")) return if (params.only(&.{})) repoIssuesDescriptionRoute(pair, issue_id) else null;
+                if (std.mem.eql(u8, tail, "new")) return if (params.only(&.{})) repoThreadCommentNewRoute(.issue, pair, issue_id, "") else null;
+                if (std.mem.eql(u8, tail, "edit")) return if (params.only(&.{})) repoThreadEditRoute(.issue, pair, issue_id) else null;
+                if (std.mem.eql(u8, tail, "description")) return if (params.only(&.{})) repoThreadDescriptionRoute(.issue, pair, issue_id) else null;
                 if (std.mem.eql(u8, tail, "resolve")) {
                     if (!params.only(&.{.theirs})) return null;
                     return repoIssuesResolveRoute(pair, issue_id, params.values.get(.theirs) orelse "");
@@ -853,7 +829,7 @@ pub const RoutablePage = union(enum) {
                 return null;
             }
             if (!params.only(&.{.start})) return null;
-            return repoIssueCommentsRoute(pair, issue_id, params.start() orelse return null);
+            return repoThreadCommentsRoute(.issue, pair, issue_id, params.start() orelse return null);
         }
         if (std.mem.startsWith(u8, tab, discussion_seg)) {
             const discussion_id = tab[discussion_seg.len..];
@@ -866,23 +842,23 @@ pub const RoutablePage = union(enum) {
                     const word = params.scanTail(&segments) catch return null;
                     if (word) |last| {
                         if (!params.only(&.{})) return null;
-                        if (std.mem.eql(u8, last, "new")) return repoDiscussionCommentNewRoute(pair, discussion_id, comment_id);
-                        if (std.mem.eql(u8, last, "edit")) return repoDiscussionCommentEditRoute(pair, discussion_id, comment_id);
+                        if (std.mem.eql(u8, last, "new")) return repoThreadCommentNewRoute(.discussion, pair, discussion_id, comment_id);
+                        if (std.mem.eql(u8, last, "edit")) return repoThreadCommentEditRoute(.discussion, pair, discussion_id, comment_id);
                         return null;
                     }
                     if (!params.only(&.{.start})) return null;
-                    return repoDiscussionCommentRoute(pair, discussion_id, comment_id, params.start() orelse return null);
+                    return repoThreadCommentRoute(.discussion, pair, discussion_id, comment_id, params.start() orelse return null);
                 }
             }
             const word = params.scanTail(&segments) catch return null;
             if (word) |tail| {
-                if (std.mem.eql(u8, tail, "new")) return if (params.only(&.{})) repoDiscussionCommentNewRoute(pair, discussion_id, "") else null;
-                if (std.mem.eql(u8, tail, "edit")) return if (params.only(&.{})) repoDiscussionsEditRoute(pair, discussion_id) else null;
-                if (std.mem.eql(u8, tail, "description")) return if (params.only(&.{})) repoDiscussionsDescriptionRoute(pair, discussion_id) else null;
+                if (std.mem.eql(u8, tail, "new")) return if (params.only(&.{})) repoThreadCommentNewRoute(.discussion, pair, discussion_id, "") else null;
+                if (std.mem.eql(u8, tail, "edit")) return if (params.only(&.{})) repoThreadEditRoute(.discussion, pair, discussion_id) else null;
+                if (std.mem.eql(u8, tail, "description")) return if (params.only(&.{})) repoThreadDescriptionRoute(.discussion, pair, discussion_id) else null;
                 return null;
             }
             if (!params.only(&.{.start})) return null;
-            return repoDiscussionCommentsRoute(pair, discussion_id, params.start() orelse return null);
+            return repoThreadCommentsRoute(.discussion, pair, discussion_id, params.start() orelse return null);
         }
         if (std.mem.eql(u8, tab, "issues")) {
             // the word is a list view; a filter with neither is never emitted.
@@ -897,8 +873,8 @@ pub const RoutablePage = union(enum) {
             }
             if (!params.only(&.{.tag})) return null;
             if (std.meta.stringToEnum(evt.Issue.Status, w)) |status| return repoIssuesRoute(pair, status, tag_value, "");
-            if (std.mem.eql(u8, w, "tags")) return repoIssuesTagsRoute(pair, tag_value);
-            if (std.mem.eql(u8, w, "new")) return if (tag_value.len == 0) repoIssuesNewRoute(pair) else null;
+            if (std.mem.eql(u8, w, "tags")) return repoThreadTagsRoute(.issue, pair, tag_value);
+            if (std.mem.eql(u8, w, "new")) return if (tag_value.len == 0) repoThreadNewRoute(.issue, pair) else null;
             return null;
         }
         if (std.mem.eql(u8, tab, "discussions")) {
@@ -907,8 +883,8 @@ pub const RoutablePage = union(enum) {
             const view = word orelse return if (params.only(&.{})) repoDiscussionsRoute(pair, "", "") else null;
             if (!params.only(&.{.tag})) return null;
             if (std.mem.eql(u8, view, "all")) return repoDiscussionsRoute(pair, tag_value, "");
-            if (std.mem.eql(u8, view, "tags")) return repoDiscussionsTagsRoute(pair, tag_value);
-            if (std.mem.eql(u8, view, "new")) return if (tag_value.len == 0) repoDiscussionsNewRoute(pair) else null;
+            if (std.mem.eql(u8, view, "tags")) return repoThreadTagsRoute(.discussion, pair, tag_value);
+            if (std.mem.eql(u8, view, "new")) return if (tag_value.len == 0) repoThreadNewRoute(.discussion, pair) else null;
             return null;
         }
         if (std.mem.eql(u8, tab, "events")) {

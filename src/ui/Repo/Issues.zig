@@ -593,7 +593,7 @@ pub const Header = struct {
 
         // tags tab, labeled with the active tag filter
         {
-            const tags_route = ui.RoutablePage.repoIssuesTagsRoute(data.identity, data.tag) orelse return error.RouteTooLong;
+            const tags_route = ui.RoutablePage.repoThreadTagsRoute(.issue, data.identity, data.tag) orelse return error.RouteTooLong;
             const tags_link = try std.fmt.allocPrint(aa, "ai:{s}", .{try tags_route.toUrl(session.page_arena)});
             const label = if (data.tag.len == 0) "tags" else blk: {
                 const decoded = std.Uri.percentDecodeInPlace(try aa.dupe(u8, data.tag));
@@ -605,11 +605,11 @@ pub const Header = struct {
         // new-issue tab; an edit or resolve url shows its tab in this place
         {
             const route = switch (data.view) {
-                .edit => ui.RoutablePage.repoIssuesEditRoute(data.identity, data.selected_id) orelse return error.RouteTooLong,
-                .new_comment => ui.RoutablePage.repoCommentNewRoute(data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong,
-                .edit_comment => ui.RoutablePage.repoCommentEditRoute(data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong,
+                .edit => ui.RoutablePage.repoThreadEditRoute(.issue, data.identity, data.selected_id) orelse return error.RouteTooLong,
+                .new_comment => ui.RoutablePage.repoThreadCommentNewRoute(.issue, data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong,
+                .edit_comment => ui.RoutablePage.repoThreadCommentEditRoute(.issue, data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong,
                 .resolve => ui.RoutablePage.repoIssuesResolveRoute(data.identity, data.selected_id, data.theirs_picks) orelse return error.RouteTooLong,
-                else => ui.RoutablePage.repoIssuesNewRoute(data.identity) orelse return error.RouteTooLong,
+                else => ui.RoutablePage.repoThreadNewRoute(.issue, data.identity) orelse return error.RouteTooLong,
             };
             const link = try std.fmt.allocPrint(aa, "ai:{s}", .{try route.toUrl(session.page_arena)});
             const label: []const u8 = switch (data.view) {

@@ -47,6 +47,36 @@ pub const Host = union(enum) {
     local: ui.RepoSource,
 };
 
+// an on-disk repo resolved from a request url. remote paths are owned.
+const RequestRepoSource = struct {
+    source: ui.RepoSource,
+    owned_path: ?[]const u8 = null,
+
+    fn deinit(self: RequestRepoSource, allocator: std.mem.Allocator) void {
+        if (self.owned_path) |path| allocator.free(path);
+    }
+};
+
+fn requestRepoSource(io: std.Io, allocator: std.mem.Allocator, host: Host, repo_base: []const u8) !?RequestRepoSource {
+    return switch (host) {
+        .remote => |remote| blk: {
+            const repo_prefix = "/repo/";
+            if (!std.mem.startsWith(u8, repo_base, repo_prefix)) break :blk null;
+            const repos_dir = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(remote.admin_repo_path) orelse ".", "repos" });
+            defer allocator.free(repos_dir);
+            const path = switch (try serve_common.resolveRepoPath(io, allocator, repos_dir, remote.admin_repo_path, repo_base[repo_prefix.len..], false)) {
+                .ok => |value| value,
+                .invalid, .not_found => break :blk null,
+            };
+            break :blk .{
+                .source = .{ .path = path, .repo_kind = .xit },
+                .owned_path = path,
+            };
+        },
+        .local => |source| if (repo_base.len == 0) .{ .source = source } else null,
+    };
+}
+
 pub fn handleConnection(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -509,52 +539,21 @@ fn handleTopicNew(
     };
 
     const not_found = "repo not found";
-    switch (host) {
-        .remote => |remote| {
-            const repo_prefix = "/repo/";
-            if (!std.mem.startsWith(u8, base, repo_prefix)) {
-                try request.respond(not_found, .{
-                    .status = .not_found,
-                    .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
-                });
-                return;
-            }
-
-            const repos_dir = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(remote.admin_repo_path) orelse ".", "repos" });
-            defer allocator.free(repos_dir);
-            const repo_path = switch (try serve_common.resolveRepoPath(io, allocator, repos_dir, remote.admin_repo_path, base[repo_prefix.len..], false)) {
-                .ok => |p| p,
-                .invalid, .not_found => {
-                    try request.respond(not_found, .{
-                        .status = .not_found,
-                        .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
-                    });
-                    return;
-                },
-            };
-            defer allocator.free(repo_path);
-
-            var repo = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = repo_path });
-            defer repo.deinit(io, allocator);
-            try evt.consume(.xit, .{}, io, allocator, &repo, evt.events_ref, &[_]evt.EventWithId{event});
-        },
-        .local => |src| {
-            // local routes elide the repo base
-            if (base.len != 0) {
-                try request.respond(not_found, .{
-                    .status = .not_found,
-                    .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
-                });
-                return;
-            }
-            switch (src.repo_kind) {
-                inline else => |repo_kind| {
-                    var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, src.localInitOpts());
-                    defer any_repo.deinit(io, allocator);
-                    switch (any_repo) {
-                        inline else => |*repo| try evt.consume(repo_kind, repo.self_repo_opts, io, allocator, repo, evt.events_ref, &[_]evt.EventWithId{event}),
-                    }
-                },
+    const request_repo = (try requestRepoSource(io, allocator, host, base)) orelse {
+        try request.respond(not_found, .{
+            .status = .not_found,
+            .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+        });
+        return;
+    };
+    defer request_repo.deinit(allocator);
+    const source = request_repo.source;
+    switch (source.repo_kind) {
+        inline else => |repo_kind| {
+            var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, source.localInitOpts());
+            defer any_repo.deinit(io, allocator);
+            switch (any_repo) {
+                inline else => |*repo| try evt.consume(repo_kind, repo.self_repo_opts, io, allocator, repo, evt.events_ref, &[_]evt.EventWithId{event}),
             }
         },
     }
@@ -635,51 +634,22 @@ fn handleCommentNew(
     const thread_id_hex = std.fmt.bytesToHex(parts.thread_id, .lower);
     const parent_id_hex = std.fmt.bytesToHex(parts.comment_id orelse parts.thread_id, .lower);
 
+    const request_repo = (try requestRepoSource(io, allocator, host, parts.repo_base)) orelse {
+        try request.respond(not_found, .{
+            .status = .not_found,
+            .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+        });
+        return;
+    };
+    defer request_repo.deinit(allocator);
+    const source = request_repo.source;
     var event_id_hex: [evt.event_id_size * 2]u8 = undefined;
-    switch (host) {
-        .remote => |remote| {
-            const repo_prefix = "/repo/";
-            if (!std.mem.startsWith(u8, parts.repo_base, repo_prefix)) {
-                try request.respond(not_found, .{
-                    .status = .not_found,
-                    .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
-                });
-                return;
-            }
-            const repos_dir = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(remote.admin_repo_path) orelse ".", "repos" });
-            defer allocator.free(repos_dir);
-            const repo_path = switch (try serve_common.resolveRepoPath(io, allocator, repos_dir, remote.admin_repo_path, parts.repo_base[repo_prefix.len..], false)) {
-                .ok => |p| p,
-                .invalid, .not_found => {
-                    try request.respond(not_found, .{
-                        .status = .not_found,
-                        .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
-                    });
-                    return;
-                },
-            };
-            defer allocator.free(repo_path);
-
-            var repo = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = repo_path });
-            defer repo.deinit(io, allocator);
-            event_id_hex = try evt.Comment.create(.xit, .{}, io, allocator, &repo, &thread_id_hex, &parent_id_hex, body, author);
-        },
-        .local => |src| {
-            if (parts.repo_base.len != 0) {
-                try request.respond(not_found, .{
-                    .status = .not_found,
-                    .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
-                });
-                return;
-            }
-            switch (src.repo_kind) {
-                inline else => |repo_kind| {
-                    var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, src.localInitOpts());
-                    defer any_repo.deinit(io, allocator);
-                    switch (any_repo) {
-                        inline else => |*repo| event_id_hex = try evt.Comment.create(repo_kind, repo.self_repo_opts, io, allocator, repo, &thread_id_hex, &parent_id_hex, body, author),
-                    }
-                },
+    switch (source.repo_kind) {
+        inline else => |repo_kind| {
+            var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, source.localInitOpts());
+            defer any_repo.deinit(io, allocator);
+            switch (any_repo) {
+                inline else => |*repo| event_id_hex = try evt.Comment.create(repo_kind, repo.self_repo_opts, io, allocator, repo, &thread_id_hex, &parent_id_hex, body, author),
             }
         },
     }
@@ -717,34 +687,15 @@ fn serveAttachment(
     attachment: AttachmentRequest,
     host: Host,
 ) !void {
-    switch (host) {
-        .remote => |remote| {
-            const repo_prefix = "/repo/";
-            if (!std.mem.startsWith(u8, attachment.repo_base, repo_prefix)) return respondAttachmentNotFound(request);
-
-            const repos_dir = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(remote.admin_repo_path) orelse ".", "repos" });
-            defer allocator.free(repos_dir);
-            const repo_path = switch (try serve_common.resolveRepoPath(io, allocator, repos_dir, remote.admin_repo_path, attachment.repo_base[repo_prefix.len..], false)) {
-                .ok => |p| p,
-                .invalid, .not_found => return respondAttachmentNotFound(request),
-            };
-            defer allocator.free(repo_path);
-
-            var repo = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = repo_path });
-            defer repo.deinit(io, allocator);
-            try sendAttachment(.xit, .{}, io, request, allocator, &repo, &attachment.id);
-        },
-        .local => |src| {
-            // local routes elide the repo base
-            if (attachment.repo_base.len != 0) return respondAttachmentNotFound(request);
-            switch (src.repo_kind) {
-                inline else => |repo_kind| {
-                    var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, src.localInitOpts());
-                    defer any_repo.deinit(io, allocator);
-                    switch (any_repo) {
-                        inline else => |*repo| try sendAttachment(repo_kind, repo.self_repo_opts, io, request, allocator, repo, &attachment.id),
-                    }
-                },
+    const request_repo = (try requestRepoSource(io, allocator, host, attachment.repo_base)) orelse return respondAttachmentNotFound(request);
+    defer request_repo.deinit(allocator);
+    const source = request_repo.source;
+    switch (source.repo_kind) {
+        inline else => |repo_kind| {
+            var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, source.localInitOpts());
+            defer any_repo.deinit(io, allocator);
+            switch (any_repo) {
+                inline else => |*repo| try sendAttachment(repo_kind, repo.self_repo_opts, io, request, allocator, repo, &attachment.id),
             }
         },
     }
@@ -892,37 +843,17 @@ fn handleAttach(
     var body_buf: [4096]u8 = undefined;
     const blob: evt.Blob = .{ .name = name, .size = size, .reader = try request.readerExpectContinue(&body_buf) };
 
-    switch (host) {
-        .remote => |remote| {
-            const repo_prefix = "/repo/";
-            if (!std.mem.startsWith(u8, parts.repo_base, repo_prefix)) return respondAttachmentParentNotFound(request);
-            const repos_dir = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(remote.admin_repo_path) orelse ".", "repos" });
-            defer allocator.free(repos_dir);
-            const repo_path = switch (try serve_common.resolveRepoPath(io, allocator, repos_dir, remote.admin_repo_path, parts.repo_base[repo_prefix.len..], false)) {
-                .ok => |p| p,
-                .invalid, .not_found => return respondAttachmentParentNotFound(request),
-            };
-            defer allocator.free(repo_path);
-
-            var repo = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = repo_path });
-            defer repo.deinit(io, allocator);
-            _ = evt.Attachment.create(.xit, .{}, io, allocator, &repo, &parent_id_hex, blob, author) catch |err| switch (err) {
-                error.ParentNotFound => return respondAttachmentParentNotFound(request),
-                else => return err,
-            };
-        },
-        .local => |src| {
-            if (parts.repo_base.len != 0) return respondAttachmentParentNotFound(request);
-            switch (src.repo_kind) {
-                inline else => |repo_kind| {
-                    var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, src.localInitOpts());
-                    defer any_repo.deinit(io, allocator);
-                    switch (any_repo) {
-                        inline else => |*repo| _ = evt.Attachment.create(repo_kind, repo.self_repo_opts, io, allocator, repo, &parent_id_hex, blob, author) catch |err| switch (err) {
-                            error.ParentNotFound => return respondAttachmentParentNotFound(request),
-                            else => return err,
-                        },
-                    }
+    const request_repo = (try requestRepoSource(io, allocator, host, parts.repo_base)) orelse return respondAttachmentParentNotFound(request);
+    defer request_repo.deinit(allocator);
+    const source = request_repo.source;
+    switch (source.repo_kind) {
+        inline else => |repo_kind| {
+            var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, source.localInitOpts());
+            defer any_repo.deinit(io, allocator);
+            switch (any_repo) {
+                inline else => |*repo| _ = evt.Attachment.create(repo_kind, repo.self_repo_opts, io, allocator, repo, &parent_id_hex, blob, author) catch |err| switch (err) {
+                    error.ParentNotFound => return respondAttachmentParentNotFound(request),
+                    else => return err,
                 },
             }
         },
@@ -964,32 +895,15 @@ fn updateComment(
 ) !void {
     const comment_id = parts.comment_id orelse return error.NotFound;
     const thread_id = std.fmt.bytesToHex(parts.thread_id, .lower);
-    switch (host) {
-        .remote => |remote| {
-            const repo_prefix = "/repo/";
-            if (!std.mem.startsWith(u8, parts.repo_base, repo_prefix)) return error.NotFound;
-            const repos_dir = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(remote.admin_repo_path) orelse ".", "repos" });
-            defer allocator.free(repos_dir);
-            const repo_path = switch (try serve_common.resolveRepoPath(io, allocator, repos_dir, remote.admin_repo_path, parts.repo_base[repo_prefix.len..], false)) {
-                .ok => |p| p,
-                .invalid, .not_found => return error.NotFound,
-            };
-            defer allocator.free(repo_path);
-
-            var repo = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = repo_path });
-            defer repo.deinit(io, allocator);
-            try evt.Comment.update(.xit, .{}, io, allocator, &repo, &thread_id, &comment_id, body, author);
-        },
-        .local => |src| {
-            if (parts.repo_base.len != 0) return error.NotFound;
-            switch (src.repo_kind) {
-                inline else => |repo_kind| {
-                    var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, src.localInitOpts());
-                    defer any_repo.deinit(io, allocator);
-                    switch (any_repo) {
-                        inline else => |*repo| try evt.Comment.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &thread_id, &comment_id, body, author),
-                    }
-                },
+    const request_repo = (try requestRepoSource(io, allocator, host, parts.repo_base)) orelse return error.NotFound;
+    defer request_repo.deinit(allocator);
+    const source = request_repo.source;
+    switch (source.repo_kind) {
+        inline else => |repo_kind| {
+            var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, source.localInitOpts());
+            defer any_repo.deinit(io, allocator);
+            switch (any_repo) {
+                inline else => |*repo| try evt.Comment.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &thread_id, &comment_id, body, author),
             }
         },
     }
@@ -1104,37 +1018,17 @@ fn handleRemove(
     defer author_arena.deinit();
     const author = (try eventAuthor(io, allocator, &author_arena, request, host)) orelse return respondLoginRequired(request);
 
-    switch (host) {
-        .remote => |remote| {
-            const repo_prefix = "/repo/";
-            if (!std.mem.startsWith(u8, parts.repo_base, repo_prefix)) return respondRemoveNotFound(request);
-            const repos_dir = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(remote.admin_repo_path) orelse ".", "repos" });
-            defer allocator.free(repos_dir);
-            const repo_path = switch (try serve_common.resolveRepoPath(io, allocator, repos_dir, remote.admin_repo_path, parts.repo_base[repo_prefix.len..], false)) {
-                .ok => |p| p,
-                .invalid, .not_found => return respondRemoveNotFound(request),
-            };
-            defer allocator.free(repo_path);
-
-            var repo = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = repo_path });
-            defer repo.deinit(io, allocator);
-            evt.remove(.xit, .{}, io, allocator, &repo, &parts.id, parts.kind, author) catch |err| switch (err) {
-                error.EventNotFound => return respondRemoveNotFound(request),
-                else => |e| return e,
-            };
-        },
-        .local => |src| {
-            if (parts.repo_base.len != 0) return respondRemoveNotFound(request);
-            switch (src.repo_kind) {
-                inline else => |repo_kind| {
-                    var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, src.localInitOpts());
-                    defer any_repo.deinit(io, allocator);
-                    switch (any_repo) {
-                        inline else => |*repo| evt.remove(repo_kind, repo.self_repo_opts, io, allocator, repo, &parts.id, parts.kind, author) catch |err| switch (err) {
-                            error.EventNotFound => return respondRemoveNotFound(request),
-                            else => |e| return e,
-                        },
-                    }
+    const request_repo = (try requestRepoSource(io, allocator, host, parts.repo_base)) orelse return respondRemoveNotFound(request);
+    defer request_repo.deinit(allocator);
+    const source = request_repo.source;
+    switch (source.repo_kind) {
+        inline else => |repo_kind| {
+            var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, source.localInitOpts());
+            defer any_repo.deinit(io, allocator);
+            switch (any_repo) {
+                inline else => |*repo| evt.remove(repo_kind, repo.self_repo_opts, io, allocator, repo, &parts.id, parts.kind, author) catch |err| switch (err) {
+                    error.EventNotFound => return respondRemoveNotFound(request),
+                    else => |e| return e,
                 },
             }
         },
@@ -1168,34 +1062,15 @@ fn updateIssue(
     update: evt.Issue.Update,
     author: evt.CommitAuthor,
 ) !void {
-    switch (host) {
-        .remote => |remote| {
-            const repo_prefix = "/repo/";
-            if (!std.mem.startsWith(u8, parts.repo_base, repo_prefix)) return error.NotFound;
-            const repos_dir = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(remote.admin_repo_path) orelse ".", "repos" });
-            defer allocator.free(repos_dir);
-            const repo_path = switch (try serve_common.resolveRepoPath(io, allocator, repos_dir, remote.admin_repo_path, parts.repo_base[repo_prefix.len..], false)) {
-                .ok => |p| p,
-                .invalid, .not_found => return error.NotFound,
-            };
-            defer allocator.free(repo_path);
-
-            var repo = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = repo_path });
-            defer repo.deinit(io, allocator);
-            try evt.Issue.update(.xit, .{}, io, allocator, &repo, &parts.id_bytes, update, author);
-        },
-        .local => |src| {
-            // the local forms post to "/issue:<id>/...", so the repo base
-            // is empty
-            if (parts.repo_base.len != 0) return error.NotFound;
-            switch (src.repo_kind) {
-                inline else => |repo_kind| {
-                    var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, src.localInitOpts());
-                    defer any_repo.deinit(io, allocator);
-                    switch (any_repo) {
-                        inline else => |*repo| try evt.Issue.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &parts.id_bytes, update, author),
-                    }
-                },
+    const request_repo = (try requestRepoSource(io, allocator, host, parts.repo_base)) orelse return error.NotFound;
+    defer request_repo.deinit(allocator);
+    const source = request_repo.source;
+    switch (source.repo_kind) {
+        inline else => |repo_kind| {
+            var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, source.localInitOpts());
+            defer any_repo.deinit(io, allocator);
+            switch (any_repo) {
+                inline else => |*repo| try evt.Issue.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &parts.id_bytes, update, author),
             }
         },
     }
@@ -1212,32 +1087,15 @@ fn updateDiscussion(
     description: []const u8,
     author: evt.CommitAuthor,
 ) !void {
-    switch (host) {
-        .remote => |remote| {
-            const repo_prefix = "/repo/";
-            if (!std.mem.startsWith(u8, repo_base, repo_prefix)) return error.NotFound;
-            const repos_dir = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(remote.admin_repo_path) orelse ".", "repos" });
-            defer allocator.free(repos_dir);
-            const repo_path = switch (try serve_common.resolveRepoPath(io, allocator, repos_dir, remote.admin_repo_path, repo_base[repo_prefix.len..], false)) {
-                .ok => |p| p,
-                .invalid, .not_found => return error.NotFound,
-            };
-            defer allocator.free(repo_path);
-
-            var repo = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = repo_path });
-            defer repo.deinit(io, allocator);
-            try evt.Discussion.update(.xit, .{}, io, allocator, &repo, id, title, tags, description, author);
-        },
-        .local => |src| {
-            if (repo_base.len != 0) return error.NotFound;
-            switch (src.repo_kind) {
-                inline else => |repo_kind| {
-                    var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, src.localInitOpts());
-                    defer any_repo.deinit(io, allocator);
-                    switch (any_repo) {
-                        inline else => |*repo| try evt.Discussion.update(repo_kind, repo.self_repo_opts, io, allocator, repo, id, title, tags, description, author),
-                    }
-                },
+    const request_repo = (try requestRepoSource(io, allocator, host, repo_base)) orelse return error.NotFound;
+    defer request_repo.deinit(allocator);
+    const source = request_repo.source;
+    switch (source.repo_kind) {
+        inline else => |repo_kind| {
+            var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, source.localInitOpts());
+            defer any_repo.deinit(io, allocator);
+            switch (any_repo) {
+                inline else => |*repo| try evt.Discussion.update(repo_kind, repo.self_repo_opts, io, allocator, repo, id, title, tags, description, author),
             }
         },
     }
