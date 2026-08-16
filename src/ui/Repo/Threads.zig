@@ -28,6 +28,11 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
     const has_conflicts = Event.merge_policy == .field_conflicts;
     const FieldConflict = if (has_conflicts) Data.FieldConflict else void;
     const ViewKind = Data.ViewKind;
+    const thread_name = switch (kind) {
+        .issue => "issue",
+        .discuss => "discussion",
+        else => @compileError("unsupported thread event kind"),
+    };
 
     return struct {
         const This = @This();
@@ -99,7 +104,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         fn listRoute(identity: []const u8, status: Status, tag: []const u8, selected: []const u8) ?ui.RoutablePage {
             return switch (kind) {
                 .issue => ui.RoutablePage.repoIssuesRoute(identity, status, tag, selected),
-                .discussion => ui.RoutablePage.repoDiscussionsRoute(identity, tag, selected),
+                .discuss => ui.RoutablePage.repoDiscussionsRoute(identity, tag, selected),
                 else => @compileError("unsupported thread event kind"),
             };
         }
@@ -192,7 +197,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 errdefer hdr.deinit(allocator);
                 switch (kind) {
                     .issue => try outer.children.put(allocator, hdr.getFocus().id, .{ .widget = .{ .repo_issues_header = hdr }, .rect = null, .min_size = null }),
-                    .discussion => try outer.children.put(allocator, hdr.getFocus().id, .{ .widget = .{ .repo_discussions_header = hdr }, .rect = null, .min_size = null }),
+                    .discuss => try outer.children.put(allocator, hdr.getFocus().id, .{ .widget = .{ .repo_discussions_header = hdr }, .rect = null, .min_size = null }),
                     else => @compileError("unsupported thread event kind"),
                 }
             }
@@ -236,7 +241,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     const aa = session.page_arena.allocator();
                     const route = removeRoute(data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong;
                     const action = try std.fmt.allocPrint(aa, "form:{s}", .{try route.toUrl(session.page_arena)});
-                    const event_name = if (data.comment_id.len == 0) @tagName(kind) else "comment";
+                    const event_name = if (data.comment_id.len == 0) thread_name else "comment";
                     const label = try std.fmt.allocPrint(aa, "remove {s}", .{event_name});
                     var center = try initRemoveForm(allocator, action, label);
                     errdefer center.deinit(allocator);
@@ -729,7 +734,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         fn header(self: *This) *Header {
             return switch (kind) {
                 .issue => &self.box.children.values()[header_index].widget.repo_issues_header,
-                .discussion => &self.box.children.values()[header_index].widget.repo_discussions_header,
+                .discuss => &self.box.children.values()[header_index].widget.repo_discussions_header,
                 else => @compileError("unsupported thread event kind"),
             };
         }
@@ -1112,7 +1117,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             }
 
             if (comment_page) |page| {
-                const back_label = try std.fmt.allocPrint(self.session.page_arena.allocator(), "← back to {s}", .{@tagName(kind)});
+                const back_label = try std.fmt.allocPrint(self.session.page_arena.allocator(), "← back to {s}", .{thread_name});
                 var back = try Comment.linkBox(allocator, self.session, back_label, commentsRoute(self.data.identity, entry.id, 0) orelse return error.RouteTooLong);
                 errdefer back.deinit(allocator);
                 try inner.children.put(allocator, back.getFocus().id, .{ .widget = .{ .text_box = back }, .rect = null, .min_size = null });
@@ -1137,7 +1142,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             if (description_page) {
                 // the back link, in the title slot so the pane's input handling
                 // applies to it unchanged.
-                const back_label = try std.fmt.allocPrint(self.session.page_arena.allocator(), "← back to {s}", .{@tagName(kind)});
+                const back_label = try std.fmt.allocPrint(self.session.page_arena.allocator(), "← back to {s}", .{thread_name});
                 var tb = try wgt.TextBox(ui.Widget).init(allocator, back_label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
                 errdefer tb.deinit(allocator);
                 tb.getFocus().focusable = true;

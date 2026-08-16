@@ -78,7 +78,7 @@ pub fn consume(
 
     const record = try DB.HashMap(.read_write).init(try records.putCursor(discussion_key));
     try evt.upsert(Record, DB, hash_kind, record, record_to_write);
-    try evt.indexEvent(DB, hash_kind, haxy_moment, event_id, .discussion, record_to_write.created_ts, record_to_write.removed);
+    try evt.indexEvent(DB, hash_kind, haxy_moment, event_id, .discuss, record_to_write.created_ts, record_to_write.removed);
 
     const order_key = evt.orderKeyDesc(record_to_write.created_ts, event_id);
     if (existing_cursor_maybe == null) {
@@ -120,7 +120,7 @@ pub fn update(
         .id = std.fmt.bytesToHex(id.*, .lower),
         .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
         .author = author,
-        .event = .{ .discussion = .{
+        .event = .{ .discuss = .{
             .title = title,
             .tags = tags,
             .description = description,

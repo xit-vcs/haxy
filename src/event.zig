@@ -59,7 +59,7 @@ pub const EventKind = enum {
     user,
     repo,
     issue,
-    discussion,
+    discuss,
     comment,
     attach,
 };
@@ -74,7 +74,7 @@ pub const Event = union(EventKind) {
     user: ?User,
     repo: ?Repo,
     issue: ?Issue,
-    discussion: ?Discussion,
+    discuss: ?Discussion,
     comment: ?Comment,
     attach: ?Attachment,
 };
@@ -143,8 +143,8 @@ pub const EventWithId = struct {
                     else
                         null,
                 },
-                .discussion => .{
-                    .discussion = if (json_event.data) |value|
+                .discuss => .{
+                    .discuss = if (json_event.data) |value|
                         try std.json.parseFromValueLeaky(Discussion, arena.allocator(), value, .{ .ignore_unknown_fields = true })
                     else
                         null,
@@ -203,7 +203,7 @@ pub fn remove(
         .user => .{ .user = null },
         .repo => .{ .repo = null },
         .issue => .{ .issue = null },
-        .discussion => .{ .discussion = null },
+        .discuss => .{ .discuss = null },
         .comment => .{ .comment = null },
         .attach => .{ .attach = null },
     };
@@ -863,7 +863,7 @@ pub fn consumeInTransaction(
                     } else null;
                     try Issue.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, record_maybe, &arena, &repo_event_oid);
                 },
-                .discussion => |event_maybe| {
+                .discuss => |event_maybe| {
                     const record_maybe: ?Discussion.Record = if (event_maybe) |event| .{
                         .event = event,
                         .author_email = authorEmail(commit_object.content.commit.metadata.author orelse ""),

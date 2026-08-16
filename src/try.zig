@@ -768,7 +768,7 @@ pub fn main(init: std.process.Init) !void {
                     .id = std.fmt.bytesToHex(evt.EventWithId.randomId(prng.random()), .lower),
                     .timestamp = @intCast(300 + i),
                     .author = .{ .name = user_data[i % user_data.len].name, .email = user_data[i % user_data.len].email },
-                    .event = .{ .discussion = .{
+                    .event = .{ .discuss = .{
                         .title = discussion.title,
                         .description = discussion.description,
                         .tags = discussion.tags,

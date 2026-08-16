@@ -264,7 +264,7 @@ fn loadWindow(
         .count = @intCast(try set.count()),
     };
 }
-pub const View = Threads.View(.discussion, Self);
+pub const View = Threads.View(.discuss, Self);
 
 // tabs switching between the discussions page's views.
 pub const Header = struct {
@@ -290,7 +290,7 @@ pub const Header = struct {
 
         // tags tab, labeled with the active tag filter
         {
-            const tags_route = ui.RoutablePage.repoThreadTagsRoute(.discussion, data.identity, data.tag) orelse return error.RouteTooLong;
+            const tags_route = ui.RoutablePage.repoThreadTagsRoute(.discuss, data.identity, data.tag) orelse return error.RouteTooLong;
             const tags_link = try std.fmt.allocPrint(aa, "ai:{s}", .{try tags_route.toUrl(session.page_arena)});
             const label = if (data.tag.len == 0) "tags" else blk: {
                 const decoded = std.Uri.percentDecodeInPlace(try aa.dupe(u8, data.tag));
@@ -302,11 +302,11 @@ pub const Header = struct {
         // new-discussion tab; an edit or comment url shows its tab in this place
         {
             const route = switch (data.view) {
-                .edit => ui.RoutablePage.repoThreadEditRoute(.discussion, data.identity, data.selected_id) orelse return error.RouteTooLong,
-                .new_comment => ui.RoutablePage.repoThreadCommentNewRoute(.discussion, data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong,
-                .edit_comment => ui.RoutablePage.repoThreadCommentEditRoute(.discussion, data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong,
-                .remove => ui.RoutablePage.repoThreadRemoveRoute(.discussion, data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong,
-                else => ui.RoutablePage.repoThreadNewRoute(.discussion, data.identity) orelse return error.RouteTooLong,
+                .edit => ui.RoutablePage.repoThreadEditRoute(.discuss, data.identity, data.selected_id) orelse return error.RouteTooLong,
+                .new_comment => ui.RoutablePage.repoThreadCommentNewRoute(.discuss, data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong,
+                .edit_comment => ui.RoutablePage.repoThreadCommentEditRoute(.discuss, data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong,
+                .remove => ui.RoutablePage.repoThreadRemoveRoute(.discuss, data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong,
+                else => ui.RoutablePage.repoThreadNewRoute(.discuss, data.identity) orelse return error.RouteTooLong,
             };
             const link = try std.fmt.allocPrint(aa, "ai:{s}", .{try route.toUrl(session.page_arena)});
             const label: []const u8 = switch (data.view) {

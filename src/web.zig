@@ -471,7 +471,7 @@ fn handleNew(
         return handleTopicNew(io, request, allocator, base[0 .. base.len - issues_suffix.len], host, .issue);
     const discussions_suffix = "/discussions";
     if (std.mem.endsWith(u8, base, discussions_suffix))
-        return handleTopicNew(io, request, allocator, base[0 .. base.len - discussions_suffix.len], host, .discussion);
+        return handleTopicNew(io, request, allocator, base[0 .. base.len - discussions_suffix.len], host, .discuss);
 
     try request.respond("new event target not found", .{
         .status = .not_found,
@@ -510,11 +510,16 @@ fn handleTopicNew(
 
     const valid = switch (kind) {
         .issue => evt.Issue.fieldsValid(title, tags),
-        .discussion => evt.Discussion.fieldsValid(title, tags),
+        .discuss => evt.Discussion.fieldsValid(title, tags),
         else => unreachable,
     };
     if (!valid) {
-        const form_location = try std.fmt.allocPrint(allocator, "{s}/{s}s/new", .{ base, @tagName(kind) });
+        const list_name: []const u8 = switch (kind) {
+            .issue => "issues",
+            .discuss => "discussions",
+            else => unreachable,
+        };
+        const form_location = try std.fmt.allocPrint(allocator, "{s}/{s}/new", .{ base, list_name });
         defer allocator.free(form_location);
         try request.respond("", .{
             .status = .see_other,
@@ -533,7 +538,7 @@ fn handleTopicNew(
         .author = author,
         .event = switch (kind) {
             .issue => .{ .issue = .{ .title = title, .description = description, .tags = tags } },
-            .discussion => .{ .discussion = .{ .title = title, .description = description, .tags = tags } },
+            .discuss => .{ .discuss = .{ .title = title, .description = description, .tags = tags } },
             else => unreachable,
         },
     };
@@ -577,7 +582,7 @@ fn commentBaseParts(base: []const u8) ?CommentBaseParts {
     const route = ui.RoutablePage.fromUrl(base) orelse ui.RoutablePage.fromUrlLocal(base) orelse return null;
     const identity, const thread_kind, const thread_hex, const comment_hex = switch (route) {
         .repo_issues => |*issue| .{ issue.name.slice(), evt.EventKind.issue, issue.selected.slice(), issue.comment.slice() },
-        .repo_discussions => |*discussion| .{ discussion.name.slice(), evt.EventKind.discussion, discussion.selected.slice(), discussion.comment.slice() },
+        .repo_discussions => |*discussion| .{ discussion.name.slice(), evt.EventKind.discuss, discussion.selected.slice(), discussion.comment.slice() },
         else => return null,
     };
     var thread_id: [evt.event_id_size]u8 = undefined;
@@ -1177,7 +1182,7 @@ fn handleTopicEdit(
     // invalid fields send the user back to the edit form
     const valid = switch (parts.thread_kind) {
         .issue => evt.Issue.fieldsValid(title, tags),
-        .discussion => evt.Discussion.fieldsValid(title, tags),
+        .discuss => evt.Discussion.fieldsValid(title, tags),
         else => unreachable,
     };
     if (!valid) {
@@ -1192,7 +1197,7 @@ fn handleTopicEdit(
 
     const not_found = switch (parts.thread_kind) {
         .issue => "issue not found",
-        .discussion => "discussion not found",
+        .discuss => "discussion not found",
         else => unreachable,
     };
     (switch (parts.thread_kind) {
@@ -1201,7 +1206,7 @@ fn handleTopicEdit(
             .tags = tags,
             .description = description,
         } }, author),
-        .discussion => updateDiscussion(io, allocator, host, parts.repo_base, &parts.thread_id, title, tags, description, author),
+        .discuss => updateDiscussion(io, allocator, host, parts.repo_base, &parts.thread_id, title, tags, description, author),
         else => unreachable,
     }) catch |err| switch (err) {
         error.NotFound => {

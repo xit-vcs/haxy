@@ -216,7 +216,7 @@ pub const RoutablePage = union(enum) {
     const line_seg = @tagName(Params.ParamKey.line) ++ ":";
     const theirs_seg = @tagName(Params.ParamKey.theirs) ++ ":";
     const issue_seg = "issue:";
-    const discussion_seg = "discussion:";
+    const discuss_seg = "discuss:";
     const comment_seg = "comment:";
     // marks a files or commits route's trailing path: the value is the raw
     // remainder of the url, so it must come last
@@ -399,7 +399,7 @@ pub const RoutablePage = union(enum) {
     pub fn repoThreadRoute(kind: evt.EventKind, identity: []const u8, tag: []const u8, selected: []const u8) ?RoutablePage {
         return switch (kind) {
             .issue => repoIssuesRoute(identity, .open, tag, selected),
-            .discussion => repoDiscussionsRoute(identity, tag, selected),
+            .discuss => repoDiscussionsRoute(identity, tag, selected),
             else => null,
         };
     }
@@ -652,25 +652,25 @@ pub const RoutablePage = union(enum) {
             },
             .repo_discussions => |t| blk: {
                 const prefix = try repoUrlPrefix(arena, t.name.slice());
-                if (t.view == .edit) break :blk try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ discussion_seg ++ "{s}/edit", .{ prefix, t.selected.slice() });
-                if (t.view == .description) break :blk try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ discussion_seg ++ "{s}/description", .{ prefix, t.selected.slice() });
+                if (t.view == .edit) break :blk try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ discuss_seg ++ "{s}/edit", .{ prefix, t.selected.slice() });
+                if (t.view == .description) break :blk try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ discuss_seg ++ "{s}/description", .{ prefix, t.selected.slice() });
                 if (t.view == .new_comment) break :blk if (t.comment.len == 0)
-                    try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ discussion_seg ++ "{s}/new", .{ prefix, t.selected.slice() })
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ discuss_seg ++ "{s}/new", .{ prefix, t.selected.slice() })
                 else
-                    try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ discussion_seg ++ "{s}/" ++ comment_seg ++ "{s}/new", .{ prefix, t.selected.slice(), t.comment.slice() });
-                if (t.view == .edit_comment) break :blk try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ discussion_seg ++ "{s}/" ++ comment_seg ++ "{s}/edit", .{ prefix, t.selected.slice(), t.comment.slice() });
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ discuss_seg ++ "{s}/" ++ comment_seg ++ "{s}/new", .{ prefix, t.selected.slice(), t.comment.slice() });
+                if (t.view == .edit_comment) break :blk try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ discuss_seg ++ "{s}/" ++ comment_seg ++ "{s}/edit", .{ prefix, t.selected.slice(), t.comment.slice() });
                 if (t.view == .remove) break :blk if (t.comment.len == 0)
-                    try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ discussion_seg ++ "{s}/remove", .{ prefix, t.selected.slice() })
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ discuss_seg ++ "{s}/remove", .{ prefix, t.selected.slice() })
                 else
-                    try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ discussion_seg ++ "{s}/" ++ comment_seg ++ "{s}/remove", .{ prefix, t.selected.slice(), t.comment.slice() });
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ discuss_seg ++ "{s}/" ++ comment_seg ++ "{s}/remove", .{ prefix, t.selected.slice(), t.comment.slice() });
                 if (t.comment.len != 0) break :blk if (t.comments_start == 0)
-                    try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ discussion_seg ++ "{s}/" ++ comment_seg ++ "{s}", .{ prefix, t.selected.slice(), t.comment.slice() })
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ discuss_seg ++ "{s}/" ++ comment_seg ++ "{s}", .{ prefix, t.selected.slice(), t.comment.slice() })
                 else
-                    try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ discussion_seg ++ "{s}/" ++ comment_seg ++ "{s}/" ++ start_seg ++ "{d}", .{ prefix, t.selected.slice(), t.comment.slice(), t.comments_start });
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ discuss_seg ++ "{s}/" ++ comment_seg ++ "{s}/" ++ start_seg ++ "{d}", .{ prefix, t.selected.slice(), t.comment.slice(), t.comments_start });
                 if (t.selected.len != 0) break :blk if (t.comments_start == 0)
-                    try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ discussion_seg ++ "{s}", .{ prefix, t.selected.slice() })
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ discuss_seg ++ "{s}", .{ prefix, t.selected.slice() })
                 else
-                    try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ discussion_seg ++ "{s}/" ++ start_seg ++ "{d}", .{ prefix, t.selected.slice(), t.comments_start });
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ discuss_seg ++ "{s}/" ++ start_seg ++ "{d}", .{ prefix, t.selected.slice(), t.comments_start });
                 break :blk if (t.tag.len == 0)
                     try std.fmt.allocPrint(arena.allocator(), "{s}/discussions/{s}", .{ prefix, @tagName(t.view) })
                 else
@@ -855,8 +855,8 @@ pub const RoutablePage = union(enum) {
             if (!params.only(&.{.start})) return null;
             return repoThreadCommentsRoute(.issue, pair, issue_id, params.start() orelse return null);
         }
-        if (std.mem.startsWith(u8, tab, discussion_seg)) {
-            const discussion_id = tab[discussion_seg.len..];
+        if (std.mem.startsWith(u8, tab, discuss_seg)) {
+            const discussion_id = tab[discuss_seg.len..];
             if (discussion_id.len == 0) return null;
             if (segments.peek()) |tail| {
                 if (std.mem.startsWith(u8, tail, comment_seg)) {
@@ -866,25 +866,25 @@ pub const RoutablePage = union(enum) {
                     const word = params.scanTail(&segments) catch return null;
                     if (word) |last| {
                         if (!params.only(&.{})) return null;
-                        if (std.mem.eql(u8, last, "new")) return repoThreadCommentNewRoute(.discussion, pair, discussion_id, comment_id);
-                        if (std.mem.eql(u8, last, "edit")) return repoThreadCommentEditRoute(.discussion, pair, discussion_id, comment_id);
-                        if (std.mem.eql(u8, last, "remove")) return repoThreadRemoveRoute(.discussion, pair, discussion_id, comment_id);
+                        if (std.mem.eql(u8, last, "new")) return repoThreadCommentNewRoute(.discuss, pair, discussion_id, comment_id);
+                        if (std.mem.eql(u8, last, "edit")) return repoThreadCommentEditRoute(.discuss, pair, discussion_id, comment_id);
+                        if (std.mem.eql(u8, last, "remove")) return repoThreadRemoveRoute(.discuss, pair, discussion_id, comment_id);
                         return null;
                     }
                     if (!params.only(&.{.start})) return null;
-                    return repoThreadCommentRoute(.discussion, pair, discussion_id, comment_id, params.start() orelse return null);
+                    return repoThreadCommentRoute(.discuss, pair, discussion_id, comment_id, params.start() orelse return null);
                 }
             }
             const word = params.scanTail(&segments) catch return null;
             if (word) |tail| {
-                if (std.mem.eql(u8, tail, "new")) return if (params.only(&.{})) repoThreadCommentNewRoute(.discussion, pair, discussion_id, "") else null;
-                if (std.mem.eql(u8, tail, "edit")) return if (params.only(&.{})) repoThreadEditRoute(.discussion, pair, discussion_id) else null;
-                if (std.mem.eql(u8, tail, "remove")) return if (params.only(&.{})) repoThreadRemoveRoute(.discussion, pair, discussion_id, "") else null;
-                if (std.mem.eql(u8, tail, "description")) return if (params.only(&.{})) repoThreadDescriptionRoute(.discussion, pair, discussion_id) else null;
+                if (std.mem.eql(u8, tail, "new")) return if (params.only(&.{})) repoThreadCommentNewRoute(.discuss, pair, discussion_id, "") else null;
+                if (std.mem.eql(u8, tail, "edit")) return if (params.only(&.{})) repoThreadEditRoute(.discuss, pair, discussion_id) else null;
+                if (std.mem.eql(u8, tail, "remove")) return if (params.only(&.{})) repoThreadRemoveRoute(.discuss, pair, discussion_id, "") else null;
+                if (std.mem.eql(u8, tail, "description")) return if (params.only(&.{})) repoThreadDescriptionRoute(.discuss, pair, discussion_id) else null;
                 return null;
             }
             if (!params.only(&.{.start})) return null;
-            return repoThreadCommentsRoute(.discussion, pair, discussion_id, params.start() orelse return null);
+            return repoThreadCommentsRoute(.discuss, pair, discussion_id, params.start() orelse return null);
         }
         if (std.mem.eql(u8, tab, "issues")) {
             // the word is a list view; a filter with neither is never emitted.
@@ -909,8 +909,8 @@ pub const RoutablePage = union(enum) {
             const view = word orelse return if (params.only(&.{})) repoDiscussionsRoute(pair, "", "") else null;
             if (!params.only(&.{.tag})) return null;
             if (std.mem.eql(u8, view, "all")) return repoDiscussionsRoute(pair, tag_value, "");
-            if (std.mem.eql(u8, view, "tags")) return repoThreadTagsRoute(.discussion, pair, tag_value);
-            if (std.mem.eql(u8, view, "new")) return if (tag_value.len == 0) repoThreadNewRoute(.discussion, pair) else null;
+            if (std.mem.eql(u8, view, "tags")) return repoThreadTagsRoute(.discuss, pair, tag_value);
+            if (std.mem.eql(u8, view, "new")) return if (tag_value.len == 0) repoThreadNewRoute(.discuss, pair) else null;
             return null;
         }
         if (std.mem.eql(u8, tab, "events")) {

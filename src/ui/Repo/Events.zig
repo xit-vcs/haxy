@@ -190,7 +190,7 @@ fn readMeta(
                 .user => evt.User,
                 .repo => evt.Repo,
                 .issue => evt.Issue,
-                .discussion => evt.Discussion,
+                .discuss => evt.Discussion,
                 .comment => evt.Comment,
                 .attach => evt.Attachment,
             };
@@ -235,11 +235,11 @@ fn readItem(
             const route = ui.RoutablePage.repoThreadCommentsRoute(.issue, identity, item.id, 0) orelse return error.RouteTooLong;
             item.view_url = try route.toUrl(arena);
         },
-        .discussion => {
+        .discuss => {
             const record = (try readRecord(evt.Discussion, hash_kind, arena, haxy_moment, id)) orelse return null;
             item.author = try ui.Author.initFromEmail(admin_moment, arena, record.author_email);
             if (!include_view_url) return item;
-            const route = ui.RoutablePage.repoThreadCommentsRoute(.discussion, identity, item.id, 0) orelse return error.RouteTooLong;
+            const route = ui.RoutablePage.repoThreadCommentsRoute(.discuss, identity, item.id, 0) orelse return error.RouteTooLong;
             item.view_url = try route.toUrl(arena);
         },
         .comment => {
