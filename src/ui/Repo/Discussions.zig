@@ -55,7 +55,7 @@ selected_id: []const u8,
 comment_id: []const u8,
 comments_start: usize,
 comment_page: ?Comment.Permalink = null,
-all: Window,
+recent: Window,
 view: ui.RoutablePage.DiscussionsView,
 description_page: bool = false,
 tags: []const []const u8,
@@ -64,19 +64,19 @@ repo_source: ?ui.RepoSource = null,
 const Self = @This();
 
 pub const Event = evt.Discussion;
-pub const Status = enum { all };
+pub const Status = enum { recent };
 pub const ViewKind = ui.RoutablePage.DiscussionsView;
 
 pub fn selectedThread(self: *const Self) ?*const DiscussionWithId {
     if (self.selected_id.len == 0) return null;
-    for (self.all.items) |*entry| {
+    for (self.recent.items) |*entry| {
         if (std.mem.eql(u8, entry.id, self.selected_id)) return entry;
     }
     return null;
 }
 
 pub fn window(self: *const Self, _: Status) *const Window {
-    return &self.all;
+    return &self.recent;
 }
 
 pub fn emptyResult(
@@ -94,8 +94,8 @@ pub fn emptyResult(
         .selected_id = try aa.dupe(u8, selected_id),
         .comment_id = try aa.dupe(u8, comment_id),
         .comments_start = comments_start,
-        .all = .empty,
-        .view = if (view == .description) .all else view,
+        .recent = .empty,
+        .view = if (view == .description) .recent else view,
         .description_page = view == .description,
         .tags = &.{},
     };
@@ -160,7 +160,8 @@ pub fn init(
         const record_cursor = try records.getCursor(hash.hashInt(repo_opts.hash, &id)) orelse return error.NotFound;
         const record = try evt.read(evt.Discussion.Record, DB, repo_opts.hash, arena, try DB.HashMap(.read_only).init(record_cursor));
         if (record.removed) return error.NotFound;
-        const order_key = try aa.dupe(u8, &evt.orderKeyDesc(record.created_ts, &id));
+        const activity_order = try evt.Discussion.activityOrder(DB, repo_opts.hash, haxy_moment, &id);
+        const order_key = try aa.dupe(u8, &evt.orderKeyDesc(activity_order, &id));
         const set = set_maybe orelse return error.NotFound;
         if (!try set.contains(order_key)) return error.NotFound;
         root_key = order_key;
@@ -192,7 +193,7 @@ pub fn init(
         .comment_id = empty.comment_id,
         .comments_start = comments_start,
         .comment_page = comment_page,
-        .all = loaded_window,
+        .recent = loaded_window,
         .view = empty.view,
         .description_page = empty.description_page,
         .tags = tag_names.items,
@@ -280,11 +281,11 @@ pub const Header = struct {
 
         const aa = session.page_arena.allocator();
 
-        // all discussions
+        // recent discussions
         {
             const route = ui.RoutablePage.repoDiscussionsRoute(data.identity, data.tag, "") orelse return error.RouteTooLong;
             const link = try std.fmt.allocPrint(aa, "ai:{s}", .{try route.toUrl(session.page_arena)});
-            const label = try std.fmt.allocPrint(aa, "all ({d})", .{data.all.count});
+            const label = try std.fmt.allocPrint(aa, "recent ({d})", .{data.recent.count});
             try addTab(allocator, &box, &tab_ids, label, link);
         }
 

@@ -68,6 +68,7 @@ pub const EventKind = enum {
 pub const event_index_key = "event-id->kind";
 pub const active_event_id_set_key = "active-event-id-set";
 pub const removed_event_id_set_key = "removed-event-id-set";
+const event_order_key = "event-order";
 
 // a null payload removes the record
 pub const Event = union(EventKind) {
@@ -796,6 +797,20 @@ pub fn consumeInTransaction(
 
         const haxy_moment = try DB.HashMap(.read_write).init(haxy_moment_cursor);
 
+        // graph generation gives every event a causal order independent of
+        // commit timestamps. concurrent events tie-break by id in their index.
+        var event_order: u64 = 1;
+        for (parent_oids) |*parent_oid| {
+            var parent_id: [hash.byteLen(repo_opts.hash)]u8 = undefined;
+            _ = try std.fmt.hexToBytes(&parent_id, parent_oid);
+            const parent_cursor = try haxy_moments.getCursor(hash.bytesToInt(repo_opts.hash, &parent_id)) orelse return error.CursorNotFound;
+            const parent = try DB.HashMap(.read_only).init(parent_cursor);
+            const parent_order_cursor = try parent.getCursor(hash.hashInt(repo_opts.hash, event_order_key)) orelse return error.CursorNotFound;
+            const parent_order = try parent_order_cursor.readUint();
+            event_order = @max(event_order, parent_order +| 1);
+        }
+        try haxy_moment.put(hash.hashInt(repo_opts.hash, event_order_key), .{ .uint = event_order });
+
         // merge changes from every parent after the first parent. the common
         // ancestor is the baseline, so a later parent only contributes records
         // it changed relative to the merge base. only the record maps are
@@ -845,21 +860,20 @@ pub fn consumeInTransaction(
             // wrap the payload into the record `consume` stores, with its
             // commit-derived fields; on update, `consume` preserves the
             // existing record's
-            const created_ts = commit_object.content.commit.metadata.timestamp;
             switch (event_with_id.event) {
                 .user => |event_maybe| {
-                    const record_maybe: ?User.Record = if (event_maybe) |event| .{ .event = event, .created_ts = created_ts } else null;
+                    const record_maybe: ?User.Record = if (event_maybe) |event| .{ .event = event, .created_order = event_order } else null;
                     try User.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, record_maybe, &arena, &repo_event_oid);
                 },
                 .repo => |event_maybe| {
-                    const record_maybe: ?Repo.Record = if (event_maybe) |event| .{ .event = event, .created_ts = created_ts } else null;
+                    const record_maybe: ?Repo.Record = if (event_maybe) |event| .{ .event = event, .created_order = event_order } else null;
                     try Repo.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, record_maybe, &arena, &repo_event_oid);
                 },
                 .issue => |event_maybe| {
                     const record_maybe: ?Issue.Record = if (event_maybe) |event| .{
                         .event = event,
                         .author_email = authorEmail(commit_object.content.commit.metadata.author orelse ""),
-                        .created_ts = created_ts,
+                        .created_order = event_order,
                     } else null;
                     try Issue.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, record_maybe, &arena, &repo_event_oid);
                 },
@@ -867,7 +881,7 @@ pub fn consumeInTransaction(
                     const record_maybe: ?Discussion.Record = if (event_maybe) |event| .{
                         .event = event,
                         .author_email = authorEmail(commit_object.content.commit.metadata.author orelse ""),
-                        .created_ts = created_ts,
+                        .created_order = event_order,
                     } else null;
                     try Discussion.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, record_maybe, &arena, &repo_event_oid);
                 },
@@ -875,7 +889,7 @@ pub fn consumeInTransaction(
                     const record_maybe: ?Comment.Record = if (event_maybe) |event| .{
                         .event = event,
                         .author_email = authorEmail(commit_object.content.commit.metadata.author orelse ""),
-                        .created_ts = created_ts,
+                        .created_order = event_order,
                     } else null;
                     try Comment.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, record_maybe, &arena, &repo_event_oid);
                 },
@@ -885,7 +899,7 @@ pub fn consumeInTransaction(
                         break :blk .{
                             .event = event,
                             .author_email = authorEmail(commit_object.content.commit.metadata.author orelse ""),
-                            .created_ts = created_ts,
+                            .created_order = event_order,
                             .name = entry.name,
                             .blob_oid = entry.oid,
                         };
@@ -1158,7 +1172,7 @@ pub fn merge(
         const conflicts = try DB.SortedMap(.read_write).init(conflicts_cursor);
         const id_to_field_to_oid_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, T.id_to_field_to_oid_key));
         const id_to_field_to_oid = try DB.HashMap(.read_write).init(id_to_field_to_oid_cursor);
-        const merged_key = orderKeyDesc(merged.created_ts, &event_id);
+        const merged_key = orderKeyDesc(merged.created_order, &event_id);
 
         var parent_field_oids: ?DB.SortedMap(.read_only) = null;
         if (parent_id_to_field_to_oid) |map| {
@@ -1218,7 +1232,7 @@ pub fn merge(
             continue;
         }
 
-        // created_ts never changes, so the parent keys this record's conflict
+        // created_order never changes, so the parent keys this record's conflict
         // identically, and it carries over when the target has none, unless the
         // parent's entry is unchanged from the baseline, meaning the target
         // inherited it too and resolving it removed it here.
@@ -1274,29 +1288,28 @@ pub fn currentMomentFromDb(
     return try DB.HashMap(.read_only).init(haxy_moment_cursor);
 }
 
-// build the key for SortedSets sorted by timestamp. the big-endian timestamp
-// makes byte order match creation order; the event id breaks ties and keeps
-// keys unique within the same timestamp.
-pub fn orderKey(timestamp: u64, event_id: *const [event_id_size]u8) [@sizeOf(u64) + event_id_size]u8 {
+// build a sorted-set key from an order and event id. big-endian order makes
+// byte order match numeric order; the event id breaks ties.
+pub fn orderKey(order: u64, event_id: *const [event_id_size]u8) [@sizeOf(u64) + event_id_size]u8 {
     var key: [@sizeOf(u64) + event_id_size]u8 = undefined;
-    std.mem.writeInt(u64, key[0..@sizeOf(u64)], timestamp, .big);
+    std.mem.writeInt(u64, key[0..@sizeOf(u64)], order, .big);
     @memcpy(key[@sizeOf(u64)..], event_id);
     return key;
 }
 
-pub fn orderKeyDesc(timestamp: u64, event_id: *const [event_id_size]u8) [@sizeOf(u64) + event_id_size]u8 {
-    return orderKey(std.math.maxInt(u64) - timestamp, event_id);
+pub fn orderKeyDesc(order: u64, event_id: *const [event_id_size]u8) [@sizeOf(u64) + event_id_size]u8 {
+    return orderKey(std.math.maxInt(u64) - order, event_id);
 }
 
 // add or refresh one entry in the global logical-event index. updates and
-// removed records preserve created_ts, so the key never moves.
+// removed records preserve created_order, so the key never moves.
 pub fn indexEvent(
     comptime DB: type,
     comptime hash_kind: hash.HashKind,
     haxy_moment: DB.HashMap(.read_write),
     event_id: *const [event_id_size]u8,
     kind: EventKind,
-    created_ts: u64,
+    created_order: u64,
     removed: bool,
 ) !void {
     const kind_map_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, event_index_key));
@@ -1307,13 +1320,30 @@ pub fn indexEvent(
     const active = try DB.SortedSet(.read_write).init(active_cursor);
     const removed_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, removed_event_id_set_key));
     const removed_set = try DB.SortedSet(.read_write).init(removed_cursor);
-    const order_key = orderKeyDesc(created_ts, event_id);
+    const order_key = orderKeyDesc(created_order, event_id);
     if (removed) {
         _ = try active.remove(&order_key);
         try removed_set.put(&order_key);
     } else {
         _ = try removed_set.remove(&order_key);
         try active.put(&order_key);
+    }
+}
+
+pub fn touchThread(
+    comptime DB: type,
+    comptime hash_kind: hash.HashKind,
+    haxy_moment: DB.HashMap(.read_write),
+    thread_id: *const [event_id_size]u8,
+    order: u64,
+    arena: *std.heap.ArenaAllocator,
+) !void {
+    const kind_map_cursor = try haxy_moment.getCursor(hash.hashInt(hash_kind, event_index_key)) orelse return;
+    const kind_map = try DB.HashMap(.read_only).init(kind_map_cursor);
+    const kind = (try readEventKind(hash_kind, kind_map, thread_id)) orelse return;
+    switch (kind) {
+        .discuss => try Discussion.touch(DB, hash_kind, haxy_moment, thread_id, order, arena),
+        else => {},
     }
 }
 

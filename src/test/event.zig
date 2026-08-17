@@ -692,7 +692,7 @@ test "merge" {
         const conflicts = try Repo.DB.SortedMap(.read_only).init(conflicts_cursor);
         try std.testing.expectEqual(1, try conflicts.count());
 
-        const order_key = evt.orderKeyDesc(issue.created_ts, &issue_id);
+        const order_key = evt.orderKeyDesc(issue.created_order, &issue_id);
         const conflict_cursor = try conflicts.getCursor(&order_key) orelse return error.NotFound;
         const conflict = try Repo.DB.HashMap(.read_only).init(conflict_cursor);
 
@@ -1172,8 +1172,8 @@ test "user and repo" {
 
         try std.testing.expectEqual(1, try user_repos.count());
 
-        // the set is keyed by orderKeyDesc([created-ts][event-id])
-        const order_key = evt.orderKeyDesc(repo_event.created_ts, &repo_event_id);
+        // the set is keyed by orderKeyDesc([created-order][event-id])
+        const order_key = evt.orderKeyDesc(repo_event.created_order, &repo_event_id);
         try std.testing.expect(try user_repos.contains(&order_key));
     }
 
@@ -1324,7 +1324,7 @@ test "repos and users paginate newest first" {
             try std.testing.expectEqual(expected.len, try set.count());
             for (expected, 0..) |id, i| {
                 const kv = (try set.getIndexKeyValuePair(@intCast(i))) orelse return error.NotFound;
-                // the key is orderKeyDesc ([timestamp][event-id]); its trailing bytes are the id
+                // the key is orderKeyDesc ([created-order][event-id]); its trailing bytes are the id
                 var order_key: [@sizeOf(u64) + evt.event_id_size]u8 = undefined;
                 _ = try kv.key_cursor.readBytes(&order_key);
                 try std.testing.expectEqualSlices(u8, id, order_key[@sizeOf(u64)..]);
@@ -1332,14 +1332,14 @@ test "repos and users paginate newest first" {
         }
     };
 
-    // one user, then four repos, each with its own creation timestamp (user@100,
-    // repos@101..104)
+    // one user, then four repos in creation order with deliberately skewed
+    // timestamps
     const events = [_]evt.EventWithId{
         .{ .id = std.fmt.bytesToHex(user_id, .lower), .author = author, .timestamp = 100, .event = .{ .user = .{ .name = "alice", .email = "alice@example.test", .password_hash = pw } } },
-        .{ .id = std.fmt.bytesToHex(repo_ids[0], .lower), .author = author, .timestamp = 101, .event = .{ .repo = .{ .user_id = &user_id, .name = "repo0", .description = "d0" } } },
-        .{ .id = std.fmt.bytesToHex(repo_ids[1], .lower), .author = author, .timestamp = 102, .event = .{ .repo = .{ .user_id = &user_id, .name = "repo1", .description = "d1" } } },
-        .{ .id = std.fmt.bytesToHex(repo_ids[2], .lower), .author = author, .timestamp = 103, .event = .{ .repo = .{ .user_id = &user_id, .name = "repo2", .description = "d2" } } },
-        .{ .id = std.fmt.bytesToHex(repo_ids[3], .lower), .author = author, .timestamp = 104, .event = .{ .repo = .{ .user_id = &user_id, .name = "repo3", .description = "d3" } } },
+        .{ .id = std.fmt.bytesToHex(repo_ids[0], .lower), .author = author, .timestamp = 10_000, .event = .{ .repo = .{ .user_id = &user_id, .name = "repo0", .description = "d0" } } },
+        .{ .id = std.fmt.bytesToHex(repo_ids[1], .lower), .author = author, .timestamp = 10, .event = .{ .repo = .{ .user_id = &user_id, .name = "repo1", .description = "d1" } } },
+        .{ .id = std.fmt.bytesToHex(repo_ids[2], .lower), .author = author, .timestamp = 5_000, .event = .{ .repo = .{ .user_id = &user_id, .name = "repo2", .description = "d2" } } },
+        .{ .id = std.fmt.bytesToHex(repo_ids[3], .lower), .author = author, .timestamp = 20, .event = .{ .repo = .{ .user_id = &user_id, .name = "repo3", .description = "d3" } } },
     };
     try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &events);
 

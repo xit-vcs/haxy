@@ -54,7 +54,7 @@ pub fn init(
     var repos_next_start: ?usize = null;
 
     // the user-id->repo-id-set index maps each user to a set of their repo event
-    // ids ordered by creation time (newest first); it only exists once a repo has
+    // ids ordered by creation (newest first); it only exists once a repo has
     // been consumed, so a user with no repos simply yields an empty list.
     if (try haxy_moment.getCursor(hash.hashInt(hash_kind, "user-id->repo-id-set"))) |user_id_to_repo_id_set_cursor| {
         const user_id_to_repo_id_set = try DB.HashMap(.read_only).init(user_id_to_repo_id_set_cursor);
@@ -73,7 +73,7 @@ pub fn init(
             while (i < end) : (i += 1) {
                 var kv_cursor = (try repos_iter.next()) orelse break;
                 const kv = try kv_cursor.readKeyValuePair();
-                // the set key is orderKey = [timestamp][event-id]; its trailing
+                // the set key is orderKey = [created-order][event-id]; its trailing
                 // bytes are the repo event id.
                 var order_key: [@sizeOf(u64) + evt.event_id_size]u8 = undefined;
                 _ = try kv.key_cursor.readBytes(&order_key);

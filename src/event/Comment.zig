@@ -13,7 +13,7 @@ pub const Record = struct {
     event: Self,
     removed: bool = false,
     author_email: ?[]const u8 = null,
-    created_ts: u64 = 0, // the commit timestamp of the event that first created this comment
+    created_order: u64 = 0,
 };
 
 const Self = @This();
@@ -67,15 +67,16 @@ pub fn consume(
     };
 
     // references use the same lower-case hex form as event ids in json
-    var id_bytes: [evt.event_id_size]u8 = undefined;
-    _ = try std.fmt.hexToBytes(&id_bytes, &record_to_write.event.thread_id);
-    if (!std.mem.eql(u8, &record_to_write.event.thread_id, &std.fmt.bytesToHex(id_bytes, .lower))) return error.InvalidEventId;
-    _ = try std.fmt.hexToBytes(&id_bytes, &record_to_write.event.parent_id);
-    if (!std.mem.eql(u8, &record_to_write.event.parent_id, &std.fmt.bytesToHex(id_bytes, .lower))) return error.InvalidEventId;
+    var thread_id: [evt.event_id_size]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&thread_id, &record_to_write.event.thread_id);
+    if (!std.mem.eql(u8, &record_to_write.event.thread_id, &std.fmt.bytesToHex(thread_id, .lower))) return error.InvalidEventId;
+    var parent_id: [evt.event_id_size]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&parent_id, &record_to_write.event.parent_id);
+    if (!std.mem.eql(u8, &record_to_write.event.parent_id, &std.fmt.bytesToHex(parent_id, .lower))) return error.InvalidEventId;
 
     if (existing_record_maybe) |existing_record| {
-        // updates preserve the original creation timestamp and author
-        record_to_write.created_ts = existing_record.created_ts;
+        // updates preserve the original creation order and author
+        record_to_write.created_order = existing_record.created_order;
         record_to_write.author_email = existing_record.author_email;
 
         // a comment cannot move between threads or positions in the thread
@@ -86,16 +87,17 @@ pub fn consume(
     const comment_cursor = try event_id_to_comment.putCursor(comment_key);
     const comment = try DB.HashMap(.read_write).init(comment_cursor);
     try evt.upsert(Record, DB, hash_kind, comment, record_to_write);
-    try evt.indexEvent(DB, hash_kind, haxy_moment, event_id, .comment, record_to_write.created_ts, record_to_write.removed);
+    try evt.indexEvent(DB, hash_kind, haxy_moment, event_id, .comment, record_to_write.created_order, record_to_write.removed);
 
     if (existing_cursor_maybe == null) {
         const comment_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, id_set_key));
         const comment_id_set = try DB.SortedSet(.read_write).init(comment_id_set_cursor);
-        try comment_id_set.put(&evt.orderKeyDesc(record_to_write.created_ts, event_id));
+        try comment_id_set.put(&evt.orderKeyDesc(record_to_write.created_order, event_id));
+        try evt.touchThread(DB, hash_kind, haxy_moment, &thread_id, record_to_write.created_order, arena);
     }
 
     // removed comments stay in the thread so their replies remain connected
-    const thread_order_key = evt.orderKey(record_to_write.created_ts, event_id);
+    const thread_order_key = evt.orderKey(record_to_write.created_order, event_id);
     const thread_comments_cursor = try thread_id_to_comment_id_set.putCursor(hash.hashInt(hash_kind, &record_to_write.event.thread_id));
     const thread_comments = try DB.SortedSet(.read_write).init(thread_comments_cursor);
     try thread_comments.put(&thread_order_key);

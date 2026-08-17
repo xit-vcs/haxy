@@ -13,7 +13,7 @@ pub const Record = struct {
     event: Self,
     removed: bool = false,
     author_email: ?[]const u8 = null,
-    created_ts: u64 = 0, // the commit timestamp of the event that created this attachment
+    created_order: u64 = 0,
     name: []const u8,
     blob_oid: []const u8,
 };
@@ -94,7 +94,7 @@ pub fn consume(
     if (existing_record_maybe) |existing_record| {
         // the file never changes, so an update preserves everything the original
         // commit determined
-        record_to_write.created_ts = existing_record.created_ts;
+        record_to_write.created_order = existing_record.created_order;
         record_to_write.author_email = existing_record.author_email;
         record_to_write.name = existing_record.name;
         record_to_write.blob_oid = existing_record.blob_oid;
@@ -106,18 +106,18 @@ pub fn consume(
     const attachment_cursor = try event_id_to_attachment.putCursor(attachment_key);
     const attachment = try DB.HashMap(.read_write).init(attachment_cursor);
     try evt.upsert(Record, DB, hash_kind, attachment, record_to_write);
-    try evt.indexEvent(DB, hash_kind, haxy_moment, event_id, .attach, record_to_write.created_ts, record_to_write.removed);
+    try evt.indexEvent(DB, hash_kind, haxy_moment, event_id, .attach, record_to_write.created_order, record_to_write.removed);
 
     if (existing_cursor_maybe == null) {
         const attachment_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, id_set_key));
         const attachment_id_set = try DB.SortedSet(.read_write).init(attachment_id_set_cursor);
-        try attachment_id_set.put(&evt.orderKeyDesc(record_to_write.created_ts, event_id));
+        try attachment_id_set.put(&evt.orderKeyDesc(record_to_write.created_order, event_id));
     }
 
     // removed attachments stay in the parent's set; the views skip them
     const parent_attachments_cursor = try parent_id_to_attachment_id_set.putCursor(hash.hashInt(hash_kind, &record_to_write.event.parent_id));
     const parent_attachments = try DB.SortedSet(.read_write).init(parent_attachments_cursor);
-    try parent_attachments.put(&evt.orderKey(record_to_write.created_ts, event_id));
+    try parent_attachments.put(&evt.orderKey(record_to_write.created_order, event_id));
 }
 
 // attach `blob` to a parent event and return the event id. `repo` must be

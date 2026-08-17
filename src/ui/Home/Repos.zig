@@ -32,8 +32,8 @@ pub fn init(
 
     const empty: Self = .{ .repos = &.{}, .owner_names = &.{}, .start = start, .next_start = null };
 
-    // the repos ordered by creation time (newest first); absent until the first
-    // repo exists. keyed by orderKey ([timestamp][event-id]); the trailing bytes
+    // the repos ordered by creation (newest first); absent until the first repo
+    // exists. keyed by orderKey ([created-order][event-id]); the trailing bytes
     // of each key are the repo event id.
     const repo_id_set_cursor = try haxy_moment.getCursor(hash.hashInt(hash_kind, "repo-id-set")) orelse return empty;
     const repo_id_set = try DB.SortedSet(.read_only).init(repo_id_set_cursor);

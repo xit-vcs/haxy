@@ -143,7 +143,7 @@ pub fn init(
     };
     const discussions_view: ui.RoutablePage.DiscussionsView = switch (route) {
         .repo_discussions => |t| t.view,
-        else => .all,
+        else => .recent,
     };
     const discussions_comments_start: usize = switch (route) {
         .repo_discussions => |t| t.comments_start,

@@ -175,7 +175,7 @@ pub fn emptyResult(aa: std.mem.Allocator, identity: []const u8, tag: []const u8,
 }
 
 // read one window per status of an opened repo's issues (filtered to `tag`
-// when set), ordered by creation time (newest first). the window of the issue
+// when set), ordered by creation (newest first). the window of the issue
 // `selected_id` names starts at it ("" = the beginning). a git repo reads the
 // event db next to it (synced from the events branch on each page build); a
 // xit repo reads its own db.
@@ -267,7 +267,7 @@ pub fn init(
         const issue_cursor = try event_id_to_issue.getCursor(hash.hashInt(repo_opts.hash, &id_bytes)) orelse return error.NotFound;
         const issue_map = try DB.HashMap(.read_only).init(issue_cursor);
         const issue_event = try evt.read(evt.Issue.Record, DB, repo_opts.hash, arena, issue_map);
-        const order_key = try aa.dupe(u8, &evt.orderKeyDesc(issue_event.created_ts, &id_bytes));
+        const order_key = try aa.dupe(u8, &evt.orderKeyDesc(issue_event.created_order, &id_bytes));
 
         if (view == .conflicts) {
             // the id roots the conflicts window, so it must be conflicted

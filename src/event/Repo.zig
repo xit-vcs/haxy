@@ -11,7 +11,7 @@ description: []const u8,
 pub const Record = struct {
     event: Self,
     removed: bool = false,
-    created_ts: u64 = 0, // the commit timestamp of the event that first created this repo
+    created_order: u64 = 0,
 
     // a repo's key in the name index. it's unique per owner, so the read side
     // resolves the url's username to its user id first.
@@ -79,9 +79,9 @@ pub fn consume(
     const user_id_to_repo_id_set = try DB.HashMap(.read_write).init(user_id_to_repo_id_set_cursor);
 
     if (existing_record_maybe) |existing_record| {
-        // updates preserve the original creation timestamp
-        record_to_write.created_ts = existing_record.created_ts;
-        const order_key = evt.orderKeyDesc(existing_record.created_ts, event_id);
+        // updates preserve the original creation metadata
+        record_to_write.created_order = existing_record.created_order;
+        const order_key = evt.orderKeyDesc(existing_record.created_order, event_id);
 
         // drop the old active indexes; active values are re-added below
         if (!existing_record.removed) {
@@ -97,9 +97,9 @@ pub fn consume(
     const repo_cursor = try event_id_to_repo.putCursor(repo_key);
     const repo = try DB.HashMap(.read_write).init(repo_cursor);
     try evt.upsert(Record, DB, hash_kind, repo, record_to_write);
-    try evt.indexEvent(DB, hash_kind, haxy_moment, event_id, .repo, record_to_write.created_ts, record_to_write.removed);
+    try evt.indexEvent(DB, hash_kind, haxy_moment, event_id, .repo, record_to_write.created_order, record_to_write.removed);
 
-    const order_key = evt.orderKeyDesc(record_to_write.created_ts, event_id);
+    const order_key = evt.orderKeyDesc(record_to_write.created_order, event_id);
 
     // the id set retains removed records so merges can carry removals
     if (existing_cursor_maybe == null) {

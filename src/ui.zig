@@ -111,7 +111,7 @@ pub const RoutablePage = union(enum) {
         name: Array(repo_route_max_len),
         tag: Array(discussion_tag_route_max_len) = .{},
         selected: Array(evt.event_id_size * 2) = .{},
-        view: DiscussionsView = .all,
+        view: DiscussionsView = .recent,
         comments_start: usize = 0,
         comment: Array(evt.event_id_size * 2) = .{},
     },
@@ -125,7 +125,7 @@ pub const RoutablePage = union(enum) {
 
     pub const IssuesView = enum { open, closed, tags, new, edit, description, new_comment, edit_comment, remove, conflicts, resolve };
 
-    pub const DiscussionsView = enum { all, tags, new, edit, description, new_comment, edit_comment, remove };
+    pub const DiscussionsView = enum { recent, tags, new, edit, description, new_comment, edit_comment, remove };
 
     pub const EventsView = enum { active, removed };
 
@@ -908,7 +908,7 @@ pub const RoutablePage = union(enum) {
             const tag_value = params.values.get(.tag) orelse "";
             const view = word orelse return if (params.only(&.{})) repoDiscussionsRoute(pair, "", "") else null;
             if (!params.only(&.{.tag})) return null;
-            if (std.mem.eql(u8, view, "all")) return repoDiscussionsRoute(pair, tag_value, "");
+            if (std.mem.eql(u8, view, "recent")) return repoDiscussionsRoute(pair, tag_value, "");
             if (std.mem.eql(u8, view, "tags")) return repoThreadTagsRoute(.discuss, pair, tag_value);
             if (std.mem.eql(u8, view, "new")) return if (tag_value.len == 0) repoThreadNewRoute(.discuss, pair) else null;
             return null;

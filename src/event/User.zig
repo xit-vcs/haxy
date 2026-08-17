@@ -15,7 +15,7 @@ ssh_keys: []const u8 = "", // newline-separated authorized_keys lines (one OpenS
 pub const Record = struct {
     event: Self,
     removed: bool = false,
-    created_ts: u64 = 0, // the commit timestamp of the event that first created this user
+    created_order: u64 = 0,
 
     // a user's key in the name index
     pub fn indexKey(self: Record, allocator: std.mem.Allocator) ![]const u8 {
@@ -97,8 +97,8 @@ pub fn consume(
     if (!record_to_write.removed) try validateName(record_to_write.event.name);
 
     if (existing_record_maybe) |existing_record| {
-        // updates preserve the original creation timestamp
-        record_to_write.created_ts = existing_record.created_ts;
+        // updates preserve the original creation metadata
+        record_to_write.created_order = existing_record.created_order;
 
         // drop the old active indexes; active values are re-added below
         if (!existing_record.removed) {
@@ -110,9 +110,9 @@ pub fn consume(
     const user_cursor = try event_id_to_user.putCursor(user_key);
     const user = try DB.HashMap(.read_write).init(user_cursor);
     try evt.upsert(Record, DB, hash_kind, user, record_to_write);
-    try evt.indexEvent(DB, hash_kind, haxy_moment, event_id, .user, record_to_write.created_ts, record_to_write.removed);
+    try evt.indexEvent(DB, hash_kind, haxy_moment, event_id, .user, record_to_write.created_order, record_to_write.removed);
 
-    const order_key = evt.orderKeyDesc(record_to_write.created_ts, event_id);
+    const order_key = evt.orderKeyDesc(record_to_write.created_order, event_id);
 
     // the id set retains removed records so merges can carry removals
     if (existing_cursor_maybe == null) {

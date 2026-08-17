@@ -15,7 +15,7 @@ pub const Record = struct {
     event: Self,
     removed: bool = false,
     author_email: ?[]const u8 = null,
-    created_ts: u64 = 0, // the commit timestamp of the event that first created this issue
+    created_order: u64 = 0,
 };
 
 const Self = @This();
@@ -78,7 +78,7 @@ pub fn consume(
     const event_id_to_issue_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, "event-id->issue"));
     const event_id_to_issue = try DB.HashMap(.read_write).init(event_id_to_issue_cursor);
 
-    // the per-status sets the issues views list, ordered by creation time,
+    // the per-status sets the issues views list, ordered by creation,
     // keyed by status name
     const status_to_issues_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, "status->issue-id-set"));
     const status_to_issues = try DB.SortedMap(.read_write).init(status_to_issues_cursor);
@@ -109,12 +109,12 @@ pub fn consume(
     };
 
     if (existing_record_maybe) |existing_record| {
-        // updates preserve the original creation timestamp and author
-        record_to_write.created_ts = existing_record.created_ts;
+        // updates preserve the original creation order and author
+        record_to_write.created_order = existing_record.created_order;
         record_to_write.author_email = existing_record.author_email;
 
         // drop the old status's and tags' entries; active values are re-added below
-        const order_key = evt.orderKeyDesc(existing_record.created_ts, event_id);
+        const order_key = evt.orderKeyDesc(existing_record.created_order, event_id);
         if (!existing_record.removed) {
             const status_set = try statusSet(DB, status_to_issues, existing_record.event.status);
             _ = try status_set.remove(&order_key);
@@ -131,9 +131,9 @@ pub fn consume(
     const issue_cursor = try event_id_to_issue.putCursor(issue_key);
     const issue = try DB.HashMap(.read_write).init(issue_cursor);
     try evt.upsert(Record, DB, hash_kind, issue, record_to_write);
-    try evt.indexEvent(DB, hash_kind, haxy_moment, event_id, .issue, record_to_write.created_ts, record_to_write.removed);
+    try evt.indexEvent(DB, hash_kind, haxy_moment, event_id, .issue, record_to_write.created_order, record_to_write.removed);
 
-    const order_key = evt.orderKeyDesc(record_to_write.created_ts, event_id);
+    const order_key = evt.orderKeyDesc(record_to_write.created_order, event_id);
 
     // the id set retains removed records so merges can carry removals
     if (existing_cursor_maybe == null) {
@@ -266,7 +266,7 @@ fn resolveFields(
 
     const conflicts_cursor = (try moment.getCursor(hash.hashInt(repo_opts.hash, conflicts_key))) orelse return updated;
     const conflicts = try DB.SortedMap(.read_only).init(conflicts_cursor);
-    const order_key = evt.orderKeyDesc(live.created_ts, id_bytes);
+    const order_key = evt.orderKeyDesc(live.created_order, id_bytes);
     const conflict_cursor = (try conflicts.getCursor(&order_key)) orelse return updated;
     const entry = try DB.HashMap(.read_only).init(conflict_cursor);
 
