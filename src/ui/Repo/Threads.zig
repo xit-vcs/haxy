@@ -242,7 +242,8 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     const route = removeRoute(data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong;
                     const action = try std.fmt.allocPrint(aa, "form:{s}", .{try route.toUrl(session.page_arena)});
                     const event_name = if (data.comment_id.len == 0) thread_name else "comment";
-                    const label = try std.fmt.allocPrint(aa, "remove {s}", .{event_name});
+                    var label_buf: ["remove ".len + @max(thread_name.len, "comment".len)]u8 = undefined;
+                    const label = try std.fmt.bufPrint(&label_buf, "remove {s}", .{event_name});
                     var center = try initRemoveForm(allocator, action, label);
                     errdefer center.deinit(allocator);
                     try stack.children.put(allocator, center.getFocus().id, .{ .center = center });
@@ -1117,13 +1118,14 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             }
 
             if (comment_page) |page| {
-                const back_label = try std.fmt.allocPrint(self.session.page_arena.allocator(), "← back to {s}", .{thread_name});
+                var back_label_buf: ["← back to ".len + thread_name.len]u8 = undefined;
+                const back_label = try std.fmt.bufPrint(&back_label_buf, "← back to {s}", .{thread_name});
                 var back = try Comment.linkBox(allocator, self.session, back_label, commentsRoute(self.data.identity, entry.id, 0) orelse return error.RouteTooLong);
                 errdefer back.deinit(allocator);
                 try inner.children.put(allocator, back.getFocus().id, .{ .widget = .{ .text_box = back }, .rect = null, .min_size = null });
 
                 try Comment.appendComment(allocator, inner, self.session, self.data.identity, kind, page.selected);
-                try Comment.appendCount(allocator, inner, page.replies.count, "reply", "replies", self.session.page_arena.allocator());
+                try Comment.appendCount(allocator, inner, page.replies.count, "reply", "replies");
                 for (page.replies.comments) |comment| try Comment.appendComment(allocator, inner, self.session, self.data.identity, kind, comment);
                 try Comment.appendWindowNav(allocator, inner, self.session, self.data.identity, kind, &page.selected.comment.event.thread_id, &page.selected.id, page.replies);
 
@@ -1142,7 +1144,8 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             if (description_page) {
                 // the back link, in the title slot so the pane's input handling
                 // applies to it unchanged.
-                const back_label = try std.fmt.allocPrint(self.session.page_arena.allocator(), "← back to {s}", .{thread_name});
+                var back_label_buf: ["← back to ".len + thread_name.len]u8 = undefined;
+                const back_label = try std.fmt.bufPrint(&back_label_buf, "← back to {s}", .{thread_name});
                 var tb = try wgt.TextBox(ui.Widget).init(allocator, back_label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
                 errdefer tb.deinit(allocator);
                 tb.getFocus().focusable = true;
@@ -1217,7 +1220,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 errdefer reply.deinit(allocator);
                 try inner.children.put(allocator, reply.getFocus().id, .{ .widget = .{ .text_box = reply }, .rect = null, .min_size = null });
 
-                try Comment.appendCount(allocator, inner, entry.comments.count, "comment", "comments", self.session.page_arena.allocator());
+                try Comment.appendCount(allocator, inner, entry.comments.count, "comment", "comments");
                 for (entry.comments.comments) |comment| try Comment.appendComment(allocator, inner, self.session, self.data.identity, kind, comment);
                 try Comment.appendWindowNav(allocator, inner, self.session, self.data.identity, kind, entry.id, null, entry.comments);
 

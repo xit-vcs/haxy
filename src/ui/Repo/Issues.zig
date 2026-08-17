@@ -587,7 +587,8 @@ pub const Header = struct {
         for ([_]evt.Issue.Status{ .open, .closed }) |status| {
             const route = ui.RoutablePage.repoIssuesRoute(data.identity, status, data.tag, "") orelse return error.RouteTooLong;
             const link = try std.fmt.allocPrint(aa, "ai:{s}", .{try route.toUrl(session.page_arena)});
-            const label = try std.fmt.allocPrint(aa, "{s} ({d})", .{ @tagName(status), data.window(status).count });
+            var label_buf: [64]u8 = undefined;
+            const label = try std.fmt.bufPrint(&label_buf, "{s} ({d})", .{ @tagName(status), data.window(status).count });
             try addTab(allocator, &box, &tab_ids, label, link);
         }
 
@@ -628,7 +629,8 @@ pub const Header = struct {
         if (data.conflicts.count > 0) {
             const route = ui.RoutablePage.repoIssuesConflictsRoute(data.identity, "") orelse return error.RouteTooLong;
             const link = try std.fmt.allocPrint(aa, "ai:{s}", .{try route.toUrl(session.page_arena)});
-            const label = try std.fmt.allocPrint(aa, "conflicts ({d})", .{data.conflicts.count});
+            var label_buf: [64]u8 = undefined;
+            const label = try std.fmt.bufPrint(&label_buf, "conflicts ({d})", .{data.conflicts.count});
             try addTab(allocator, &box, &tab_ids, label, link);
         }
 

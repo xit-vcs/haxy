@@ -578,7 +578,8 @@ pub const Header = struct {
             inline for ([_]ui.RoutablePage.EventsView{ .active, .removed }, 0..) |view, i| {
                 const route = ui.RoutablePage.repoEventsRoute(data.identity, view, null, "") orelse return error.RouteTooLong;
                 const count = data.window(view).count;
-                const label = try std.fmt.allocPrint(session.page_arena.allocator(), "{s} ({d})", .{ @tagName(view), count });
+                var label_buf: [64]u8 = undefined;
+                const label = try std.fmt.bufPrint(&label_buf, "{s} ({d})", .{ @tagName(view), count });
                 var tab = try wgt.TextBox(ui.Widget).init(allocator, label, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .none });
                 errdefer tab.deinit(allocator);
                 tab.getFocus().focusable = true;
@@ -633,28 +634,23 @@ pub const Header = struct {
                 return;
             }
             switch (key) {
-                .enter => if (self.syncFocused()) self.requestSync(),
-                .mouse => |mouse| if (self.button_id) |id| if (inp.leftClickOn(root_focus, id, mouse)) self.requestSync(),
+                .enter => if (self.syncFocused()) try self.requestSync(allocator),
+                .mouse => |mouse| if (self.button_id) |id| if (inp.leftClickOn(root_focus, id, mouse)) try self.requestSync(allocator),
                 else => {},
             }
-            _ = allocator;
         }
 
-        fn requestSync(self: *Header.View) void {
+        fn requestSync(self: *Header.View, allocator: std.mem.Allocator) !void {
             if (!self.session.is_terminal) return;
             if (self.session.host_request != null) return;
-            self.session.host_request = .sync_events;
             const button_id = self.button_id orelse return;
             const child = self.box.children.getPtr(button_id) orelse return;
             const button = switch (child.widget) {
                 .text_box => |*button| button,
                 else => return,
             };
-            button.content = "syncing...";
-            for (button.box.children.values()) |*line| switch (line.widget) {
-                .text => |*text| text.content = "syncing...",
-                else => {},
-            };
+            try button.setContent(allocator, "syncing...");
+            self.session.host_request = .sync_events;
         }
 
         fn syncFocused(self: *Header.View) bool {

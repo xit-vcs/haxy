@@ -288,8 +288,9 @@ pub fn appendComment(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), ses
     try box.children.put(allocator, item.getFocus().id, .{ .widget = .{ .repo_comment = item }, .rect = null, .min_size = null });
 }
 
-pub fn appendCount(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), count: usize, singular: []const u8, plural: []const u8, arena: std.mem.Allocator) !void {
-    const text = try std.fmt.allocPrint(arena, "{d} {s}", .{ count, if (count == 1) singular else plural });
+pub fn appendCount(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), count: usize, singular: []const u8, plural: []const u8) !void {
+    var text_buf: [64]u8 = undefined;
+    const text = try std.fmt.bufPrint(&text_buf, "{d} {s}", .{ count, if (count == 1) singular else plural });
     var count_box = try wgt.TextBox(ui.Widget).init(allocator, text, .{ .border_style = .hidden, .wrap_kind = .none });
     errdefer count_box.deinit(allocator);
     try box.children.put(allocator, count_box.getFocus().id, .{ .widget = .{ .text_box = count_box }, .rect = null, .min_size = null });

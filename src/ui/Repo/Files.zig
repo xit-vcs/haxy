@@ -253,8 +253,9 @@ pub const View = struct {
                 var list_box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert, .stretch = true });
                 errdefer list_box.deinit(allocator);
 
-                // labels and link kinds are borrowed by the rows, so they live in
-                // the page arena (as long as this page's widget tree).
+                // link kinds are borrowed by the rows, so they live in the page
+                // arena (as long as this page's widget tree). row labels are
+                // copied by their text boxes.
                 const aa = session.page_arena.allocator();
                 if (data.dir.len != 0) {
                     try addRow(allocator, &list_box, "..", try dirLink(session.page_arena, data, parentDir(data.dir)));
@@ -357,8 +358,8 @@ pub const View = struct {
 
     // the selected file's contents as a single focusable multi-line text box.
     // it's borderless — the border lives on the surrounding scroll frame, which
-    // doubles when this content is focused. `text` lives in the page arena. a
-    // non-empty `link` makes activating the box follow it, like addRow.
+    // doubles when this content is focused. a non-empty `link` makes activating
+    // the box follow it, like addRow.
     fn addContentBox(self: *View, allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), text: []const u8, link: []const u8) !void {
         _ = self;
         var tb = try wgt.TextBox(ui.Widget).init(allocator, text, .{ .border_style = null, .wrap_kind = .none });

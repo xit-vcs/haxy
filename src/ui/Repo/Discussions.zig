@@ -285,7 +285,8 @@ pub const Header = struct {
         {
             const route = ui.RoutablePage.repoDiscussionsRoute(data.identity, data.tag, "") orelse return error.RouteTooLong;
             const link = try std.fmt.allocPrint(aa, "ai:{s}", .{try route.toUrl(session.page_arena)});
-            const label = try std.fmt.allocPrint(aa, "recent ({d})", .{data.recent.count});
+            var label_buf: [64]u8 = undefined;
+            const label = try std.fmt.bufPrint(&label_buf, "recent ({d})", .{data.recent.count});
             try addTab(allocator, &box, &tab_ids, label, link);
         }
 

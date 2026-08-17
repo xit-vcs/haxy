@@ -1946,8 +1946,7 @@ pub const FlowBox = struct {
     focus: *Focus,
     grid: ?Grid,
     text_boxes: std.ArrayList(wgt.TextBox(Widget)),
-    // backs the per-item strings the text boxes borrow: each box's `content`
-    // and, for link items, its `.custom` focus kind (e.g. "a:/user/foo"). reset
+    // backs each link item's `.custom` focus kind (e.g. "a:/user/foo"). reset
     // wholesale on each setItems so there's no per-string ownership to track.
     arena: std.heap.ArenaAllocator,
     // column count from the last build — FlowBox.Scroll.input uses it so arrow
@@ -1989,14 +1988,14 @@ pub const FlowBox = struct {
     // the web renderer turns into an anchor.
     pub const Item = struct { text: []const u8, link: []const u8 = "" };
 
-    // both the item text and the link are copied into the arena, so the caller's
-    // slices needn't outlive this call.
+    // the text box copies the item text; links are copied into the arena, so the
+    // caller's slices needn't outlive this call.
     pub fn setItems(self: *FlowBox, allocator: std.mem.Allocator, items: []const Item) !void {
         for (self.text_boxes.items) |*tb| tb.deinit(allocator);
         self.text_boxes.clearAndFree(allocator);
 
-        // the old text boxes (and their borrowed content/links) are gone now, so
-        // the arena that backed those strings can be reclaimed.
+        // the old text boxes and their borrowed links are gone now, so the link
+        // arena can be reclaimed.
         _ = self.arena.reset(.retain_capacity);
         const aa = self.arena.allocator();
 
@@ -2004,9 +2003,7 @@ pub const FlowBox = struct {
         self.focus.child_id = null;
 
         for (items) |item| {
-            const line = try aa.dupe(u8, item.text);
-
-            var text_box = try wgt.TextBox(Widget).init(allocator, line, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .word });
+            var text_box = try wgt.TextBox(Widget).init(allocator, item.text, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .word });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().focusable = true;
 
@@ -2225,7 +2222,7 @@ pub const TagFlow = struct {
     // last build's item rects (content space), for vertical navigation and
     // scroll-into-view.
     rects: std.ArrayList(layout.IRect),
-    // backs the per-item strings the text boxes borrow.
+    // backs each link item's `.custom` focus kind.
     arena: std.heap.ArenaAllocator,
 
     pub const Item = struct { text: []const u8, link: []const u8 = "" };
@@ -2252,8 +2249,8 @@ pub const TagFlow = struct {
         self.arena.deinit();
     }
 
-    // both the item text and the link are copied into the arena, so the caller's
-    // slices needn't outlive this call.
+    // the text box copies the item text; links are copied into the arena, so the
+    // caller's slices needn't outlive this call.
     pub fn setItems(self: *TagFlow, allocator: std.mem.Allocator, items: []const Item) !void {
         for (self.text_boxes.items) |*tb| tb.deinit(allocator);
         self.text_boxes.clearAndFree(allocator);
@@ -2265,9 +2262,7 @@ pub const TagFlow = struct {
         self.focus.child_id = null;
 
         for (items) |item| {
-            const line = try aa.dupe(u8, item.text);
-
-            var text_box = try wgt.TextBox(Widget).init(allocator, line, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            var text_box = try wgt.TextBox(Widget).init(allocator, item.text, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().focusable = true;
 

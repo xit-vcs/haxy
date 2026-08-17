@@ -1,4 +1,5 @@
 const std = @import("std");
+const evt = @import("../../event.zig");
 const ui = @import("../../ui.zig");
 const inp = @import("../input.zig");
 const xit = @import("xit");
@@ -72,7 +73,8 @@ pub const View = struct {
 
         // the user's name (local mode has no user pages to link to)
         if (!session.data.is_local) {
-            const text = try std.fmt.allocPrint(aa, "{s}/", .{data.owner_name});
+            var text_buf: [evt.User.name_max_len + 1]u8 = undefined;
+            const text = try std.fmt.bufPrint(&text_buf, "{s}/", .{data.owner_name});
             const link = try std.fmt.allocPrint(aa, "a:/user/{s}", .{data.owner_name});
 
             var text_box = try wgt.TextBox(ui.Widget).init(allocator, text, .{ .border_style = .hidden, .wrap_kind = .none });
