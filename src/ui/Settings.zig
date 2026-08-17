@@ -74,7 +74,7 @@ pub const View = struct {
         if (self.session.data.user_id != null) {
             const box = &self.authorized.child.box;
             const button = &box.children.values()[0].widget.text_box;
-            button.box.children.values()[0].widget.text.content = ansiLabel(self.session);
+            try button.setContent(allocator, ansiLabel(self.session));
             try self.authorized.build(allocator, constraint, root_focus);
             if (self.authorized.getGrid()) |inner_grid| {
                 try self.focus.addChild(allocator, self.authorized.getFocus(), inner_grid.size, 0, 0);

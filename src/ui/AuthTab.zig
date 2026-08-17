@@ -51,13 +51,7 @@ pub const View = struct {
     }
 
     pub fn build(self: *View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
-        // update the displayed text based on session state. the inner Text
-        // widget's content is just a slice, so we can repoint it without
-        // re-allocating.
-        if (self.text_box.box.children.values().len > 0) {
-            const text_widget = &self.text_box.box.children.values()[0].widget.text;
-            text_widget.content = self.text();
-        }
+        try self.text_box.setContent(allocator, self.text());
         self.text_box.options.bottom_label = self.bottomLabel();
         try self.text_box.build(allocator, constraint, root_focus);
     }
