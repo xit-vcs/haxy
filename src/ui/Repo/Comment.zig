@@ -158,7 +158,7 @@ pub const Item = struct {
 
             var author = try ui.authorBox(allocator, session.page_arena, entry.author);
             errdefer author.deinit(allocator);
-            try bar.children.put(allocator, author.getFocus().id, .{ .widget = .{ .text_box = author }, .rect = null, .min_size = null, .shrink = true });
+            try bar.children.put(allocator, author.getFocus().id, .{ .widget = .{ .text_box = author }, .rect = null, .min_size = null, .flex = .shrink });
 
             var reply = try linkBox(allocator, session, "new reply", commentNewRoute(thread_kind, identity, &entry.comment.event.thread_id, &entry.id) orelse return error.RouteTooLong);
             errdefer reply.deinit(allocator);

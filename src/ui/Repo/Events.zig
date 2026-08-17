@@ -601,7 +601,7 @@ pub const Header = struct {
             if (data.header.sync_status) |status_text| {
                 var status = try wgt.TextBox(ui.Widget).init(allocator, status_text, .{ .border_style = .hidden, .wrap_kind = .none });
                 errdefer status.deinit(allocator);
-                try box.children.put(allocator, status.getFocus().id, .{ .widget = .{ .text_box = status }, .rect = null, .min_size = null, .shrink = true });
+                try box.children.put(allocator, status.getFocus().id, .{ .widget = .{ .text_box = status }, .rect = null, .min_size = null, .flex = .shrink });
             }
             box.getFocus().child_id = tab_ids[@intFromEnum(data.view)];
             return .{ .box = box, .session = session, .tab_ids = tab_ids, .button_id = button_id };

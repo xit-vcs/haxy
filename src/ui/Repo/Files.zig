@@ -331,7 +331,7 @@ pub const View = struct {
                     frame.getFocus().child_id = scroll_frame.getFocus().id;
                     // shrink, so the fill scroll yields the nav box's row
                     // instead of consuming the frame's whole height.
-                    try frame.children.put(allocator, scroll_frame.getFocus().id, .{ .widget = .{ .box = scroll_frame }, .rect = null, .min_size = null, .shrink = true });
+                    try frame.children.put(allocator, scroll_frame.getFocus().id, .{ .widget = .{ .box = scroll_frame }, .rect = null, .min_size = null, .flex = .shrink });
                 }
                 break :blk frame;
             };
@@ -890,7 +890,7 @@ pub const Header = struct {
 
             var text_box = try wgt.TextBox(ui.Widget).init(allocator, data.content, .{ .border_style = .hidden, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
-            try box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null, .shrink = true });
+            try box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null, .flex = .shrink });
 
             return .{ .box = box, .data = data };
         }

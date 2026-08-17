@@ -183,6 +183,10 @@ const importObject = {
             const top = first.top - c.top + container.scrollTop;
             const bottom = last.bottom - c.top + container.scrollTop;
             const left = first.left - c.left + container.scrollLeft;
+            let right = left;
+            for (const el of els) {
+                right = Math.max(right, el.getBoundingClientRect().right - c.left + container.scrollLeft);
+            }
 
             // vertical is the priority axis. keep the viewport in place when it
             // already overlaps a tall widget; otherwise reveal its nearest edge.
@@ -193,10 +197,14 @@ const importObject = {
             } else if (bottom > container.scrollTop + container.clientHeight) {
                 container.scrollTop = bottom - container.clientHeight;
             }
-            // horizontal: only reveal the row's start, never chase the right edge,
-            // so moving down through varying-width rows doesn't yank the view
-            // sideways. (a hidden-overflow x axis stays at 0, so this no-ops.)
-            if (left < container.scrollLeft) container.scrollLeft = left;
+            // horizontal-only scrolls are rows of controls, so reveal either
+            // edge. other scrolls reveal only the row's start; chasing varying
+            // right edges while moving vertically would yank their view sideways.
+            if (left < container.scrollLeft) {
+                container.scrollLeft = left;
+            } else if (container.dataset.scrollDirection === "horiz" && right > container.scrollLeft + container.clientWidth) {
+                container.scrollLeft = right - container.clientWidth;
+            }
         },
     },
 };

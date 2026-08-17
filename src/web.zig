@@ -1666,8 +1666,8 @@ fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: 
         // scroll offset (in cells) rides along so JS can apply it when it has no
         // preserved position, letting a wasm-side scrollToRect (the files list
         // scrolling to its selected row on page load) reach the browser.
-        var buf: [224]u8 = undefined;
-        try output.appendSlice(allocator, try std.fmt.bufPrint(&buf, "<div class=\"scroll\" data-scroll-id=\"{d}-{d}\" data-scroll-x=\"{d}\" data-scroll-y=\"{d}\" style=\"left:{d}ch;top:{d}em;width:{d}ch;height:{d}em;{s}\">", .{ id, child.focus.version, info.offset_x, info.offset_y, r.x, r.y, r.size.width, r.size.height, overflow }));
+        var buf: [256]u8 = undefined;
+        try output.appendSlice(allocator, try std.fmt.bufPrint(&buf, "<div class=\"scroll\" data-scroll-id=\"{d}-{d}\" data-scroll-direction=\"{s}\" data-scroll-x=\"{d}\" data-scroll-y=\"{d}\" style=\"left:{d}ch;top:{d}em;width:{d}ch;height:{d}em;{s}\">", .{ id, child.focus.version, @tagName(info.direction), info.offset_x, info.offset_y, r.x, r.y, r.size.width, r.size.height, overflow }));
         try renderPanel(allocator, output, child.focus, info.content);
         try output.appendSlice(allocator, "</div>");
     }

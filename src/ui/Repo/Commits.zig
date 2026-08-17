@@ -1039,7 +1039,7 @@ pub const Header = struct {
 
             var text_box = try wgt.TextBox(ui.Widget).init(allocator, data.content, .{ .border_style = .hidden, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
-            try box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null, .shrink = true });
+            try box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null, .flex = .shrink });
 
             return .{ .box = box, .data = data };
         }

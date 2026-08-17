@@ -43,7 +43,7 @@ pub fn init(arena: *std.heap.ArenaAllocator, name: []const u8, owner_name: []con
 }
 
 pub const View = struct {
-    box: wgt.Box(ui.Widget),
+    scroll: wgt.Scroll(ui.Widget),
     data: *const Self,
     tab_ids: std.AutoArrayHashMapUnmanaged(usize, void),
 
@@ -72,7 +72,7 @@ pub const View = struct {
                 .widget = .{ .text_box = text_box },
                 .rect = null,
                 .min_size = null,
-                .shrink = true,
+                .flex = .shrink,
             });
         }
 
@@ -93,7 +93,7 @@ pub const View = struct {
                 .widget = .{ .title = title_view },
                 .rect = null,
                 .min_size = null,
-                .shrink = true,
+                .flex = .shrink,
             });
         }
 
@@ -246,6 +246,7 @@ pub const View = struct {
                 .widget = .{ .spacer = spacer },
                 .rect = null,
                 .min_size = null,
+                .flex = .grow,
             });
         }
 
@@ -296,20 +297,25 @@ pub const View = struct {
             });
         }
 
-        var self = View{ .box = box, .data = data, .tab_ids = tab_ids };
+        var self = View{
+            .scroll = try wgt.Scroll(ui.Widget).init(allocator, .{ .box = box }, .{ .direction = .horiz, .show_bar = false, .web_native = !session.is_terminal }),
+            .data = data,
+            .tab_ids = tab_ids,
+        };
         self.getFocus().child_id = selected_tab orelse self.tab_ids.keys()[0];
         return self;
     }
 
     pub fn deinit(self: *View, allocator: std.mem.Allocator) void {
-        self.box.deinit(allocator);
+        self.scroll.deinit(allocator);
         self.tab_ids.deinit(allocator);
     }
 
     pub fn build(self: *View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
         self.clearGrid();
         // only the selected tab shows its border
-        for (self.box.children.keys(), self.box.children.values()) |id, *child| {
+        const box = &self.scroll.child.box;
+        for (box.children.keys(), box.children.values()) |id, *child| {
             const tb: ?*wgt.TextBox(ui.Widget) = switch (child.widget) {
                 .text_box => |*x| x,
                 .auth_tab => |*at| blk: {
@@ -323,27 +329,32 @@ pub const View = struct {
                 t.options.border_style = if (self.getFocus().child_id == id) .single else .hidden;
             }
         }
-        try self.box.build(allocator, constraint, root_focus);
+        var scroll_constraint = constraint;
+        scroll_constraint.min_size.width = constraint.max_size.width orelse constraint.min_size.width;
+        try self.scroll.build(allocator, scroll_constraint, root_focus);
     }
 
     pub fn input(self: *View, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
         _ = allocator;
         const current_tab = self.currentTabIndex() orelse return;
         if (inp.moveTab(key, current_tab, self.tab_ids.count())) |new_tab| {
-            root_focus.setFocus(self.tab_ids.keys()[new_tab]);
+            const tab_id = self.tab_ids.keys()[new_tab];
+            root_focus.setFocus(tab_id);
+            const tab = self.scroll.child.box.children.get(tab_id) orelse return;
+            if (tab.rect) |rect| self.scroll.scrollToRect(rect);
         }
     }
 
     pub fn clearGrid(self: *View) void {
-        self.box.clearGrid();
+        self.scroll.clearGrid();
     }
 
     pub fn getGrid(self: View) ?Grid {
-        return self.box.getGrid();
+        return self.scroll.getGrid();
     }
 
     pub fn getFocus(self: *View) *Focus {
-        return self.box.getFocus();
+        return self.scroll.getFocus();
     }
 
     pub fn getSelectedIndex(self: View) ?usize {
@@ -351,7 +362,7 @@ pub const View = struct {
     }
 
     fn currentTabIndex(self: View) ?usize {
-        const child_id = self.box.focus.child_id orelse return null;
+        const child_id = self.scroll.child.box.focus.child_id orelse return null;
         return self.tab_ids.getIndex(child_id);
     }
 };

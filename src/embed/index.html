@@ -33,7 +33,7 @@
             position: relative;
           }
 
-          body:has(#grid .scroll) {
+          body:has(#grid .scroll:not([data-scroll-direction="horiz"])) {
             height: 100vh;
             overflow: hidden;
           }
