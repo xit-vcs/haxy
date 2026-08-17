@@ -46,10 +46,20 @@ pub const View = struct {
     scroll: wgt.Scroll(ui.Widget),
     data: *const Self,
     tab_ids: std.AutoArrayHashMapUnmanaged(usize, void),
+    tabs_id: usize,
+    first_group_width: usize,
 
     pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !View {
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = .hidden, .rounded_corners = true, .direction = .horiz });
         errdefer box.deinit(allocator);
+
+        var title_box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
+        var title_box_owned = false;
+        errdefer if (!title_box_owned) title_box.deinit(allocator);
+
+        var tabs_box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
+        var tabs_box_owned = false;
+        errdefer if (!tabs_box_owned) tabs_box.deinit(allocator);
 
         var tab_ids: std.AutoArrayHashMapUnmanaged(usize, void) = .empty;
         errdefer tab_ids.deinit(allocator);
@@ -58,6 +68,7 @@ pub const View = struct {
         const ref_name = std.Uri.percentDecodeInPlace(try aa.dupe(u8, data.ref_or_oid_value));
         const bottom_label = try ui.clippedBottomLabel(try aa.alloc(u8, ui.clipped_bottom_label_max_len), ref_name);
         const bottom_label_width = try xitui.width.displayWidth(bottom_label);
+        var first_group_width = try data.title.width();
 
         // the user's name (local mode has no user pages to link to)
         if (!session.data.is_local) {
@@ -68,19 +79,19 @@ pub const View = struct {
             errdefer text_box.deinit(allocator);
             text_box.getFocus().focusable = true;
             text_box.getFocus().kind = .{ .custom = link };
-            try box.children.put(allocator, text_box.getFocus().id, .{
+            first_group_width += try xitui.width.displayWidth(text) + 2;
+            try title_box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
                 .min_size = null,
-                .flex = .shrink,
             });
         }
 
         // local routes carry no identity, so their urls come out elided
         const identity = if (session.data.is_local) "" else try std.fmt.allocPrint(aa, "{s}/{s}", .{ data.owner_name, data.name });
 
-        // title sits to the left of the tabs; it links to the repo's files root
-        // (the bare route, so it resolves to the default branch).
+        // title links to the repo's files root (the bare route, so it resolves
+        // to the default branch).
         {
             const files_root_route = ui.RoutablePage.repoFilesRoute(identity, null, "", "", 0) orelse return error.RouteTooLong;
             const title_link = try std.fmt.allocPrint(aa, "a:{s}", .{try files_root_route.toUrl(session.page_arena)});
@@ -88,12 +99,10 @@ pub const View = struct {
             errdefer title_view.deinit(allocator);
             title_view.getFocus().focusable = true;
             title_view.getFocus().kind = .{ .custom = title_link };
-            // shrink the title when there is not enough space
-            try box.children.put(allocator, title_view.getFocus().id, .{
+            try title_box.children.put(allocator, title_view.getFocus().id, .{
                 .widget = .{ .title = title_view },
                 .rect = null,
                 .min_size = null,
-                .flex = .shrink,
             });
         }
 
@@ -101,7 +110,7 @@ pub const View = struct {
         {
             var text = try wgt.Text(ui.Widget).init(allocator, " ");
             errdefer text.deinit(allocator);
-            try box.children.put(allocator, text.getFocus().id, .{
+            try tabs_box.children.put(allocator, text.getFocus().id, .{
                 .widget = .{ .text = text },
                 .rect = null,
                 .min_size = .{ .width = 1, .height = null },
@@ -156,7 +165,7 @@ pub const View = struct {
             text_box.getFocus().kind = .{ .custom = files_link };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
             if (std.mem.eql(u8, files_link, current_link)) selected_tab = text_box.getFocus().id;
-            try box.children.put(allocator, text_box.getFocus().id, .{
+            try tabs_box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
                 .min_size = .{ .width = @max("files".len, bottom_label_width) + 2, .height = null },
@@ -171,7 +180,7 @@ pub const View = struct {
             text_box.getFocus().kind = .{ .custom = commits_link };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
             if (std.mem.eql(u8, commits_link, current_link)) selected_tab = text_box.getFocus().id;
-            try box.children.put(allocator, text_box.getFocus().id, .{
+            try tabs_box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
                 .min_size = .{ .width = @max("commits".len, bottom_label_width) + 2, .height = null },
@@ -186,7 +195,7 @@ pub const View = struct {
             text_box.getFocus().kind = .{ .custom = refs_link };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
             if (std.mem.eql(u8, refs_link, current_link)) selected_tab = text_box.getFocus().id;
-            try box.children.put(allocator, text_box.getFocus().id, .{
+            try tabs_box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
                 .min_size = .{ .width = "refs".len + 2, .height = null },
@@ -201,7 +210,7 @@ pub const View = struct {
             text_box.getFocus().kind = .{ .custom = issues_link };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
             if (std.mem.eql(u8, issues_link, current_link)) selected_tab = text_box.getFocus().id;
-            try box.children.put(allocator, text_box.getFocus().id, .{
+            try tabs_box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
                 .min_size = .{ .width = "issues".len + 2, .height = null },
@@ -216,7 +225,7 @@ pub const View = struct {
             text_box.getFocus().kind = .{ .custom = discussions_link };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
             if (std.mem.eql(u8, discussions_link, current_link)) selected_tab = text_box.getFocus().id;
-            try box.children.put(allocator, text_box.getFocus().id, .{
+            try tabs_box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
                 .min_size = .{ .width = "discussions".len + 2, .height = null },
@@ -231,7 +240,7 @@ pub const View = struct {
             text_box.getFocus().kind = .{ .custom = events_link };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
             if (std.mem.eql(u8, events_link, current_link)) selected_tab = text_box.getFocus().id;
-            try box.children.put(allocator, text_box.getFocus().id, .{
+            try tabs_box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
                 .min_size = .{ .width = "events".len + 2, .height = null },
@@ -242,7 +251,7 @@ pub const View = struct {
         {
             var spacer = try ui.Spacer.init(allocator);
             errdefer spacer.deinit(allocator);
-            try box.children.put(allocator, spacer.getFocus().id, .{
+            try tabs_box.children.put(allocator, spacer.getFocus().id, .{
                 .widget = .{ .spacer = spacer },
                 .rect = null,
                 .min_size = null,
@@ -259,7 +268,7 @@ pub const View = struct {
             text_box.getFocus().kind = .{ .custom = settings_link };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
             if (std.mem.eql(u8, settings_link, current_link)) selected_tab = text_box.getFocus().id;
-            try box.children.put(allocator, text_box.getFocus().id, .{
+            try tabs_box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
                 .min_size = .{ .width = "settings".len + 2, .height = null },
@@ -275,7 +284,7 @@ pub const View = struct {
             auth_tab.text_box.getFocus().kind = .{ .custom = auth_link };
             try tab_ids.put(allocator, auth_tab.getFocus().id, {});
             if (std.mem.eql(u8, auth_link, current_link)) selected_tab = auth_tab.getFocus().id;
-            try box.children.put(allocator, auth_tab.getFocus().id, .{
+            try tabs_box.children.put(allocator, auth_tab.getFocus().id, .{
                 .widget = .{ .auth_tab = auth_tab },
                 .rect = null,
                 .min_size = .{ .width = auth_tab.minWidth(), .height = null },
@@ -289,7 +298,7 @@ pub const View = struct {
             text_box.getFocus().focusable = true;
             text_box.getFocus().kind = .{ .custom = ui.Quit.tab_kind };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
-            try box.children.put(allocator, text_box.getFocus().id, .{
+            try tabs_box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
                 // the label is a single column; +2 for the border
@@ -297,13 +306,30 @@ pub const View = struct {
             });
         }
 
-        var self = View{
+        tabs_box.getFocus().child_id = selected_tab orelse tab_ids.keys()[0];
+        const title_id = title_box.getFocus().id;
+        const tabs_id = tabs_box.getFocus().id;
+        try box.children.put(allocator, title_id, .{
+            .widget = .{ .box = title_box },
+            .rect = null,
+            .min_size = null,
+        });
+        title_box_owned = true;
+        try box.children.put(allocator, tabs_id, .{
+            .widget = .{ .box = tabs_box },
+            .rect = null,
+            .min_size = null,
+        });
+        tabs_box_owned = true;
+        box.getFocus().child_id = tabs_id;
+
+        return .{
             .scroll = try wgt.Scroll(ui.Widget).init(allocator, .{ .box = box }, .{ .direction = .horiz, .show_bar = false, .web_native = !session.is_terminal }),
             .data = data,
             .tab_ids = tab_ids,
+            .tabs_id = tabs_id,
+            .first_group_width = first_group_width,
         };
-        self.getFocus().child_id = selected_tab orelse self.tab_ids.keys()[0];
-        return self;
     }
 
     pub fn deinit(self: *View, allocator: std.mem.Allocator) void {
@@ -313,9 +339,20 @@ pub const View = struct {
 
     pub fn build(self: *View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
         self.clearGrid();
-        // only the selected tab shows its border
         const box = &self.scroll.child.box;
-        for (box.children.keys(), box.children.values()) |id, *child| {
+        const tabs_child = self.tabsChild();
+        const tabs_box = &tabs_child.widget.box;
+
+        const viewport_width = constraint.max_size.width orelse constraint.min_size.width;
+        // the outer box's hidden border occupies two columns
+        const content_width = if (viewport_width) |width| width -| 2 else null;
+        const wrap = if (content_width) |width| self.first_group_width >= width / 2 else false;
+        box.options.direction = if (wrap) .vert else .horiz;
+        tabs_child.min_size = if (wrap) .{ .width = content_width, .height = null } else null;
+
+        // only the selected tab shows its border
+        const selected_tab = if (box.getFocus().child_id == self.tabs_id) tabs_box.getFocus().child_id else null;
+        for (tabs_box.children.keys(), tabs_box.children.values()) |id, *child| {
             const tb: ?*wgt.TextBox(ui.Widget) = switch (child.widget) {
                 .text_box => |*x| x,
                 .auth_tab => |*at| blk: {
@@ -326,11 +363,11 @@ pub const View = struct {
                 else => null,
             };
             if (tb) |t| {
-                t.options.border_style = if (self.getFocus().child_id == id) .single else .hidden;
+                t.options.border_style = if (selected_tab == id) .single else .hidden;
             }
         }
         var scroll_constraint = constraint;
-        scroll_constraint.min_size.width = constraint.max_size.width orelse constraint.min_size.width;
+        scroll_constraint.min_size.width = viewport_width;
         try self.scroll.build(allocator, scroll_constraint, root_focus);
     }
 
@@ -340,8 +377,13 @@ pub const View = struct {
         if (inp.moveTab(key, current_tab, self.tab_ids.count())) |new_tab| {
             const tab_id = self.tab_ids.keys()[new_tab];
             root_focus.setFocus(tab_id);
-            const tab = self.scroll.child.box.children.get(tab_id) orelse return;
-            if (tab.rect) |rect| self.scroll.scrollToRect(rect);
+            const tabs_child = self.tabsChild();
+            const tabs_rect = tabs_child.rect orelse return;
+            const tab = tabs_child.widget.box.children.get(tab_id) orelse return;
+            var rect = tab.rect orelse return;
+            rect.x += tabs_rect.x;
+            rect.y += tabs_rect.y;
+            self.scroll.scrollToRect(rect);
         }
     }
 
@@ -362,7 +404,12 @@ pub const View = struct {
     }
 
     fn currentTabIndex(self: View) ?usize {
-        const child_id = self.scroll.child.box.focus.child_id orelse return null;
+        if (self.scroll.child.box.focus.child_id != self.tabs_id) return null;
+        const child_id = self.tabsChild().widget.box.focus.child_id orelse return null;
         return self.tab_ids.getIndex(child_id);
+    }
+
+    fn tabsChild(self: *const View) *wgt.Box(ui.Widget).Child {
+        return self.scroll.child.box.children.getPtr(self.tabs_id) orelse unreachable;
     }
 };
