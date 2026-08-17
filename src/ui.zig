@@ -23,6 +23,21 @@ pub const Quit = @import("./ui/Quit.zig");
 pub const CloneUrl = @import("./ui/CloneUrl.zig");
 pub const Unauthorized = @import("./ui/Unauthorized.zig");
 
+pub const clipped_bottom_label_max_len = 10 * 4;
+
+pub fn clippedBottomLabel(buffer: []u8, text: []const u8) ![]const u8 {
+    var iter = (try std.unicode.Utf8View.init(text)).iterator();
+    var end: usize = 0;
+    var clipped_end: usize = 0;
+    for (0..10) |i| {
+        const codepoint = iter.nextCodepointSlice() orelse break;
+        end += codepoint.len;
+        if (i == 7) clipped_end = end;
+    }
+    const clipped = iter.nextCodepointSlice() != null;
+    return try std.fmt.bufPrint(buffer, "{s}{s}", .{ text[0..if (clipped) clipped_end else end], if (clipped) ".." else "" });
+}
+
 pub const PageKind = enum {
     home,
     user,

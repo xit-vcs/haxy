@@ -1,5 +1,4 @@
 const std = @import("std");
-const evt = @import("../event.zig");
 const ui = @import("../ui.zig");
 const xit = @import("xit");
 const xitui = xit.xitui;
@@ -18,11 +17,8 @@ pub fn init() Self {
 pub const View = struct {
     text_box: wgt.TextBox(ui.Widget),
     session: *ui.Session,
-    // backs the tab's text, which borrows it. sized for the longest name, so
-    // build never allocates.
-    text_buf: [logout_prefix.len + evt.User.name_max_len]u8,
-
-    const logout_prefix = "logout ";
+    // backs the bottom label, which borrows it
+    bottom_label_buf: [ui.clipped_bottom_label_max_len]u8,
 
     pub fn init(allocator: std.mem.Allocator, session: *ui.Session) !View {
         var text_box = try wgt.TextBox(ui.Widget).init(allocator, "login", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
@@ -32,7 +28,7 @@ pub const View = struct {
         return .{
             .text_box = text_box,
             .session = session,
-            .text_buf = undefined,
+            .bottom_label_buf = undefined,
         };
     }
 
@@ -40,17 +36,18 @@ pub const View = struct {
         self.text_box.deinit(allocator);
     }
 
-    // the action the tab performs, naming whoever is logged in
-    fn text(self: *View) []const u8 {
-        if (self.session.data.user_id == null) return "login";
-        const name = self.session.data.user_name orelse return "logout";
-        // validateName caps the name, so the buffer always fits it
-        return std.fmt.bufPrint(&self.text_buf, logout_prefix ++ "{s}", .{name}) catch unreachable;
+    fn text(self: *const View) []const u8 {
+        return if (self.session.data.user_id == null) "login" else "logout";
     }
 
-    // what the tab's text needs, plus its border
+    fn bottomLabel(self: *View) []const u8 {
+        if (self.session.data.user_id == null) return "";
+        const name = self.session.data.user_name orelse return "";
+        return ui.clippedBottomLabel(&self.bottom_label_buf, name) catch unreachable;
+    }
+
     pub fn minWidth(self: *View) usize {
-        return self.text().len + 2;
+        return @max(self.text().len, self.bottomLabel().len) + 2;
     }
 
     pub fn build(self: *View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
@@ -61,6 +58,7 @@ pub const View = struct {
             const text_widget = &self.text_box.box.children.values()[0].widget.text;
             text_widget.content = self.text();
         }
+        self.text_box.options.bottom_label = self.bottomLabel();
         try self.text_box.build(allocator, constraint, root_focus);
     }
 

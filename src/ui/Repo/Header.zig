@@ -55,6 +55,9 @@ pub const View = struct {
         errdefer tab_ids.deinit(allocator);
 
         const aa = session.page_arena.allocator();
+        const ref_name = std.Uri.percentDecodeInPlace(try aa.dupe(u8, data.ref_or_oid_value));
+        const bottom_label = try ui.clippedBottomLabel(try aa.alloc(u8, ui.clipped_bottom_label_max_len), ref_name);
+        const bottom_label_width = try xitui.width.displayWidth(bottom_label);
 
         // the user's name (local mode has no user pages to link to)
         if (!session.data.is_local) {
@@ -147,7 +150,7 @@ pub const View = struct {
 
         // files tab
         {
-            var text_box = try wgt.TextBox(ui.Widget).init(allocator, "files", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            var text_box = try wgt.TextBox(ui.Widget).init(allocator, "files", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none, .bottom_label = bottom_label });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().focusable = true;
             text_box.getFocus().kind = .{ .custom = files_link };
@@ -156,13 +159,13 @@ pub const View = struct {
             try box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
-                .min_size = .{ .width = "files".len + 2, .height = null },
+                .min_size = .{ .width = @max("files".len, bottom_label_width) + 2, .height = null },
             });
         }
 
         // commits tab
         {
-            var text_box = try wgt.TextBox(ui.Widget).init(allocator, "commits", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            var text_box = try wgt.TextBox(ui.Widget).init(allocator, "commits", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none, .bottom_label = bottom_label });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().focusable = true;
             text_box.getFocus().kind = .{ .custom = commits_link };
@@ -171,7 +174,7 @@ pub const View = struct {
             try box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
-                .min_size = .{ .width = "commits".len + 2, .height = null },
+                .min_size = .{ .width = @max("commits".len, bottom_label_width) + 2, .height = null },
             });
         }
 
