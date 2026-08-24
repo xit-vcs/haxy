@@ -43,7 +43,7 @@ Here's what it looks like so far in the terminal and on the web:
 
 ## Why not Radicle?
 
-The main difference between Haxy's design and [Radicle](https://radicle.dev/) is that Haxy is not peer-to-peer. While a p2p architecture can be useful in free speech contexts, it can lead to a significant amount of complexity and make it more difficult to have a consistently good experience. Haxy is *federated* in the sense that anyone can run a Haxy instance, and your projects can be easily moved between them. I believe that is pragmatically the kind of decentralization that people want, and it significantly simplifies the implementation.
+The main difference between Haxy and [Radicle](https://radicle.dev/) is that Haxy is not peer-to-peer. I believe p2p architectures lead to a significant amount of complexity and make it difficult to have a consistently good experience. Haxy is *federated* in the sense that anyone can run a Haxy instance, and your projects can be easily moved between them. I believe that is pragmatically the kind of decentralization that people want, and it dramatically simplifies the implementation. See my [video on decentralized p2p](https://www.youtube.com/watch?v=P0yxbttcmzw) for an elaboration of this.
 
 ## How to fire this puppy up and get 'er done
 
@@ -63,6 +63,6 @@ A fun test is to push Haxy itself to the server. You can do that by running the 
 GIT_SSH_COMMAND='ssh -p 8022 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -i temp-try/key' git push localhost:admin/haxy HEAD:master
 ```
 
-After that, go to the admin user in the UI and you'll see Haxy's repo page: http://localhost:8000/repo/admin/haxy/files/branch/master
+After that, go to the admin user in the UI and you'll see Haxy's repo page: http://localhost:8000/repo/admin/haxy/files/branch:master
 
 *"C'mon Alex! You always dreamt about going on a big adventure! Let this be our first!" -- Lunar: Silver Star Story*
