@@ -84,10 +84,7 @@ pub fn consume(
         break :blk record;
     };
 
-    // references use the same lower-case hex form as event ids in json
-    var id_bytes: [evt.event_id_size]u8 = undefined;
-    _ = try std.fmt.hexToBytes(&id_bytes, &record_to_write.event.parent_id);
-    if (!std.mem.eql(u8, &record_to_write.event.parent_id, &std.fmt.bytesToHex(id_bytes, .lower))) return error.InvalidEventId;
+    const id_bytes = try evt.parseEventId(&record_to_write.event.parent_id);
     if (!try parentExists(DB, hash_kind, haxy_moment, &id_bytes)) return error.ParentNotFound;
     if (!nameValid(record_to_write.name)) return error.InvalidAttachment;
 
@@ -135,9 +132,7 @@ pub fn create(
     if (!nameValid(blob.name)) return error.InvalidFields;
     if (blob.size == 0 or blob.size > max_size) return error.InvalidFields;
 
-    var parent_id_bytes: [evt.event_id_size]u8 = undefined;
-    _ = std.fmt.hexToBytes(&parent_id_bytes, parent_id) catch return error.InvalidFields;
-    if (!std.mem.eql(u8, parent_id, &std.fmt.bytesToHex(parent_id_bytes, .lower))) return error.InvalidFields;
+    const parent_id_bytes = evt.parseEventId(parent_id) catch return error.InvalidFields;
 
     {
         const DB = evt.EventDB(repo_opts.hash);
@@ -159,7 +154,7 @@ pub fn create(
         .id = event_id,
         .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
         .author = author,
-        .blob = blob,
+        .tree_entries = &.{.{ .blob = blob }},
         .event = .{ .attach = .{ .parent_id = parent_id.* } },
     }});
     return event_id;

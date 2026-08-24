@@ -193,6 +193,8 @@ fn readMeta(
                 .discuss => evt.Discussion,
                 .comment => evt.Comment,
                 .attach => evt.Attachment,
+                .patchrev => evt.PatchRev,
+                .patch => evt.Patch,
             };
             const record = (try readRecord(T, hash_kind, arena, haxy_moment, id)) orelse return error.NotFound;
             break :blk .{ .created_order = record.created_order, .removed = record.removed };
@@ -261,6 +263,14 @@ fn readItem(
             const parent_kind = (try evt.readEventKind(hash_kind, kind_map, &parent_id)) orelse return item;
             const route = ui.RoutablePage.repoThreadCommentsRoute(parent_kind, identity, &record.event.parent_id, 0) orelse return item;
             item.view_url = try route.toUrl(arena);
+        },
+        .patch => {
+            const record = (try readRecord(evt.Patch, hash_kind, arena, haxy_moment, id)) orelse return null;
+            item.author = try ui.Author.initFromEmail(admin_moment, arena, record.author_email);
+        },
+        .patchrev => {
+            const record = (try readRecord(evt.PatchRev, hash_kind, arena, haxy_moment, id)) orelse return null;
+            item.author = try ui.Author.initFromEmail(admin_moment, arena, record.author_email);
         },
     }
     return item;

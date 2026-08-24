@@ -66,13 +66,8 @@ pub fn consume(
         break :blk record;
     };
 
-    // references use the same lower-case hex form as event ids in json
-    var thread_id: [evt.event_id_size]u8 = undefined;
-    _ = try std.fmt.hexToBytes(&thread_id, &record_to_write.event.thread_id);
-    if (!std.mem.eql(u8, &record_to_write.event.thread_id, &std.fmt.bytesToHex(thread_id, .lower))) return error.InvalidEventId;
-    var parent_id: [evt.event_id_size]u8 = undefined;
-    _ = try std.fmt.hexToBytes(&parent_id, &record_to_write.event.parent_id);
-    if (!std.mem.eql(u8, &record_to_write.event.parent_id, &std.fmt.bytesToHex(parent_id, .lower))) return error.InvalidEventId;
+    const thread_id = try evt.parseEventId(&record_to_write.event.thread_id);
+    _ = try evt.parseEventId(&record_to_write.event.parent_id);
 
     if (existing_record_maybe) |existing_record| {
         // updates preserve the original creation order and author

@@ -12,13 +12,8 @@ pub const Issue = @import("event/Issue.zig");
 pub const Discussion = @import("event/Discussion.zig");
 pub const Comment = @import("event/Comment.zig");
 pub const Attachment = @import("event/Attachment.zig");
-
-pub const event_id_size: usize = 16;
-
-pub const MergePolicy = enum {
-    field_conflicts,
-    target_wins,
-};
+pub const Patch = @import("event/Patch.zig");
+pub const PatchRev = @import("event/PatchRev.zig");
 
 // the most bytes an event's serialized form may hold
 pub const max_event_size: usize = 100 * 1024;
@@ -26,10 +21,7 @@ pub const max_event_size: usize = 100 * 1024;
 // the branch haxy events are committed to before being consumed
 pub const events_ref: rf.Ref = .{ .kind = .head, .name = "haxy/events" };
 
-// options + db type for *the admin repo* — the single event store that holds
-// users, repos, issues, etc. the functions below stay parameterized over
-// repo_opts because they also operate on individual repos in the repos dir,
-// which may use different options
+// options + db type for the admin repo
 pub const admin_repo_opts: rp.RepoOpts(.xit) = .{};
 pub const AdminDB = rp.Repo(.xit, admin_repo_opts).DB;
 
@@ -62,6 +54,8 @@ pub const EventKind = enum {
     discuss,
     comment,
     attach,
+    patchrev,
+    patch,
 };
 
 // every logical event's kind and creation-ordered active/removed id sets
@@ -78,14 +72,24 @@ pub const Event = union(EventKind) {
     discuss: ?Discussion,
     comment: ?Comment,
     attach: ?Attachment,
+    patchrev: ?PatchRev,
+    patch: ?Patch,
 };
 
-// a file committed alongside its event, as the one entry in that commit's tree.
-// it isn't serialized, so nothing about it reaches the commit message.
+// a file committed alongside its event
 pub const Blob = struct {
     name: []const u8,
     size: u64,
     reader: *std.Io.Reader,
+};
+
+// an entry in the fresh tree carried by one event commit
+pub const EventTreeEntry = union(enum) {
+    blob: Blob,
+    tree: struct {
+        name: []const u8,
+        oid: []const u8,
+    },
 };
 
 // who a commit is attributed to
@@ -94,12 +98,21 @@ pub const CommitAuthor = struct {
     email: []const u8,
 };
 
+pub const event_id_size: usize = 16;
+
+pub fn parseEventId(id: []const u8) ![event_id_size]u8 {
+    var bytes: [event_id_size]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&bytes, id);
+    if (!std.mem.eql(u8, id, &std.fmt.bytesToHex(bytes, .lower))) return error.InvalidEventId;
+    return bytes;
+}
+
 pub const EventWithId = struct {
     id: [event_id_size * 2]u8,
     event: Event,
     timestamp: u64 = 0, // not serialized, because it comes from the commit timestamp
     author: CommitAuthor, // not serialized, because it goes in the commit author line
-    blob: ?Blob = null, // not serialized, because it goes in the commit tree
+    tree_entries: []const EventTreeEntry = &.{}, // not serialized, because they go in the commit tree
 
     pub fn jsonStringify(self: EventWithId, jw: anytype) !void {
         try jw.beginObject();
@@ -162,6 +175,18 @@ pub const EventWithId = struct {
                     else
                         null,
                 },
+                .patch => .{
+                    .patch = if (json_event.data) |value|
+                        try std.json.parseFromValueLeaky(Patch, arena.allocator(), value, .{ .ignore_unknown_fields = true })
+                    else
+                        null,
+                },
+                .patchrev => .{
+                    .patchrev = if (json_event.data) |value|
+                        try std.json.parseFromValueLeaky(PatchRev, arena.allocator(), value, .{ .ignore_unknown_fields = true })
+                    else
+                        null,
+                },
             },
         };
     }
@@ -207,6 +232,8 @@ pub fn remove(
         .discuss => .{ .discuss = null },
         .comment => .{ .comment = null },
         .attach => .{ .attach = null },
+        .patchrev => .{ .patchrev = null },
+        .patch => .{ .patch = null },
     };
     try consume(repo_kind, repo_opts, io, allocator, repo, events_ref, &.{.{
         .id = std.fmt.bytesToHex(id.*, .lower),
@@ -281,7 +308,7 @@ pub fn consume(
                     const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
 
                     try commitEvents(.xit, repo_opts, state, ctx.io, ctx.allocator, ctx.ref, ctx.events, ctx.first_parent_oids);
-                    if (!try consumeInTransaction(.xit, repo_opts, state.readOnly(), &ctx.core.db, &moment, ctx.io, ctx.allocator, ctx.ref)) return error.CancelTransaction;
+                    if (!try consumeInTransaction(.xit, repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, ctx.ref)) return error.CancelTransaction;
                     try xit.undo.writeMessage(repo_opts, state, .{ .custom = "event" });
 
                     // fsync the chunk store, so any chunks written by the
@@ -433,6 +460,11 @@ fn attachedFile(
     };
 }
 
+fn commitIdentity(line: []const u8) ![]const u8 {
+    const close = std.mem.indexOfScalar(u8, line, '>') orelse return error.AuthorNotFound;
+    return line[0 .. close + 1];
+}
+
 // commit each event as a JSON commit message on `ref` through `state`, so a
 // xit repo can write them inside an already-open transaction
 fn commitEvents(
@@ -457,14 +489,23 @@ fn commitEvents(
         const author = try std.fmt.allocPrint(allocator, "{s} <{s}>", .{ event.author.name, event.author.email });
         defer allocator.free(author);
 
-        // every event gets its own tree, with one entry when it carries a file
-        // and no entries otherwise
+        // every event gets a fresh tree
         var tree = try obj.Tree.init(allocator);
         defer tree.deinit();
-        if (event.blob) |blob| {
-            var oid_bytes = [_]u8{0} ** hash.byteLen(repo_opts.hash);
-            try obj.writeObject(repo_kind, repo_opts, state, io, blob.reader, .{ .kind = .blob, .size = blob.size }, &oid_bytes);
-            try tree.addBlobEntry(.{ .content = .{ .unix_permission = 0o644, .object_type = .regular_file } }, blob.name, &oid_bytes);
+        for (event.tree_entries) |entry| {
+            switch (entry) {
+                .blob => |blob| {
+                    var oid_bytes = [_]u8{0} ** hash.byteLen(repo_opts.hash);
+                    try obj.writeObject(repo_kind, repo_opts, state, io, blob.reader, .{ .kind = .blob, .size = blob.size }, &oid_bytes);
+                    try tree.addBlobEntry(.{ .content = .{ .unix_permission = 0o644, .object_type = .regular_file } }, blob.name, &oid_bytes);
+                },
+                .tree => |nested| {
+                    var oid_bytes: [hash.byteLen(repo_opts.hash)]u8 = undefined;
+                    _ = try std.fmt.hexToBytes(&oid_bytes, nested.oid);
+                    if (!std.mem.eql(u8, nested.oid, &std.fmt.bytesToHex(oid_bytes, .lower))) return error.InvalidTreeObject;
+                    try tree.addTreeEntry(nested.name, &oid_bytes);
+                },
+            }
         }
 
         _ = try obj.writeCommit(repo_kind, repo_opts, state, io, allocator, .{
@@ -512,7 +553,7 @@ pub fn receivePackAndConsume(
             // no-op consume must not cancel here, since the push shares the
             // transaction and must commit regardless.
             if (null == try rf.readRecur(.xit, repo_opts, state.readOnly(), ctx.io, .{ .ref = events_ref })) return;
-            _ = try consumeInTransaction(.xit, repo_opts, state.readOnly(), &ctx.core.db, &moment, ctx.io, ctx.allocator, events_ref);
+            _ = try consumeInTransaction(.xit, repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, events_ref);
         }
     };
 
@@ -615,9 +656,8 @@ pub fn LocalEventDB(comptime hash_kind: hash.HashKind) type {
 
                 pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
                     var moment = try DB.HashMap(.read_write).init(cursor.*);
-                    var repo_moment = try ctx.repo.core.latestMoment();
-                    const read_state = rp.Repo(repo_kind, repo_opts).State(.read_only){ .core = &ctx.repo.core, .extra = .{ .moment = &repo_moment } };
-                    if (!try consumeInTransaction(repo_kind, repo_opts, read_state, ctx.db, &moment, ctx.io, ctx.allocator, ctx.ref)) return error.CancelTransaction;
+                    const state = rp.Repo(repo_kind, repo_opts).State(.read_write){ .core = &ctx.repo.core, .extra = .{} };
+                    if (!try consumeInTransaction(repo_kind, repo_opts, state, ctx.db, &moment, ctx.io, ctx.allocator, ctx.ref)) return error.CancelTransaction;
                 }
             };
 
@@ -637,13 +677,13 @@ pub fn LocalEventDB(comptime hash_kind: hash.HashKind) type {
 }
 
 // consume the events on `ref` into the db `moment` writes to, returning false
-// if there was nothing to do. events are read from `read_state`'s repo, which
+// if there was nothing to do. events are read from `state`'s repo, which
 // needn't be the repo backing the db — that's how a local (possibly
 // git-backed) repo's events land in a standalone db.
 pub fn consumeInTransaction(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
-    read_state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+    state: rp.Repo(repo_kind, repo_opts).State(.read_write),
     db: *EventDB(repo_opts.hash),
     moment: *EventDB(repo_opts.hash).HashMap(.read_write),
     io: std.Io,
@@ -651,6 +691,7 @@ pub fn consumeInTransaction(
     ref: rf.Ref,
 ) !bool {
     const DB = EventDB(repo_opts.hash);
+    const read_state = state.readOnly();
 
     // the last_object_id represents the object id that was last consumed
     var last_object_id_maybe: ?[hash.byteLen(repo_opts.hash)]u8 = null;
@@ -853,9 +894,7 @@ pub fn consumeInTransaction(
 
             const event_with_id = try EventWithId.fromString(&arena, message.items);
 
-            // get the id of the current event as bytes
-            var current_event_id: [event_id_size]u8 = undefined;
-            _ = try std.fmt.hexToBytes(&current_event_id, &event_with_id.id);
+            const current_event_id = try parseEventId(&event_with_id.id);
 
             // wrap the payload into the record `consume` stores, with its
             // commit-derived fields; on update, `consume` preserves the
@@ -905,6 +944,53 @@ pub fn consumeInTransaction(
                         };
                     } else null;
                     try Attachment.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, record_maybe, &arena, &repo_event_oid);
+                },
+                .patchrev => |event_maybe| {
+                    const record_maybe: ?PatchRev.Record = if (event_maybe) |event| blk: {
+                        const trees = try PatchRev.readTrees(repo_kind, repo_opts, read_state, io, allocator, &commit_object.content.commit.tree);
+                        const existing_maybe = try PatchRev.readById(DB, repo_opts.hash, haxy_moment.readOnly(), &arena, &current_event_id);
+
+                        var patch_oid: [hash.hexLen(repo_opts.hash)]u8 = undefined;
+                        if (existing_maybe) |existing| {
+                            if (existing.patch_oid.len != patch_oid.len) return error.InvalidPatch;
+                            @memcpy(&patch_oid, existing.patch_oid);
+                        } else {
+                            var base_oid: [hash.hexLen(repo_opts.hash)]u8 = undefined;
+                            if (event.base_oid.len != base_oid.len) return error.InvalidPatch;
+                            @memcpy(&base_oid, event.base_oid);
+                            var base_oid_bytes: [hash.byteLen(repo_opts.hash)]u8 = undefined;
+                            _ = try std.fmt.hexToBytes(&base_oid_bytes, &base_oid);
+                            if (!std.mem.eql(u8, &base_oid, &std.fmt.bytesToHex(base_oid_bytes, .lower))) return error.InvalidPatch;
+                            const derived_parent_oids = [_][hash.hexLen(repo_opts.hash)]u8{base_oid};
+                            const author = try commitIdentity(commit_object.content.commit.metadata.author orelse return error.AuthorNotFound);
+                            const committer = try commitIdentity(commit_object.content.commit.metadata.committer orelse author);
+                            patch_oid = try obj.writeCommitWithoutRef(repo_kind, repo_opts, state, io, allocator, .{
+                                .author = author,
+                                .committer = committer,
+                                .message = event.message,
+                                .parent_oids = &derived_parent_oids,
+                                .timestamp = commit_object.content.commit.metadata.timestamp,
+                            }, &trees.head);
+                        }
+
+                        break :blk .{
+                            .event = event,
+                            .author_email = authorEmail(commit_object.content.commit.metadata.author orelse ""),
+                            .created_order = event_order,
+                            .base_tree_oid = &trees.base,
+                            .head_tree_oid = &trees.head,
+                            .patch_oid = &patch_oid,
+                        };
+                    } else null;
+                    try PatchRev.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, record_maybe, &arena, &repo_event_oid);
+                },
+                .patch => |event_maybe| {
+                    const record_maybe: ?Patch.Record = if (event_maybe) |event| .{
+                        .event = event,
+                        .author_email = authorEmail(commit_object.content.commit.metadata.author orelse ""),
+                        .created_order = event_order,
+                    } else null;
+                    try Patch.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, record_maybe, &arena, &repo_event_oid);
                 },
             }
         }
@@ -977,6 +1063,11 @@ fn conflictedFieldsMaxLen(comptime T: type) usize {
     for (std.meta.fields(T)) |field| len += field.name.len + 1;
     return len;
 }
+
+pub const MergePolicy = enum {
+    field_conflicts,
+    target_wins,
+};
 
 // what a three-way merge did with a field
 const FieldMerge = enum {
@@ -1493,12 +1584,23 @@ pub fn read(
                         @field(event, field.name) = std.meta.stringToEnum(field.type, bytes) orelse return error.InvalidEnumTag;
                     },
                     .optional => |optional_info| {
-                        if (optional_info.child != []const u8) @compileError("unsupported read field type: " ++ @typeName(field.type));
                         // a missing key is null
-                        @field(event, field.name) = if (try map.getCursor(hash.hashInt(hash_kind, field.name))) |cursor|
-                            try cursor.readBytesAlloc(arena.allocator(), null)
-                        else
-                            null;
+                        if (try map.getCursor(hash.hashInt(hash_kind, field.name))) |cursor| {
+                            if (optional_info.child == []const u8) {
+                                @field(event, field.name) = try cursor.readBytesAlloc(arena.allocator(), null);
+                            } else switch (@typeInfo(optional_info.child)) {
+                                .array => |array_info| {
+                                    if (array_info.child != u8) @compileError("unsupported read field type: " ++ @typeName(field.type));
+                                    var bytes: optional_info.child = undefined;
+                                    const value = try cursor.readBytes(&bytes);
+                                    if (value.len != bytes.len) return error.InvalidByteArrayLength;
+                                    @field(event, field.name) = bytes;
+                                },
+                                else => @compileError("unsupported read field type: " ++ @typeName(field.type)),
+                            }
+                        } else {
+                            @field(event, field.name) = null;
+                        }
                     },
                     // a struct field's own fields are read from the same map
                     .@"struct" => @field(event, field.name) = try read(field.type, DB, hash_kind, arena, map),
@@ -1543,6 +1645,13 @@ pub fn fieldEqual(comptime Field: type, a: Field, b: Field) bool {
             }
         },
         .bool, .int, .@"enum" => return a == b,
+        .optional => |optional_info| {
+            if (a) |a_value| {
+                if (b) |b_value| return fieldEqual(optional_info.child, a_value, b_value);
+                return false;
+            }
+            return b == null;
+        },
         else => @compileError("unsupported field type: " ++ @typeName(Field)),
     }
 }
@@ -1677,10 +1786,17 @@ fn upsertField(
         },
         .@"enum" => try upsertBytes(DB, hash_kind, map, key, @tagName(value)),
         .optional => |optional_info| {
-            if (optional_info.child != []const u8) @compileError("unsupported upsert field type: " ++ @typeName(Field));
             // a missing key is null
-            if (value) |bytes| {
-                try upsertBytes(DB, hash_kind, map, key, bytes);
+            if (value) |child| {
+                if (optional_info.child == []const u8) {
+                    try upsertBytes(DB, hash_kind, map, key, child);
+                } else switch (@typeInfo(optional_info.child)) {
+                    .array => |array_info| {
+                        if (array_info.child != u8) @compileError("unsupported upsert field type: " ++ @typeName(Field));
+                        try upsertBytes(DB, hash_kind, map, key, &child);
+                    },
+                    else => @compileError("unsupported upsert field type: " ++ @typeName(Field)),
+                }
             } else {
                 _ = try map.remove(key);
             }
