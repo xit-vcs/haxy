@@ -8,8 +8,6 @@ description: []const u8,
 tags: []const u8, // space-separated
 target_ref: []const u8,
 target_patch_id: ?[evt.event_id_size * 2]u8 = null,
-source_url: []const u8,
-source_ref: []const u8,
 patchrev_id: [evt.event_id_size * 2]u8,
 
 pub const Record = struct {
@@ -66,11 +64,7 @@ pub fn consume(
         break :blk value;
     };
 
-    if (!fieldsValid(record.event.title, record.event.tags) or
-        record.event.target_ref.len == 0 or
-        record.event.source_url.len == 0 or
-        record.event.source_ref.len == 0)
-    {
+    if (!fieldsValid(record.event.title, record.event.tags) or record.event.target_ref.len == 0) {
         return error.InvalidPatch;
     }
     const patchrev_id = try evt.parseEventId(&record.event.patchrev_id);
@@ -83,12 +77,8 @@ pub fn consume(
         record.created_order = existing.created_order;
         record.author_email = existing.author_email;
         if (event_oid != null) {
-            if (!std.mem.eql(u8, existing.event.target_ref, record.event.target_ref) or
-                !std.meta.eql(existing.event.target_patch_id, record.event.target_patch_id) or
-                !std.mem.eql(u8, existing.event.source_url, record.event.source_url) or
-                !std.mem.eql(u8, existing.event.source_ref, record.event.source_ref))
-            {
-                return error.PatchTargetChanged;
+            if (!std.meta.eql(existing.event.target_patch_id, record.event.target_patch_id)) {
+                return error.TargetPatchChanged;
             }
         }
         if (event_oid != null or record.removed) {

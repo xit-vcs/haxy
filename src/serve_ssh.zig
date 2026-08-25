@@ -10,6 +10,7 @@ const ui = @import("./ui.zig");
 const ssh = @import("./serve_ssh_protocol.zig");
 const evt = @import("./event.zig");
 const serve_common = @import("./serve_common.zig");
+const fork = @import("./fork.zig");
 
 // listener resource limits. the watchdog gives unauthenticated peers a hard
 // deadline, detects idle non-interactive sessions from protocol progress, and
@@ -327,6 +328,41 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, command:
     defer parsed.deinit(allocator);
     const repo_prefix = "/repo/";
     const repo_identity = if (std.mem.startsWith(u8, parsed.dir, repo_prefix)) parsed.dir[repo_prefix.len..] else parsed.dir;
+
+    if (fork.parseRoute(repo_identity)) |route| {
+        if (evt.parseOwnerRepoPath(route.identity) == null) return writeError(sess, "repo path must be <owner>/<repo>");
+        if (parsed.service == .receive_pack and !xit.ref.validateName(route.target)) return writeError(sess, "invalid target branch");
+
+        const draft_path = try fork.forkPath(allocator, handler.repo_root_path, &route.id);
+        defer allocator.free(draft_path);
+        var draft = rp.AnyRepo(.xit, .{}).open(io, allocator, .{ .path = draft_path }) catch
+            return writeError(sess, "patch draft not found");
+        defer draft.deinit(io, allocator);
+        switch (draft) {
+            inline else => |*repo| {
+                const author_maybe = try fork.draftAuthor(repo.self_repo_opts, repo, io, allocator);
+                defer if (author_maybe) |author| allocator.free(author);
+                const author = author_maybe orelse return writeError(sess, "invalid patch draft");
+                if (builtin.mode != .Debug and !try isKeyAuthorized(io, allocator, handler.admin_repo_path, author, &sess.fingerprint))
+                    return writeError(sess, "unauthorized: this SSH key is not registered to the patch author");
+                var reader_buf: [4096]u8 = undefined;
+                var writer_buf: [4096]u8 = undefined;
+                var reader = ssh.SessionReader.init(sess, &reader_buf);
+                var writer = ssh.SessionWriter.init(sess, &writer_buf);
+                switch (parsed.service) {
+                    .upload_pack => try repo.uploadPack(io, allocator, &reader.interface, &writer.interface, .{}),
+                    .receive_pack => try repo.receivePack(io, allocator, &reader.interface, &writer.interface, .{}),
+                }
+                writer.interface.flush() catch {};
+                if (parsed.service == .receive_pack) {
+                    if (try repo.readRef(io, fork.ref) == null) return writeError(sess, "push HEAD to refs/heads/patch");
+                    try fork.setTarget(repo.self_repo_opts, repo, io, allocator, route.target);
+                }
+            },
+        }
+        try sess.exit(0);
+        return;
+    }
 
     const create_if_missing = parsed.service == .receive_pack;
     const any_repo_opts: rp.AnyRepoOpts(.xit) = .{};

@@ -5,6 +5,7 @@ const rp = xit.repo;
 const obj = xit.object;
 const hash = xit.hash;
 const rf = xit.ref;
+const fork = @import("../../fork.zig");
 
 const repo_opts: rp.RepoOpts(.xit) = .{ .is_test = true };
 const Repo = rp.Repo(.xit, repo_opts);
@@ -110,8 +111,6 @@ test "patch lifecycle" {
         .description = "adds a reusable answer constant",
         .tags = "enhancement",
         .target_ref = "refs/heads/master",
-        .source_url = source_path,
-        .source_ref = "refs/heads/master",
         .patchrev_id = std.fmt.bytesToHex(patchrev_id, .lower),
     };
     const tree_entries = [_]evt.EventTreeEntry{
@@ -350,8 +349,6 @@ test "patch lifecycle" {
                     .tags = "enhancement",
                     .target_ref = patch.target_ref,
                     .target_patch_id = std.fmt.bytesToHex(patch_id, .lower),
-                    .source_url = patch.source_url,
-                    .source_ref = patch.source_ref,
                     .patchrev_id = std.fmt.bytesToHex(child_patchrev_id, .lower),
                 } },
             },
@@ -404,4 +401,158 @@ test "patch lifecycle" {
         var retained = try obj.Object(.xit, repo_opts).init(after_gc_state, io, allocator, &roots[0]);
         retained.deinit();
     }
+}
+
+test "publish a staged patch" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    const temp_dir_name = "temp-staged-patch";
+    const cwd = std.Io.Dir.cwd();
+
+    if (cwd.openDir(io, temp_dir_name, .{})) |dir_value| {
+        var dir = dir_value;
+        dir.close(io);
+        try cwd.deleteTree(io, temp_dir_name);
+    } else |_| {}
+    var temp_dir = try cwd.createDirPathOpen(io, temp_dir_name, .{});
+    defer cwd.deleteTree(io, temp_dir_name) catch {};
+    defer temp_dir.close(io);
+
+    const cwd_path = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(cwd_path);
+    const root = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name });
+    defer allocator.free(root);
+    const repos_dir = try std.fs.path.join(allocator, &.{ root, "repos" });
+    defer allocator.free(repos_dir);
+    const upstream_path = try std.fs.path.join(allocator, &.{ root, "upstream" });
+    defer allocator.free(upstream_path);
+    const target_path = try std.fs.path.join(allocator, &.{ repos_dir, "target" });
+    defer allocator.free(target_path);
+
+    //
+    // create the target repo
+    //
+
+    {
+        var upstream = try rp.Repo(.git, .{ .is_test = true }).init(io, allocator, .{ .path = upstream_path });
+        defer upstream.deinit(io, allocator);
+        const file = try upstream.core.work_dir.createFile(io, "main.zig", .{ .truncate = true });
+        defer file.close(io);
+        try file.writeStreamingAll(io, "pub fn main() void {}\n");
+        try upstream.add(io, allocator, &.{"main.zig"});
+        _ = try upstream.commit(io, allocator, .{ .author = "alice <alice@example.test>", .message = "initial code", .timestamp = 1 });
+    }
+    var target = try Repo.clone(io, allocator, upstream_path, target_path, target_path, null, .{});
+    defer target.deinit(io, allocator);
+    try target.addBranch(io, .{ .name = "next" });
+
+    var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
+    const unused_id = evt.EventWithId.randomId(prng.random());
+    const unused_hex = std.fmt.bytesToHex(unused_id, .lower);
+
+    const route_text = try std.fmt.allocPrint(allocator, "alice/repo/patch:{s}/branch:feature/topic", .{&unused_hex});
+    defer allocator.free(route_text);
+    const route = fork.parseRoute(route_text) orelse return error.InvalidRoute;
+    try std.testing.expectEqualStrings("alice/repo", route.identity);
+    try std.testing.expectEqualStrings("feature/topic", route.target);
+
+    //
+    // reserve an author-bound draft
+    //
+
+    const unused_path = try fork.create(repo_opts, io, allocator, repos_dir, &unused_hex, author.name);
+    defer allocator.free(unused_path);
+    var unused = try Repo.open(io, allocator, .{ .path = unused_path });
+    defer unused.deinit(io, allocator);
+    const stored_author = (try fork.draftAuthor(repo_opts, &unused, io, allocator)) orelse return error.NotFound;
+    defer allocator.free(stored_author);
+    try std.testing.expectEqualStrings(author.name, stored_author);
+    var head_buf: [rf.MAX_REF_CONTENT_SIZE]u8 = undefined;
+    const head = try unused.head(io, &head_buf);
+    switch (head) {
+        .ref => |head_ref| try std.testing.expectEqualStrings(fork.ref.name, head_ref.name),
+        .oid => return error.InvalidRef,
+    }
+
+    //
+    // push a proposed commit into another draft
+    //
+
+    const patch_id = evt.EventWithId.randomId(prng.random());
+    const patch_id_hex = std.fmt.bytesToHex(patch_id, .lower);
+    const draft_path = try fork.forkPath(allocator, repos_dir, &patch_id_hex);
+    defer allocator.free(draft_path);
+    try cwd.createDirPath(io, std.fs.path.dirname(draft_path) orelse return error.InvalidPath);
+    var draft = try Repo.clone(io, allocator, upstream_path, draft_path, draft_path, null, .{});
+    {
+        defer draft.deinit(io, allocator);
+        try draft.addConfig(io, allocator, .{ .name = "haxy.author", .value = author.name });
+        try draft.addConfig(io, allocator, .{ .name = "haxy.target", .value = "master" });
+        const file = try draft.core.work_dir.createFile(io, "feature.zig", .{ .truncate = true });
+        defer file.close(io);
+        try file.writeStreamingAll(io, "pub const answer = 42;\n");
+        try draft.add(io, allocator, &.{"feature.zig"});
+        _ = try draft.commit(io, allocator, .{ .author = "alice <alice@example.test>", .message = "add feature", .timestamp = 2 });
+        try draft.addBranch(io, .{ .name = fork.ref.name });
+    }
+
+    //
+    // publish the staged code and metadata
+    //
+
+    try fork.publish(repo_opts, io, allocator, &target, draft_path, .{
+        .id = patch_id_hex,
+        .title = "add the answer",
+        .tags = "enhancement",
+        .description = "adds a reusable answer constant",
+        .author = author,
+        .timestamp = 3,
+    });
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var moment = try evt.currentMoment(repo_opts, &target);
+    const patch = (try evt.Patch.readById(Repo.DB, repo_opts.hash, moment, &arena, &patch_id)) orelse return error.NotFound;
+    try std.testing.expectEqualStrings("refs/heads/master", patch.event.target_ref);
+    const first_patchrev_id = try evt.parseEventId(&patch.event.patchrev_id);
+    const first_patchrev = (try evt.PatchRev.readById(Repo.DB, repo_opts.hash, moment, &arena, &first_patchrev_id)) orelse return error.NotFound;
+    try std.testing.expectEqualStrings("add feature", first_patchrev.event.message);
+
+    //
+    // edit metadata without replacing the code revision
+    //
+
+    try fork.publish(repo_opts, io, allocator, &target, draft_path, .{
+        .id = patch_id_hex,
+        .title = "add a reusable answer",
+        .tags = "enhancement",
+        .description = "adds a reusable answer constant",
+        .author = author,
+        .timestamp = 4,
+    });
+    _ = arena.reset(.retain_capacity);
+    moment = try evt.currentMoment(repo_opts, &target);
+    const edited = (try evt.Patch.readById(Repo.DB, repo_opts.hash, moment, &arena, &patch_id)) orelse return error.NotFound;
+    try std.testing.expectEqualStrings(&patch.event.patchrev_id, &edited.event.patchrev_id);
+
+    //
+    // retargeting creates another code revision
+    //
+
+    var reopened = try Repo.open(io, allocator, .{ .path = draft_path });
+    defer reopened.deinit(io, allocator);
+    try fork.setTarget(repo_opts, &reopened, io, allocator, "next");
+    try fork.publish(repo_opts, io, allocator, &target, draft_path, .{
+        .id = patch_id_hex,
+        .title = edited.event.title,
+        .tags = edited.event.tags,
+        .description = edited.event.description,
+        .author = author,
+        .timestamp = 5,
+    });
+    _ = arena.reset(.retain_capacity);
+    moment = try evt.currentMoment(repo_opts, &target);
+    const retargeted = (try evt.Patch.readById(Repo.DB, repo_opts.hash, moment, &arena, &patch_id)) orelse return error.NotFound;
+    try std.testing.expectEqualStrings("refs/heads/next", retargeted.event.target_ref);
+    try std.testing.expect(!std.mem.eql(u8, &edited.event.patchrev_id, &retargeted.event.patchrev_id));
 }
