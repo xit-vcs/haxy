@@ -7,6 +7,7 @@ const rp = xit.repo;
 
 base_oid: []const u8,
 source_oid: []const u8,
+target_ref: []const u8,
 message: []const u8,
 
 pub const Record = struct {
@@ -14,6 +15,7 @@ pub const Record = struct {
     removed: bool = false,
     author_email: ?[]const u8 = null,
     created_order: u64 = 0,
+    event_oid: []const u8,
     base_tree_oid: []const u8,
     head_tree_oid: []const u8,
     patch_oid: []const u8,
@@ -87,6 +89,9 @@ pub fn consume(
 
     try validateOid(hash_kind, record.event.base_oid);
     try validateOid(hash_kind, record.event.source_oid);
+    if (!std.mem.startsWith(u8, record.event.target_ref, "refs/heads/") or
+        !xit.ref.validateName(record.event.target_ref["refs/".len..])) return error.InvalidTarget;
+    try validateOid(hash_kind, record.event_oid);
     try validateOid(hash_kind, record.base_tree_oid);
     try validateOid(hash_kind, record.head_tree_oid);
     try validateOid(hash_kind, record.patch_oid);
@@ -94,6 +99,7 @@ pub fn consume(
     if (existing_maybe) |existing| {
         if (!std.mem.eql(u8, existing.event.base_oid, record.event.base_oid) or
             !std.mem.eql(u8, existing.event.source_oid, record.event.source_oid) or
+            !std.mem.eql(u8, existing.event.target_ref, record.event.target_ref) or
             !std.mem.eql(u8, existing.event.message, record.event.message) or
             !std.mem.eql(u8, existing.base_tree_oid, record.base_tree_oid) or
             !std.mem.eql(u8, existing.head_tree_oid, record.head_tree_oid) or
@@ -103,6 +109,7 @@ pub fn consume(
         }
         record.created_order = existing.created_order;
         record.author_email = existing.author_email;
+        record.event_oid = existing.event_oid;
     }
 
     const cursor = try records.putCursor(record_key);
@@ -132,6 +139,28 @@ pub fn readById(
     const records = try DB.HashMap(.read_only).init(records_cursor);
     const record_cursor = try records.getCursor(hash.hashInt(hash_kind, id)) orelse return null;
     return try evt.read(Record, DB, hash_kind, arena, try DB.HashMap(.read_only).init(record_cursor));
+}
+
+pub const WithId = struct {
+    id: [evt.event_id_size]u8,
+    record: Record,
+};
+
+pub fn readNewest(
+    comptime DB: type,
+    comptime hash_kind: hash.HashKind,
+    haxy_moment: DB.HashMap(.read_only),
+    arena: *std.heap.ArenaAllocator,
+) !?WithId {
+    const ids_cursor = try haxy_moment.getCursor(hash.hashInt(hash_kind, id_set_key)) orelse return null;
+    const ids = try DB.SortedSet(.read_only).init(ids_cursor);
+    var iter = try ids.iteratorFromIndex(0);
+    while (try iter.next()) |cursor| {
+        const id = try evt.readOrderKeyId(DB, cursor);
+        const record = (try readById(DB, hash_kind, haxy_moment, arena, &id)) orelse continue;
+        if (!record.removed) return .{ .id = id, .record = record };
+    }
+    return null;
 }
 
 // derived commits referenced only by patch revision records

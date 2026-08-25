@@ -6,9 +6,8 @@ const hash = xit.hash;
 title: []const u8,
 description: []const u8,
 tags: []const u8, // space-separated
-target_ref: []const u8,
 target_patch_id: ?[evt.event_id_size * 2]u8 = null,
-patchrev_id: [evt.event_id_size * 2]u8,
+patchrev_id: ?[evt.event_id_size * 2]u8 = null,
 
 pub const Record = struct {
     event: Self,
@@ -64,10 +63,8 @@ pub fn consume(
         break :blk value;
     };
 
-    if (!fieldsValid(record.event.title, record.event.tags) or record.event.target_ref.len == 0) {
-        return error.InvalidPatch;
-    }
-    const patchrev_id = try evt.parseEventId(&record.event.patchrev_id);
+    if (!fieldsValid(record.event.title, record.event.tags)) return error.InvalidPatch;
+    if (record.event.patchrev_id) |*id| _ = try evt.parseEventId(id);
     const target_patch_id = if (record.event.target_patch_id) |*id| try evt.parseEventId(id) else null;
     if (target_patch_id) |*id| {
         if (std.mem.eql(u8, id, event_id)) return error.InvalidPatch;
@@ -83,26 +80,6 @@ pub fn consume(
         }
         if (event_oid != null or record.removed) {
             _ = try conflicts.remove(&evt.orderKeyDesc(existing.created_order, event_id));
-        }
-    }
-
-    if (event_oid != null) {
-        const changed = if (existing_maybe) |existing| !std.mem.eql(u8, &existing.event.patchrev_id, &record.event.patchrev_id) else true;
-        if (changed) {
-            const patchrev = (try evt.PatchRev.readById(DB, hash_kind, haxy_moment.readOnly(), arena, &patchrev_id)) orelse return error.PatchRevNotFound;
-            if (patchrev.removed) return error.PatchRevNotFound;
-            if (target_patch_id) |*target_id| {
-                const target = (try readById(DB, hash_kind, haxy_moment.readOnly(), arena, target_id)) orelse return error.TargetPatchNotFound;
-                if (target.removed) return error.TargetPatchNotFound;
-                const target_patchrev_id = try evt.parseEventId(&target.event.patchrev_id);
-                const target_patchrev = (try evt.PatchRev.readById(DB, hash_kind, haxy_moment.readOnly(), arena, &target_patchrev_id)) orelse return error.PatchRevNotFound;
-                if (target_patchrev.removed) return error.PatchRevNotFound;
-                if (!std.mem.eql(u8, patchrev.event.base_oid, target_patchrev.patch_oid) or
-                    !std.mem.eql(u8, patchrev.base_tree_oid, target_patchrev.head_tree_oid))
-                {
-                    return error.InvalidPatchBase;
-                }
-            }
         }
     }
 

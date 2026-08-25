@@ -27,7 +27,7 @@ fn commitTree(
     };
 }
 
-test "patch lifecycle" {
+test "patch event conflicts, stacking, and gc" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
     const temp_dir_name = "temp-event-patch";
@@ -110,7 +110,6 @@ test "patch lifecycle" {
         .title = "add the answer",
         .description = "adds a reusable answer constant",
         .tags = "enhancement",
-        .target_ref = "refs/heads/master",
         .patchrev_id = std.fmt.bytesToHex(patchrev_id, .lower),
     };
     const tree_entries = [_]evt.EventTreeEntry{
@@ -129,7 +128,7 @@ test "patch lifecycle" {
                 .timestamp = 3,
                 .author = author,
                 .tree_entries = &tree_entries,
-                .event = .{ .patchrev = .{ .base_oid = &base_oid, .source_oid = &source_oid, .message = patch.title } },
+                .event = .{ .patchrev = .{ .base_oid = &base_oid, .source_oid = &source_oid, .target_ref = "refs/heads/master", .message = patch.title } },
             },
             .{
                 .id = std.fmt.bytesToHex(patch_id, .lower),
@@ -151,7 +150,7 @@ test "patch lifecycle" {
     const patchrev_record = (try evt.PatchRev.readById(Repo.DB, repo_opts.hash, moment, &arena, &patchrev_id)) orelse return error.NotFound;
     try std.testing.expectEqualStrings(&base_tree_oid, patchrev_record.base_tree_oid);
     try std.testing.expectEqualStrings(&head_tree_oid, patchrev_record.head_tree_oid);
-    try std.testing.expectEqualStrings(&std.fmt.bytesToHex(patchrev_id, .lower), &patch_record.event.patchrev_id);
+    try std.testing.expectEqualStrings(&std.fmt.bytesToHex(patchrev_id, .lower), &(patch_record.event.patchrev_id orelse return error.NotFound));
 
     var initial_patch_oid: [hash.hexLen(repo_opts.hash)]u8 = undefined;
     @memcpy(&initial_patch_oid, patchrev_record.patch_oid);
@@ -249,7 +248,7 @@ test "patch lifecycle" {
                 .timestamp = 8,
                 .author = author,
                 .tree_entries = &target_entries,
-                .event = .{ .patchrev = .{ .base_oid = &base_oid, .source_oid = &source_a_oid, .message = updated_patch.title } },
+                .event = .{ .patchrev = .{ .base_oid = &base_oid, .source_oid = &source_a_oid, .target_ref = "refs/heads/master", .message = updated_patch.title } },
             },
             .{
                 .id = std.fmt.bytesToHex(patch_id, .lower),
@@ -278,7 +277,7 @@ test "patch lifecycle" {
                 .timestamp = 10,
                 .author = author,
                 .tree_entries = &parent_entries,
-                .event = .{ .patchrev = .{ .base_oid = &base_oid, .source_oid = &source_b_oid, .message = updated_patch.title } },
+                .event = .{ .patchrev = .{ .base_oid = &base_oid, .source_oid = &source_b_oid, .target_ref = "refs/heads/master", .message = updated_patch.title } },
             },
             .{
                 .id = std.fmt.bytesToHex(patch_id, .lower),
@@ -305,7 +304,7 @@ test "patch lifecycle" {
     _ = arena.reset(.retain_capacity);
     const merged_moment = try evt.currentMoment(repo_opts, &target);
     const merged = (try evt.Patch.readById(Repo.DB, repo_opts.hash, merged_moment, &arena, &patch_id)) orelse return error.NotFound;
-    try std.testing.expectEqualStrings(&std.fmt.bytesToHex(patchrev_a_id, .lower), &merged.event.patchrev_id);
+    try std.testing.expectEqualStrings(&std.fmt.bytesToHex(patchrev_a_id, .lower), &(merged.event.patchrev_id orelse return error.NotFound));
     const merged_patchrev = (try evt.PatchRev.readById(Repo.DB, repo_opts.hash, merged_moment, &arena, &patchrev_a_id)) orelse return error.NotFound;
     try std.testing.expectEqualStrings(&source_a_oid, merged_patchrev.event.source_oid);
     try std.testing.expectEqualStrings(&source_a_tree, merged_patchrev.head_tree_oid);
@@ -318,7 +317,7 @@ test "patch lifecycle" {
     try std.testing.expectEqualStrings("patchrev_id", try fields_cursor.readBytesAlloc(arena.allocator(), null));
     const their_cursor = try conflict.getCursor(hash.hashInt(repo_opts.hash, evt.their_record_key)) orelse return error.NotFound;
     const theirs = try evt.read(evt.Patch.Record, Repo.DB, repo_opts.hash, &arena, try Repo.DB.HashMap(.read_only).init(their_cursor));
-    try std.testing.expectEqualStrings(&std.fmt.bytesToHex(patchrev_b_id, .lower), &theirs.event.patchrev_id);
+    try std.testing.expectEqualStrings(&std.fmt.bytesToHex(patchrev_b_id, .lower), &(theirs.event.patchrev_id orelse return error.NotFound));
 
     //
     // create a patch stacked on the selected revision
@@ -337,7 +336,7 @@ test "patch lifecycle" {
                 .timestamp = 12,
                 .author = author,
                 .tree_entries = &child_entries,
-                .event = .{ .patchrev = .{ .base_oid = merged_patchrev.patch_oid, .source_oid = &source_b_oid, .message = "stack another answer change" } },
+                .event = .{ .patchrev = .{ .base_oid = merged_patchrev.patch_oid, .source_oid = &source_b_oid, .target_ref = "refs/heads/master", .message = "stack another answer change" } },
             },
             .{
                 .id = std.fmt.bytesToHex(child_id, .lower),
@@ -347,7 +346,6 @@ test "patch lifecycle" {
                     .title = "stack another answer change",
                     .description = "depends on the first patch",
                     .tags = "enhancement",
-                    .target_ref = patch.target_ref,
                     .target_patch_id = std.fmt.bytesToHex(patch_id, .lower),
                     .patchrev_id = std.fmt.bytesToHex(child_patchrev_id, .lower),
                 } },
@@ -363,7 +361,7 @@ test "patch lifecycle" {
     const stacked_moment = try evt.currentMoment(repo_opts, &target);
     const child = (try evt.Patch.readById(Repo.DB, repo_opts.hash, stacked_moment, &arena, &child_id)) orelse return error.NotFound;
     var selected_patchrev_id: [evt.event_id_size]u8 = undefined;
-    _ = try std.fmt.hexToBytes(&selected_patchrev_id, &child.event.patchrev_id);
+    _ = try std.fmt.hexToBytes(&selected_patchrev_id, &(child.event.patchrev_id orelse return error.NotFound));
     const child_patchrev = (try evt.PatchRev.readById(Repo.DB, repo_opts.hash, stacked_moment, &arena, &selected_patchrev_id)) orelse return error.NotFound;
     var child_oid: [hash.hexLen(repo_opts.hash)]u8 = undefined;
     @memcpy(&child_oid, child_patchrev.patch_oid);
@@ -403,10 +401,10 @@ test "patch lifecycle" {
     }
 }
 
-test "publish a staged patch" {
+test "patch lifecycle" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    const temp_dir_name = "temp-staged-patch";
+    const temp_dir_name = "temp-patch-lifecycle";
     const cwd = std.Io.Dir.cwd();
 
     if (cwd.openDir(io, temp_dir_name, .{})) |dir_value| {
@@ -428,6 +426,8 @@ test "publish a staged patch" {
     defer allocator.free(admin_path);
     const upstream_path = try std.fs.path.join(allocator, &.{ root, "upstream" });
     defer allocator.free(upstream_path);
+    const source_path = try std.fs.path.join(allocator, &.{ root, "source" });
+    defer allocator.free(source_path);
 
     var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
     const user_id = evt.EventWithId.randomId(prng.random());
@@ -476,45 +476,14 @@ test "publish a staged patch" {
     }
     var target = try Repo.clone(io, allocator, upstream_path, target_path, target_path, null, .{});
     defer target.deinit(io, allocator);
-    try target.addBranch(io, .{ .name = "next" });
 
     //
-    // push a proposed commit into a draft
+    // create the patch draft in the fork
     //
 
     const patch_id = evt.EventWithId.randomId(prng.random());
     const patch_id_hex = std.fmt.bytesToHex(patch_id, .lower);
-    const draft_path = try fork.forkPath(allocator, repos_dir, &patch_id_hex);
-    defer allocator.free(draft_path);
-    try evt.consume(.xit, evt.admin_repo_opts, io, allocator, &admin, evt.events_ref, &.{.{
-        .id = patch_id_hex,
-        .timestamp = 2,
-        .author = author,
-        .event = .{ .fork = .{
-            .user_id = &user_id,
-            .repo_id = &repo_id,
-            .target = "master",
-        } },
-    }});
-    try cwd.createDirPath(io, std.fs.path.dirname(draft_path) orelse return error.InvalidPath);
-    var draft = try Repo.clone(io, allocator, upstream_path, draft_path, draft_path, null, .{});
-    var source_oid: [hash.hexLen(repo_opts.hash)]u8 = undefined;
-    {
-        defer draft.deinit(io, allocator);
-        const file = try draft.core.work_dir.createFile(io, "feature.zig", .{ .truncate = true });
-        defer file.close(io);
-        try file.writeStreamingAll(io, "pub const answer = 42;\n");
-        try draft.add(io, allocator, &.{"feature.zig"});
-        source_oid = try draft.commit(io, allocator, .{ .author = "alice <alice@example.test>", .message = "add feature", .timestamp = 2 });
-        try draft.addBranch(io, .{ .name = fork.ref.name });
-    }
-    try fork.recordPush(io, allocator, &admin, &patch_id_hex, "master", &source_oid, author, 3);
-
-    //
-    // publish the staged code and metadata
-    //
-
-    try fork.publish(repo_opts, io, allocator, &admin, &target, draft_path, .{
+    const draft_path = try fork.create(repo_opts, io, allocator, repos_dir, &admin, .{
         .id = patch_id_hex,
         .user_id = user_id,
         .repo_id = repo_id,
@@ -522,63 +491,127 @@ test "publish a staged patch" {
         .tags = "enhancement",
         .description = "adds a reusable answer constant",
         .author = author,
+        .timestamp = 2,
+    });
+    defer allocator.free(draft_path);
+
+    //
+    // create and record the proposed revision in the fork
+    //
+
+    const base_oid = (try target.readRef(io, .{ .kind = .head, .name = "master" })) orelse return error.NotFound;
+    const base_tree_oid = try commitTree(io, allocator, &target, &base_oid);
+    var source = try Repo.clone(io, allocator, upstream_path, source_path, source_path, null, .{});
+    defer source.deinit(io, allocator);
+    const source_oid = blk: {
+        const file = try source.core.work_dir.createFile(io, "feature.zig", .{ .truncate = true });
+        defer file.close(io);
+        try file.writeStreamingAll(io, "pub const answer = 42;\n");
+        try source.add(io, allocator, &.{"feature.zig"});
+        break :blk try source.commit(io, allocator, .{ .author = "alice <alice@example.test>", .message = "add feature", .timestamp = 2 });
+    };
+    const head_tree_oid = try commitTree(io, allocator, &source, &source_oid);
+    const first_patchrev_id = evt.EventWithId.randomId(prng.random());
+    const first_patchrev_hex = std.fmt.bytesToHex(first_patchrev_id, .lower);
+    const first_entries = [_]evt.EventTreeEntry{
+        .{ .tree = .{ .name = "base", .oid = &base_tree_oid } },
+        .{ .tree = .{ .name = "head", .oid = &head_tree_oid } },
+    };
+    {
+        var draft = try Repo.open(io, allocator, .{ .path = draft_path });
+        defer draft.deinit(io, allocator);
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+
+        const initial_moment = try evt.currentMoment(repo_opts, &draft);
+        const initial_patch = (try evt.Patch.readById(Repo.DB, repo_opts.hash, initial_moment, &arena, &patch_id)) orelse return error.NotFound;
+        try std.testing.expect(!initial_patch.removed);
+        try std.testing.expectEqualStrings("add the answer", initial_patch.event.title);
+        try std.testing.expectEqual(null, initial_patch.event.patchrev_id);
+        try std.testing.expectEqual(null, try evt.PatchRev.readNewest(Repo.DB, repo_opts.hash, initial_moment, &arena));
+
+        var source_moment = try source.core.latestMoment();
+        const source_state = Repo.State(.read_only){ .core = &source.core, .extra = .{ .moment = &source_moment } };
+        var objects = try obj.ObjectIterator(.xit, repo_opts).init(source_state, io, allocator, .{ .kind = .all });
+        defer objects.deinit();
+        try objects.include(&source_oid);
+        try draft.copyObjects(.xit, repo_opts, &objects, io, null);
+        try evt.consume(.xit, repo_opts, io, allocator, &draft, evt.events_ref, &.{
+            .{
+                .id = first_patchrev_hex,
+                .timestamp = 3,
+                .author = author,
+                .tree_entries = &first_entries,
+                .event = .{ .patchrev = .{
+                    .base_oid = &base_oid,
+                    .source_oid = &source_oid,
+                    .target_ref = "refs/heads/master",
+                    .message = "add the answer",
+                } },
+            },
+            .{
+                .id = patch_id_hex,
+                .timestamp = 3,
+                .author = author,
+                .event = .{ .patch = .{
+                    .title = "add the answer",
+                    .tags = "enhancement",
+                    .description = "adds a reusable answer constant",
+                    .patchrev_id = first_patchrev_hex,
+                } },
+            },
+        });
+
+        _ = arena.reset(.retain_capacity);
+        const moment = try evt.currentMoment(repo_opts, &draft);
+        const patch = (try evt.Patch.readById(Repo.DB, repo_opts.hash, moment, &arena, &patch_id)) orelse return error.NotFound;
+        try std.testing.expect(!patch.removed);
+        try std.testing.expectEqualStrings(&first_patchrev_hex, &(patch.event.patchrev_id orelse return error.NotFound));
+        try std.testing.expect(null != try evt.PatchRev.readById(Repo.DB, repo_opts.hash, moment, &arena, &first_patchrev_id));
+    }
+    try std.testing.expectError(error.NotFound, evt.currentMoment(repo_opts, &target));
+
+    //
+    // publish the metadata and revision pointer
+    //
+
+    try fork.publish(repo_opts, io, allocator, &admin, &target, draft_path, .{
+        .id = patch_id_hex,
+        .user_id = user_id,
+        .repo_id = repo_id,
+        .author = author,
         .timestamp = 3,
     });
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    var moment = try evt.currentMoment(repo_opts, &target);
+    const moment = try evt.currentMoment(repo_opts, &target);
     const patch = (try evt.Patch.readById(Repo.DB, repo_opts.hash, moment, &arena, &patch_id)) orelse return error.NotFound;
-    try std.testing.expectEqualStrings("refs/heads/master", patch.event.target_ref);
-    const first_patchrev_id = try evt.parseEventId(&patch.event.patchrev_id);
-    const first_patchrev = (try evt.PatchRev.readById(Repo.DB, repo_opts.hash, moment, &arena, &first_patchrev_id)) orelse return error.NotFound;
-    try std.testing.expectEqualStrings("add feature", first_patchrev.event.message);
-    const first_patchrev_hex = patch.event.patchrev_id;
+    try std.testing.expectEqualStrings(&first_patchrev_hex, &(patch.event.patchrev_id orelse return error.NotFound));
+    try std.testing.expectEqual(null, try evt.PatchRev.readById(Repo.DB, repo_opts.hash, moment, &arena, &first_patchrev_id));
 
-    var fork_arena = std.heap.ArenaAllocator.init(allocator);
-    defer fork_arena.deinit();
+    _ = arena.reset(.retain_capacity);
     const admin_moment = try evt.currentMoment(evt.admin_repo_opts, &admin);
-    const published_fork = (try evt.Fork.readById(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &fork_arena, &patch_id)) orelse return error.NotFound;
+    const published_fork = (try evt.Fork.readById(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &arena, &patch_id)) orelse return error.NotFound;
     try std.testing.expect(!published_fork.removed);
-
-    //
-    // edit metadata without replacing the code revision
-    //
-
-    try fork.publish(repo_opts, io, allocator, &admin, &target, draft_path, .{
-        .id = patch_id_hex,
-        .user_id = user_id,
-        .repo_id = repo_id,
-        .title = "add a reusable answer",
-        .tags = "enhancement",
-        .description = "adds a reusable answer constant",
-        .author = author,
-        .timestamp = 4,
-    });
-    _ = arena.reset(.retain_capacity);
-    moment = try evt.currentMoment(repo_opts, &target);
-    const edited = (try evt.Patch.readById(Repo.DB, repo_opts.hash, moment, &arena, &patch_id)) orelse return error.NotFound;
-    try std.testing.expectEqualStrings(&first_patchrev_hex, &edited.event.patchrev_id);
-    const edited_patchrev_hex = edited.event.patchrev_id;
-
-    //
-    // retargeting creates another code revision
-    //
-
-    try fork.recordPush(io, allocator, &admin, &patch_id_hex, "next", &source_oid, author, 5);
-    try fork.publish(repo_opts, io, allocator, &admin, &target, draft_path, .{
-        .id = patch_id_hex,
-        .user_id = user_id,
-        .repo_id = repo_id,
-        .title = "add a reusable answer",
-        .tags = "enhancement",
-        .description = "adds a reusable answer constant",
-        .author = author,
-        .timestamp = 5,
-    });
-    _ = arena.reset(.retain_capacity);
-    moment = try evt.currentMoment(repo_opts, &target);
-    const retargeted = (try evt.Patch.readById(Repo.DB, repo_opts.hash, moment, &arena, &patch_id)) orelse return error.NotFound;
-    try std.testing.expectEqualStrings("refs/heads/next", retargeted.event.target_ref);
-    try std.testing.expect(!std.mem.eql(u8, &edited_patchrev_hex, &retargeted.event.patchrev_id));
+    {
+        var draft = try Repo.open(io, allocator, .{ .path = draft_path });
+        defer draft.deinit(io, allocator);
+        _ = arena.reset(.retain_capacity);
+        const draft_moment = try evt.currentMoment(repo_opts, &draft);
+        const removed = (try evt.Patch.readById(Repo.DB, repo_opts.hash, draft_moment, &arena, &patch_id)) orelse return error.NotFound;
+        try std.testing.expect(removed.removed);
+        const revision = (try evt.PatchRev.readById(Repo.DB, repo_opts.hash, draft_moment, &arena, &first_patchrev_id)) orelse return error.NotFound;
+        try std.testing.expectEqualStrings("refs/heads/master", revision.event.target_ref);
+        try std.testing.expectEqual(hash.hexLen(repo_opts.hash), revision.event_oid.len);
+        var event_oid: [hash.hexLen(repo_opts.hash)]u8 = undefined;
+        @memcpy(&event_oid, revision.event_oid);
+        var repo_moment = try draft.core.latestMoment();
+        const state = Repo.State(.read_only){ .core = &draft.core, .extra = .{ .moment = &repo_moment } };
+        var event_object = try obj.Object(.xit, repo_opts).initCommit(state, io, allocator, &event_oid);
+        defer event_object.deinit();
+        const trees = try evt.PatchRev.readTrees(.xit, repo_opts, state, io, allocator, &event_object.content.commit.tree);
+        try std.testing.expectEqualStrings(revision.base_tree_oid, &trees.base);
+        try std.testing.expectEqualStrings(revision.head_tree_oid, &trees.head);
+    }
 }

@@ -342,9 +342,6 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, command:
         const fork_record = (try evt.Fork.readById(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &admin_arena, &fork_id)) orelse
             return writeError(sess, "patch draft not found");
         if (fork_record.removed) return writeError(sess, "patch draft not found");
-        const target_repo = (try evt.Repo.readByOwnerAndName(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &admin_arena, owner_repo.owner, owner_repo.name)) orelse
-            return writeError(sess, "repo not found");
-        if (!std.mem.eql(u8, fork_record.event.repo_id, &target_repo.event_id)) return writeError(sess, "patch draft belongs to another repo");
         const user = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &admin_arena, fork_record.event.user_id)) orelse
             return writeError(sess, "invalid patch draft");
         if (user.removed) return writeError(sess, "invalid patch draft");
@@ -356,26 +353,33 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, command:
         var draft = rp.AnyRepo(.xit, .{}).open(io, allocator, .{ .path = draft_path }) catch
             return writeError(sess, "patch draft not found");
         defer draft.deinit(io, allocator);
-        switch (draft) {
-            inline else => |*repo| {
-                var reader_buf: [4096]u8 = undefined;
-                var writer_buf: [4096]u8 = undefined;
-                var reader = ssh.SessionReader.init(sess, &reader_buf);
-                var writer = ssh.SessionWriter.init(sess, &writer_buf);
-                switch (parsed.service) {
-                    .upload_pack => try repo.uploadPack(io, allocator, &reader.interface, &writer.interface, .{}),
-                    .receive_pack => try repo.receivePack(io, allocator, &reader.interface, &writer.interface, .{}),
-                }
-                writer.interface.flush() catch {};
-                if (parsed.service == .receive_pack) {
-                    const source_oid = (try repo.readRef(io, fork.ref)) orelse return writeError(sess, "push HEAD to refs/heads/patch");
-                    try fork.recordPush(io, allocator, &admin, &route.id, route.target, &source_oid, .{
-                        .name = user.event.name,
-                        .email = user.event.email,
-                    }, @intCast(std.Io.Timestamp.now(io, .real).toSeconds()));
-                }
-            },
+        var reader_buf: [4096]u8 = undefined;
+        var writer_buf: [4096]u8 = undefined;
+        var reader = ssh.SessionReader.init(sess, &reader_buf);
+        var writer = ssh.SessionWriter.init(sess, &writer_buf);
+        if (parsed.service == .upload_pack) {
+            switch (draft) {
+                inline else => |*repo| try repo.uploadPack(io, allocator, &reader.interface, &writer.interface, .{}),
+            }
+        } else {
+            const target = (try evt.Repo.readByOwnerAndName(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &admin_arena, owner_repo.owner, owner_repo.name)) orelse
+                return writeError(sess, "repo not found");
+            if (!std.mem.eql(u8, fork_record.event.repo_id, &target.event_id)) return writeError(sess, "patch draft belongs to another repo");
+            const target_id = std.fmt.bytesToHex(target.event_id, .lower);
+            const target_path = try std.fs.path.join(allocator, &.{ handler.repo_root_path, &target_id });
+            defer allocator.free(target_path);
+            const author: evt.CommitAuthor = .{ .name = user.event.name, .email = user.event.email };
+            const timestamp: u64 = @intCast(std.Io.Timestamp.now(io, .real).toSeconds());
+            switch (draft) {
+                inline else => |*repo| {
+                    var target_repo = rp.Repo(.xit, repo.self_repo_opts).open(io, allocator, .{ .path = target_path }) catch
+                        return writeError(sess, "repo not found or has the wrong hash");
+                    defer target_repo.deinit(io, allocator);
+                    try fork.receivePack(repo.self_repo_opts, io, allocator, repo, &target_repo, &route.id, route.target, author, timestamp, &reader.interface, &writer.interface);
+                },
+            }
         }
+        writer.interface.flush() catch {};
         try sess.exit(0);
         return;
     }

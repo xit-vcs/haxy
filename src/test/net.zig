@@ -542,8 +542,15 @@ fn testPushFork(
 
     const target_path = (try repoOnDiskPath(io, allocator, temp_dir_name, "target", true)).?;
     defer allocator.free(target_path);
-    var target_repo = try rp.Repo(.xit, .{}).init(io, allocator, .{ .path = target_path });
-    target_repo.deinit(io, allocator);
+    {
+        var target_repo = try rp.Repo(.xit, .{}).init(io, allocator, .{ .path = target_path });
+        defer target_repo.deinit(io, allocator);
+        const file = try target_repo.core.work_dir.createFile(io, "main.txt", .{ .truncate = true });
+        defer file.close(io);
+        try file.writeStreamingAll(io, "base contents\n");
+        try target_repo.add(io, allocator, &.{"main.txt"});
+        _ = try target_repo.commit(io, allocator, .{ .author = "admin <admin@example.test>", .message = "initial code" });
+    }
 
     const other_path = (try repoOnDiskPath(io, allocator, temp_dir_name, "other", true)).?;
     defer allocator.free(other_path);
@@ -573,7 +580,9 @@ fn testPushFork(
             .id = fork_id_hex,
             .user_id = user_id,
             .repo_id = repo_id,
-            .target = "master",
+            .title = "add a feature",
+            .description = "a draft patch",
+            .tags = "enhancement",
             .author = .{ .name = "admin", .email = "admin@example.test" },
             .timestamp = 1,
         });
@@ -582,7 +591,17 @@ fn testPushFork(
 
     const client_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "client" });
     defer allocator.free(client_path);
-    var client = try rp.Repo(.xit, .{ .is_test = true }).init(io, allocator, .{ .path = client_path, .create_default_branch = fork.ref.name });
+    const ssh_cmd = (try sshCommand(true, allocator, cwd_path, temp_dir_name, port)).?;
+    defer allocator.free(ssh_cmd);
+    var client = try rp.Repo(.xit, .{ .is_test = true }).clone(
+        io,
+        allocator,
+        "git@localhost:admin/target",
+        client_path,
+        client_path,
+        null,
+        .{ .wire = .{ .ssh = .{ .command = ssh_cmd } } },
+    );
     defer client.deinit(io, allocator);
 
     const source_oid = blk: {
@@ -595,49 +614,202 @@ fn testPushFork(
 
     const remote_url = try std.fmt.allocPrint(allocator, "git@localhost:admin/target/patch:{s}/branch:master", .{&fork_id_hex});
     defer allocator.free(remote_url);
-    try client.addRemote(io, allocator, .{ .name = "origin", .value = remote_url });
-    const ssh_cmd = (try sshCommand(true, allocator, cwd_path, temp_dir_name, port)).?;
-    defer allocator.free(ssh_cmd);
-    try client.push(io, allocator, "origin", fork.ref.name, false, .{ .wire = .{ .ssh = .{ .command = ssh_cmd } } });
+    try client.addRemote(io, allocator, .{ .name = "patch", .value = remote_url });
+    try client.push(io, allocator, "patch", "master:patch", false, .{ .wire = .{ .ssh = .{ .command = ssh_cmd } } });
+
+    var first_revision_id: [evt.event_id_size]u8 = undefined;
+    {
+        var draft = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = draft_path });
+        defer draft.deinit(io, allocator);
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const moment = try evt.currentMoment(.{}, &draft);
+        const patch = (try evt.Patch.readById(evt.EventDB(.sha1), .sha1, moment, &arena, &fork_id)) orelse return error.NotFound;
+        try std.testing.expect(!patch.removed);
+        first_revision_id = try evt.parseEventId(&(patch.event.patchrev_id orelse return error.NotFound));
+        const revision = (try evt.PatchRev.readById(evt.EventDB(.sha1), .sha1, moment, &arena, &first_revision_id)) orelse return error.NotFound;
+        try std.testing.expectEqualStrings("refs/heads/master", revision.event.target_ref);
+        try std.testing.expectEqualStrings(&source_oid, revision.event.source_oid);
+    }
+
+    //
+    // publish, then push another revision
+    //
 
     {
         var admin = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = admin_path });
         defer admin.deinit(io, allocator);
+        var target = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = target_path });
+        defer target.deinit(io, allocator);
+        try fork.publish(.{}, io, allocator, &admin, &target, draft_path, .{
+            .id = fork_id_hex,
+            .user_id = user_id,
+            .repo_id = repo_id,
+            .author = .{ .name = "admin", .email = "admin@example.test" },
+            .timestamp = 2,
+        });
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
-        const moment = try evt.currentMoment(evt.admin_repo_opts, &admin);
-        const record = (try evt.Fork.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, &arena, &fork_id)) orelse return error.NotFound;
-        try std.testing.expect(!record.removed);
-        try std.testing.expectEqualStrings("master", record.event.target);
-        try std.testing.expectEqualStrings(&source_oid, record.event.source_oid orelse return error.NotFound);
+        const moment = try evt.currentMoment(.{}, &target);
+        const patch = (try evt.Patch.readById(evt.EventDB(.sha1), .sha1, moment, &arena, &fork_id)) orelse return error.NotFound;
+        try evt.consume(.xit, .{}, io, allocator, &target, evt.events_ref, &.{.{
+            .id = fork_id_hex,
+            .timestamp = 3,
+            .author = .{ .name = "admin", .email = "admin@example.test" },
+            .event = .{ .patch = .{
+                .title = "edited feature",
+                .description = patch.event.description,
+                .tags = patch.event.tags,
+                .target_patch_id = patch.event.target_patch_id,
+                .patchrev_id = patch.event.patchrev_id,
+            } },
+        }});
+    }
+
+    const second_source_oid = blk: {
+        const file = try client.core.work_dir.createFile(io, "feature.txt", .{ .truncate = true });
+        defer file.close(io);
+        try file.writeStreamingAll(io, "updated fork contents\n");
+        try client.add(io, allocator, &.{"feature.txt"});
+        break :blk try client.commit(io, allocator, .{ .message = "revise feature" });
+    };
+    try client.push(io, allocator, "patch", "master:patch", false, .{ .wire = .{ .ssh = .{ .command = ssh_cmd } } });
+
+    var second_revision_id: [evt.event_id_size]u8 = undefined;
+    {
+        var draft = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = draft_path });
+        defer draft.deinit(io, allocator);
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const moment = try evt.currentMoment(.{}, &draft);
+        const patch = (try evt.Patch.readById(evt.EventDB(.sha1), .sha1, moment, &arena, &fork_id)) orelse return error.NotFound;
+        try std.testing.expect(patch.removed);
+        const newest = (try evt.PatchRev.readNewest(evt.EventDB(.sha1), .sha1, moment, &arena)) orelse return error.NotFound;
+        second_revision_id = newest.id;
+        try std.testing.expect(!std.mem.eql(u8, &first_revision_id, &second_revision_id));
+        try std.testing.expectEqualStrings(&second_source_oid, newest.record.event.source_oid);
+        try std.testing.expectEqualStrings("edited feature", newest.record.event.message);
+    }
+    {
+        var target = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = target_path });
+        defer target.deinit(io, allocator);
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const moment = try evt.currentMoment(.{}, &target);
+        const patch = (try evt.Patch.readById(evt.EventDB(.sha1), .sha1, moment, &arena, &fork_id)) orelse return error.NotFound;
+        try std.testing.expectEqualStrings("edited feature", patch.event.title);
+        try std.testing.expectEqualStrings(&std.fmt.bytesToHex(second_revision_id, .lower), &(patch.event.patchrev_id orelse return error.NotFound));
+    }
+
+    //
+    // reject extra refs without applying the patch update
+    //
+
+    const third_source_oid = blk: {
+        const file = try client.core.work_dir.createFile(io, "feature.txt", .{ .truncate = true });
+        defer file.close(io);
+        try file.writeStreamingAll(io, "rejected fork contents\n");
+        try client.add(io, allocator, &.{"feature.txt"});
+        break :blk try client.commit(io, allocator, .{ .message = "rejected revision" });
+    };
+    const extra_ref_rejected = if (client.push(io, allocator, "patch", "master:patch", false, .{
+        .refspecs = &.{"refs/heads/master:refs/heads/extra"},
+        .wire = .{ .ssh = .{ .command = ssh_cmd } },
+    })) |_| false else |_| true;
+    try std.testing.expect(extra_ref_rejected);
+    {
+        var draft = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = draft_path });
+        defer draft.deinit(io, allocator);
+        try std.testing.expectEqualStrings(&second_source_oid, &(try draft.readRef(io, fork.ref) orelse return error.NotFound));
+        try std.testing.expectEqual(null, try draft.readRef(io, .{ .kind = .head, .name = "extra" }));
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const moment = try evt.currentMoment(.{}, &draft);
+        const newest = (try evt.PatchRev.readNewest(evt.EventDB(.sha1), .sha1, moment, &arena)) orelse return error.NotFound;
+        try std.testing.expectEqualSlices(u8, &second_revision_id, &newest.id);
+    }
+
+    //
+    // a removed target patch stays removed after another push
+    //
+
+    {
+        var target = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = target_path });
+        defer target.deinit(io, allocator);
+        try evt.remove(.xit, .{}, io, allocator, &target, &fork_id, .patch, .{ .name = "admin", .email = "admin@example.test" });
+    }
+    try client.push(io, allocator, "patch", "master:patch", false, .{ .wire = .{ .ssh = .{ .command = ssh_cmd } } });
+    {
+        var target = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = target_path });
+        defer target.deinit(io, allocator);
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const moment = try evt.currentMoment(.{}, &target);
+        const patch = (try evt.Patch.readById(evt.EventDB(.sha1), .sha1, moment, &arena, &fork_id)) orelse return error.NotFound;
+        try std.testing.expect(patch.removed);
     }
 
     const other_url = try std.fmt.allocPrint(allocator, "git@localhost:admin/other/patch:{s}/branch:other", .{&fork_id_hex});
     defer allocator.free(other_url);
     try client.addRemote(io, allocator, .{ .name = "other", .value = other_url });
-    const wrong_repo_rejected = if (client.push(io, allocator, "other", fork.ref.name, false, .{ .wire = .{ .ssh = .{ .command = ssh_cmd } } })) |_| false else |_| true;
+    const wrong_repo_rejected = if (client.push(io, allocator, "other", "master:patch", false, .{ .wire = .{ .ssh = .{ .command = ssh_cmd } } })) |_| false else |_| true;
     try std.testing.expect(wrong_repo_rejected);
+
+    //
+    // the fork remains cloneable after the target repo is removed
+    //
 
     {
         var admin = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = admin_path });
         defer admin.deinit(io, allocator);
-        try evt.consume(.xit, evt.admin_repo_opts, io, allocator, &admin, evt.events_ref, &.{.{
-            .id = std.fmt.bytesToHex(user_id, .lower),
-            .timestamp = 2,
-            .author = .{ .name = "admin", .email = "admin@example.test" },
-            .event = .{ .user = .{
-                .name = "admin",
-                .email = "admin@example.test",
-                .password_hash = "",
-                .ssh_keys = "",
-            } },
-        }});
+        try evt.remove(.xit, evt.admin_repo_opts, io, allocator, &admin, &repo_id, .repo, .{ .name = "admin", .email = "admin@example.test" });
+    }
+    const clone_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "fork-clone" });
+    defer allocator.free(clone_path);
+    var fork_clone = try rp.Repo(.xit, .{ .is_test = true }).clone(
+        io,
+        allocator,
+        remote_url,
+        clone_path,
+        clone_path,
+        null,
+        .{ .wire = .{ .ssh = .{ .command = ssh_cmd } } },
+    );
+    defer fork_clone.deinit(io, allocator);
+    try std.testing.expectEqualStrings(&third_source_oid, &(try fork_clone.readRef(io, fork.ref) orelse return error.NotFound));
+
+    {
+        var admin = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = admin_path });
+        defer admin.deinit(io, allocator);
+        try evt.consume(.xit, evt.admin_repo_opts, io, allocator, &admin, evt.events_ref, &.{
+            .{
+                .id = std.fmt.bytesToHex(repo_id, .lower),
+                .timestamp = 2,
+                .author = .{ .name = "admin", .email = "admin@example.test" },
+                .event = .{ .repo = .{
+                    .user_id = &user_id,
+                    .name = "target",
+                    .description = "",
+                } },
+            },
+            .{
+                .id = std.fmt.bytesToHex(user_id, .lower),
+                .timestamp = 2,
+                .author = .{ .name = "admin", .email = "admin@example.test" },
+                .event = .{ .user = .{
+                    .name = "admin",
+                    .email = "admin@example.test",
+                    .password_hash = "",
+                    .ssh_keys = "",
+                } },
+            },
+        });
     }
 
     const denied_url = try std.fmt.allocPrint(allocator, "git@localhost:admin/target/patch:{s}/branch:denied", .{&fork_id_hex});
     defer allocator.free(denied_url);
     try client.addRemote(io, allocator, .{ .name = "denied", .value = denied_url });
-    const unauthorized_rejected = if (client.push(io, allocator, "denied", fork.ref.name, false, .{ .wire = .{ .ssh = .{ .command = ssh_cmd } } })) |_| false else |_| true;
+    const unauthorized_rejected = if (client.push(io, allocator, "denied", "master:patch", false, .{ .wire = .{ .ssh = .{ .command = ssh_cmd } } })) |_| false else |_| true;
     try std.testing.expect(unauthorized_rejected);
 }
 

@@ -5,8 +5,6 @@ const hash = xit.hash;
 
 user_id: []const u8,
 repo_id: []const u8,
-target: []const u8,
-source_oid: ?[]const u8 = null,
 
 // what the db stores: the event's data plus the commit-derived fields
 pub const Record = struct {
@@ -26,13 +24,6 @@ pub const repo_id_to_fork_id_set_key = "repo-id->fork-id-set";
 fn validate(record: Record) !void {
     if (record.event.user_id.len != evt.event_id_size) return error.InvalidUserId;
     if (record.event.repo_id.len != evt.event_id_size) return error.InvalidRepoId;
-    if (!xit.ref.validateName(record.event.target)) return error.InvalidTarget;
-    if (record.event.source_oid) |oid| {
-        if (oid.len == 0 or oid.len % 2 != 0) return error.InvalidSourceOid;
-        for (oid) |c| {
-            if (!std.ascii.isDigit(c) and !(c >= 'a' and c <= 'f')) return error.InvalidSourceOid;
-        }
-    }
 }
 
 pub fn consume(
@@ -66,6 +57,8 @@ pub fn consume(
     if (!record.removed) try validate(record);
 
     if (existing_maybe) |existing| {
+        if (!std.mem.eql(u8, existing.event.user_id, record.event.user_id) or
+            !std.mem.eql(u8, existing.event.repo_id, record.event.repo_id)) return error.ForkChanged;
         record.created_order = existing.created_order;
         if (!existing.removed) {
             const order_key = evt.orderKeyDesc(existing.created_order, event_id);

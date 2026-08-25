@@ -395,7 +395,9 @@ test "fork query and removal lifecycle" {
         .id = fork_id_hex,
         .user_id = user_id,
         .repo_id = repo_id,
-        .target = "master",
+        .title = "add a feature",
+        .description = "a draft patch",
+        .tags = "enhancement",
         .author = author,
         .timestamp = 2,
     });
@@ -407,24 +409,23 @@ test "fork query and removal lifecycle" {
     var record = (try evt.Fork.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, &arena, &fork_id)) orelse return error.NotFound;
     try std.testing.expectEqualSlices(u8, &user_id, record.event.user_id);
     try std.testing.expectEqualSlices(u8, &repo_id, record.event.repo_id);
-    try std.testing.expectEqualStrings("master", record.event.target);
-    try std.testing.expectEqual(null, record.event.source_oid);
     try std.testing.expectEqual(1, try indexedForkCount(moment, evt.Fork.user_id_to_fork_id_set_key, &user_id));
     try std.testing.expectEqual(1, try indexedForkCount(moment, evt.Fork.repo_id_to_fork_id_set_key, &repo_id));
 
-    const source_oid = "0123456789abcdef0123456789abcdef01234567";
-    try fork.recordPush(io, allocator, &admin, &fork_id_hex, "feature/topic", source_oid, author, 3);
-    _ = arena.reset(.retain_capacity);
-    moment = try evt.currentMoment(evt.admin_repo_opts, &admin);
-    record = (try evt.Fork.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, &arena, &fork_id)) orelse return error.NotFound;
-    try std.testing.expectEqualStrings("feature/topic", record.event.target);
-    try std.testing.expectEqualStrings(source_oid, record.event.source_oid orelse return error.NotFound);
+    var draft_repo = try rp.Repo(.xit, fork_repo_opts).open(io, allocator, .{ .path = draft_path });
+    defer draft_repo.deinit(io, allocator);
+    const draft_moment = try evt.currentMoment(fork_repo_opts, &draft_repo);
+    const draft = (try evt.Patch.readById(evt.EventDB(fork_repo_opts.hash), fork_repo_opts.hash, draft_moment, &arena, &fork_id)) orelse return error.NotFound;
+    try std.testing.expectEqualStrings("add a feature", draft.event.title);
+    try std.testing.expectEqual(null, draft.event.patchrev_id);
 
     const same_path = try fork.create(fork_repo_opts, io, allocator, repos_dir, &admin, .{
         .id = fork_id_hex,
         .user_id = user_id,
         .repo_id = repo_id,
-        .target = "feature/topic",
+        .title = "add a feature",
+        .description = "a draft patch",
+        .tags = "enhancement",
         .author = author,
         .timestamp = 4,
     });
@@ -451,7 +452,7 @@ test "fork query and removal lifecycle" {
 fn indexedForkCount(
     moment: evt.AdminDB.HashMap(.read_only),
     index_key: []const u8,
-    parent_id: *const [evt.event_id_size]u8,
+    parent_id: []const u8,
 ) !u64 {
     const index_cursor = try moment.getCursor(hash.hashInt(evt.admin_repo_opts.hash, index_key)) orelse return 0;
     const index = try evt.AdminDB.HashMap(.read_only).init(index_cursor);

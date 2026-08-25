@@ -5,8 +5,10 @@ const rp = xit.repo;
 const hash = xit.hash;
 const obj = xit.object;
 const mrg = xit.merge;
+const rf = xit.ref;
 
-pub const ref = xit.ref.Ref{ .kind = .head, .name = "patch" };
+pub const ref = rf.Ref{ .kind = .head, .name = "patch" };
+const ref_path = "refs/heads/patch";
 
 pub const Route = struct {
     identity: []const u8,
@@ -36,7 +38,9 @@ pub const CreateInput = struct {
     id: [evt.event_id_size * 2]u8,
     user_id: [evt.event_id_size]u8,
     repo_id: [evt.event_id_size]u8,
-    target: []const u8,
+    title: []const u8,
+    description: []const u8,
+    tags: []const u8,
     author: evt.CommitAuthor,
     timestamp: u64,
 };
@@ -49,13 +53,10 @@ pub fn create(
     admin_repo: *rp.Repo(.xit, evt.admin_repo_opts),
     input: CreateInput,
 ) ![]u8 {
+    if (!evt.Patch.fieldsValid(input.title, input.tags)) return error.InvalidPatch;
     const fork_id = try evt.parseEventId(&input.id);
-    if (!xit.ref.validateName(input.target)) return error.InvalidTarget;
-    const draft_path = try forkPath(allocator, repo_root_path, &input.id);
-    errdefer allocator.free(draft_path);
-
-    var created_repo = false;
-    errdefer if (created_repo) std.Io.Dir.cwd().deleteTree(io, draft_path) catch {};
+    const path = try forkPath(allocator, repo_root_path, &input.id);
+    errdefer allocator.free(path);
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -66,88 +67,270 @@ pub fn create(
         else => |other| return other,
     };
     if (existing) |record| {
-        if (!std.mem.eql(u8, record.event.user_id, &input.user_id) or
+        if (record.removed or
+            !std.mem.eql(u8, record.event.user_id, &input.user_id) or
             !std.mem.eql(u8, record.event.repo_id, &input.repo_id)) return error.InvalidPatchDraft;
     }
 
-    var source_oid: ?[]const u8 = null;
-    const draft_exists = if (std.Io.Dir.accessAbsolute(io, draft_path, .{}))
+    const path_exists = if (std.Io.Dir.accessAbsolute(io, path, .{}))
         true
     else |err| switch (err) {
         error.FileNotFound => false,
         else => |other| return other,
     };
-    if (draft_exists) {
-        if (existing == null) return error.InvalidPatchDraft;
-        if (existing) |record| {
-            if (!record.removed and std.mem.eql(u8, record.event.target, input.target)) source_oid = record.event.source_oid;
-        }
-    } else {
-        try std.Io.Dir.cwd().createDirPath(io, std.fs.path.dirname(draft_path) orelse return error.InvalidPatchDraft);
-        created_repo = true;
-        var repo = try rp.Repo(.xit, repo_opts).init(io, allocator, .{ .path = draft_path, .create_default_branch = ref.name });
+    if (existing != null and !path_exists) return error.PatchDataUnavailable;
+    if (existing == null and path_exists) return error.InvalidPatchDraft;
+
+    if (path_exists) {
+        var repo = try rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = path });
         defer repo.deinit(io, allocator);
-        try repo.addConfig(io, allocator, .{ .name = "receive.denycurrentbranch", .value = "updateinstead" });
+        const moment = try evt.currentMoment(repo_opts, &repo);
+        const patch = (try evt.Patch.readById(evt.EventDB(repo_opts.hash), repo_opts.hash, moment, &arena, &fork_id)) orelse return error.InvalidPatchDraft;
+        if (patch.removed or
+            !std.mem.eql(u8, patch.event.title, input.title) or
+            !std.mem.eql(u8, patch.event.description, input.description) or
+            !std.mem.eql(u8, patch.event.tags, input.tags)) return error.InvalidPatchDraft;
+        return path;
     }
 
-    const unchanged = if (existing) |record|
-        !record.removed and std.mem.eql(u8, record.event.target, input.target) and
-            evt.fieldEqual(?[]const u8, record.event.source_oid, source_oid)
-    else
-        false;
-    if (!unchanged) {
-        try evt.consume(.xit, evt.admin_repo_opts, io, allocator, admin_repo, evt.events_ref, &.{.{
-            .id = input.id,
-            .timestamp = input.timestamp,
-            .author = input.author,
-            .event = .{ .fork = .{
-                .user_id = &input.user_id,
-                .repo_id = &input.repo_id,
-                .target = input.target,
-                .source_oid = source_oid,
-            } },
-        }});
-    }
-    return draft_path;
+    try std.Io.Dir.cwd().createDirPath(io, std.fs.path.dirname(path) orelse return error.InvalidPatchDraft);
+    errdefer std.Io.Dir.cwd().deleteTree(io, path) catch {};
+    var repo = try rp.Repo(.xit, repo_opts).init(io, allocator, .{ .path = path, .create_default_branch = ref.name });
+    defer repo.deinit(io, allocator);
+    try repo.addConfig(io, allocator, .{ .name = "receive.denycurrentbranch", .value = "updateinstead" });
+    try repo.addConfig(io, allocator, .{ .name = "receive.denydeletes", .value = "true" });
+
+    try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &.{.{
+        .id = input.id,
+        .timestamp = input.timestamp,
+        .author = input.author,
+        .event = .{ .patch = .{
+            .title = input.title,
+            .description = input.description,
+            .tags = input.tags,
+        } },
+    }});
+    try evt.consume(.xit, evt.admin_repo_opts, io, allocator, admin_repo, evt.events_ref, &.{.{
+        .id = input.id,
+        .timestamp = input.timestamp,
+        .author = input.author,
+        .event = .{ .fork = .{
+            .user_id = &input.user_id,
+            .repo_id = &input.repo_id,
+        } },
+    }});
+    return path;
 }
 
-pub fn recordPush(
+pub fn receivePack(
+    comptime repo_opts: rp.RepoOpts(.xit),
     io: std.Io,
     allocator: std.mem.Allocator,
-    admin_repo: *rp.Repo(.xit, evt.admin_repo_opts),
+    fork_repo: *rp.Repo(.xit, repo_opts),
+    target_repo: *rp.Repo(.xit, repo_opts),
     id: *const [evt.event_id_size * 2]u8,
-    target: []const u8,
-    source_oid: []const u8,
+    target_branch: []const u8,
     author: evt.CommitAuthor,
     timestamp: u64,
+    reader: *std.Io.Reader,
+    writer: *std.Io.Writer,
 ) !void {
-    const fork_id = try evt.parseEventId(id);
-    if (!xit.ref.validateName(target)) return error.InvalidTarget;
+    if (!rf.validateName(target_branch)) return error.InvalidTarget;
+    const patch_id = try evt.parseEventId(id);
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    const moment = try evt.currentMoment(evt.admin_repo_opts, admin_repo);
-    const record = (try evt.Fork.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, &arena, &fork_id)) orelse return error.InvalidPatchDraft;
-    if (record.removed) return error.InvalidPatchDraft;
-    try evt.consume(.xit, evt.admin_repo_opts, io, allocator, admin_repo, evt.events_ref, &.{.{
+
+    const fork_moment = evt.currentMoment(repo_opts, fork_repo) catch return error.PatchDataUnavailable;
+    const fork_patch = (try evt.Patch.readById(evt.EventDB(repo_opts.hash), repo_opts.hash, fork_moment, &arena, &patch_id)) orelse return error.PatchDataUnavailable;
+
+    const target_moment = evt.currentMoment(repo_opts, target_repo) catch |err| switch (err) {
+        error.NotFound => null,
+        else => |other| return other,
+    };
+    const target_patch = if (target_moment) |moment|
+        try evt.Patch.readById(evt.EventDB(repo_opts.hash), repo_opts.hash, moment, &arena, &patch_id)
+    else
+        null;
+    if (fork_patch.removed and target_patch == null) return error.PatchDataUnavailable;
+    if (target_patch) |patch| {
+        if (!std.mem.eql(u8, patch.author_email orelse "", author.email)) return error.PatchDataUnavailable;
+    }
+    const published = target_patch != null;
+    const title = if (target_patch) |patch| patch.event.title else fork_patch.event.title;
+
+    const target_oid = (try target_repo.readRef(io, .{ .kind = .head, .name = target_branch })) orelse return error.TargetNotFound;
+    const newest = try evt.PatchRev.readNewest(evt.EventDB(repo_opts.hash), repo_opts.hash, fork_moment, &arena);
+    const target_ref = try std.fmt.allocPrint(arena.allocator(), "refs/heads/{s}", .{target_branch});
+    var revision_id_maybe: ?[evt.event_id_size]u8 = null;
+
+    const DB = rp.Repo(.xit, repo_opts).DB;
+    const State = rp.Repo(.xit, repo_opts).State;
+    const Ctx = struct {
+        core: *rp.Repo(.xit, repo_opts).Core,
+        target_core: *rp.Repo(.xit, repo_opts).Core,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        reader: *std.Io.Reader,
+        writer: *std.Io.Writer,
+        patch_id: [evt.event_id_size * 2]u8,
+        patch: evt.Patch.Record,
+        published: bool,
+        target_oid: [hash.hexLen(repo_opts.hash)]u8,
+        target_ref: []const u8,
+        title: []const u8,
+        author: evt.CommitAuthor,
+        timestamp: u64,
+        newest: ?evt.PatchRev.WithId,
+        revision_id_maybe: *?[evt.event_id_size]u8,
+
+        pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
+            var moment = try DB.HashMap(.read_write).init(cursor.*);
+            const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
+            try xit.net_server_receive_pack.run(.xit, repo_opts, state, ctx.io, ctx.allocator, ctx.reader, ctx.writer, .{ .allowed_ref = ref_path });
+
+            const source_oid = (try rf.readRecur(.xit, repo_opts, state.readOnly(), ctx.io, .{ .ref = ref })) orelse return error.CancelTransaction;
+            var target_repo_moment = try ctx.target_core.latestMoment();
+            const target_state = State(.read_only){ .core = ctx.target_core, .extra = .{ .moment = &target_repo_moment } };
+            var objects = try obj.ObjectIterator(.xit, repo_opts).init(target_state, ctx.io, ctx.allocator, .{ .kind = .all });
+            defer objects.deinit();
+            try objects.include(&ctx.target_oid);
+            try obj.copyFromObjectIterator(.xit, repo_opts, state, .xit, repo_opts, &objects, ctx.io, null);
+
+            const base_oid = try mrg.commonAncestor(.xit, repo_opts, state.readOnly(), ctx.io, ctx.allocator, &ctx.target_oid, &source_oid);
+            const existing_revision = if (ctx.newest) |latest|
+                if (std.mem.eql(u8, latest.record.event.base_oid, &base_oid) and
+                    std.mem.eql(u8, latest.record.event.source_oid, &source_oid) and
+                    std.mem.eql(u8, latest.record.event.target_ref, ctx.target_ref)) latest else null
+            else
+                null;
+
+            var events: [2]evt.EventWithId = undefined;
+            var event_count: usize = 0;
+            var base_tree_oid: [hash.hexLen(repo_opts.hash)]u8 = undefined;
+            var head_tree_oid: [hash.hexLen(repo_opts.hash)]u8 = undefined;
+            var tree_entries: [2]evt.EventTreeEntry = undefined;
+            if (existing_revision) |latest| {
+                if (ctx.published) ctx.revision_id_maybe.* = latest.id;
+            } else {
+                var base_object = try obj.Object(.xit, repo_opts).initCommit(state.readOnly(), ctx.io, ctx.allocator, &base_oid);
+                defer base_object.deinit();
+                var source_object = try obj.Object(.xit, repo_opts).initCommit(state.readOnly(), ctx.io, ctx.allocator, &source_oid);
+                defer source_object.deinit();
+                base_tree_oid = base_object.content.commit.tree;
+                head_tree_oid = source_object.content.commit.tree;
+
+                var revision_id: [evt.event_id_size]u8 = undefined;
+                ctx.io.random(&revision_id);
+                const revision_hex = std.fmt.bytesToHex(revision_id, .lower);
+                tree_entries = .{
+                    .{ .tree = .{ .name = "base", .oid = &base_tree_oid } },
+                    .{ .tree = .{ .name = "head", .oid = &head_tree_oid } },
+                };
+                events[event_count] = .{
+                    .id = revision_hex,
+                    .timestamp = ctx.timestamp,
+                    .author = ctx.author,
+                    .tree_entries = &tree_entries,
+                    .event = .{ .patchrev = .{
+                        .base_oid = &base_oid,
+                        .source_oid = &source_oid,
+                        .target_ref = ctx.target_ref,
+                        .message = ctx.title,
+                    } },
+                };
+                event_count += 1;
+                ctx.revision_id_maybe.* = revision_id;
+
+                if (!ctx.published) {
+                    events[event_count] = .{
+                        .id = ctx.patch_id,
+                        .timestamp = ctx.timestamp,
+                        .author = ctx.author,
+                        .event = .{ .patch = .{
+                            .title = ctx.patch.event.title,
+                            .description = ctx.patch.event.description,
+                            .tags = ctx.patch.event.tags,
+                            .target_patch_id = ctx.patch.event.target_patch_id,
+                            .patchrev_id = revision_hex,
+                        } },
+                    };
+                    event_count += 1;
+                }
+            }
+
+            if (ctx.published and !ctx.patch.removed) {
+                events[event_count] = .{
+                    .id = ctx.patch_id,
+                    .timestamp = ctx.timestamp,
+                    .author = ctx.author,
+                    .event = .{ .patch = null },
+                };
+                event_count += 1;
+            }
+            if (event_count > 0) {
+                try evt.commitEvents(.xit, repo_opts, state, ctx.io, ctx.allocator, evt.events_ref, events[0..event_count], null);
+                if (!try evt.consumeInTransaction(.xit, repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, evt.events_ref)) return error.CancelTransaction;
+            }
+            try xit.undo.writeMessage(repo_opts, state, .push);
+            try ctx.core.chunk_store_file.sync(ctx.io);
+        }
+    };
+
+    try fork_repo.core.db_file.lock(io, .exclusive);
+    defer fork_repo.core.db_file.unlock(io);
+    const history = try DB.ArrayList(.read_write).init(fork_repo.core.db.rootCursor());
+    history.appendContext(.{ .slot = try history.getSlot(-1) }, Ctx{
+        .core = &fork_repo.core,
+        .target_core = &target_repo.core,
+        .io = io,
+        .allocator = allocator,
+        .reader = reader,
+        .writer = writer,
+        .patch_id = id.*,
+        .patch = fork_patch,
+        .published = published,
+        .target_oid = target_oid,
+        .target_ref = target_ref,
+        .title = title,
+        .author = author,
+        .timestamp = timestamp,
+        .newest = newest,
+        .revision_id_maybe = &revision_id_maybe,
+    }) catch |err| switch (err) {
+        error.CancelTransaction => {},
+        else => |other| return other,
+    };
+    try writer.flush();
+
+    const revision_id = revision_id_maybe orelse return;
+    if (!published) return;
+    var update_arena = std.heap.ArenaAllocator.init(allocator);
+    defer update_arena.deinit();
+    const update_moment = evt.currentMoment(repo_opts, target_repo) catch return;
+    const published_patch = (evt.Patch.readById(evt.EventDB(repo_opts.hash), repo_opts.hash, update_moment, &update_arena, &patch_id) catch return) orelse return;
+    if (published_patch.removed) return;
+    const revision_hex = std.fmt.bytesToHex(revision_id, .lower);
+    if (published_patch.event.patchrev_id) |*published_revision| {
+        if (std.mem.eql(u8, published_revision, &revision_hex)) return;
+    }
+    evt.consume(.xit, repo_opts, io, allocator, target_repo, evt.events_ref, &.{.{
         .id = id.*,
         .timestamp = timestamp,
         .author = author,
-        .event = .{ .fork = .{
-            .user_id = record.event.user_id,
-            .repo_id = record.event.repo_id,
-            .target = target,
-            .source_oid = source_oid,
+        .event = .{ .patch = .{
+            .title = published_patch.event.title,
+            .description = published_patch.event.description,
+            .tags = published_patch.event.tags,
+            .target_patch_id = published_patch.event.target_patch_id,
+            .patchrev_id = revision_hex,
         } },
-    }});
+    }}) catch {};
 }
 
 pub const PublishInput = struct {
     id: [evt.event_id_size * 2]u8,
     user_id: [evt.event_id_size]u8,
     repo_id: [evt.event_id_size]u8,
-    title: []const u8,
-    tags: []const u8,
-    description: []const u8,
     author: evt.CommitAuthor,
     timestamp: u64,
 };
@@ -158,106 +341,69 @@ pub fn publish(
     allocator: std.mem.Allocator,
     admin_repo: *rp.Repo(.xit, evt.admin_repo_opts),
     target_repo: *rp.Repo(.xit, repo_opts),
-    draft_path: []const u8,
+    path: []const u8,
     input: PublishInput,
 ) !void {
-    if (!evt.Patch.fieldsValid(input.title, input.tags)) return error.InvalidPatch;
     const patch_id = try evt.parseEventId(&input.id);
-
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
+
     const admin_moment = try evt.currentMoment(evt.admin_repo_opts, admin_repo);
     const fork_record = (try evt.Fork.readById(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &arena, &patch_id)) orelse return error.InvalidPatchDraft;
     if (fork_record.removed or
         !std.mem.eql(u8, fork_record.event.user_id, &input.user_id) or
         !std.mem.eql(u8, fork_record.event.repo_id, &input.repo_id)) return error.InvalidPatchDraft;
     const user = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &arena, &input.user_id)) orelse return error.InvalidPatchDraft;
-    if (user.removed or !std.mem.eql(u8, user.event.name, input.author.name) or !std.mem.eql(u8, user.event.email, input.author.email)) return error.InvalidPatchDraft;
-    const target_name = fork_record.event.target;
-    const recorded_source_oid = fork_record.event.source_oid orelse return error.PatchNotPushed;
+    if (user.removed or
+        !std.mem.eql(u8, user.event.name, input.author.name) or
+        !std.mem.eql(u8, user.event.email, input.author.email)) return error.InvalidPatchDraft;
 
-    const moment_maybe = evt.currentMoment(repo_opts, target_repo) catch |err| switch (err) {
+    var fork_repo = rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = path }) catch return error.PatchDataUnavailable;
+    defer fork_repo.deinit(io, allocator);
+    const fork_moment = evt.currentMoment(repo_opts, &fork_repo) catch return error.PatchDataUnavailable;
+    const local_patch = (try evt.Patch.readById(evt.EventDB(repo_opts.hash), repo_opts.hash, fork_moment, &arena, &patch_id)) orelse return error.PatchDataUnavailable;
+
+    const target_moment = evt.currentMoment(repo_opts, target_repo) catch |err| switch (err) {
         error.NotFound => null,
         else => |other| return other,
     };
-    const existing = if (moment_maybe) |moment| try evt.Patch.readById(evt.EventDB(repo_opts.hash), repo_opts.hash, moment, &arena, &patch_id) else null;
+    const existing = if (target_moment) |moment|
+        try evt.Patch.readById(evt.EventDB(repo_opts.hash), repo_opts.hash, moment, &arena, &patch_id)
+    else
+        null;
     if (existing) |record| {
         if (record.removed or !std.mem.eql(u8, record.author_email orelse "", input.author.email)) return error.InvalidPatch;
     }
-
-    var stage = try rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = draft_path });
-    defer stage.deinit(io, allocator);
-    const source_oid = (try stage.readRef(io, ref)) orelse return error.PatchNotPushed;
-    if (!std.mem.eql(u8, recorded_source_oid, &source_oid)) return error.InvalidPatchDraft;
-
-    const target_oid = (try target_repo.readRef(io, .{ .kind = .head, .name = target_name })) orelse return error.TargetNotFound;
-    var stage_moment = try stage.core.latestMoment();
-    const stage_state = rp.Repo(.xit, repo_opts).State(.read_only){ .core = &stage.core, .extra = .{ .moment = &stage_moment } };
-    var objects = try obj.ObjectIterator(.xit, repo_opts).init(stage_state, io, allocator, .{ .kind = .all });
-    defer objects.deinit();
-    try objects.include(&source_oid);
-    try target_repo.copyObjects(.xit, repo_opts, &objects, io, null);
-
-    var target_moment = try target_repo.core.latestMoment();
-    const target_state = rp.Repo(.xit, repo_opts).State(.read_only){ .core = &target_repo.core, .extra = .{ .moment = &target_moment } };
-    const base_oid = try mrg.commonAncestor(.xit, repo_opts, target_state, io, allocator, &target_oid, &source_oid);
-    var base_object = try obj.Object(.xit, repo_opts).initCommit(target_state, io, allocator, &base_oid);
-    defer base_object.deinit();
-    var source_object = try obj.Object(.xit, repo_opts).initCommit(target_state, io, allocator, &source_oid);
-    defer source_object.deinit();
-    const base_tree_oid = base_object.content.commit.tree;
-    const head_tree_oid = source_object.content.commit.tree;
-
-    var message: std.ArrayList(u8) = .empty;
-    defer message.deinit(allocator);
-    try source_object.readMessage(allocator, &message, .limited(10_000));
-
-    const target_ref = try std.fmt.allocPrint(arena.allocator(), "refs/heads/{s}", .{target_name});
-    var revision_changed = true;
-    var patchrev_id: [evt.event_id_size]u8 = undefined;
-    if (existing) |record| {
-        patchrev_id = try evt.parseEventId(&record.event.patchrev_id);
-        if (std.mem.eql(u8, record.event.target_ref, target_ref)) {
-            const moment = moment_maybe orelse return error.PatchNotFound;
-            if (try evt.PatchRev.readById(evt.EventDB(repo_opts.hash), repo_opts.hash, moment, &arena, &patchrev_id)) |revision| {
-                revision_changed = !std.mem.eql(u8, revision.event.base_oid, &base_oid) or !std.mem.eql(u8, revision.event.source_oid, &source_oid);
-            }
-        }
+    if (local_patch.removed) {
+        if (existing == null) return error.PatchDataUnavailable;
+        return;
     }
-    if (revision_changed) io.random(&patchrev_id);
-    const patchrev_hex = std.fmt.bytesToHex(patchrev_id, .lower);
 
-    const tree_entries = [_]evt.EventTreeEntry{
-        .{ .tree = .{ .name = "base", .oid = &base_tree_oid } },
-        .{ .tree = .{ .name = "head", .oid = &head_tree_oid } },
-    };
-    const patch_event = evt.EventWithId{
+    const revision_hex = local_patch.event.patchrev_id orelse return error.PatchNotPushed;
+    const revision_id = try evt.parseEventId(&revision_hex);
+    const revision = (try evt.PatchRev.readById(evt.EventDB(repo_opts.hash), repo_opts.hash, fork_moment, &arena, &revision_id)) orelse return error.PatchNotPushed;
+    if (revision.removed) return error.PatchNotPushed;
+    const metadata = existing orelse local_patch;
+
+    try evt.consume(.xit, repo_opts, io, allocator, target_repo, evt.events_ref, &.{.{
         .id = input.id,
         .timestamp = input.timestamp,
         .author = input.author,
         .event = .{ .patch = .{
-            .title = input.title,
-            .description = input.description,
-            .tags = input.tags,
-            .target_ref = target_ref,
-            .target_patch_id = if (existing) |record| record.event.target_patch_id else null,
-            .patchrev_id = patchrev_hex,
+            .title = metadata.event.title,
+            .description = metadata.event.description,
+            .tags = metadata.event.tags,
+            .target_patch_id = metadata.event.target_patch_id,
+            .patchrev_id = revision_hex,
         } },
-    };
-    if (revision_changed) {
-        try evt.consume(.xit, repo_opts, io, allocator, target_repo, evt.events_ref, &.{
-            .{
-                .id = patchrev_hex,
-                .timestamp = input.timestamp,
-                .author = input.author,
-                .tree_entries = &tree_entries,
-                .event = .{ .patchrev = .{ .base_oid = &base_oid, .source_oid = &source_oid, .message = message.items } },
-            },
-            patch_event,
-        });
-    } else {
-        try evt.consume(.xit, repo_opts, io, allocator, target_repo, evt.events_ref, &.{patch_event});
-    }
+    }});
+
+    try evt.consume(.xit, repo_opts, io, allocator, &fork_repo, evt.events_ref, &.{.{
+        .id = input.id,
+        .timestamp = input.timestamp,
+        .author = input.author,
+        .event = .{ .patch = null },
+    }});
 }
 
 // delete first so a failed tombstone can be retried safely
@@ -277,8 +423,8 @@ pub fn remove(
     const record = (try evt.Fork.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, &arena, &fork_id)) orelse return error.InvalidPatchDraft;
     if (!std.mem.eql(u8, record.event.user_id, user_id)) return error.InvalidPatchDraft;
 
-    const draft_path = try forkPath(allocator, repo_root_path, id);
-    defer allocator.free(draft_path);
-    try std.Io.Dir.cwd().deleteTree(io, draft_path);
+    const path = try forkPath(allocator, repo_root_path, id);
+    defer allocator.free(path);
+    try std.Io.Dir.cwd().deleteTree(io, path);
     if (!record.removed) try evt.remove(.xit, evt.admin_repo_opts, io, allocator, admin_repo, &fork_id, .fork, author);
 }

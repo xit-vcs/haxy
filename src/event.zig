@@ -477,7 +477,7 @@ fn commitIdentity(line: []const u8) ![]const u8 {
 
 // commit each event as a JSON commit message on `ref` through `state`, so a
 // xit repo can write them inside an already-open transaction
-fn commitEvents(
+pub fn commitEvents(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     state: rp.Repo(repo_kind, repo_opts).State(.read_write),
@@ -963,6 +963,7 @@ pub fn consumeInTransaction(
                     const record_maybe: ?PatchRev.Record = if (event_maybe) |event| blk: {
                         const trees = try PatchRev.readTrees(repo_kind, repo_opts, read_state, io, allocator, &commit_object.content.commit.tree);
                         const existing_maybe = try PatchRev.readById(DB, repo_opts.hash, haxy_moment.readOnly(), &arena, &current_event_id);
+                        const event_oid = std.fmt.bytesToHex(repo_event_oid, .lower);
 
                         var patch_oid: [hash.hexLen(repo_opts.hash)]u8 = undefined;
                         if (existing_maybe) |existing| {
@@ -991,6 +992,7 @@ pub fn consumeInTransaction(
                             .event = event,
                             .author_email = authorEmail(commit_object.content.commit.metadata.author orelse ""),
                             .created_order = event_order,
+                            .event_oid = &event_oid,
                             .base_tree_oid = &trees.base,
                             .head_tree_oid = &trees.head,
                             .patch_oid = &patch_oid,
