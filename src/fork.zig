@@ -100,7 +100,7 @@ pub fn create(
     try repo.addConfig(io, allocator, .{ .name = "receive.denycurrentbranch", .value = "updateinstead" });
     try repo.addConfig(io, allocator, .{ .name = "receive.denydeletes", .value = "true" });
 
-    try evt.consume(.xit, repo_opts, io, allocator, &repo, evt.events_ref, &.{.{
+    try evt.consume(.fork, .xit, repo_opts, io, allocator, &repo, evt.events_ref, &.{.{
         .id = input.id,
         .timestamp = input.timestamp,
         .author = input.author,
@@ -110,7 +110,7 @@ pub fn create(
             .tags = input.tags,
         } },
     }});
-    try evt.consume(.xit, evt.admin_repo_opts, io, allocator, admin_repo, evt.events_ref, &.{.{
+    try evt.consume(.admin, .xit, evt.admin_repo_opts, io, allocator, admin_repo, evt.events_ref, &.{.{
         .id = input.id,
         .timestamp = input.timestamp,
         .author = input.author,
@@ -269,7 +269,7 @@ pub fn receivePack(
             }
             if (event_count > 0) {
                 try evt.commitEvents(.xit, repo_opts, state, ctx.io, ctx.allocator, evt.events_ref, events[0..event_count], null);
-                if (!try evt.consumeInTransaction(.xit, repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, evt.events_ref)) return error.CancelTransaction;
+                if (!try evt.consumeInTransaction(.fork, .xit, repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, evt.events_ref)) return error.CancelTransaction;
             }
             try xit.undo.writeMessage(repo_opts, state, .push);
             try ctx.core.chunk_store_file.sync(ctx.io);
@@ -313,7 +313,7 @@ pub fn receivePack(
     if (published_patch.event.patchrev_id) |*published_revision| {
         if (std.mem.eql(u8, published_revision, &revision_hex)) return;
     }
-    evt.consume(.xit, repo_opts, io, allocator, target_repo, evt.events_ref, &.{.{
+    evt.consume(.repo, .xit, repo_opts, io, allocator, target_repo, evt.events_ref, &.{.{
         .id = id.*,
         .timestamp = timestamp,
         .author = author,
@@ -385,7 +385,7 @@ pub fn publish(
     if (revision.removed) return error.PatchNotPushed;
     const metadata = existing orelse local_patch;
 
-    try evt.consume(.xit, repo_opts, io, allocator, target_repo, evt.events_ref, &.{.{
+    try evt.consume(.repo, .xit, repo_opts, io, allocator, target_repo, evt.events_ref, &.{.{
         .id = input.id,
         .timestamp = input.timestamp,
         .author = input.author,
@@ -398,7 +398,7 @@ pub fn publish(
         } },
     }});
 
-    try evt.consume(.xit, repo_opts, io, allocator, &fork_repo, evt.events_ref, &.{.{
+    try evt.consume(.fork, .xit, repo_opts, io, allocator, &fork_repo, evt.events_ref, &.{.{
         .id = input.id,
         .timestamp = input.timestamp,
         .author = input.author,
@@ -426,5 +426,5 @@ pub fn remove(
     const path = try forkPath(allocator, repo_root_path, id);
     defer allocator.free(path);
     try std.Io.Dir.cwd().deleteTree(io, path);
-    if (!record.removed) try evt.remove(.xit, evt.admin_repo_opts, io, allocator, admin_repo, &fork_id, .fork, author);
+    if (!record.removed) try evt.remove(.admin, .xit, evt.admin_repo_opts, io, allocator, admin_repo, &fork_id, .fork, author);
 }

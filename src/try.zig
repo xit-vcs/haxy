@@ -228,7 +228,7 @@ pub fn main(init: std.process.Init) !void {
         }
 
         // commit the seed events and consume them into the database
-        try evt.consume(.xit, evt.admin_repo_opts, io, allocator, &repo, evt.events_ref, &events_to_consume);
+        try evt.consume(.admin, .xit, evt.admin_repo_opts, io, allocator, &repo, evt.events_ref, &events_to_consume);
 
         // every repo gets the same generated history, so build it once into a
         // template repo and copy that to each repo's location below rather than
@@ -581,7 +581,7 @@ pub fn main(init: std.process.Init) !void {
                     },
                 };
             }
-            try evt.consume(.xit, .{}, io, allocator, &template_repo, evt.events_ref, &issue_events);
+            try evt.consume(.repo, .xit, .{}, io, allocator, &template_repo, evt.events_ref, &issue_events);
             // the tip is the branch point for the conflicting edits below
             const seed_tip = (try template_repo.readRef(io, evt.events_ref)) orelse unreachable;
 
@@ -661,7 +661,7 @@ pub fn main(init: std.process.Init) !void {
                     } },
                 } };
 
-                try evt.consume(.xit, .{}, io, allocator, &template_repo, evt.events_ref, &ours);
+                try evt.consume(.repo, .xit, .{}, io, allocator, &template_repo, evt.events_ref, &ours);
 
                 // consume can't root a new branch, so theirs commits by hand
                 var json: std.Io.Writer.Allocating = .init(allocator);
@@ -696,7 +696,7 @@ pub fn main(init: std.process.Init) !void {
                 try template_repo.removeBranch(io, .{ .name = other_ref.name });
             }
 
-            try evt.consume(.xit, .{}, io, allocator, &template_repo, evt.events_ref, &.{});
+            try evt.consume(.repo, .xit, .{}, io, allocator, &template_repo, evt.events_ref, &.{});
 
             // seed a small comment tree on the newest issue
             var comment_ids: [5][evt.event_id_size]u8 = undefined;
@@ -728,7 +728,7 @@ pub fn main(init: std.process.Init) !void {
                     } },
                 };
             }
-            try evt.consume(.xit, .{}, io, allocator, &template_repo, evt.events_ref, &comment_events);
+            try evt.consume(.repo, .xit, .{}, io, allocator, &template_repo, evt.events_ref, &comment_events);
 
             const discussion_data = [_]struct {
                 title: []const u8,
@@ -775,7 +775,7 @@ pub fn main(init: std.process.Init) !void {
                     } },
                 };
             }
-            try evt.consume(.xit, .{}, io, allocator, &template_repo, evt.events_ref, &discussion_events);
+            try evt.consume(.repo, .xit, .{}, io, allocator, &template_repo, evt.events_ref, &discussion_events);
 
             var discussion_comment_ids: [discussion_data.len][3][evt.event_id_size]u8 = undefined;
             for (&discussion_comment_ids) |*ids| {
@@ -804,7 +804,7 @@ pub fn main(init: std.process.Init) !void {
                     } },
                 };
             }
-            try evt.consume(.xit, .{}, io, allocator, &template_repo, evt.events_ref, &discussion_comment_events);
+            try evt.consume(.repo, .xit, .{}, io, allocator, &template_repo, evt.events_ref, &discussion_comment_events);
         }
 
         // copy the template to each repo's on-disk location, named by its

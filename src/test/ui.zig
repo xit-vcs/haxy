@@ -110,7 +110,7 @@ test "sync creates missing event branches and preserves head" {
         try local.addRemote(io, allocator, .{ .name = "origin", .value = remote_path });
 
         const id = [_]u8{1} ** evt.event_id_size;
-        try evt.consume(.git, .{}, io, allocator, &local, evt.events_ref, &.{.{
+        try evt.consume(.repo, .git, .{}, io, allocator, &local, evt.events_ref, &.{.{
             .id = std.fmt.bytesToHex(id, .lower),
             .author = .{ .name = "haxy", .email = "user@haxy" },
             .event = .{ .issue = .{ .title = "sync", .description = "", .tags = "" } },
@@ -122,7 +122,7 @@ test "sync creates missing event branches and preserves head" {
         var local = try Repo.open(io, allocator, .{ .path = local_path });
         defer local.deinit(io, allocator);
         const id = [_]u8{2} ** evt.event_id_size;
-        try evt.consume(.git, .{}, io, allocator, &local, evt.events_ref, &.{.{
+        try evt.consume(.repo, .git, .{}, io, allocator, &local, evt.events_ref, &.{.{
             .id = std.fmt.bytesToHex(id, .lower),
             .author = .{ .name = "haxy", .email = "user@haxy" },
             .event = .{ .issue = .{ .title = "local", .description = "", .tags = "" } },
@@ -132,7 +132,7 @@ test "sync creates missing event branches and preserves head" {
         var remote = try RemoteRepo.open(io, allocator, .{ .path = remote_path });
         defer remote.deinit(io, allocator);
         const id = [_]u8{3} ** evt.event_id_size;
-        try evt.consume(.git, .{}, io, allocator, &remote, evt.events_ref, &.{.{
+        try evt.consume(.repo, .git, .{}, io, allocator, &remote, evt.events_ref, &.{.{
             .id = std.fmt.bytesToHex(id, .lower),
             .author = .{ .name = "haxy", .email = "user@haxy" },
             .event = .{ .issue = .{ .title = "remote", .description = "", .tags = "" } },
@@ -143,7 +143,7 @@ test "sync creates missing event branches and preserves head" {
         var local = try Repo.open(io, allocator, .{ .path = local_path });
         defer local.deinit(io, allocator);
         try local.removeBranch(io, .{ .name = evt.events_ref.name });
-        try evt.consume(.git, .{}, io, allocator, &local, evt.events_ref, &.{});
+        try evt.consume(.repo, .git, .{}, io, allocator, &local, evt.events_ref, &.{});
     }
     try std.testing.expectEqual(null, try Events.sync(io, allocator, .{ .path = local_path, .repo_kind = .git }));
 

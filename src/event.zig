@@ -60,6 +60,29 @@ pub const EventKind = enum {
     patch,
 };
 
+pub const RepoRole = enum {
+    admin,
+    repo,
+    fork,
+
+    fn allows(self: RepoRole, kind: EventKind) bool {
+        return switch (self) {
+            .admin => switch (kind) {
+                .user, .repo, .fork => true,
+                else => false,
+            },
+            .repo => switch (kind) {
+                .issue, .discuss, .comment, .attach, .patchrev, .patch => true,
+                else => false,
+            },
+            .fork => switch (kind) {
+                .patchrev, .patch => true,
+                else => false,
+            },
+        };
+    }
+};
+
 // every logical event's kind and creation-ordered active/removed id sets
 pub const event_index_key = "event-id->kind";
 pub const active_event_id_set_key = "active-event-id-set";
@@ -209,6 +232,7 @@ pub const EventWithId = struct {
 
 // remove an event by emitting a null payload
 pub fn remove(
+    comptime role: RepoRole,
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     io: std.Io,
@@ -245,7 +269,7 @@ pub fn remove(
         .patchrev => .{ .patchrev = null },
         .patch => .{ .patch = null },
     };
-    try consume(repo_kind, repo_opts, io, allocator, repo, events_ref, &.{.{
+    try consume(role, repo_kind, repo_opts, io, allocator, repo, events_ref, &.{.{
         .id = std.fmt.bytesToHex(id.*, .lower),
         .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
         .author = author,
@@ -258,6 +282,7 @@ pub fn remove(
 // xit repo, or the standalone event db next to a git repo. for a xit repo the
 // commits and the consume run in one transaction.
 pub fn consume(
+    comptime role: RepoRole,
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     io: std.Io,
@@ -266,6 +291,10 @@ pub fn consume(
     ref: rf.Ref,
     events: []const EventWithId,
 ) !void {
+    for (events) |event| {
+        if (!role.allows(std.meta.activeTag(event.event))) return error.EventKindNotAllowed;
+    }
+
     var resolved_remote_name: ?[]u8 = null;
     defer if (resolved_remote_name) |name| allocator.free(name);
 
@@ -318,7 +347,7 @@ pub fn consume(
                     const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
 
                     try commitEvents(.xit, repo_opts, state, ctx.io, ctx.allocator, ctx.ref, ctx.events, ctx.first_parent_oids);
-                    if (!try consumeInTransaction(.xit, repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, ctx.ref)) return error.CancelTransaction;
+                    if (!try consumeInTransaction(role, .xit, repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, ctx.ref)) return error.CancelTransaction;
                     try xit.undo.writeMessage(repo_opts, state, .{ .custom = "event" });
 
                     // fsync the chunk store, so any chunks written by the
@@ -563,7 +592,7 @@ pub fn receivePackAndConsume(
             // no-op consume must not cancel here, since the push shares the
             // transaction and must commit regardless.
             if (null == try rf.readRecur(.xit, repo_opts, state.readOnly(), ctx.io, .{ .ref = events_ref })) return;
-            _ = try consumeInTransaction(.xit, repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, events_ref);
+            _ = try consumeInTransaction(.repo, .xit, repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, events_ref);
         }
     };
 
@@ -667,7 +696,7 @@ pub fn LocalEventDB(comptime hash_kind: hash.HashKind) type {
                 pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
                     var moment = try DB.HashMap(.read_write).init(cursor.*);
                     const state = rp.Repo(repo_kind, repo_opts).State(.read_write){ .core = &ctx.repo.core, .extra = .{} };
-                    if (!try consumeInTransaction(repo_kind, repo_opts, state, ctx.db, &moment, ctx.io, ctx.allocator, ctx.ref)) return error.CancelTransaction;
+                    if (!try consumeInTransaction(.repo, repo_kind, repo_opts, state, ctx.db, &moment, ctx.io, ctx.allocator, ctx.ref)) return error.CancelTransaction;
                 }
             };
 
@@ -691,6 +720,7 @@ pub fn LocalEventDB(comptime hash_kind: hash.HashKind) type {
 // needn't be the repo backing the db — that's how a local (possibly
 // git-backed) repo's events land in a standalone db.
 pub fn consumeInTransaction(
+    comptime role: RepoRole,
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     state: rp.Repo(repo_kind, repo_opts).State(.read_write),
@@ -903,6 +933,7 @@ pub fn consumeInTransaction(
             try commit_object.readMessage(arena.allocator(), &message, .limited(max_event_size));
 
             const event_with_id = try EventWithId.fromString(&arena, message.items);
+            if (!role.allows(std.meta.activeTag(event_with_id.event))) return error.EventKindNotAllowed;
 
             const current_event_id = try parseEventId(&event_with_id.id);
 
@@ -1528,7 +1559,7 @@ pub fn resolveOrCreateRepo(
     io.random(&id_bytes);
     const event_id_hex = std.fmt.bytesToHex(id_bytes, .lower);
 
-    try consume(.xit, admin_repo_opts, io, allocator, &repo, events_ref, &[_]EventWithId{.{
+    try consume(.admin, .xit, admin_repo_opts, io, allocator, &repo, events_ref, &[_]EventWithId{.{
         .id = event_id_hex,
         .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
         .author = .{ .name = owner.event.name, .email = owner.event.email },

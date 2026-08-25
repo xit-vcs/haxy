@@ -165,7 +165,7 @@ pub fn update(
     const discussion = (try readById(repo_kind, repo_opts, io, allocator, &arena, repo, id)) orelse return error.NotFound;
     if (discussion.removed) return error.NotFound;
 
-    try evt.consume(repo_kind, repo_opts, io, allocator, repo, evt.events_ref, &.{.{
+    try evt.consume(.repo, repo_kind, repo_opts, io, allocator, repo, evt.events_ref, &.{.{
         .id = std.fmt.bytesToHex(id.*, .lower),
         .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
         .author = author,

@@ -558,7 +558,7 @@ fn handleTopicNew(
             var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, source.localInitOpts());
             defer any_repo.deinit(io, allocator);
             switch (any_repo) {
-                inline else => |*repo| try evt.consume(repo_kind, repo.self_repo_opts, io, allocator, repo, evt.events_ref, &[_]evt.EventWithId{event}),
+                inline else => |*repo| try evt.consume(.repo, repo_kind, repo.self_repo_opts, io, allocator, repo, evt.events_ref, &[_]evt.EventWithId{event}),
             }
         },
     }
@@ -1031,7 +1031,7 @@ fn handleRemove(
             var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, source.localInitOpts());
             defer any_repo.deinit(io, allocator);
             switch (any_repo) {
-                inline else => |*repo| evt.remove(repo_kind, repo.self_repo_opts, io, allocator, repo, &parts.id, parts.kind, author) catch |err| switch (err) {
+                inline else => |*repo| evt.remove(.repo, repo_kind, repo.self_repo_opts, io, allocator, repo, &parts.id, parts.kind, author) catch |err| switch (err) {
                     error.EventNotFound => return respondRemoveNotFound(request),
                     else => |e| return e,
                 },

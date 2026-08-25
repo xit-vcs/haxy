@@ -798,11 +798,11 @@ pub fn sync(io: std.Io, allocator: std.mem.Allocator, source: ui.RepoSource) !?[
                     const local_oid = try repo.readRef(io, evt.events_ref);
                     const remote_oid = try repo.readRef(io, remote_ref);
                     if (local_oid == null and remote_oid == null) {
-                        try evt.consume(repo_kind, repo_opts, io, allocator, repo, evt.events_ref, &.{});
+                        try evt.consume(.repo, repo_kind, repo_opts, io, allocator, repo, evt.events_ref, &.{});
                         return null;
                     }
                     if (remote_oid != null) try evt.mergeEvents(repo_kind, repo_opts, io, allocator, repo, remote_ref);
-                    try evt.consume(repo_kind, repo_opts, io, allocator, repo, evt.events_ref, &.{});
+                    try evt.consume(.repo, repo_kind, repo_opts, io, allocator, repo, evt.events_ref, &.{});
 
                     const push_refspec = try std.fmt.allocPrint(allocator, "refs/heads/{s}:refs/heads/{s}", .{ evt.events_ref.name, evt.events_ref.name });
                     defer allocator.free(push_refspec);

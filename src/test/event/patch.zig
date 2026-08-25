@@ -122,7 +122,7 @@ test "patch event conflicts, stacking, and gc" {
     //
 
     {
-        try evt.consume(.xit, repo_opts, io, allocator, &target, evt.events_ref, &.{
+        try evt.consume(.repo, .xit, repo_opts, io, allocator, &target, evt.events_ref, &.{
             .{
                 .id = std.fmt.bytesToHex(patchrev_id, .lower),
                 .timestamp = 3,
@@ -177,7 +177,7 @@ test "patch event conflicts, stacking, and gc" {
     var updated_patch = patch;
     updated_patch.title = "add a reusable answer";
     {
-        try evt.consume(.xit, repo_opts, io, allocator, &target, evt.events_ref, &.{.{
+        try evt.consume(.repo, .xit, repo_opts, io, allocator, &target, evt.events_ref, &.{.{
             .id = std.fmt.bytesToHex(patch_id, .lower),
             .timestamp = 5,
             .author = author,
@@ -242,7 +242,7 @@ test "patch event conflicts, stacking, and gc" {
     var target_patch = updated_patch;
     target_patch.patchrev_id = std.fmt.bytesToHex(patchrev_a_id, .lower);
     {
-        try evt.consume(.xit, repo_opts, io, allocator, &target, evt.events_ref, &.{
+        try evt.consume(.repo, .xit, repo_opts, io, allocator, &target, evt.events_ref, &.{
             .{
                 .id = std.fmt.bytesToHex(patchrev_a_id, .lower),
                 .timestamp = 8,
@@ -271,7 +271,7 @@ test "patch event conflicts, stacking, and gc" {
     var parent_patch = updated_patch;
     parent_patch.patchrev_id = std.fmt.bytesToHex(patchrev_b_id, .lower);
     {
-        try evt.consume(.xit, repo_opts, io, allocator, &target, side_events_ref, &.{
+        try evt.consume(.repo, .xit, repo_opts, io, allocator, &target, side_events_ref, &.{
             .{
                 .id = std.fmt.bytesToHex(patchrev_b_id, .lower),
                 .timestamp = 10,
@@ -294,7 +294,7 @@ test "patch event conflicts, stacking, and gc" {
 
     {
         try evt.mergeEvents(.xit, repo_opts, io, allocator, &target, side_events_ref);
-        try evt.consume(.xit, repo_opts, io, allocator, &target, evt.events_ref, &.{});
+        try evt.consume(.repo, .xit, repo_opts, io, allocator, &target, evt.events_ref, &.{});
     }
 
     //
@@ -330,7 +330,7 @@ test "patch event conflicts, stacking, and gc" {
         .{ .tree = .{ .name = "head", .oid = &source_b_tree } },
     };
     {
-        try evt.consume(.xit, repo_opts, io, allocator, &target, evt.events_ref, &.{
+        try evt.consume(.repo, .xit, repo_opts, io, allocator, &target, evt.events_ref, &.{
             .{
                 .id = std.fmt.bytesToHex(child_patchrev_id, .lower),
                 .timestamp = 12,
@@ -438,7 +438,7 @@ test "patch lifecycle" {
 
     var admin = try rp.Repo(.xit, evt.admin_repo_opts).init(io, allocator, .{ .path = admin_path });
     defer admin.deinit(io, allocator);
-    try evt.consume(.xit, evt.admin_repo_opts, io, allocator, &admin, evt.events_ref, &.{
+    try evt.consume(.admin, .xit, evt.admin_repo_opts, io, allocator, &admin, evt.events_ref, &.{
         .{
             .id = std.fmt.bytesToHex(user_id, .lower),
             .timestamp = 1,
@@ -536,7 +536,7 @@ test "patch lifecycle" {
         defer objects.deinit();
         try objects.include(&source_oid);
         try draft.copyObjects(.xit, repo_opts, &objects, io, null);
-        try evt.consume(.xit, repo_opts, io, allocator, &draft, evt.events_ref, &.{
+        try evt.consume(.fork, .xit, repo_opts, io, allocator, &draft, evt.events_ref, &.{
             .{
                 .id = first_patchrev_hex,
                 .timestamp = 3,
