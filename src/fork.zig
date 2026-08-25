@@ -8,9 +8,6 @@ const mrg = xit.merge;
 
 pub const ref = xit.ref.Ref{ .kind = .head, .name = "patch" };
 
-const author_config = "haxy.author";
-const target_config = "haxy.target";
-
 pub const Route = struct {
     identity: []const u8,
     id: [evt.event_id_size * 2]u8,
@@ -35,80 +32,119 @@ pub fn forkPath(allocator: std.mem.Allocator, repo_root_path: []const u8, id: []
     return try std.fs.path.join(allocator, &.{ std.fs.path.dirname(repo_root_path) orelse ".", "forks", id });
 }
 
+pub const CreateInput = struct {
+    id: [evt.event_id_size * 2]u8,
+    user_id: [evt.event_id_size]u8,
+    repo_id: [evt.event_id_size]u8,
+    target: []const u8,
+    author: evt.CommitAuthor,
+    timestamp: u64,
+};
+
 pub fn create(
     comptime repo_opts: rp.RepoOpts(.xit),
     io: std.Io,
     allocator: std.mem.Allocator,
     repo_root_path: []const u8,
-    id: []const u8,
-    author_name: []const u8,
+    admin_repo: *rp.Repo(.xit, evt.admin_repo_opts),
+    input: CreateInput,
 ) ![]u8 {
-    const draft_path = try forkPath(allocator, repo_root_path, id);
+    const fork_id = try evt.parseEventId(&input.id);
+    if (!xit.ref.validateName(input.target)) return error.InvalidTarget;
+    const draft_path = try forkPath(allocator, repo_root_path, &input.id);
     errdefer allocator.free(draft_path);
 
-    if (std.Io.Dir.accessAbsolute(io, draft_path, .{})) {
-        var repo = try rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = draft_path });
-        defer repo.deinit(io, allocator);
-        const stored = try draftAuthor(repo_opts, &repo, io, allocator);
-        defer if (stored) |value| allocator.free(value);
-        const stored_author = stored orelse return error.InvalidPatchDraft;
-        if (!std.mem.eql(u8, stored_author, author_name)) return error.InvalidPatchDraft;
-        return draft_path;
-    } else |_| {}
+    var created_repo = false;
+    errdefer if (created_repo) std.Io.Dir.cwd().deleteTree(io, draft_path) catch {};
 
-    try std.Io.Dir.cwd().createDirPath(io, std.fs.path.dirname(draft_path) orelse return error.InvalidPatchDraft);
-    var repo = try rp.Repo(.xit, repo_opts).init(io, allocator, .{ .path = draft_path, .create_default_branch = ref.name });
-    defer repo.deinit(io, allocator);
-    try repo.addConfig(io, allocator, .{ .name = author_config, .value = author_name });
-    try repo.addConfig(io, allocator, .{ .name = "receive.denycurrentbranch", .value = "updateinstead" });
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const existing = if (evt.currentMoment(evt.admin_repo_opts, admin_repo)) |moment|
+        try evt.Fork.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, &arena, &fork_id)
+    else |err| switch (err) {
+        error.NotFound => null,
+        else => |other| return other,
+    };
+    if (existing) |record| {
+        if (!std.mem.eql(u8, record.event.user_id, &input.user_id) or
+            !std.mem.eql(u8, record.event.repo_id, &input.repo_id)) return error.InvalidPatchDraft;
+    }
+
+    var source_oid: ?[]const u8 = null;
+    const draft_exists = if (std.Io.Dir.accessAbsolute(io, draft_path, .{}))
+        true
+    else |err| switch (err) {
+        error.FileNotFound => false,
+        else => |other| return other,
+    };
+    if (draft_exists) {
+        if (existing == null) return error.InvalidPatchDraft;
+        if (existing) |record| {
+            if (!record.removed and std.mem.eql(u8, record.event.target, input.target)) source_oid = record.event.source_oid;
+        }
+    } else {
+        try std.Io.Dir.cwd().createDirPath(io, std.fs.path.dirname(draft_path) orelse return error.InvalidPatchDraft);
+        created_repo = true;
+        var repo = try rp.Repo(.xit, repo_opts).init(io, allocator, .{ .path = draft_path, .create_default_branch = ref.name });
+        defer repo.deinit(io, allocator);
+        try repo.addConfig(io, allocator, .{ .name = "receive.denycurrentbranch", .value = "updateinstead" });
+    }
+
+    const unchanged = if (existing) |record|
+        !record.removed and std.mem.eql(u8, record.event.target, input.target) and
+            evt.fieldEqual(?[]const u8, record.event.source_oid, source_oid)
+    else
+        false;
+    if (!unchanged) {
+        try evt.consume(.xit, evt.admin_repo_opts, io, allocator, admin_repo, evt.events_ref, &.{.{
+            .id = input.id,
+            .timestamp = input.timestamp,
+            .author = input.author,
+            .event = .{ .fork = .{
+                .user_id = &input.user_id,
+                .repo_id = &input.repo_id,
+                .target = input.target,
+                .source_oid = source_oid,
+            } },
+        }});
+    }
     return draft_path;
 }
 
-pub fn draftAuthor(
-    comptime repo_opts: rp.RepoOpts(.xit),
-    repo: *rp.Repo(.xit, repo_opts),
+pub fn recordPush(
     io: std.Io,
     allocator: std.mem.Allocator,
-) !?[]u8 {
-    return configValue(repo_opts, repo, io, allocator, author_config);
-}
-
-pub fn draftTarget(
-    comptime repo_opts: rp.RepoOpts(.xit),
-    repo: *rp.Repo(.xit, repo_opts),
-    io: std.Io,
-    allocator: std.mem.Allocator,
-) !?[]u8 {
-    return configValue(repo_opts, repo, io, allocator, target_config);
-}
-
-pub fn setTarget(
-    comptime repo_opts: rp.RepoOpts(.xit),
-    repo: *rp.Repo(.xit, repo_opts),
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    value: []const u8,
+    admin_repo: *rp.Repo(.xit, evt.admin_repo_opts),
+    id: *const [evt.event_id_size * 2]u8,
+    target: []const u8,
+    source_oid: []const u8,
+    author: evt.CommitAuthor,
+    timestamp: u64,
 ) !void {
-    try repo.addConfig(io, allocator, .{ .name = target_config, .value = value });
-}
-
-fn configValue(
-    comptime repo_opts: rp.RepoOpts(.xit),
-    repo: *rp.Repo(.xit, repo_opts),
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    name: []const u8,
-) !?[]u8 {
-    const dot = std.mem.indexOfScalar(u8, name, '.') orelse return error.InvalidConfigName;
-    var config = try repo.listConfig(io, allocator);
-    defer config.deinit();
-    const variables = config.sections.get(name[0..dot]) orelse return null;
-    const value = variables.get(name[dot + 1 ..]) orelse return null;
-    return try allocator.dupe(u8, value);
+    const fork_id = try evt.parseEventId(id);
+    if (!xit.ref.validateName(target)) return error.InvalidTarget;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const moment = try evt.currentMoment(evt.admin_repo_opts, admin_repo);
+    const record = (try evt.Fork.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, &arena, &fork_id)) orelse return error.InvalidPatchDraft;
+    if (record.removed) return error.InvalidPatchDraft;
+    try evt.consume(.xit, evt.admin_repo_opts, io, allocator, admin_repo, evt.events_ref, &.{.{
+        .id = id.*,
+        .timestamp = timestamp,
+        .author = author,
+        .event = .{ .fork = .{
+            .user_id = record.event.user_id,
+            .repo_id = record.event.repo_id,
+            .target = target,
+            .source_oid = source_oid,
+        } },
+    }});
 }
 
 pub const PublishInput = struct {
     id: [evt.event_id_size * 2]u8,
+    user_id: [evt.event_id_size]u8,
+    repo_id: [evt.event_id_size]u8,
     title: []const u8,
     tags: []const u8,
     description: []const u8,
@@ -120,6 +156,7 @@ pub fn publish(
     comptime repo_opts: rp.RepoOpts(.xit),
     io: std.Io,
     allocator: std.mem.Allocator,
+    admin_repo: *rp.Repo(.xit, evt.admin_repo_opts),
     target_repo: *rp.Repo(.xit, repo_opts),
     draft_path: []const u8,
     input: PublishInput,
@@ -129,6 +166,16 @@ pub fn publish(
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
+    const admin_moment = try evt.currentMoment(evt.admin_repo_opts, admin_repo);
+    const fork_record = (try evt.Fork.readById(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &arena, &patch_id)) orelse return error.InvalidPatchDraft;
+    if (fork_record.removed or
+        !std.mem.eql(u8, fork_record.event.user_id, &input.user_id) or
+        !std.mem.eql(u8, fork_record.event.repo_id, &input.repo_id)) return error.InvalidPatchDraft;
+    const user = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &arena, &input.user_id)) orelse return error.InvalidPatchDraft;
+    if (user.removed or !std.mem.eql(u8, user.event.name, input.author.name) or !std.mem.eql(u8, user.event.email, input.author.email)) return error.InvalidPatchDraft;
+    const target_name = fork_record.event.target;
+    const recorded_source_oid = fork_record.event.source_oid orelse return error.PatchNotPushed;
+
     const moment_maybe = evt.currentMoment(repo_opts, target_repo) catch |err| switch (err) {
         error.NotFound => null,
         else => |other| return other,
@@ -140,14 +187,8 @@ pub fn publish(
 
     var stage = try rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = draft_path });
     defer stage.deinit(io, allocator);
-    const stored_author_maybe = try draftAuthor(repo_opts, &stage, io, allocator);
-    defer if (stored_author_maybe) |value| allocator.free(value);
-    const stored_author = stored_author_maybe orelse return error.InvalidPatchDraft;
-    if (!std.mem.eql(u8, stored_author, input.author.name)) return error.InvalidPatchDraft;
-    const target_name = (try draftTarget(repo_opts, &stage, io, allocator)) orelse return error.PatchNotPushed;
-    defer allocator.free(target_name);
-    if (!xit.ref.validateName(target_name)) return error.InvalidPatchDraft;
     const source_oid = (try stage.readRef(io, ref)) orelse return error.PatchNotPushed;
+    if (!std.mem.eql(u8, recorded_source_oid, &source_oid)) return error.InvalidPatchDraft;
 
     const target_oid = (try target_repo.readRef(io, .{ .kind = .head, .name = target_name })) orelse return error.TargetNotFound;
     var stage_moment = try stage.core.latestMoment();
@@ -217,4 +258,27 @@ pub fn publish(
     } else {
         try evt.consume(.xit, repo_opts, io, allocator, target_repo, evt.events_ref, &.{patch_event});
     }
+}
+
+// delete first so a failed tombstone can be retried safely
+pub fn remove(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    repo_root_path: []const u8,
+    admin_repo: *rp.Repo(.xit, evt.admin_repo_opts),
+    id: *const [evt.event_id_size * 2]u8,
+    user_id: *const [evt.event_id_size]u8,
+    author: evt.CommitAuthor,
+) !void {
+    const fork_id = try evt.parseEventId(id);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const moment = try evt.currentMoment(evt.admin_repo_opts, admin_repo);
+    const record = (try evt.Fork.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, &arena, &fork_id)) orelse return error.InvalidPatchDraft;
+    if (!std.mem.eql(u8, record.event.user_id, user_id)) return error.InvalidPatchDraft;
+
+    const draft_path = try forkPath(allocator, repo_root_path, id);
+    defer allocator.free(draft_path);
+    try std.Io.Dir.cwd().deleteTree(io, draft_path);
+    if (!record.removed) try evt.remove(.xit, evt.admin_repo_opts, io, allocator, admin_repo, &fork_id, .fork, author);
 }

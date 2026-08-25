@@ -189,6 +189,7 @@ fn readMeta(
             const T = switch (event_kind) {
                 .user => evt.User,
                 .repo => evt.Repo,
+                .fork => evt.Fork,
                 .issue => evt.Issue,
                 .discuss => evt.Discussion,
                 .comment => evt.Comment,
@@ -225,6 +226,13 @@ fn readItem(
         },
         .repo => {
             const record = (try readRecord(evt.Repo, hash_kind, arena, haxy_moment, id)) orelse return null;
+            if (admin_moment) |moment| {
+                if (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, record.event.user_id)) |user|
+                    item.author = .{ .user_name = user.event.name };
+            }
+        },
+        .fork => {
+            const record = (try readRecord(evt.Fork, hash_kind, arena, haxy_moment, id)) orelse return null;
             if (admin_moment) |moment| {
                 if (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, record.event.user_id)) |user|
                     item.author = .{ .user_name = user.event.name };

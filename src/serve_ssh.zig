@@ -330,8 +330,26 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, command:
     const repo_identity = if (std.mem.startsWith(u8, parsed.dir, repo_prefix)) parsed.dir[repo_prefix.len..] else parsed.dir;
 
     if (fork.parseRoute(repo_identity)) |route| {
-        if (evt.parseOwnerRepoPath(route.identity) == null) return writeError(sess, "repo path must be <owner>/<repo>");
+        const owner_repo = evt.parseOwnerRepoPath(route.identity) orelse return writeError(sess, "repo path must be <owner>/<repo>");
         if (parsed.service == .receive_pack and !xit.ref.validateName(route.target)) return writeError(sess, "invalid target branch");
+
+        var admin = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = handler.admin_repo_path });
+        defer admin.deinit(io, allocator);
+        var admin_arena = std.heap.ArenaAllocator.init(allocator);
+        defer admin_arena.deinit();
+        const admin_moment = try evt.currentMoment(evt.admin_repo_opts, &admin);
+        const fork_id = try evt.parseEventId(&route.id);
+        const fork_record = (try evt.Fork.readById(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &admin_arena, &fork_id)) orelse
+            return writeError(sess, "patch draft not found");
+        if (fork_record.removed) return writeError(sess, "patch draft not found");
+        const target_repo = (try evt.Repo.readByOwnerAndName(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &admin_arena, owner_repo.owner, owner_repo.name)) orelse
+            return writeError(sess, "repo not found");
+        if (!std.mem.eql(u8, fork_record.event.repo_id, &target_repo.event_id)) return writeError(sess, "patch draft belongs to another repo");
+        const user = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &admin_arena, fork_record.event.user_id)) orelse
+            return writeError(sess, "invalid patch draft");
+        if (user.removed) return writeError(sess, "invalid patch draft");
+        if (builtin.mode != .Debug and !isKeyInAuthorizedKeys(user.event.ssh_keys, &sess.fingerprint))
+            return writeError(sess, "unauthorized: this SSH key is not registered to the patch author");
 
         const draft_path = try fork.forkPath(allocator, handler.repo_root_path, &route.id);
         defer allocator.free(draft_path);
@@ -340,11 +358,6 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, command:
         defer draft.deinit(io, allocator);
         switch (draft) {
             inline else => |*repo| {
-                const author_maybe = try fork.draftAuthor(repo.self_repo_opts, repo, io, allocator);
-                defer if (author_maybe) |author| allocator.free(author);
-                const author = author_maybe orelse return writeError(sess, "invalid patch draft");
-                if (builtin.mode != .Debug and !try isKeyAuthorized(io, allocator, handler.admin_repo_path, author, &sess.fingerprint))
-                    return writeError(sess, "unauthorized: this SSH key is not registered to the patch author");
                 var reader_buf: [4096]u8 = undefined;
                 var writer_buf: [4096]u8 = undefined;
                 var reader = ssh.SessionReader.init(sess, &reader_buf);
@@ -355,8 +368,11 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, command:
                 }
                 writer.interface.flush() catch {};
                 if (parsed.service == .receive_pack) {
-                    if (try repo.readRef(io, fork.ref) == null) return writeError(sess, "push HEAD to refs/heads/patch");
-                    try fork.setTarget(repo.self_repo_opts, repo, io, allocator, route.target);
+                    const source_oid = (try repo.readRef(io, fork.ref)) orelse return writeError(sess, "push HEAD to refs/heads/patch");
+                    try fork.recordPush(io, allocator, &admin, &route.id, route.target, &source_oid, .{
+                        .name = user.event.name,
+                        .email = user.event.email,
+                    }, @intCast(std.Io.Timestamp.now(io, .real).toSeconds()));
                 }
             },
         }
@@ -490,7 +506,11 @@ fn isKeyAuthorized(
 
     const user = (try evt.User.readByName(io, allocator, admin_repo_path, &arena, owner_name)) orelse return false;
 
-    var it = std.mem.splitScalar(u8, user.event.ssh_keys, '\n');
+    return isKeyInAuthorizedKeys(user.event.ssh_keys, fingerprint);
+}
+
+fn isKeyInAuthorizedKeys(ssh_keys: []const u8, fingerprint: *const [ssh.fingerprint_len]u8) bool {
+    var it = std.mem.splitScalar(u8, ssh_keys, '\n');
     while (it.next()) |line| {
         const fp = fingerprintOfAuthorizedKey(line) orelse continue;
         if (std.mem.eql(u8, &fp, fingerprint)) return true;

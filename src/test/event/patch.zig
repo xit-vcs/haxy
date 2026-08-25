@@ -424,10 +424,42 @@ test "publish a staged patch" {
     defer allocator.free(root);
     const repos_dir = try std.fs.path.join(allocator, &.{ root, "repos" });
     defer allocator.free(repos_dir);
+    const admin_path = try std.fs.path.join(allocator, &.{ root, "admin" });
+    defer allocator.free(admin_path);
     const upstream_path = try std.fs.path.join(allocator, &.{ root, "upstream" });
     defer allocator.free(upstream_path);
-    const target_path = try std.fs.path.join(allocator, &.{ repos_dir, "target" });
+
+    var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
+    const user_id = evt.EventWithId.randomId(prng.random());
+    const repo_id = evt.EventWithId.randomId(prng.random());
+    const repo_id_hex = std.fmt.bytesToHex(repo_id, .lower);
+    const target_path = try std.fs.path.join(allocator, &.{ repos_dir, &repo_id_hex });
     defer allocator.free(target_path);
+
+    var admin = try rp.Repo(.xit, evt.admin_repo_opts).init(io, allocator, .{ .path = admin_path });
+    defer admin.deinit(io, allocator);
+    try evt.consume(.xit, evt.admin_repo_opts, io, allocator, &admin, evt.events_ref, &.{
+        .{
+            .id = std.fmt.bytesToHex(user_id, .lower),
+            .timestamp = 1,
+            .author = author,
+            .event = .{ .user = .{
+                .name = author.name,
+                .email = author.email,
+                .password_hash = "",
+            } },
+        },
+        .{
+            .id = repo_id_hex,
+            .timestamp = 1,
+            .author = author,
+            .event = .{ .repo = .{
+                .user_id = &user_id,
+                .name = "repo",
+                .description = "",
+            } },
+        },
+    });
 
     //
     // create the target repo
@@ -446,62 +478,46 @@ test "publish a staged patch" {
     defer target.deinit(io, allocator);
     try target.addBranch(io, .{ .name = "next" });
 
-    var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
-    const unused_id = evt.EventWithId.randomId(prng.random());
-    const unused_hex = std.fmt.bytesToHex(unused_id, .lower);
-
-    const route_text = try std.fmt.allocPrint(allocator, "alice/repo/patch:{s}/branch:feature/topic", .{&unused_hex});
-    defer allocator.free(route_text);
-    const route = fork.parseRoute(route_text) orelse return error.InvalidRoute;
-    try std.testing.expectEqualStrings("alice/repo", route.identity);
-    try std.testing.expectEqualStrings("feature/topic", route.target);
-
     //
-    // reserve an author-bound draft
-    //
-
-    const unused_path = try fork.create(repo_opts, io, allocator, repos_dir, &unused_hex, author.name);
-    defer allocator.free(unused_path);
-    var unused = try Repo.open(io, allocator, .{ .path = unused_path });
-    defer unused.deinit(io, allocator);
-    const stored_author = (try fork.draftAuthor(repo_opts, &unused, io, allocator)) orelse return error.NotFound;
-    defer allocator.free(stored_author);
-    try std.testing.expectEqualStrings(author.name, stored_author);
-    var head_buf: [rf.MAX_REF_CONTENT_SIZE]u8 = undefined;
-    const head = try unused.head(io, &head_buf);
-    switch (head) {
-        .ref => |head_ref| try std.testing.expectEqualStrings(fork.ref.name, head_ref.name),
-        .oid => return error.InvalidRef,
-    }
-
-    //
-    // push a proposed commit into another draft
+    // push a proposed commit into a draft
     //
 
     const patch_id = evt.EventWithId.randomId(prng.random());
     const patch_id_hex = std.fmt.bytesToHex(patch_id, .lower);
     const draft_path = try fork.forkPath(allocator, repos_dir, &patch_id_hex);
     defer allocator.free(draft_path);
+    try evt.consume(.xit, evt.admin_repo_opts, io, allocator, &admin, evt.events_ref, &.{.{
+        .id = patch_id_hex,
+        .timestamp = 2,
+        .author = author,
+        .event = .{ .fork = .{
+            .user_id = &user_id,
+            .repo_id = &repo_id,
+            .target = "master",
+        } },
+    }});
     try cwd.createDirPath(io, std.fs.path.dirname(draft_path) orelse return error.InvalidPath);
     var draft = try Repo.clone(io, allocator, upstream_path, draft_path, draft_path, null, .{});
+    var source_oid: [hash.hexLen(repo_opts.hash)]u8 = undefined;
     {
         defer draft.deinit(io, allocator);
-        try draft.addConfig(io, allocator, .{ .name = "haxy.author", .value = author.name });
-        try draft.addConfig(io, allocator, .{ .name = "haxy.target", .value = "master" });
         const file = try draft.core.work_dir.createFile(io, "feature.zig", .{ .truncate = true });
         defer file.close(io);
         try file.writeStreamingAll(io, "pub const answer = 42;\n");
         try draft.add(io, allocator, &.{"feature.zig"});
-        _ = try draft.commit(io, allocator, .{ .author = "alice <alice@example.test>", .message = "add feature", .timestamp = 2 });
+        source_oid = try draft.commit(io, allocator, .{ .author = "alice <alice@example.test>", .message = "add feature", .timestamp = 2 });
         try draft.addBranch(io, .{ .name = fork.ref.name });
     }
+    try fork.recordPush(io, allocator, &admin, &patch_id_hex, "master", &source_oid, author, 3);
 
     //
     // publish the staged code and metadata
     //
 
-    try fork.publish(repo_opts, io, allocator, &target, draft_path, .{
+    try fork.publish(repo_opts, io, allocator, &admin, &target, draft_path, .{
         .id = patch_id_hex,
+        .user_id = user_id,
+        .repo_id = repo_id,
         .title = "add the answer",
         .tags = "enhancement",
         .description = "adds a reusable answer constant",
@@ -517,13 +533,22 @@ test "publish a staged patch" {
     const first_patchrev_id = try evt.parseEventId(&patch.event.patchrev_id);
     const first_patchrev = (try evt.PatchRev.readById(Repo.DB, repo_opts.hash, moment, &arena, &first_patchrev_id)) orelse return error.NotFound;
     try std.testing.expectEqualStrings("add feature", first_patchrev.event.message);
+    const first_patchrev_hex = patch.event.patchrev_id;
+
+    var fork_arena = std.heap.ArenaAllocator.init(allocator);
+    defer fork_arena.deinit();
+    const admin_moment = try evt.currentMoment(evt.admin_repo_opts, &admin);
+    const published_fork = (try evt.Fork.readById(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &fork_arena, &patch_id)) orelse return error.NotFound;
+    try std.testing.expect(!published_fork.removed);
 
     //
     // edit metadata without replacing the code revision
     //
 
-    try fork.publish(repo_opts, io, allocator, &target, draft_path, .{
+    try fork.publish(repo_opts, io, allocator, &admin, &target, draft_path, .{
         .id = patch_id_hex,
+        .user_id = user_id,
+        .repo_id = repo_id,
         .title = "add a reusable answer",
         .tags = "enhancement",
         .description = "adds a reusable answer constant",
@@ -533,20 +558,21 @@ test "publish a staged patch" {
     _ = arena.reset(.retain_capacity);
     moment = try evt.currentMoment(repo_opts, &target);
     const edited = (try evt.Patch.readById(Repo.DB, repo_opts.hash, moment, &arena, &patch_id)) orelse return error.NotFound;
-    try std.testing.expectEqualStrings(&patch.event.patchrev_id, &edited.event.patchrev_id);
+    try std.testing.expectEqualStrings(&first_patchrev_hex, &edited.event.patchrev_id);
+    const edited_patchrev_hex = edited.event.patchrev_id;
 
     //
     // retargeting creates another code revision
     //
 
-    var reopened = try Repo.open(io, allocator, .{ .path = draft_path });
-    defer reopened.deinit(io, allocator);
-    try fork.setTarget(repo_opts, &reopened, io, allocator, "next");
-    try fork.publish(repo_opts, io, allocator, &target, draft_path, .{
+    try fork.recordPush(io, allocator, &admin, &patch_id_hex, "next", &source_oid, author, 5);
+    try fork.publish(repo_opts, io, allocator, &admin, &target, draft_path, .{
         .id = patch_id_hex,
-        .title = edited.event.title,
-        .tags = edited.event.tags,
-        .description = edited.event.description,
+        .user_id = user_id,
+        .repo_id = repo_id,
+        .title = "add a reusable answer",
+        .tags = "enhancement",
+        .description = "adds a reusable answer constant",
         .author = author,
         .timestamp = 5,
     });
@@ -554,5 +580,5 @@ test "publish a staged patch" {
     moment = try evt.currentMoment(repo_opts, &target);
     const retargeted = (try evt.Patch.readById(Repo.DB, repo_opts.hash, moment, &arena, &patch_id)) orelse return error.NotFound;
     try std.testing.expectEqualStrings("refs/heads/next", retargeted.event.target_ref);
-    try std.testing.expect(!std.mem.eql(u8, &edited.event.patchrev_id, &retargeted.event.patchrev_id));
+    try std.testing.expect(!std.mem.eql(u8, &edited_patchrev_hex, &retargeted.event.patchrev_id));
 }

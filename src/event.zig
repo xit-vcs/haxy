@@ -8,6 +8,7 @@ const rf = xit.ref;
 
 pub const User = @import("event/User.zig");
 pub const Repo = @import("event/Repo.zig");
+pub const Fork = @import("event/Fork.zig");
 pub const Issue = @import("event/Issue.zig");
 pub const Discussion = @import("event/Discussion.zig");
 pub const Comment = @import("event/Comment.zig");
@@ -50,6 +51,7 @@ pub fn project(comptime T: type, source: anytype) T {
 pub const EventKind = enum {
     user,
     repo,
+    fork,
     issue,
     discuss,
     comment,
@@ -68,6 +70,7 @@ const event_order_key = "event-order";
 pub const Event = union(EventKind) {
     user: ?User,
     repo: ?Repo,
+    fork: ?Fork,
     issue: ?Issue,
     discuss: ?Discussion,
     comment: ?Comment,
@@ -151,6 +154,12 @@ pub const EventWithId = struct {
                     else
                         null,
                 },
+                .fork => .{
+                    .fork = if (json_event.data) |value|
+                        try std.json.parseFromValueLeaky(Fork, arena.allocator(), value, .{ .ignore_unknown_fields = true })
+                    else
+                        null,
+                },
                 .issue => .{
                     .issue = if (json_event.data) |value|
                         try std.json.parseFromValueLeaky(Issue, arena.allocator(), value, .{ .ignore_unknown_fields = true })
@@ -228,6 +237,7 @@ pub fn remove(
     const event: Event = switch (kind) {
         .user => .{ .user = null },
         .repo => .{ .repo = null },
+        .fork => .{ .fork = null },
         .issue => .{ .issue = null },
         .discuss => .{ .discuss = null },
         .comment => .{ .comment = null },
@@ -907,6 +917,10 @@ pub fn consumeInTransaction(
                 .repo => |event_maybe| {
                     const record_maybe: ?Repo.Record = if (event_maybe) |event| .{ .event = event, .created_order = event_order } else null;
                     try Repo.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, record_maybe, &arena, &repo_event_oid);
+                },
+                .fork => |event_maybe| {
+                    const record_maybe: ?Fork.Record = if (event_maybe) |event| .{ .event = event, .created_order = event_order } else null;
+                    try Fork.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, record_maybe, &arena, &repo_event_oid);
                 },
                 .issue => |event_maybe| {
                     const record_maybe: ?Issue.Record = if (event_maybe) |event| .{

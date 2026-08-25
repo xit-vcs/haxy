@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const hx = @import("haxy");
 const xit = hx.xit;
 const evt = hx.event;
+const fork = hx.fork;
 const rp = xit.repo;
 const rf = xit.ref;
 const work = xit.workdir;
@@ -74,6 +75,14 @@ test "push large subprocess" {
     const allocator = std.testing.allocator;
     if (.windows != builtin.os.tag) {
         try testPushLarge(.git, .{ .wire = .ssh }, true, 3022, io, allocator);
+    }
+}
+
+test "push fork" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    if (.windows != builtin.os.tag) {
+        try testPushFork(3024, io, allocator);
     }
 }
 
@@ -510,6 +519,126 @@ fn testPush(
 
     // make sure push was successful
     try std.testing.expect(null == try server_repo.readRef(io, .{ .kind = .tag, .name = "1.0.0" }));
+}
+
+fn testPushFork(
+    comptime port: u16,
+    io: std.Io,
+    allocator: std.mem.Allocator,
+) !void {
+    const temp_dir_name = "temp-testnet-push-fork";
+    const cwd = std.Io.Dir.cwd();
+    var temp_dir_or_err = cwd.openDir(io, temp_dir_name, .{});
+    if (temp_dir_or_err) |*temp_dir| {
+        temp_dir.close(io);
+        try cwd.deleteTree(io, temp_dir_name);
+    } else |_| {}
+    var temp_dir = try cwd.createDirPathOpen(io, temp_dir_name, .{});
+    defer cwd.deleteTree(io, temp_dir_name) catch {};
+    defer temp_dir.close(io);
+
+    var server_process = try runServer(io, allocator, temp_dir_name, port);
+    defer _ = server_process.kill(io);
+
+    const target_path = (try repoOnDiskPath(io, allocator, temp_dir_name, "target", true)).?;
+    defer allocator.free(target_path);
+    var target_repo = try rp.Repo(.xit, .{}).init(io, allocator, .{ .path = target_path });
+    target_repo.deinit(io, allocator);
+
+    const other_path = (try repoOnDiskPath(io, allocator, temp_dir_name, "other", true)).?;
+    defer allocator.free(other_path);
+
+    const cwd_path = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(cwd_path);
+    const admin_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "admin" });
+    defer allocator.free(admin_path);
+    const repos_dir = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "repos" });
+    defer allocator.free(repos_dir);
+
+    var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
+    const fork_id = evt.EventWithId.randomId(prng.random());
+    const fork_id_hex = std.fmt.bytesToHex(fork_id, .lower);
+    var user_id: [evt.event_id_size]u8 = undefined;
+    var repo_id: [evt.event_id_size]u8 = undefined;
+    const draft_path = blk: {
+        var admin = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = admin_path });
+        defer admin.deinit(io, allocator);
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const moment = try evt.currentMoment(evt.admin_repo_opts, &admin);
+        const target = (try evt.Repo.readByOwnerAndName(evt.AdminDB, evt.admin_repo_opts.hash, moment, &arena, "admin", "target")) orelse return error.NotFound;
+        repo_id = target.event_id;
+        @memcpy(&user_id, target.repo.event.user_id);
+        break :blk try fork.create(.{}, io, allocator, repos_dir, &admin, .{
+            .id = fork_id_hex,
+            .user_id = user_id,
+            .repo_id = repo_id,
+            .target = "master",
+            .author = .{ .name = "admin", .email = "admin@example.test" },
+            .timestamp = 1,
+        });
+    };
+    defer allocator.free(draft_path);
+
+    const client_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "client" });
+    defer allocator.free(client_path);
+    var client = try rp.Repo(.xit, .{ .is_test = true }).init(io, allocator, .{ .path = client_path, .create_default_branch = fork.ref.name });
+    defer client.deinit(io, allocator);
+
+    const source_oid = blk: {
+        const file = try client.core.work_dir.createFile(io, "feature.txt", .{ .truncate = true });
+        defer file.close(io);
+        try file.writeStreamingAll(io, "fork contents\n");
+        try client.add(io, allocator, &.{"feature.txt"});
+        break :blk try client.commit(io, allocator, .{ .message = "add feature" });
+    };
+
+    const remote_url = try std.fmt.allocPrint(allocator, "git@localhost:admin/target/patch:{s}/branch:master", .{&fork_id_hex});
+    defer allocator.free(remote_url);
+    try client.addRemote(io, allocator, .{ .name = "origin", .value = remote_url });
+    const ssh_cmd = (try sshCommand(true, allocator, cwd_path, temp_dir_name, port)).?;
+    defer allocator.free(ssh_cmd);
+    try client.push(io, allocator, "origin", fork.ref.name, false, .{ .wire = .{ .ssh = .{ .command = ssh_cmd } } });
+
+    {
+        var admin = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = admin_path });
+        defer admin.deinit(io, allocator);
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const moment = try evt.currentMoment(evt.admin_repo_opts, &admin);
+        const record = (try evt.Fork.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, &arena, &fork_id)) orelse return error.NotFound;
+        try std.testing.expect(!record.removed);
+        try std.testing.expectEqualStrings("master", record.event.target);
+        try std.testing.expectEqualStrings(&source_oid, record.event.source_oid orelse return error.NotFound);
+    }
+
+    const other_url = try std.fmt.allocPrint(allocator, "git@localhost:admin/other/patch:{s}/branch:other", .{&fork_id_hex});
+    defer allocator.free(other_url);
+    try client.addRemote(io, allocator, .{ .name = "other", .value = other_url });
+    const wrong_repo_rejected = if (client.push(io, allocator, "other", fork.ref.name, false, .{ .wire = .{ .ssh = .{ .command = ssh_cmd } } })) |_| false else |_| true;
+    try std.testing.expect(wrong_repo_rejected);
+
+    {
+        var admin = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = admin_path });
+        defer admin.deinit(io, allocator);
+        try evt.consume(.xit, evt.admin_repo_opts, io, allocator, &admin, evt.events_ref, &.{.{
+            .id = std.fmt.bytesToHex(user_id, .lower),
+            .timestamp = 2,
+            .author = .{ .name = "admin", .email = "admin@example.test" },
+            .event = .{ .user = .{
+                .name = "admin",
+                .email = "admin@example.test",
+                .password_hash = "",
+                .ssh_keys = "",
+            } },
+        }});
+    }
+
+    const denied_url = try std.fmt.allocPrint(allocator, "git@localhost:admin/target/patch:{s}/branch:denied", .{&fork_id_hex});
+    defer allocator.free(denied_url);
+    try client.addRemote(io, allocator, .{ .name = "denied", .value = denied_url });
+    const unauthorized_rejected = if (client.push(io, allocator, "denied", fork.ref.name, false, .{ .wire = .{ .ssh = .{ .command = ssh_cmd } } })) |_| false else |_| true;
+    try std.testing.expect(unauthorized_rejected);
 }
 
 fn testPushCreatesMissingRepo(
