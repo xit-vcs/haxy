@@ -5,6 +5,7 @@ const rp = xit.repo;
 const hash = xit.hash;
 const obj = xit.object;
 const mrg = xit.merge;
+const bch = xit.branch;
 const rf = xit.ref;
 
 pub const ref = rf.Ref{ .kind = .head, .name = "patch" };
@@ -54,10 +55,13 @@ pub fn create(
     input: CreateInput,
 ) ![]u8 {
     if (!evt.Patch.fieldsValid(input.title, input.tags)) return error.InvalidPatch;
-    const fork_id = try evt.parseEventId(&input.id);
-    const path = try forkPath(allocator, repo_root_path, &input.id);
-    errdefer allocator.free(path);
 
+    // get the fork id and path
+    const fork_id = try evt.parseEventId(&input.id);
+    const fork_path = try forkPath(allocator, repo_root_path, &input.id);
+    errdefer allocator.free(fork_path);
+
+    // make sure the fork id doesn't already exist
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const existing = if (evt.currentMoment(evt.admin_repo_opts, admin_repo)) |moment|
@@ -66,41 +70,110 @@ pub fn create(
         error.NotFound => null,
         else => |other| return other,
     };
-    if (existing) |record| {
-        if (record.removed or
-            !std.mem.eql(u8, record.event.user_id, &input.user_id) or
-            !std.mem.eql(u8, record.event.repo_id, &input.repo_id)) return error.InvalidPatchDraft;
-    }
+    if (existing != null) return error.InvalidPatchDraft;
 
-    const path_exists = if (std.Io.Dir.accessAbsolute(io, path, .{}))
-        true
-    else |err| switch (err) {
-        error.FileNotFound => false,
+    // get the target repo
+    const target_id = std.fmt.bytesToHex(input.repo_id, .lower);
+    const target_path = try std.fs.path.join(allocator, &.{ repo_root_path, &target_id });
+    defer allocator.free(target_path);
+    var target_repo = try rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = target_path, .require_repo_root = true });
+    defer target_repo.deinit(io, allocator);
+
+    // create the fork repo dir
+    const forks_path = std.fs.path.dirname(fork_path) orelse return error.InvalidPatchDraft;
+    var forks_dir = try std.Io.Dir.cwd().createDirPathOpen(io, forks_path, .{});
+    defer forks_dir.close(io);
+    const fork_name = std.fs.path.basename(fork_path);
+    forks_dir.createDir(io, fork_name, .default_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => return error.InvalidPatchDraft,
         else => |other| return other,
     };
-    if (existing != null and !path_exists) return error.PatchDataUnavailable;
-    if (existing == null and path_exists) return error.InvalidPatchDraft;
+    errdefer forks_dir.deleteTree(io, fork_name) catch {};
+    var fork_dir = try forks_dir.openDir(io, fork_name, .{});
+    defer fork_dir.close(io);
+    var fork_repo_dir = try fork_dir.createDirPathOpen(io, ".xit", .{});
+    defer fork_repo_dir.close(io);
 
-    if (path_exists) {
-        var repo = try rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = path });
-        defer repo.deinit(io, allocator);
-        const moment = try evt.currentMoment(repo_opts, &repo);
-        const patch = (try evt.Patch.readById(evt.EventDB(repo_opts.hash), repo_opts.hash, moment, &arena, &fork_id)) orelse return error.InvalidPatchDraft;
-        if (patch.removed or
-            !std.mem.eql(u8, patch.event.title, input.title) or
-            !std.mem.eql(u8, patch.event.description, input.description) or
-            !std.mem.eql(u8, patch.event.tags, input.tags)) return error.InvalidPatchDraft;
-        return path;
+    // copy the target repo into the fork repo dir
+    {
+        try target_repo.core.db_file.lock(io, .shared);
+        defer target_repo.core.db_file.unlock(io);
+        try target_repo.core.chunk_store_file.lock(io, .shared);
+        defer target_repo.core.chunk_store_file.unlock(io);
+
+        // TODO: use reflinks here when the filesystem supports them
+        for ([_]struct { file: std.Io.File, name: []const u8 }{
+            .{ .file = target_repo.core.db_file, .name = "db" },
+            .{ .file = target_repo.core.chunk_store_file, .name = "chunks" },
+        }) |source| {
+            const destination = try fork_repo_dir.createFile(io, source.name, .{ .exclusive = true, .read = true });
+            defer destination.close(io);
+            var read_buffer: [64 * 1024]u8 = undefined;
+            var write_buffer: [64 * 1024]u8 = undefined;
+            var reader = source.file.reader(io, &read_buffer);
+            var writer = destination.writer(io, &write_buffer);
+            _ = try reader.interface.streamRemaining(&writer.interface);
+            try writer.interface.flush();
+            try destination.sync(io);
+        }
     }
 
-    try std.Io.Dir.cwd().createDirPath(io, std.fs.path.dirname(path) orelse return error.InvalidPatchDraft);
-    errdefer std.Io.Dir.cwd().deleteTree(io, path) catch {};
-    var repo = try rp.Repo(.xit, repo_opts).init(io, allocator, .{ .path = path, .create_default_branch = ref.name });
-    defer repo.deinit(io, allocator);
-    try repo.addConfig(io, allocator, .{ .name = "receive.denycurrentbranch", .value = "updateinstead" });
-    try repo.addConfig(io, allocator, .{ .name = "receive.denydeletes", .value = "true" });
+    var fork_repo = try rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = fork_path, .require_repo_root = true });
+    defer fork_repo.deinit(io, allocator);
 
-    try evt.consume(.fork, .xit, repo_opts, io, allocator, &repo, evt.events_ref, &.{.{
+    // clear the haxy state in the fork repo and create the patch branch
+    {
+        const DB = rp.Repo(.xit, repo_opts).DB;
+        const State = rp.Repo(.xit, repo_opts).State;
+        const Ctx = struct {
+            core: *rp.Repo(.xit, repo_opts).Core,
+            io: std.Io,
+
+            pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
+                var moment = try DB.HashMap(.read_write).init(cursor.*);
+                const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
+                const head_oid_maybe = try rf.readHeadRecurMaybe(.xit, repo_opts, state.readOnly(), ctx.io);
+
+                var path_buffer: [rf.MAX_REF_CONTENT_SIZE]u8 = undefined;
+                const events_path = try evt.events_ref.toPath(&path_buffer);
+                rf.remove(.xit, repo_opts, state, ctx.io, events_path) catch |err| switch (err) {
+                    error.RefNotFound => {},
+                    else => |other| return other,
+                };
+                const patch_path = try ref.toPath(&path_buffer);
+                rf.remove(.xit, repo_opts, state, ctx.io, patch_path) catch |err| switch (err) {
+                    error.RefNotFound => {},
+                    else => |other| return other,
+                };
+
+                _ = try moment.remove(hash.hashInt(repo_opts.hash, "haxy"));
+                _ = try moment.remove(hash.hashInt(repo_opts.hash, "haxy-last-object-id"));
+
+                if (head_oid_maybe) |*head_oid| {
+                    try rf.write(.xit, repo_opts, state, ctx.io, patch_path, .{ .oid = head_oid });
+                } else {
+                    try bch.add(.xit, repo_opts, state, ctx.io, .{ .name = ref.name, .target = .none });
+                }
+                try rf.replaceHead(.xit, repo_opts, state, ctx.io, .{ .ref = ref });
+                try xit.undo.writeMessage(repo_opts, state, .{ .custom = "create fork" });
+            }
+        };
+
+        try fork_repo.core.db_file.lock(io, .exclusive);
+        defer fork_repo.core.db_file.unlock(io);
+
+        const history = try DB.ArrayList(.read_write).init(fork_repo.core.db.rootCursor());
+        try history.appendContext(
+            .{ .slot = try history.getSlot(-1) },
+            Ctx{ .core = &fork_repo.core, .io = io },
+        );
+    }
+
+    try fork_repo.addConfig(io, allocator, .{ .name = "receive.denycurrentbranch", .value = "updateinstead" });
+    try fork_repo.addConfig(io, allocator, .{ .name = "receive.denydeletes", .value = "true" });
+
+    // create the patch event
+    try evt.consume(.fork, .xit, repo_opts, io, allocator, &fork_repo, evt.events_ref, &.{.{
         .id = input.id,
         .timestamp = input.timestamp,
         .author = input.author,
@@ -110,6 +183,8 @@ pub fn create(
             .tags = input.tags,
         } },
     }});
+
+    // create the fork event
     try evt.consume(.admin, .xit, evt.admin_repo_opts, io, allocator, admin_repo, evt.events_ref, &.{.{
         .id = input.id,
         .timestamp = input.timestamp,
@@ -119,7 +194,8 @@ pub fn create(
             .repo_id = &input.repo_id,
         } },
     }});
-    return path;
+
+    return fork_path;
 }
 
 pub fn receivePack(

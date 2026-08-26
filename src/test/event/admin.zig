@@ -363,6 +363,7 @@ test "fork query and removal lifecycle" {
     var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
     const user_id = evt.EventWithId.randomId(prng.random());
     const repo_id = evt.EventWithId.randomId(prng.random());
+    const repo_id_hex = std.fmt.bytesToHex(repo_id, .lower);
     const fork_id = evt.EventWithId.randomId(prng.random());
     const fork_id_hex = std.fmt.bytesToHex(fork_id, .lower);
 
@@ -391,6 +392,11 @@ test "fork query and removal lifecycle" {
         },
     });
 
+    const target_path = try std.fs.path.join(allocator, &.{ repos_dir, &repo_id_hex });
+    defer allocator.free(target_path);
+    var target = try rp.Repo(.xit, fork_repo_opts).init(io, allocator, .{ .path = target_path });
+    defer target.deinit(io, allocator);
+
     const draft_path = try fork.create(fork_repo_opts, io, allocator, repos_dir, &admin, .{
         .id = fork_id_hex,
         .user_id = user_id,
@@ -418,19 +424,6 @@ test "fork query and removal lifecycle" {
     const draft = (try evt.Patch.readById(evt.EventDB(fork_repo_opts.hash), fork_repo_opts.hash, draft_moment, &arena, &fork_id)) orelse return error.NotFound;
     try std.testing.expectEqualStrings("add a feature", draft.event.title);
     try std.testing.expectEqual(null, draft.event.patchrev_id);
-
-    const same_path = try fork.create(fork_repo_opts, io, allocator, repos_dir, &admin, .{
-        .id = fork_id_hex,
-        .user_id = user_id,
-        .repo_id = repo_id,
-        .title = "add a feature",
-        .description = "a draft patch",
-        .tags = "enhancement",
-        .author = author,
-        .timestamp = 4,
-    });
-    defer allocator.free(same_path);
-    try std.testing.expectEqualStrings(draft_path, same_path);
 
     var wrong_user_id = user_id;
     wrong_user_id[0] ^= 1;
