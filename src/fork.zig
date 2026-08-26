@@ -1,5 +1,6 @@
 const std = @import("std");
 const evt = @import("event.zig");
+const serve_common = @import("serve_common.zig");
 const xit = @import("xit");
 const rp = xit.repo;
 const hash = xit.hash;
@@ -210,15 +211,16 @@ pub fn receivePack(
     timestamp: u64,
     reader: *std.Io.Reader,
     writer: *std.Io.Writer,
+    error_writer: *std.Io.Writer,
 ) !void {
     if (!rf.validateName(target_branch)) return error.InvalidTarget;
     const patch_id = try evt.parseEventId(id);
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
+    // load the fork and target patch state
     const fork_moment = evt.currentMoment(repo_opts, fork_repo) catch return error.PatchDataUnavailable;
     const fork_patch = (try evt.Patch.readById(evt.EventDB(repo_opts.hash), repo_opts.hash, fork_moment, &arena, &patch_id)) orelse return error.PatchDataUnavailable;
-
     const target_moment = evt.currentMoment(repo_opts, target_repo) catch |err| switch (err) {
         error.NotFound => null,
         else => |other| return other,
@@ -235,188 +237,204 @@ pub fn receivePack(
     const posted = target_patch != null;
     const title = if (target_patch) |patch| patch.event.title else fork_patch.event.title;
 
+    // resolve the target and the newest fork revision
     const target_oid = (try target_repo.readRef(io, .{ .kind = .head, .name = target_branch })) orelse return error.TargetNotFound;
     const newest = try evt.PatchRev.readNewest(evt.EventDB(repo_opts.hash), repo_opts.hash, fork_moment, &arena);
     const target_ref = try std.fmt.allocPrint(arena.allocator(), "refs/heads/{s}", .{target_branch});
     var revision_id_maybe: ?[evt.event_id_size]u8 = null;
 
-    const DB = rp.Repo(.xit, repo_opts).DB;
-    const State = rp.Repo(.xit, repo_opts).State;
-    const Ctx = struct {
-        core: *rp.Repo(.xit, repo_opts).Core,
-        target_core: *rp.Repo(.xit, repo_opts).Core,
-        io: std.Io,
-        allocator: std.mem.Allocator,
-        reader: *std.Io.Reader,
-        writer: *std.Io.Writer,
-        patch_id: [evt.event_id_size * 2]u8,
-        patch: evt.Patch.Record,
-        posted: bool,
-        target_oid: [hash.hexLen(repo_opts.hash)]u8,
-        target_ref: []const u8,
-        title: []const u8,
-        author: evt.CommitAuthor,
-        timestamp: u64,
-        newest: ?evt.PatchRev.WithId,
-        revision_id_maybe: *?[evt.event_id_size]u8,
+    // execute a transaction that receives the push and materializes its revision
+    {
+        const DB = rp.Repo(.xit, repo_opts).DB;
+        const State = rp.Repo(.xit, repo_opts).State;
+        const Ctx = struct {
+            core: *rp.Repo(.xit, repo_opts).Core,
+            target_core: *rp.Repo(.xit, repo_opts).Core,
+            io: std.Io,
+            allocator: std.mem.Allocator,
+            reader: *std.Io.Reader,
+            writer: *std.Io.Writer,
+            patch_id: [evt.event_id_size * 2]u8,
+            patch: evt.Patch.Record,
+            posted: bool,
+            target_oid: [hash.hexLen(repo_opts.hash)]u8,
+            target_ref: []const u8,
+            title: []const u8,
+            author: evt.CommitAuthor,
+            timestamp: u64,
+            newest: ?evt.PatchRev.WithId,
+            revision_id_maybe: *?[evt.event_id_size]u8,
 
-        pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
-            var moment = try DB.HashMap(.read_write).init(cursor.*);
-            const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
-            try xit.net_server_receive_pack.run(.xit, repo_opts, state, ctx.io, ctx.allocator, ctx.reader, ctx.writer, .{ .allowed_ref = ref_path });
+            pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
+                // receive the branch update
+                var moment = try DB.HashMap(.read_write).init(cursor.*);
+                const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
+                try xit.net_server_receive_pack.run(.xit, repo_opts, state, ctx.io, ctx.allocator, ctx.reader, ctx.writer, .{ .allowed_ref = ref_path });
 
-            const source_oid = (try rf.readRecur(.xit, repo_opts, state.readOnly(), ctx.io, .{ .ref = ref })) orelse return error.CancelTransaction;
-            var target_repo_moment = try ctx.target_core.latestMoment();
-            const target_state = State(.read_only){ .core = ctx.target_core, .extra = .{ .moment = &target_repo_moment } };
-            var objects = try obj.ObjectIterator(.xit, repo_opts).init(target_state, ctx.io, ctx.allocator, .{ .kind = .all });
-            defer objects.deinit();
-            try objects.include(&ctx.target_oid);
-            try obj.copyFromObjectIterator(.xit, repo_opts, state, .xit, repo_opts, &objects, ctx.io, null);
+                // copy the target history needed to preserve the merge base
+                const source_oid = (try rf.readRecur(.xit, repo_opts, state.readOnly(), ctx.io, .{ .ref = ref })) orelse return error.CancelTransaction;
+                var target_repo_moment = try ctx.target_core.latestMoment();
+                const target_state = State(.read_only){ .core = ctx.target_core, .extra = .{ .moment = &target_repo_moment } };
+                var objects = try obj.ObjectIterator(.xit, repo_opts).init(target_state, ctx.io, ctx.allocator, .{ .kind = .all });
+                defer objects.deinit();
+                try objects.include(&ctx.target_oid);
+                try obj.copyFromObjectIterator(.xit, repo_opts, state, .xit, repo_opts, &objects, ctx.io, null);
 
-            const base_oid = try mrg.commonAncestor(.xit, repo_opts, state.readOnly(), ctx.io, ctx.allocator, &ctx.target_oid, &source_oid);
-            const existing_revision = if (ctx.newest) |latest|
-                if (std.mem.eql(u8, latest.record.event.base_oid, &base_oid) and
-                    std.mem.eql(u8, latest.record.event.source_oid, &source_oid) and
-                    std.mem.eql(u8, latest.record.event.target_ref, ctx.target_ref)) latest else null
-            else
-                null;
+                const base_oid = try mrg.commonAncestor(.xit, repo_opts, state.readOnly(), ctx.io, ctx.allocator, &ctx.target_oid, &source_oid);
+                const existing_revision = if (ctx.newest) |latest|
+                    if (std.mem.eql(u8, latest.record.event.base_oid, &base_oid) and
+                        std.mem.eql(u8, latest.record.event.source_oid, &source_oid) and
+                        std.mem.eql(u8, latest.record.event.target_ref, ctx.target_ref)) latest else null
+                else
+                    null;
 
-            var events: [2]evt.EventWithId = undefined;
-            var event_count: usize = 0;
-            var base_tree_oid: [hash.hexLen(repo_opts.hash)]u8 = undefined;
-            var head_tree_oid: [hash.hexLen(repo_opts.hash)]u8 = undefined;
-            var tree_entries: [2]evt.EventTreeEntry = undefined;
-            if (existing_revision) |latest| {
-                if (ctx.posted) ctx.revision_id_maybe.* = latest.id;
-            } else {
-                var base_object = try obj.Object(.xit, repo_opts).initCommit(state.readOnly(), ctx.io, ctx.allocator, &base_oid);
-                defer base_object.deinit();
-                var source_object = try obj.Object(.xit, repo_opts).initCommit(state.readOnly(), ctx.io, ctx.allocator, &source_oid);
-                defer source_object.deinit();
-                base_tree_oid = base_object.content.commit.tree;
-                head_tree_oid = source_object.content.commit.tree;
+                // reuse an identical revision or record a new one
+                var events: [2]evt.EventWithId = undefined;
+                var event_count: usize = 0;
+                var base_tree_oid: [hash.hexLen(repo_opts.hash)]u8 = undefined;
+                var head_tree_oid: [hash.hexLen(repo_opts.hash)]u8 = undefined;
+                var tree_entries: [2]evt.EventTreeEntry = undefined;
+                if (existing_revision) |latest| {
+                    if (ctx.posted) ctx.revision_id_maybe.* = latest.id;
+                } else {
+                    var base_object = try obj.Object(.xit, repo_opts).initCommit(state.readOnly(), ctx.io, ctx.allocator, &base_oid);
+                    defer base_object.deinit();
+                    var source_object = try obj.Object(.xit, repo_opts).initCommit(state.readOnly(), ctx.io, ctx.allocator, &source_oid);
+                    defer source_object.deinit();
+                    base_tree_oid = base_object.content.commit.tree;
+                    head_tree_oid = source_object.content.commit.tree;
 
-                var revision_id: [evt.event_id_size]u8 = undefined;
-                ctx.io.random(&revision_id);
-                const revision_hex = std.fmt.bytesToHex(revision_id, .lower);
-                const revision_event: evt.PatchRev = .{
-                    .base_oid = &base_oid,
-                    .source_oid = &source_oid,
-                    .target_ref = ctx.target_ref,
-                    .message = ctx.title,
-                };
-                const identity = try std.fmt.allocPrint(ctx.allocator, "{s} <{s}>", .{ ctx.author.name, ctx.author.email });
-                defer ctx.allocator.free(identity);
-                const patch_oid = try evt.PatchRev.writeSquashCommit(
-                    .xit,
-                    repo_opts,
-                    state,
-                    ctx.io,
-                    ctx.allocator,
-                    revision_event,
-                    &head_tree_oid,
-                    identity,
-                    identity,
-                    ctx.timestamp,
-                );
-                tree_entries = .{
-                    .{ .tree = .{ .name = "base", .oid = &base_tree_oid } },
-                    .{ .tree = .{ .name = "head", .oid = &head_tree_oid } },
-                };
-                events[event_count] = .{
-                    .id = revision_hex,
-                    .timestamp = ctx.timestamp,
-                    .author = ctx.author,
-                    .tree_entries = &tree_entries,
-                    .event = .{ .patchrev = revision_event },
-                };
-                event_count += 1;
-                ctx.revision_id_maybe.* = revision_id;
-
-                if (!ctx.posted) {
-                    var patch = ctx.patch.event;
-                    patch.revision = .{
-                        .id = revision_hex,
-                        .squash_oid = &patch_oid,
+                    var revision_id: [evt.event_id_size]u8 = undefined;
+                    ctx.io.random(&revision_id);
+                    const revision_hex = std.fmt.bytesToHex(revision_id, .lower);
+                    const revision_event: evt.PatchRev = .{
+                        .base_oid = &base_oid,
                         .source_oid = &source_oid,
                         .target_ref = ctx.target_ref,
+                        .message = ctx.title,
                     };
+                    const identity = try std.fmt.allocPrint(ctx.allocator, "{s} <{s}>", .{ ctx.author.name, ctx.author.email });
+                    defer ctx.allocator.free(identity);
+                    const patch_oid = try evt.PatchRev.writeSquashCommit(
+                        .xit,
+                        repo_opts,
+                        state,
+                        ctx.io,
+                        ctx.allocator,
+                        revision_event,
+                        &head_tree_oid,
+                        identity,
+                        identity,
+                        ctx.timestamp,
+                    );
+                    tree_entries = .{
+                        .{ .tree = .{ .name = "base", .oid = &base_tree_oid } },
+                        .{ .tree = .{ .name = "head", .oid = &head_tree_oid } },
+                    };
+                    events[event_count] = .{
+                        .id = revision_hex,
+                        .timestamp = ctx.timestamp,
+                        .author = ctx.author,
+                        .tree_entries = &tree_entries,
+                        .event = .{ .patchrev = revision_event },
+                    };
+                    event_count += 1;
+                    ctx.revision_id_maybe.* = revision_id;
+
+                    if (!ctx.posted) {
+                        var patch = ctx.patch.event;
+                        patch.revision = .{
+                            .id = revision_hex,
+                            .squash_oid = &patch_oid,
+                            .source_oid = &source_oid,
+                            .target_ref = ctx.target_ref,
+                        };
+                        events[event_count] = .{
+                            .id = ctx.patch_id,
+                            .timestamp = ctx.timestamp,
+                            .author = ctx.author,
+                            .event = .{ .patch = patch },
+                        };
+                        event_count += 1;
+                    }
+                }
+
+                // posted patches keep only revisions in the fork
+                if (ctx.posted and !ctx.patch.removed) {
                     events[event_count] = .{
                         .id = ctx.patch_id,
                         .timestamp = ctx.timestamp,
                         .author = ctx.author,
-                        .event = .{ .patch = patch },
+                        .event = .{ .patch = null },
                     };
                     event_count += 1;
                 }
-            }
 
-            if (ctx.posted and !ctx.patch.removed) {
-                events[event_count] = .{
-                    .id = ctx.patch_id,
-                    .timestamp = ctx.timestamp,
-                    .author = ctx.author,
-                    .event = .{ .patch = null },
-                };
-                event_count += 1;
+                // commit and index any new events
+                if (event_count > 0) {
+                    try evt.commitEvents(.xit, repo_opts, state, ctx.io, ctx.allocator, evt.events_ref, events[0..event_count], null);
+                    if (!try evt.consumeInTransaction(.fork, .xit, repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, evt.events_ref)) return error.CancelTransaction;
+                }
+                try xit.undo.writeMessage(repo_opts, state, .push);
+                try ctx.core.chunk_store_file.sync(ctx.io);
             }
-            if (event_count > 0) {
-                try evt.commitEvents(.xit, repo_opts, state, ctx.io, ctx.allocator, evt.events_ref, events[0..event_count], null);
-                if (!try evt.consumeInTransaction(.fork, .xit, repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, evt.events_ref)) return error.CancelTransaction;
-            }
-            try xit.undo.writeMessage(repo_opts, state, .push);
-            try ctx.core.chunk_store_file.sync(ctx.io);
-        }
-    };
+        };
 
-    try fork_repo.core.db_file.lock(io, .exclusive);
-    defer fork_repo.core.db_file.unlock(io);
-    const history = try DB.ArrayList(.read_write).init(fork_repo.core.db.rootCursor());
-    history.appendContext(.{ .slot = try history.getSlot(-1) }, Ctx{
-        .core = &fork_repo.core,
-        .target_core = &target_repo.core,
-        .io = io,
-        .allocator = allocator,
-        .reader = reader,
-        .writer = writer,
-        .patch_id = id.*,
-        .patch = fork_patch,
-        .posted = posted,
-        .target_oid = target_oid,
-        .target_ref = target_ref,
-        .title = title,
-        .author = author,
-        .timestamp = timestamp,
-        .newest = newest,
-        .revision_id_maybe = &revision_id_maybe,
-    }) catch |err| switch (err) {
-        error.CancelTransaction => {},
-        else => |other| return other,
-    };
-    try writer.flush();
+        try fork_repo.core.db_file.lock(io, .exclusive);
+        defer fork_repo.core.db_file.unlock(io);
 
-    const revision_id = revision_id_maybe orelse return;
-    if (!posted) return;
-    var update_arena = std.heap.ArenaAllocator.init(allocator);
-    defer update_arena.deinit();
-    const update_moment = evt.currentMoment(repo_opts, target_repo) catch return;
-    const posted_patch = (evt.Patch.readById(evt.EventDB(repo_opts.hash), repo_opts.hash, update_moment, &update_arena, &patch_id) catch return) orelse return;
-    if (posted_patch.removed) return;
-    const fork_update_moment = evt.currentMoment(repo_opts, fork_repo) catch return;
-    const revision = (evt.PatchRev.readById(evt.EventDB(repo_opts.hash), repo_opts.hash, fork_update_moment, &update_arena, &revision_id) catch return) orelse return;
-    if (revision.removed) return;
-    const selected = evt.Patch.Revision.fromRecord(revision_id, revision);
-    if (posted_patch.event.revision) |current| {
-        if (evt.fieldEqual(evt.Patch.Revision, current, selected)) return;
+        const history = try DB.ArrayList(.read_write).init(fork_repo.core.db.rootCursor());
+        history.appendContext(.{ .slot = try history.getSlot(-1) }, Ctx{
+            .core = &fork_repo.core,
+            .target_core = &target_repo.core,
+            .io = io,
+            .allocator = allocator,
+            .reader = reader,
+            .writer = writer,
+            .patch_id = id.*,
+            .patch = fork_patch,
+            .posted = posted,
+            .target_oid = target_oid,
+            .target_ref = target_ref,
+            .title = title,
+            .author = author,
+            .timestamp = timestamp,
+            .newest = newest,
+            .revision_id_maybe = &revision_id_maybe,
+        }) catch |err| switch (err) {
+            error.CancelTransaction => {},
+            else => |other| return other,
+        };
+        try writer.flush();
     }
-    var patch = posted_patch.event;
-    patch.revision = selected;
-    evt.consume(.repo, .xit, repo_opts, io, allocator, target_repo, evt.events_ref, &.{.{
-        .id = id.*,
-        .timestamp = timestamp,
-        .author = author,
-        .event = .{ .patch = patch },
-    }}) catch {};
+
+    // best-effort update the posted patch so it has the new revision
+    {
+        const revision_id = revision_id_maybe orelse return;
+        if (!posted) return;
+        var update_arena = std.heap.ArenaAllocator.init(allocator);
+        defer update_arena.deinit();
+        const target_update_moment = evt.currentMoment(repo_opts, target_repo) catch return;
+        const posted_patch = (evt.Patch.readById(evt.EventDB(repo_opts.hash), repo_opts.hash, target_update_moment, &update_arena, &patch_id) catch return) orelse return;
+        if (posted_patch.removed) return;
+        const fork_update_moment = evt.currentMoment(repo_opts, fork_repo) catch return;
+        const revision = (evt.PatchRev.readById(evt.EventDB(repo_opts.hash), repo_opts.hash, fork_update_moment, &update_arena, &revision_id) catch return) orelse return;
+        if (revision.removed) return;
+        const selected = evt.Patch.Revision.fromRecord(revision_id, revision);
+        if (posted_patch.event.revision) |current| {
+            if (evt.fieldEqual(evt.Patch.Revision, current, selected)) return;
+        }
+        var patch = posted_patch.event;
+        patch.revision = selected;
+        evt.consume(.repo, .xit, repo_opts, io, allocator, target_repo, evt.events_ref, &.{.{
+            .id = id.*,
+            .timestamp = timestamp,
+            .author = author,
+            .event = .{ .patch = patch },
+        }}) catch |update_err| {
+            serve_common.logError(io, error_writer, "failed to update posted patch {s}: {s}\n", .{ id, @errorName(update_err) });
+        };
+    }
 }
 
 // delete first so a failed tombstone can be retried safely
