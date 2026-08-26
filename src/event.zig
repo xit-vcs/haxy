@@ -1117,7 +1117,7 @@ pub const MergePolicy = enum {
 };
 
 // what a three-way merge did with a field
-const FieldMerge = enum {
+pub const FieldMerge = enum {
     // the target's value stands, because neither side changed it, both made the
     // same change, or only the target changed it
     kept,
@@ -1249,6 +1249,9 @@ pub fn merge(
                     outcome = @splat(.kept);
                     merged = target_record;
                     merged.event = mergeFields(T, if (baseline_record) |baseline| baseline.event else null, target_record.event, parent_record.event, &outcome);
+                    if (comptime @hasDecl(T, "resolveMerge")) {
+                        T.resolveMerge(target_record.event, parent_record.event, &merged.event, &outcome);
+                    }
 
                     // merge the removed state separately from serialized fields. removal
                     // carries over an unchanged record, while an edit or restoration

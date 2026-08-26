@@ -230,6 +230,7 @@ pub fn receivePack(
     if (fork_patch.removed and target_patch == null) return error.PatchDataUnavailable;
     if (target_patch) |patch| {
         if (!std.mem.eql(u8, patch.author_email orelse "", author.email)) return error.PatchDataUnavailable;
+        if (patch.event.status == .merged) return error.PatchAlreadyMerged;
     }
     const published = target_patch != null;
     const title = if (target_patch) |patch| patch.event.title else fork_patch.event.title;
@@ -318,17 +319,13 @@ pub fn receivePack(
                 ctx.revision_id_maybe.* = revision_id;
 
                 if (!ctx.published) {
+                    var patch = ctx.patch.event;
+                    patch.patchrev_id = revision_hex;
                     events[event_count] = .{
                         .id = ctx.patch_id,
                         .timestamp = ctx.timestamp,
                         .author = ctx.author,
-                        .event = .{ .patch = .{
-                            .title = ctx.patch.event.title,
-                            .description = ctx.patch.event.description,
-                            .tags = ctx.patch.event.tags,
-                            .target_patch_id = ctx.patch.event.target_patch_id,
-                            .patchrev_id = revision_hex,
-                        } },
+                        .event = .{ .patch = patch },
                     };
                     event_count += 1;
                 }
@@ -389,17 +386,13 @@ pub fn receivePack(
     if (published_patch.event.patchrev_id) |*published_revision| {
         if (std.mem.eql(u8, published_revision, &revision_hex)) return;
     }
+    var patch = published_patch.event;
+    patch.patchrev_id = revision_hex;
     evt.consume(.repo, .xit, repo_opts, io, allocator, target_repo, evt.events_ref, &.{.{
         .id = id.*,
         .timestamp = timestamp,
         .author = author,
-        .event = .{ .patch = .{
-            .title = published_patch.event.title,
-            .description = published_patch.event.description,
-            .tags = published_patch.event.tags,
-            .target_patch_id = published_patch.event.target_patch_id,
-            .patchrev_id = revision_hex,
-        } },
+        .event = .{ .patch = patch },
     }}) catch {};
 }
 
@@ -452,34 +445,40 @@ pub fn publish(
     }
     if (local_patch.removed) {
         if (existing == null) return error.PatchDataUnavailable;
-        return;
+    } else {
+        const revision_hex = local_patch.event.patchrev_id orelse return error.PatchNotPushed;
+        const revision_id = try evt.parseEventId(&revision_hex);
+        const revision = (try evt.PatchRev.readById(evt.EventDB(repo_opts.hash), repo_opts.hash, fork_moment, &arena, &revision_id)) orelse return error.PatchNotPushed;
+        if (revision.removed) return error.PatchNotPushed;
+        var patch = (existing orelse local_patch).event;
+        patch.patchrev_id = revision_hex;
+        if (existing == null) patch.status = .open;
+
+        try evt.consume(.repo, .xit, repo_opts, io, allocator, target_repo, evt.events_ref, &.{.{
+            .id = input.id,
+            .timestamp = input.timestamp,
+            .author = input.author,
+            .event = .{ .patch = patch },
+        }});
+
+        try evt.consume(.fork, .xit, repo_opts, io, allocator, &fork_repo, evt.events_ref, &.{.{
+            .id = input.id,
+            .timestamp = input.timestamp,
+            .author = input.author,
+            .event = .{ .patch = null },
+        }});
     }
 
-    const revision_hex = local_patch.event.patchrev_id orelse return error.PatchNotPushed;
-    const revision_id = try evt.parseEventId(&revision_hex);
-    const revision = (try evt.PatchRev.readById(evt.EventDB(repo_opts.hash), repo_opts.hash, fork_moment, &arena, &revision_id)) orelse return error.PatchNotPushed;
-    if (revision.removed) return error.PatchNotPushed;
-    const metadata = existing orelse local_patch;
-
-    try evt.consume(.repo, .xit, repo_opts, io, allocator, target_repo, evt.events_ref, &.{.{
-        .id = input.id,
-        .timestamp = input.timestamp,
-        .author = input.author,
-        .event = .{ .patch = .{
-            .title = metadata.event.title,
-            .description = metadata.event.description,
-            .tags = metadata.event.tags,
-            .target_patch_id = metadata.event.target_patch_id,
-            .patchrev_id = revision_hex,
-        } },
-    }});
-
-    try evt.consume(.fork, .xit, repo_opts, io, allocator, &fork_repo, evt.events_ref, &.{.{
-        .id = input.id,
-        .timestamp = input.timestamp,
-        .author = input.author,
-        .event = .{ .patch = null },
-    }});
+    if (fork_record.event.stage == .draft) {
+        var posted = fork_record.event;
+        posted.stage = .posted;
+        try evt.consume(.admin, .xit, evt.admin_repo_opts, io, allocator, admin_repo, evt.events_ref, &.{.{
+            .id = input.id,
+            .timestamp = input.timestamp,
+            .author = input.author,
+            .event = .{ .fork = posted },
+        }});
+    }
 }
 
 // delete first so a failed tombstone can be retried safely

@@ -241,6 +241,7 @@ test "patch event conflicts, stacking, and gc" {
     };
     var target_patch = updated_patch;
     target_patch.patchrev_id = std.fmt.bytesToHex(patchrev_a_id, .lower);
+    target_patch.status = .closed;
     {
         try evt.consume(.repo, .xit, repo_opts, io, allocator, &target, evt.events_ref, &.{
             .{
@@ -270,6 +271,7 @@ test "patch event conflicts, stacking, and gc" {
     };
     var parent_patch = updated_patch;
     parent_patch.patchrev_id = std.fmt.bytesToHex(patchrev_b_id, .lower);
+    parent_patch.status = .merged;
     {
         try evt.consume(.repo, .xit, repo_opts, io, allocator, &target, side_events_ref, &.{
             .{
@@ -314,7 +316,7 @@ test "patch event conflicts, stacking, and gc" {
     const conflict_cursor = try conflicts.getCursor(&evt.orderKeyDesc(merged.created_order, &patch_id)) orelse return error.NotFound;
     const conflict = try Repo.DB.HashMap(.read_only).init(conflict_cursor);
     const fields_cursor = try conflict.getCursor(hash.hashInt(repo_opts.hash, evt.conflicted_fields_key)) orelse return error.NotFound;
-    try std.testing.expectEqualStrings("patchrev_id", try fields_cursor.readBytesAlloc(arena.allocator(), null));
+    try std.testing.expectEqualStrings("patchrev_id status", try fields_cursor.readBytesAlloc(arena.allocator(), null));
     const their_cursor = try conflict.getCursor(hash.hashInt(repo_opts.hash, evt.their_record_key)) orelse return error.NotFound;
     const theirs = try evt.read(evt.Patch.Record, Repo.DB, repo_opts.hash, &arena, try Repo.DB.HashMap(.read_only).init(their_cursor));
     try std.testing.expectEqualStrings(&std.fmt.bytesToHex(patchrev_b_id, .lower), &(theirs.event.patchrev_id orelse return error.NotFound));
@@ -383,6 +385,70 @@ test "patch event conflicts, stacking, and gc" {
     const children_cursor = try targets.getCursor(hash.hashInt(repo_opts.hash, &patch_id)) orelse return error.NotFound;
     const children = try Repo.DB.SortedSet(.read_only).init(children_cursor);
     try std.testing.expectEqual(1, try children.count());
+
+    //
+    // close and merge the same revision concurrently
+    //
+
+    const status_side_ref: rf.Ref = .{ .kind = .head, .name = "haxy/patch-status-side" };
+    {
+        var result = try target.switchDir(io, allocator, .{ .target = .{ .ref = evt.events_ref } });
+        defer result.deinit();
+        try target.addBranch(io, .{ .name = status_side_ref.name });
+    }
+    var closed_child = child.event;
+    closed_child.status = .closed;
+    try evt.consume(.repo, .xit, repo_opts, io, allocator, &target, evt.events_ref, &.{.{
+        .id = std.fmt.bytesToHex(child_id, .lower),
+        .timestamp = 14,
+        .author = author,
+        .event = .{ .patch = closed_child },
+    }});
+    var merged_child = child.event;
+    merged_child.status = .merged;
+    try evt.consume(.repo, .xit, repo_opts, io, allocator, &target, status_side_ref, &.{.{
+        .id = std.fmt.bytesToHex(child_id, .lower),
+        .timestamp = 15,
+        .author = author,
+        .event = .{ .patch = merged_child },
+    }});
+    try evt.mergeEvents(.xit, repo_opts, io, allocator, &target, status_side_ref);
+    try evt.consume(.repo, .xit, repo_opts, io, allocator, &target, evt.events_ref, &.{});
+
+    _ = arena.reset(.retain_capacity);
+    const status_moment = try evt.currentMoment(repo_opts, &target);
+    const merged_child_record = (try evt.Patch.readById(Repo.DB, repo_opts.hash, status_moment, &arena, &child_id)) orelse return error.NotFound;
+    try std.testing.expectEqual(.merged, merged_child_record.event.status);
+    try std.testing.expectEqual(0, try patchStatusCount(status_moment, .open));
+    try std.testing.expectEqual(1, try patchStatusCount(status_moment, .closed));
+    try std.testing.expectEqual(1, try patchStatusCount(status_moment, .merged));
+    try std.testing.expectEqual(1, try patchTagStatusCount(status_moment, "enhancement", .merged));
+    const status_conflicts_cursor = try status_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Patch.conflicts_key)) orelse return error.NotFound;
+    const status_conflicts = try Repo.DB.SortedMap(.read_only).init(status_conflicts_cursor);
+    const child_conflict = try status_conflicts.getCursor(&evt.orderKeyDesc(merged_child_record.created_order, &child_id));
+    try std.testing.expectEqual(null, child_conflict);
+
+    var reopened_child = merged_child_record.event;
+    reopened_child.status = .open;
+    try std.testing.expectError(error.PatchAlreadyMerged, evt.consume(.repo, .xit, repo_opts, io, allocator, &target, evt.events_ref, &.{.{
+        .id = std.fmt.bytesToHex(child_id, .lower),
+        .timestamp = 16,
+        .author = author,
+        .event = .{ .patch = reopened_child },
+    }}));
+
+    const invalid_merged_id = evt.EventWithId.randomId(prng.random());
+    try std.testing.expectError(error.InvalidPatch, evt.consume(.repo, .xit, repo_opts, io, allocator, &target, evt.events_ref, &.{.{
+        .id = std.fmt.bytesToHex(invalid_merged_id, .lower),
+        .timestamp = 16,
+        .author = author,
+        .event = .{ .patch = .{
+            .title = "invalid merged patch",
+            .description = "has no revision",
+            .tags = "enhancement",
+            .status = .merged,
+        } },
+    }}));
 
     //
     // retain the ref-free commits during garbage collection
@@ -582,18 +648,30 @@ test "patch lifecycle" {
         .author = author,
         .timestamp = 3,
     });
+    try fork.publish(repo_opts, io, allocator, &admin, &target, draft_path, .{
+        .id = patch_id_hex,
+        .user_id = user_id,
+        .repo_id = repo_id,
+        .author = author,
+        .timestamp = 4,
+    });
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const moment = try evt.currentMoment(repo_opts, &target);
     const patch = (try evt.Patch.readById(Repo.DB, repo_opts.hash, moment, &arena, &patch_id)) orelse return error.NotFound;
     try std.testing.expectEqualStrings(&first_patchrev_hex, &(patch.event.patchrev_id orelse return error.NotFound));
+    try std.testing.expectEqual(.open, patch.event.status);
     try std.testing.expectEqual(null, try evt.PatchRev.readById(Repo.DB, repo_opts.hash, moment, &arena, &first_patchrev_id));
 
     _ = arena.reset(.retain_capacity);
     const admin_moment = try evt.currentMoment(evt.admin_repo_opts, &admin);
     const published_fork = (try evt.Fork.readById(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &arena, &patch_id)) orelse return error.NotFound;
     try std.testing.expect(!published_fork.removed);
+    try std.testing.expectEqual(.posted, published_fork.event.stage);
+    const draft_key = evt.Fork.draftKey(&repo_id, &user_id);
+    try std.testing.expectEqual(0, try indexedForkCount(admin_moment, evt.Fork.repo_user_to_draft_id_set_key, &draft_key));
+    try std.testing.expectEqual(1, try indexedForkCount(admin_moment, evt.Fork.user_id_to_fork_id_set_key, &user_id));
     {
         var draft = try Repo.open(io, allocator, .{ .path = draft_path });
         defer draft.deinit(io, allocator);
@@ -614,4 +692,33 @@ test "patch lifecycle" {
         try std.testing.expectEqualStrings(revision.base_tree_oid, &trees.base);
         try std.testing.expectEqualStrings(revision.head_tree_oid, &trees.head);
     }
+}
+
+fn indexedForkCount(
+    moment: evt.AdminDB.HashMap(.read_only),
+    index_key: []const u8,
+    parent_id: []const u8,
+) !u64 {
+    const index_cursor = try moment.getCursor(hash.hashInt(evt.admin_repo_opts.hash, index_key)) orelse return 0;
+    const index = try evt.AdminDB.HashMap(.read_only).init(index_cursor);
+    const ids_cursor = try index.getCursor(hash.hashInt(evt.admin_repo_opts.hash, parent_id)) orelse return 0;
+    const ids = try evt.AdminDB.SortedSet(.read_only).init(ids_cursor);
+    return try ids.count();
+}
+
+fn patchStatusCount(moment: Repo.DB.HashMap(.read_only), status: evt.Patch.Status) !u64 {
+    const statuses_cursor = try moment.getCursor(hash.hashInt(repo_opts.hash, evt.Patch.status_to_id_set_key)) orelse return 0;
+    const statuses = try Repo.DB.SortedMap(.read_only).init(statuses_cursor);
+    const ids_cursor = try statuses.getCursor(@tagName(status)) orelse return 0;
+    const ids = try Repo.DB.SortedSet(.read_only).init(ids_cursor);
+    return try ids.count();
+}
+
+fn patchTagStatusCount(moment: Repo.DB.HashMap(.read_only), tag: []const u8, status: evt.Patch.Status) !u64 {
+    const tags_cursor = try moment.getCursor(hash.hashInt(repo_opts.hash, evt.Patch.tag_status_to_id_set_key)) orelse return 0;
+    const tags = try Repo.DB.SortedMap(.read_only).init(tags_cursor);
+    var key_buffer: evt.Patch.TagStatusKey = undefined;
+    const ids_cursor = try tags.getCursor(try evt.Patch.tagStatusKey(&key_buffer, tag, status)) orelse return 0;
+    const ids = try Repo.DB.SortedSet(.read_only).init(ids_cursor);
+    return try ids.count();
 }

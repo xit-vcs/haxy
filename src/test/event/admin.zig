@@ -415,8 +415,10 @@ test "fork query and removal lifecycle" {
     var record = (try evt.Fork.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, &arena, &fork_id)) orelse return error.NotFound;
     try std.testing.expectEqualSlices(u8, &user_id, record.event.user_id);
     try std.testing.expectEqualSlices(u8, &repo_id, record.event.repo_id);
+    try std.testing.expectEqual(.draft, record.event.stage);
     try std.testing.expectEqual(1, try indexedForkCount(moment, evt.Fork.user_id_to_fork_id_set_key, &user_id));
-    try std.testing.expectEqual(1, try indexedForkCount(moment, evt.Fork.repo_id_to_fork_id_set_key, &repo_id));
+    const draft_key = evt.Fork.draftKey(&repo_id, &user_id);
+    try std.testing.expectEqual(1, try indexedForkCount(moment, evt.Fork.repo_user_to_draft_id_set_key, &draft_key));
 
     var draft_repo = try rp.Repo(.xit, fork_repo_opts).open(io, allocator, .{ .path = draft_path });
     defer draft_repo.deinit(io, allocator);
@@ -437,7 +439,7 @@ test "fork query and removal lifecycle" {
     record = (try evt.Fork.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, &arena, &fork_id)) orelse return error.NotFound;
     try std.testing.expect(record.removed);
     try std.testing.expectEqual(0, try indexedForkCount(moment, evt.Fork.user_id_to_fork_id_set_key, &user_id));
-    try std.testing.expectEqual(0, try indexedForkCount(moment, evt.Fork.repo_id_to_fork_id_set_key, &repo_id));
+    try std.testing.expectEqual(0, try indexedForkCount(moment, evt.Fork.repo_user_to_draft_id_set_key, &draft_key));
 
     try fork.remove(io, allocator, repos_dir, &admin, &fork_id_hex, &user_id, author);
 }
