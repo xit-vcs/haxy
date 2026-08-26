@@ -45,7 +45,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     // main
-    const install_main_exe = blk: {
+    {
         const exe = b.addExecutable(.{
             .name = "haxy",
             .root_module = b.createModule(.{
@@ -63,9 +63,7 @@ pub fn build(b: *std.Build) void {
 
         const install_exe = b.addInstallArtifact(exe, .{});
         b.getInstallStep().dependOn(&install_exe.step);
-
-        break :blk install_exe;
-    };
+    }
 
     // test
     {
@@ -119,6 +117,21 @@ pub fn build(b: *std.Build) void {
 
     // testnet
     {
+        const server_exe = b.addExecutable(.{
+            .name = "haxy",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/main.zig"),
+                .target = target,
+                .optimize = .Debug,
+            }),
+            .use_llvm = true,
+        });
+        server_exe.root_module.addImport("xit", xit_dep.module("xit"));
+        server_exe.root_module.addAnonymousImport("haxy.wasm", .{
+            .root_source_file = wasm_exe.getEmittedBin(),
+        });
+        const install_server_exe = b.addInstallArtifact(server_exe, .{});
+
         const unit_tests = b.addTest(.{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/testnet.zig"),
@@ -130,7 +143,7 @@ pub fn build(b: *std.Build) void {
 
         const run_unit_tests = b.addRunArtifact(unit_tests);
         run_unit_tests.has_side_effects = true;
-        run_unit_tests.step.dependOn(&install_main_exe.step);
+        run_unit_tests.step.dependOn(&install_server_exe.step);
         const test_step = b.step("testnet", "Run network unit tests");
         test_step.dependOn(&run_unit_tests.step);
     }
