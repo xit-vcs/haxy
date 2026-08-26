@@ -222,6 +222,8 @@ pub fn main(init: std.process.Init) !void {
                         .user_id = &user_ids[r.user_index],
                         .name = r.name,
                         .description = r.description,
+                        .read_access = .public,
+                        .write_access = .public,
                     },
                 },
             };
@@ -240,6 +242,7 @@ pub fn main(init: std.process.Init) !void {
 
             try template_repo.addConfig(io, allocator, .{ .name = "user.name", .value = "haxy" });
             try template_repo.addConfig(io, allocator, .{ .name = "user.email", .value = "admin@example.test" });
+            try template_repo.addConfig(io, allocator, .{ .name = "receive.denycurrentbranch", .value = "updateinstead" });
 
             // a README plus a nested doc so the file tree has a directory to
             // descend into

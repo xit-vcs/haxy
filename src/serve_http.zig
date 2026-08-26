@@ -1,6 +1,7 @@
 const std = @import("std");
 const xit = @import("xit");
 const rp = xit.repo;
+const evt = @import("./event.zig");
 const serve_common = @import("./serve_common.zig");
 
 pub fn runListener(
@@ -118,6 +119,32 @@ fn handleGitRequest(
         return;
     }
 
+    const owner_repo = evt.parseOwnerRepoPath(repo_rel) orelse {
+        if (http_server.reader.state == .received_head) http_server.reader.state = .ready;
+        try writeSimpleResponse(http_server, 400, "Bad Request", "text/plain", "repo path must be <owner>/<repo>");
+        return;
+    };
+    const repo_path = blk: {
+        var admin = rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = admin_repo_path }) catch |err| switch (err) {
+            error.RepoNotFound => return error.RepoNotFound,
+            else => |e| return e,
+        };
+        defer admin.deinit(io, allocator);
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const moment = try evt.currentMoment(evt.admin_repo_opts, &admin);
+        const repo = (try evt.Repo.readByOwnerAndName(evt.AdminDB, evt.admin_repo_opts.hash, moment, &arena, owner_repo.owner, owner_repo.name)) orelse
+            return error.RepoNotFound;
+        if (repo.repo.event.read_access == .private) {
+            if (http_server.reader.state == .received_head) http_server.reader.state = .ready;
+            try writeSimpleResponse(http_server, 403, "Forbidden", "text/plain", "private repos cannot be fetched over HTTP");
+            return;
+        }
+        const repo_id = std.fmt.bytesToHex(repo.event_id, .lower);
+        break :blk try std.fs.path.join(allocator, &.{ repo_root_path, &repo_id });
+    };
+    defer allocator.free(repo_path);
+
     const body = if (request.head.method == .POST) blk: {
         const reader = try request.readerExpectContinue(&.{});
         break :blk try reader.allocRemaining(allocator, .unlimited);
@@ -127,13 +154,6 @@ fn handleGitRequest(
     if (http_server.reader.state == .received_head) {
         http_server.reader.state = .ready;
     }
-
-    const repo_path = switch (try serve_common.resolveRepoPath(io, allocator, repo_root_path, admin_repo_path, repo_rel, false)) {
-        .ok => |p| p,
-        .invalid => return writeSimpleResponse(http_server, 400, "Bad Request", "text/plain", "repo path must be <owner>/<repo>"),
-        .not_found => return error.RepoNotFound,
-    };
-    defer allocator.free(repo_path);
 
     var body_reader = std.Io.Reader.fixed(body);
     const http_backend_options = xit.net_server_http_backend.Options{

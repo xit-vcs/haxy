@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const xit = @import("xit");
 const rp = xit.repo;
 const xitui = xit.xitui;
@@ -345,7 +344,7 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, command:
         const user = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &admin_arena, fork_record.event.user_id)) orelse
             return writeError(sess, "invalid patch draft");
         if (user.removed) return writeError(sess, "invalid patch draft");
-        if (builtin.mode != .Debug and !isKeyInAuthorizedKeys(user.event.ssh_keys, &sess.fingerprint))
+        if (parsed.service == .receive_pack and !isKeyInAuthorizedKeys(user.event.ssh_keys, &sess.fingerprint))
             return writeError(sess, "unauthorized: this SSH key is not registered to the patch author");
 
         const draft_path = try fork.forkPath(allocator, handler.repo_root_path, &route.id);
@@ -387,12 +386,14 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, command:
     const create_if_missing = parsed.service == .receive_pack;
     const any_repo_opts: rp.AnyRepoOpts(.xit) = .{};
 
-    // authenticate pushes: the authenticated key must be registered to the
-    // repo's owner.
-    if (create_if_missing) {
-        const owner_repo = evt.parseOwnerRepoPath(repo_identity) orelse return writeError(sess, "repo path must be <owner>/<repo>");
-        if (builtin.mode != .Debug and !try isKeyAuthorized(io, allocator, handler.admin_repo_path, owner_repo.owner, &sess.fingerprint))
-            return writeError(sess, "unauthorized: this SSH key is not registered to the repo owner");
+    const owner_repo = evt.parseOwnerRepoPath(repo_identity) orelse return writeError(sess, "repo path must be <owner>/<repo>");
+    switch (try authorizeRepoKey(io, allocator, handler.admin_repo_path, owner_repo.owner, owner_repo.name, parsed.service, &sess.fingerprint)) {
+        .allowed => {},
+        .denied => return switch (parsed.service) {
+            .upload_pack => writeError(sess, "unauthorized: this SSH key cannot read this repo"),
+            .receive_pack => writeError(sess, "unauthorized: this SSH key cannot push to this repo"),
+        },
+        .not_found => return writeError(sess, "repo not found"),
     }
 
     const repo_path = switch (try serve_common.resolveRepoPath(io, allocator, handler.repo_root_path, handler.admin_repo_path, repo_identity, create_if_missing)) {
@@ -497,20 +498,59 @@ fn parseGitCommand(allocator: std.mem.Allocator, command: []const u8) !ParsedGit
     return .{ .service = service, .dir = try allocator.dupe(u8, dir_token) };
 }
 
-// true if `fingerprint` matches one of the named user's registered SSH keys
-fn isKeyAuthorized(
+const RepoAuthorization = enum { allowed, denied, not_found };
+
+fn authorizeRepoKey(
     io: std.Io,
     allocator: std.mem.Allocator,
     admin_repo_path: []const u8,
     owner_name: []const u8,
+    repo_name: []const u8,
+    service: GitService,
     fingerprint: *const [ssh.fingerprint_len]u8,
-) !bool {
+) !RepoAuthorization {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    const user = (try evt.User.readByName(io, allocator, admin_repo_path, &arena, owner_name)) orelse return false;
+    var admin = rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = admin_repo_path }) catch |err| switch (err) {
+        error.RepoNotFound => return .not_found,
+        else => |e| return e,
+    };
+    defer admin.deinit(io, allocator);
 
-    return isKeyInAuthorizedKeys(user.event.ssh_keys, fingerprint);
+    const moment = try evt.currentMoment(evt.admin_repo_opts, &admin);
+    const repo = (try evt.Repo.readByOwnerAndName(evt.AdminDB, evt.admin_repo_opts.hash, moment, &arena, owner_name, repo_name)) orelse {
+        if (service == .upload_pack) return .not_found;
+        const owner = (try evt.User.readByName(io, allocator, admin_repo_path, &arena, owner_name)) orelse return .not_found;
+        return if (isKeyInAuthorizedKeys(owner.event.ssh_keys, fingerprint)) .allowed else .denied;
+    };
+
+    if ((service == .upload_pack and repo.repo.event.read_access == .public) or
+        (service == .receive_pack and repo.repo.event.write_access == .public)) return .allowed;
+    if (try keyBelongsToUser(moment, &arena, repo.repo.event.user_id, fingerprint)) return .allowed;
+
+    const user_id_lists: []const []const u8 = switch (service) {
+        .upload_pack => &.{ repo.repo.event.write_user_ids, repo.repo.event.read_user_ids },
+        .receive_pack => &.{repo.repo.event.write_user_ids},
+    };
+    for (user_id_lists) |user_ids| {
+        var lines = std.mem.tokenizeScalar(u8, user_ids, '\n');
+        while (lines.next()) |id| {
+            const user_id = try evt.parseEventId(id);
+            if (try keyBelongsToUser(moment, &arena, &user_id, fingerprint)) return .allowed;
+        }
+    }
+    return .denied;
+}
+
+fn keyBelongsToUser(
+    moment: evt.AdminDB.HashMap(.read_only),
+    arena: *std.heap.ArenaAllocator,
+    user_id: []const u8,
+    fingerprint: *const [ssh.fingerprint_len]u8,
+) !bool {
+    const user = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, user_id)) orelse return false;
+    return !user.removed and isKeyInAuthorizedKeys(user.event.ssh_keys, fingerprint);
 }
 
 fn isKeyInAuthorizedKeys(ssh_keys: []const u8, fingerprint: *const [ssh.fingerprint_len]u8) bool {

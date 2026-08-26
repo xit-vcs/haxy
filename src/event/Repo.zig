@@ -6,6 +6,10 @@ const hash = xit.hash;
 user_id: []const u8,
 name: []const u8,
 description: []const u8,
+read_access: Access = .private,
+write_access: Access = .private,
+read_user_ids: []const u8 = "",
+write_user_ids: []const u8 = "",
 
 // what the db stores: the event's data plus the commit-derived fields
 pub const Record = struct {
@@ -21,6 +25,11 @@ pub const Record = struct {
 };
 
 const Self = @This();
+
+pub const Access = enum {
+    private,
+    public,
+};
 
 pub const name_max_len = 32;
 
@@ -39,6 +48,11 @@ pub fn validateName(name: []const u8) !void {
         if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '_' and c != '.')
             return error.InvalidName;
     }
+}
+
+fn validateUserIds(user_ids: []const u8) !void {
+    var lines = std.mem.tokenizeScalar(u8, user_ids, '\n');
+    while (lines.next()) |id| _ = try evt.parseEventId(id);
 }
 
 pub fn consume(
@@ -73,7 +87,11 @@ pub fn consume(
         break :blk record;
     };
 
-    if (!record_to_write.removed) try validateName(record_to_write.event.name);
+    if (!record_to_write.removed) {
+        try validateName(record_to_write.event.name);
+        try validateUserIds(record_to_write.event.read_user_ids);
+        try validateUserIds(record_to_write.event.write_user_ids);
+    }
 
     const user_id_to_repo_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, "user-id->repo-id-set"));
     const user_id_to_repo_id_set = try DB.HashMap(.read_write).init(user_id_to_repo_id_set_cursor);
