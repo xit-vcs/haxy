@@ -7,8 +7,31 @@ title: []const u8,
 description: []const u8,
 tags: []const u8, // space-separated
 target_patch_id: ?[evt.event_id_size * 2]u8 = null,
-patchrev_id: ?[evt.event_id_size * 2]u8 = null,
+revision: ?Revision = null,
 status: Status = .open,
+
+pub const Revision = struct {
+    id: [evt.event_id_size * 2]u8,
+    squash_oid: []const u8,
+    source_oid: []const u8,
+    target_ref: []const u8,
+
+    pub fn fromRecord(id: [evt.event_id_size]u8, record: evt.PatchRev.Record) Revision {
+        return .{
+            .id = std.fmt.bytesToHex(id, .lower),
+            .squash_oid = record.patch_oid,
+            .source_oid = record.event.source_oid,
+            .target_ref = record.event.target_ref,
+        };
+    }
+
+    pub fn matches(self: Revision, record: evt.PatchRev.Record) bool {
+        return !record.removed and
+            std.mem.eql(u8, record.patch_oid, self.squash_oid) and
+            std.mem.eql(u8, record.event.source_oid, self.source_oid) and
+            std.mem.eql(u8, record.event.target_ref, self.target_ref);
+    }
+};
 
 pub const Record = struct {
     event: Self,
@@ -40,6 +63,7 @@ pub const id_to_field_to_oid_key = "patch-id->field->oid";
 pub const target_patch_id_to_patch_id_set_key = "target-patch-id->patch-id-set";
 pub const status_to_id_set_key = "status->patch-id-set";
 pub const tag_status_to_id_set_key = "tag+status->patch-id-set";
+pub const revision_to_id_set_key = "target-ref+oid->patch-id-set";
 
 pub const TagStatusKey = [tag_max_len + 1 + Status.longest_len]u8;
 
@@ -91,7 +115,12 @@ pub fn consume(
     };
 
     if (!fieldsValid(record.event.title, record.event.tags)) return error.InvalidPatch;
-    const patchrev_id = if (record.event.patchrev_id) |*id| try evt.parseEventId(id) else null;
+    const revision_id = if (record.event.revision) |*revision| blk: {
+        try evt.PatchRev.validateOid(hash_kind, revision.squash_oid);
+        try evt.PatchRev.validateOid(hash_kind, revision.source_oid);
+        try evt.PatchRev.validateTarget(revision.target_ref);
+        break :blk try evt.parseEventId(&revision.id);
+    } else null;
     const target_patch_id = if (record.event.target_patch_id) |*id| try evt.parseEventId(id) else null;
     if (target_patch_id) |*id| {
         if (std.mem.eql(u8, id, event_id)) return error.InvalidPatch;
@@ -109,9 +138,10 @@ pub fn consume(
     }
 
     if (record.event.status == .merged) {
-        const revision_id = patchrev_id orelse return error.InvalidPatch;
-        const revision = (try evt.PatchRev.readById(DB, hash_kind, haxy_moment.readOnly(), arena, &revision_id)) orelse return error.InvalidPatch;
-        if (revision.removed) return error.InvalidPatch;
+        const id = revision_id orelse return error.InvalidPatch;
+        const selected = record.event.revision orelse return error.InvalidPatch;
+        const revision = (try evt.PatchRev.readById(DB, hash_kind, haxy_moment.readOnly(), arena, &id)) orelse return error.InvalidPatch;
+        if (!selected.matches(revision)) return error.InvalidPatch;
     }
 
     const order_key = evt.orderKeyDesc(record.created_order, event_id);
@@ -121,6 +151,18 @@ pub fn consume(
             const old_status = try statusSet(DB, statuses, existing.event.status);
             _ = try old_status.remove(&order_key);
             try removeFromTagSets(DB, tag_statuses, existing.event.tags, existing.event.status, &order_key);
+            if (existing.event.status != .merged) {
+                if (existing.event.revision) |revision| {
+                    const revisions = try DB.HashMap(.read_write).init(try haxy_moment.putCursor(hash.hashInt(hash_kind, revision_to_id_set_key)));
+                    for ([_][]const u8{ revision.squash_oid, revision.source_oid }, 0..) |oid, i| {
+                        if (i != 0 and std.mem.eql(u8, revision.squash_oid, revision.source_oid)) continue;
+                        const key_hash = hash.hashInt(hash_kind, try revisionKey(arena.allocator(), revision.target_ref, oid));
+                        const ids = try DB.CountedHashSet(.read_write).init(try revisions.putCursor(key_hash));
+                        _ = try ids.remove(record_key);
+                        if (try ids.count() == 0) _ = try revisions.remove(key_hash);
+                    }
+                }
+            }
         }
     }
 
@@ -151,6 +193,18 @@ pub fn consume(
             const set = try DB.SortedSet(.read_write).init(try tag_statuses.putCursor(try tagStatusKey(&key_buffer, tag, record.event.status)));
             try set.put(&order_key);
         }
+
+        if (record.event.status != .merged) {
+            if (record.event.revision) |revision| {
+                const revisions = try DB.HashMap(.read_write).init(try haxy_moment.putCursor(hash.hashInt(hash_kind, revision_to_id_set_key)));
+                for ([_][]const u8{ revision.squash_oid, revision.source_oid }, 0..) |oid, i| {
+                    if (i != 0 and std.mem.eql(u8, revision.squash_oid, revision.source_oid)) continue;
+                    const key = try revisionKey(arena.allocator(), revision.target_ref, oid);
+                    const ids = try DB.CountedHashSet(.read_write).init(try revisions.putCursor(hash.hashInt(hash_kind, key)));
+                    try ids.put(record_key, .{ .bytes = event_id });
+                }
+            }
+        }
     }
 }
 
@@ -161,16 +215,20 @@ pub fn resolveMerge(
     outcome: *[std.meta.fields(Self).len]evt.FieldMerge,
 ) void {
     const status_index = std.meta.fieldIndex(Self, "status") orelse @compileError("Patch.status not found");
-    const patchrev_index = std.meta.fieldIndex(Self, "patchrev_id") orelse @compileError("Patch.patchrev_id not found");
-    if (outcome[status_index] != .conflicted or outcome[patchrev_index] == .conflicted) return;
+    const revision_index = std.meta.fieldIndex(Self, "revision") orelse @compileError("Patch.revision not found");
+    if (outcome[status_index] != .conflicted or outcome[revision_index] == .conflicted) return;
 
-    if (target.status == .merged and std.meta.eql(target.patchrev_id, merged.patchrev_id)) {
+    if (target.status == .merged and evt.fieldEqual(?Revision, target.revision, merged.revision)) {
         merged.status = .merged;
         outcome[status_index] = .kept;
-    } else if (parent.status == .merged and std.meta.eql(parent.patchrev_id, merged.patchrev_id)) {
+    } else if (parent.status == .merged and evt.fieldEqual(?Revision, parent.revision, merged.revision)) {
         merged.status = .merged;
         outcome[status_index] = .parent;
     }
+}
+
+fn revisionKey(allocator: std.mem.Allocator, target_ref: []const u8, oid: []const u8) ![]u8 {
+    return std.mem.concat(allocator, u8, &.{ target_ref, "\x00", oid });
 }
 
 fn statusSet(

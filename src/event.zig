@@ -5,6 +5,7 @@ const hash = xit.hash;
 const mrg = xit.merge;
 const obj = xit.object;
 const rf = xit.ref;
+const pch = @import("patch.zig");
 
 pub const User = @import("event/User.zig");
 pub const Repo = @import("event/Repo.zig");
@@ -21,6 +22,9 @@ pub const max_event_size: usize = 100 * 1024;
 
 // the branch haxy events are committed to before being consumed
 pub const events_ref: rf.Ref = .{ .kind = .head, .name = "haxy/events" };
+
+pub const materialized_key = "haxy";
+pub const last_object_id_key = "haxy-last-object-id";
 
 // options + db type for the admin repo
 pub const admin_repo_opts: rp.RepoOpts(.xit) = .{};
@@ -570,6 +574,7 @@ pub fn receivePackAndConsume(
     reader: *std.Io.Reader,
     writer: *std.Io.Writer,
     options: xit.net_server_receive_pack.Options,
+    repo_root_path: []const u8,
 ) !void {
     const DB = rp.Repo(.xit, repo_opts).DB;
     const State = rp.Repo(.xit, repo_opts).State;
@@ -581,18 +586,26 @@ pub fn receivePackAndConsume(
         reader: *std.Io.Reader,
         writer: *std.Io.Writer,
         options: xit.net_server_receive_pack.Options,
+        repo_root_path: []const u8,
 
         pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
             var moment = try DB.HashMap(.read_write).init(cursor.*);
             const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
-            try xit.net_server_receive_pack.run(.xit, repo_opts, state, ctx.io, ctx.allocator, ctx.reader, ctx.writer, ctx.options);
-            try xit.undo.writeMessage(repo_opts, state, .push);
+            var updates = xit.net_server_receive_pack.AppliedRefUpdates.init(ctx.allocator);
+            defer updates.deinit();
+            var receive_options = ctx.options;
+            receive_options.applied_ref_updates = &updates;
+            try xit.net_server_receive_pack.run(.xit, repo_opts, state, ctx.io, ctx.allocator, ctx.reader, ctx.writer, receive_options);
 
             // a repo without an events branch has no events to consume. a
             // no-op consume must not cancel here, since the push shares the
             // transaction and must commit regardless.
-            if (null == try rf.readRecur(.xit, repo_opts, state.readOnly(), ctx.io, .{ .ref = events_ref })) return;
-            _ = try consumeInTransaction(.repo, .xit, repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, events_ref);
+            if (null != try rf.readRecur(.xit, repo_opts, state.readOnly(), ctx.io, .{ .ref = events_ref })) {
+                _ = try consumeInTransaction(.repo, .xit, repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, events_ref);
+                try pch.detectMerged(repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, ctx.repo_root_path, updates.items.items);
+            }
+            try xit.undo.writeMessage(repo_opts, state, .push);
+            try ctx.core.chunk_store_file.sync(ctx.io);
         }
     };
 
@@ -602,7 +615,15 @@ pub fn receivePackAndConsume(
     const history = try DB.ArrayList(.read_write).init(repo.core.db.rootCursor());
     history.appendContext(
         .{ .slot = try history.getSlot(-1) },
-        Ctx{ .core = &repo.core, .io = io, .allocator = allocator, .reader = reader, .writer = writer, .options = options },
+        Ctx{
+            .core = &repo.core,
+            .io = io,
+            .allocator = allocator,
+            .reader = reader,
+            .writer = writer,
+            .options = options,
+            .repo_root_path = repo_root_path,
+        },
     ) catch |err| switch (err) {
         error.CancelTransaction => {},
         else => |e| return e,
@@ -735,7 +756,7 @@ pub fn consumeInTransaction(
 
     // the last_object_id represents the object id that was last consumed
     var last_object_id_maybe: ?[hash.byteLen(repo_opts.hash)]u8 = null;
-    if (try moment.getCursor(hash.hashInt(repo_opts.hash, "haxy-last-object-id"))) |last_object_id_cursor| {
+    if (try moment.getCursor(hash.hashInt(repo_opts.hash, last_object_id_key))) |last_object_id_cursor| {
         var last_object_id_buffer: [hash.byteLen(repo_opts.hash)]u8 = undefined;
         _ = try last_object_id_cursor.readBytes(&last_object_id_buffer);
         last_object_id_maybe = last_object_id_buffer;
@@ -753,7 +774,7 @@ pub fn consumeInTransaction(
     // the reason it is a list is so we can keep every previous haxy
     // state, making it easy to revert to an older state if the user
     // rebases some of the past commits.
-    const haxy_cursor = try moment.putCursor(hash.hashInt(repo_opts.hash, "haxy"));
+    const haxy_cursor = try moment.putCursor(hash.hashInt(repo_opts.hash, materialized_key));
     const haxy = try DB.ArrayList(.read_write).init(haxy_cursor);
 
     // add a new item to the haxy list created above.
@@ -786,7 +807,7 @@ pub fn consumeInTransaction(
         const moment_index = try moment_index_cursor.readUint();
 
         try haxy.slice(moment_index + 1);
-        try moment.put(hash.hashInt(repo_opts.hash, "haxy-last-object-id"), .{ .bytes = &head_oid });
+        try moment.put(hash.hashInt(repo_opts.hash, last_object_id_key), .{ .bytes = &head_oid });
         return true;
     }
 
@@ -1001,22 +1022,20 @@ pub fn consumeInTransaction(
                             if (existing.patch_oid.len != patch_oid.len) return error.InvalidPatch;
                             @memcpy(&patch_oid, existing.patch_oid);
                         } else {
-                            var base_oid: [hash.hexLen(repo_opts.hash)]u8 = undefined;
-                            if (event.base_oid.len != base_oid.len) return error.InvalidPatch;
-                            @memcpy(&base_oid, event.base_oid);
-                            var base_oid_bytes: [hash.byteLen(repo_opts.hash)]u8 = undefined;
-                            _ = try std.fmt.hexToBytes(&base_oid_bytes, &base_oid);
-                            if (!std.mem.eql(u8, &base_oid, &std.fmt.bytesToHex(base_oid_bytes, .lower))) return error.InvalidPatch;
-                            const derived_parent_oids = [_][hash.hexLen(repo_opts.hash)]u8{base_oid};
                             const author = try commitIdentity(commit_object.content.commit.metadata.author orelse return error.AuthorNotFound);
                             const committer = try commitIdentity(commit_object.content.commit.metadata.committer orelse author);
-                            patch_oid = try obj.writeCommitWithoutRef(repo_kind, repo_opts, state, io, allocator, .{
-                                .author = author,
-                                .committer = committer,
-                                .message = event.message,
-                                .parent_oids = &derived_parent_oids,
-                                .timestamp = commit_object.content.commit.metadata.timestamp,
-                            }, &trees.head);
+                            patch_oid = try PatchRev.writeSquashCommit(
+                                repo_kind,
+                                repo_opts,
+                                state,
+                                io,
+                                allocator,
+                                event,
+                                &trees.head,
+                                author,
+                                committer,
+                                commit_object.content.commit.metadata.timestamp,
+                            );
                         }
 
                         break :blk .{
@@ -1050,7 +1069,7 @@ pub fn consumeInTransaction(
     }
 
     if (last_object_id_maybe) |*last_object_id| {
-        try moment.put(hash.hashInt(repo_opts.hash, "haxy-last-object-id"), .{ .bytes = last_object_id });
+        try moment.put(hash.hashInt(repo_opts.hash, last_object_id_key), .{ .bytes = last_object_id });
     }
 
     return true;
@@ -1396,32 +1415,26 @@ pub fn currentMoment(
     return currentMomentFromDb(repo_opts.hash, &repo.core.db);
 }
 
-// the oid of the last event commit consumed into `db`, or null before any
-// consume completed
-fn lastConsumedOid(
-    comptime hash_kind: hash.HashKind,
-    db: *EventDB(hash_kind),
-) !?[hash.byteLen(hash_kind)]u8 {
-    const DB = EventDB(hash_kind);
-    const history = try DB.ArrayList(.read_only).init(db.rootCursor().readOnly());
-    const moment_cursor = try history.getCursor(-1) orelse return null;
-    const moment = try DB.HashMap(.read_only).init(moment_cursor);
-    const last_object_id_cursor = try moment.getCursor(hash.hashInt(hash_kind, "haxy-last-object-id")) orelse return null;
-    var last_object_id: [hash.byteLen(hash_kind)]u8 = undefined;
-    _ = try last_object_id_cursor.readBytes(&last_object_id);
-    return last_object_id;
-}
-
 pub fn currentMomentFromDb(
     comptime hash_kind: hash.HashKind,
     db: *EventDB(hash_kind),
 ) !EventDB(hash_kind).HashMap(.read_only) {
     const DB = EventDB(hash_kind);
-    const last_object_id = (try lastConsumedOid(hash_kind, db)) orelse return error.NotFound;
     const history = try DB.ArrayList(.read_only).init(db.rootCursor().readOnly());
     const moment_cursor = try history.getCursor(-1) orelse return error.NotFound;
     const moment = try DB.HashMap(.read_only).init(moment_cursor);
-    const haxy_cursor = try moment.getCursor(hash.hashInt(hash_kind, "haxy")) orelse return error.NotFound;
+    return try currentMomentFromRepoMoment(hash_kind, moment);
+}
+
+pub fn currentMomentFromRepoMoment(
+    comptime hash_kind: hash.HashKind,
+    moment: EventDB(hash_kind).HashMap(.read_only),
+) !EventDB(hash_kind).HashMap(.read_only) {
+    const DB = EventDB(hash_kind);
+    const last_object_id_cursor = try moment.getCursor(hash.hashInt(hash_kind, last_object_id_key)) orelse return error.NotFound;
+    var last_object_id: [hash.byteLen(hash_kind)]u8 = undefined;
+    _ = try last_object_id_cursor.readBytes(&last_object_id);
+    const haxy_cursor = try moment.getCursor(hash.hashInt(hash_kind, materialized_key)) orelse return error.NotFound;
     const haxy = try DB.ArrayList(.read_only).init(haxy_cursor);
     const haxy_moments_cursor = try haxy.getCursor(-1) orelse return error.NotFound;
     const haxy_moments = try DB.HashMap(.read_only).init(haxy_moments_cursor);
@@ -1519,12 +1532,8 @@ pub fn parseOwnerRepoPath(path: []const u8) ?struct { owner: []const u8, name: [
     return .{ .owner = owner, .name = name };
 }
 
-pub const ResolveRepoOptions = struct {
-    create: ?CreateOptions = null,
-
-    pub const CreateOptions = struct {
-        read_access: Repo.Access = .private,
-    };
+pub const CreateRepoOptions = struct {
+    read_access: Repo.Access = .private,
 };
 
 // resolve a pushed `<owner>/<repo>` to the hex event id that names its on-disk
@@ -1535,7 +1544,7 @@ pub fn resolveOrCreateRepo(
     admin_repo_path: []const u8,
     owner_name: []const u8,
     repo_name: []const u8,
-    options: ResolveRepoOptions,
+    create_options_maybe: ?CreateRepoOptions,
 ) !?[event_id_size * 2]u8 {
     var repo = rp.Repo(.xit, admin_repo_opts).open(io, allocator, .{ .path = admin_repo_path }) catch |err| switch (err) {
         error.RepoNotFound => return null,
@@ -1554,7 +1563,7 @@ pub fn resolveOrCreateRepo(
         return std.fmt.bytesToHex(found.event_id, .lower);
     }
 
-    const create_options = options.create orelse return null;
+    const create_options = create_options_maybe orelse return null;
 
     // the new repo is owned by the named user, read from the name index; an
     // unknown owner can't own a repo, so the push is rejected
@@ -1589,20 +1598,6 @@ pub fn resolveOrCreateRepo(
 // reading from xitdb
 //
 
-// a struct field's fields share its container's map, so their names must not
-// collide with the container's or two fields would silently share a key
-fn validateFlattenedFields(comptime T: type) void {
-    comptime {
-        for (std.meta.fields(T)) |field| {
-            if (@typeInfo(field.type) != .@"struct") continue;
-            for (std.meta.fields(field.type)) |nested| {
-                if (@hasField(T, nested.name))
-                    @compileError("flattened field name collision in " ++ @typeName(T) ++ ": " ++ nested.name);
-            }
-        }
-    }
-}
-
 pub fn read(
     comptime T: type,
     comptime DB: type,
@@ -1614,7 +1609,6 @@ pub fn read(
 
     switch (@typeInfo(T)) {
         .@"struct" => |struct_info| {
-            comptime validateFlattenedFields(T);
             inline for (struct_info.fields) |field| {
                 switch (@typeInfo(field.type)) {
                     .pointer => |pointer_info| {
@@ -1655,14 +1649,29 @@ pub fn read(
                                     if (value.len != bytes.len) return error.InvalidByteArrayLength;
                                     @field(event, field.name) = bytes;
                                 },
+                                .@"struct" => @field(event, field.name) = try read(
+                                    optional_info.child,
+                                    DB,
+                                    hash_kind,
+                                    arena,
+                                    try DB.HashMap(.read_only).init(cursor),
+                                ),
                                 else => @compileError("unsupported read field type: " ++ @typeName(field.type)),
                             }
                         } else {
                             @field(event, field.name) = null;
                         }
                     },
-                    // a struct field's own fields are read from the same map
-                    .@"struct" => @field(event, field.name) = try read(field.type, DB, hash_kind, arena, map),
+                    .@"struct" => {
+                        const cursor = try map.getCursor(hash.hashInt(hash_kind, field.name)) orelse return error.NotFound;
+                        @field(event, field.name) = try read(
+                            field.type,
+                            DB,
+                            hash_kind,
+                            arena,
+                            try DB.HashMap(.read_only).init(cursor),
+                        );
+                    },
                     else => @compileError("unsupported read field type: " ++ @typeName(field.type)),
                 }
             }
@@ -1704,6 +1713,7 @@ pub fn fieldEqual(comptime Field: type, a: Field, b: Field) bool {
             }
         },
         .bool, .int, .@"enum" => return a == b,
+        .@"struct" => return fieldsEqual(Field, a, b),
         .optional => |optional_info| {
             if (a) |a_value| {
                 if (b) |b_value| return fieldEqual(optional_info.child, a_value, b_value);
@@ -1775,7 +1785,6 @@ pub fn upsert(
 ) !void {
     switch (@typeInfo(T)) {
         .@"struct" => |struct_info| {
-            comptime validateFlattenedFields(T);
             inline for (struct_info.fields) |field| {
                 try upsertField(DB, hash_kind, map, field.name, field.type, @field(event, field.name));
             }
@@ -1854,14 +1863,26 @@ fn upsertField(
                         if (array_info.child != u8) @compileError("unsupported upsert field type: " ++ @typeName(Field));
                         try upsertBytes(DB, hash_kind, map, key, &child);
                     },
+                    .@"struct" => try upsert(
+                        optional_info.child,
+                        DB,
+                        hash_kind,
+                        try DB.HashMap(.read_write).init(try map.putCursor(key)),
+                        child,
+                    ),
                     else => @compileError("unsupported upsert field type: " ++ @typeName(Field)),
                 }
             } else {
                 _ = try map.remove(key);
             }
         },
-        // a struct field's own fields are stored in the same map
-        .@"struct" => try upsert(Field, DB, hash_kind, map, value),
+        .@"struct" => try upsert(
+            Field,
+            DB,
+            hash_kind,
+            try DB.HashMap(.read_write).init(try map.putCursor(key)),
+            value,
+        ),
         else => @compileError("unsupported upsert field type: " ++ @typeName(Field)),
     }
 }

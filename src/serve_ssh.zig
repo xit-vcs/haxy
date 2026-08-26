@@ -403,7 +403,7 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, command:
     };
     defer allocator.free(repo_path);
 
-    if (try serveIfExists(repo_path, sess, io, allocator, parsed.service)) {
+    if (try serveIfExists(repo_path, handler.repo_root_path, sess, io, allocator, parsed.service)) {
         try sess.exit(0);
         return;
     }
@@ -413,13 +413,14 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, command:
     // create the on-disk repo for the just-minted event and serve the push
     var repo = try createRepo(any_repo_opts.toRepoOpts(), io, allocator, repo_path);
     defer repo.deinit(io, allocator);
-    try servePack(repo.self_repo_opts, &repo, sess, io, allocator, parsed.service);
+    try servePack(repo.self_repo_opts, &repo, handler.repo_root_path, sess, io, allocator, parsed.service);
     try sess.exit(0);
 }
 
 // serve an existing repo at `repo_path`, or return false if none is there
 fn serveIfExists(
     repo_path: []const u8,
+    repo_root_path: []const u8,
     sess: *ssh.SessionCtx,
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -437,7 +438,7 @@ fn serveIfExists(
     defer any_repo.deinit(io, allocator);
 
     switch (any_repo) {
-        inline else => |*repo| try servePack(repo.self_repo_opts, repo, sess, io, allocator, service),
+        inline else => |*repo| try servePack(repo.self_repo_opts, repo, repo_root_path, sess, io, allocator, service),
     }
     return true;
 }
@@ -461,6 +462,7 @@ fn createRepo(
 fn servePack(
     comptime repo_opts: rp.RepoOpts(.xit),
     repo: *rp.Repo(.xit, repo_opts),
+    repo_root_path: []const u8,
     sess: *ssh.SessionCtx,
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -473,7 +475,7 @@ fn servePack(
 
     switch (service) {
         .upload_pack => try repo.uploadPack(io, allocator, &session_reader.interface, &session_writer.interface, .{}),
-        .receive_pack => try evt.receivePackAndConsume(repo_opts, io, allocator, repo, &session_reader.interface, &session_writer.interface, .{}),
+        .receive_pack => try evt.receivePackAndConsume(repo_opts, io, allocator, repo, &session_reader.interface, &session_writer.interface, .{}, repo_root_path),
     }
 
     // flush whatever the pack op buffered into our writer adapter

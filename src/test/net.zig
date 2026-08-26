@@ -4,6 +4,7 @@ const hx = @import("haxy");
 const xit = hx.xit;
 const evt = hx.event;
 const fork = hx.fork;
+const pch = hx.pch;
 const rp = xit.repo;
 const rf = xit.ref;
 const work = xit.workdir;
@@ -550,6 +551,7 @@ fn testPushFork(
         try file.writeStreamingAll(io, "base contents\n");
         try target_repo.add(io, allocator, &.{"main.txt"});
         _ = try target_repo.commit(io, allocator, .{ .author = "admin <admin@example.test>", .message = "initial code" });
+        try target_repo.addConfig(io, allocator, .{ .name = "receive.denycurrentbranch", .value = "updateinstead" });
     }
 
     const other_path = (try repoOnDiskPath(io, allocator, temp_dir_name, "other", true)).?;
@@ -626,14 +628,14 @@ fn testPushFork(
         const moment = try evt.currentMoment(.{}, &draft);
         const patch = (try evt.Patch.readById(evt.EventDB(.sha1), .sha1, moment, &arena, &fork_id)) orelse return error.NotFound;
         try std.testing.expect(!patch.removed);
-        first_revision_id = try evt.parseEventId(&(patch.event.patchrev_id orelse return error.NotFound));
+        first_revision_id = try evt.parseEventId(&(patch.event.revision orelse return error.NotFound).id);
         const revision = (try evt.PatchRev.readById(evt.EventDB(.sha1), .sha1, moment, &arena, &first_revision_id)) orelse return error.NotFound;
         try std.testing.expectEqualStrings("refs/heads/master", revision.event.target_ref);
         try std.testing.expectEqualStrings(&source_oid, revision.event.source_oid);
     }
 
     //
-    // publish, then push another revision
+    // post, then push another revision
     //
 
     {
@@ -641,7 +643,7 @@ fn testPushFork(
         defer admin.deinit(io, allocator);
         var target = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = target_path });
         defer target.deinit(io, allocator);
-        try fork.publish(.{}, io, allocator, &admin, &target, draft_path, .{
+        try pch.post(.{}, io, allocator, &admin, &target, draft_path, .{
             .id = fork_id_hex,
             .user_id = user_id,
             .repo_id = repo_id,
@@ -661,7 +663,7 @@ fn testPushFork(
                 .description = patch.event.description,
                 .tags = patch.event.tags,
                 .target_patch_id = patch.event.target_patch_id,
-                .patchrev_id = patch.event.patchrev_id,
+                .revision = patch.event.revision,
             } },
         }});
     }
@@ -676,6 +678,7 @@ fn testPushFork(
     try client.push(io, allocator, "patch", "master:patch", false, .{ .wire = .{ .ssh = .{ .command = ssh_cmd } } });
 
     var second_revision_id: [evt.event_id_size]u8 = undefined;
+    var second_patch_oid: [hash.hexLen(.sha1)]u8 = undefined;
     {
         var draft = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = draft_path });
         defer draft.deinit(io, allocator);
@@ -686,6 +689,7 @@ fn testPushFork(
         try std.testing.expect(patch.removed);
         const newest = (try evt.PatchRev.readNewest(evt.EventDB(.sha1), .sha1, moment, &arena)) orelse return error.NotFound;
         second_revision_id = newest.id;
+        @memcpy(&second_patch_oid, newest.record.patch_oid);
         try std.testing.expect(!std.mem.eql(u8, &first_revision_id, &second_revision_id));
         try std.testing.expectEqualStrings(&second_source_oid, newest.record.event.source_oid);
         try std.testing.expectEqualStrings("edited feature", newest.record.event.message);
@@ -698,7 +702,7 @@ fn testPushFork(
         const moment = try evt.currentMoment(.{}, &target);
         const patch = (try evt.Patch.readById(evt.EventDB(.sha1), .sha1, moment, &arena, &fork_id)) orelse return error.NotFound;
         try std.testing.expectEqualStrings("edited feature", patch.event.title);
-        try std.testing.expectEqualStrings(&std.fmt.bytesToHex(second_revision_id, .lower), &(patch.event.patchrev_id orelse return error.NotFound));
+        try std.testing.expectEqualStrings(&std.fmt.bytesToHex(second_revision_id, .lower), &(patch.event.revision orelse return error.NotFound).id);
     }
 
     //
@@ -747,6 +751,39 @@ fn testPushFork(
         const moment = try evt.currentMoment(.{}, &target);
         const patch = (try evt.Patch.readById(evt.EventDB(.sha1), .sha1, moment, &arena, &fork_id)) orelse return error.NotFound;
         try std.testing.expect(patch.removed);
+    }
+
+    //
+    // restore the patch, merge its source oid, and push the merge
+    //
+
+    {
+        var target = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = target_path });
+        defer target.deinit(io, allocator);
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const moment = try evt.currentMoment(.{}, &target);
+        const removed = (try evt.Patch.readById(evt.EventDB(.sha1), .sha1, moment, &arena, &fork_id)) orelse return error.NotFound;
+        try evt.consume(.repo, .xit, .{}, io, allocator, &target, evt.events_ref, &.{.{
+            .id = fork_id_hex,
+            .timestamp = 4,
+            .author = .{ .name = "admin", .email = "admin@example.test" },
+            .event = .{ .patch = removed.event },
+        }});
+    }
+    const merge_parents = [_][hash.hexLen(.sha1)]u8{ third_source_oid, second_source_oid };
+    _ = try client.commit(io, allocator, .{ .message = "merge patch", .parent_oids = &merge_parents });
+    try client.push(io, allocator, "origin", "master:master", false, .{ .wire = .{ .ssh = .{ .command = ssh_cmd } } });
+    {
+        var target = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = target_path });
+        defer target.deinit(io, allocator);
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const moment = try evt.currentMoment(.{}, &target);
+        const patch = (try evt.Patch.readById(evt.EventDB(.sha1), .sha1, moment, &arena, &fork_id)) orelse return error.NotFound;
+        try std.testing.expectEqual(.merged, patch.event.status);
+        const imported = (try evt.PatchRev.readById(evt.EventDB(.sha1), .sha1, moment, &arena, &second_revision_id)) orelse return error.NotFound;
+        try std.testing.expectEqualStrings(&second_patch_oid, imported.patch_oid);
     }
 
     const other_url = try std.fmt.allocPrint(allocator, "git@localhost:admin/other/patch:{s}/branch:other", .{&fork_id_hex});
@@ -992,18 +1029,13 @@ fn testPushEvents(
     // the push consumed the issue into the server repo's db
     {
         const haxy_moment = try evt.currentMoment(repo_opts, &server_repo);
+        const records_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Issue.record_map_key)) orelse return error.NotFound;
+        const records = try ServerRepo.DB.HashMap(.read_only).init(records_cursor);
+        const issue_cursor = try records.getCursor(hash.hashInt(repo_opts.hash, &issue_event_id)) orelse return error.NotFound;
+        const issue = try evt.read(evt.Issue.Record, ServerRepo.DB, repo_opts.hash, &arena, try ServerRepo.DB.HashMap(.read_only).init(issue_cursor));
 
-        // get the map of issues
-        const event_id_to_issue_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, "event-id->issue")) orelse return error.NotFound;
-        const event_id_to_issue = try ServerRepo.DB.HashMap(.read_only).init(event_id_to_issue_cursor);
-
-        // get the issue out of the map
-        const issue_cursor = try event_id_to_issue.getCursor(hash.hashInt(repo_opts.hash, &issue_event_id)) orelse return error.NotFound;
-        const issue_map = try ServerRepo.DB.HashMap(.read_only).init(issue_cursor);
-        const issue = try evt.read(evt.Issue, ServerRepo.DB, repo_opts.hash, &arena, issue_map);
-
-        try std.testing.expectEqualStrings(events_to_push[0].event.issue.?.description, issue.description);
-        try std.testing.expectEqualStrings(events_to_push[0].event.issue.?.tags, issue.tags);
+        try std.testing.expectEqualStrings(events_to_push[0].event.issue.?.description, issue.event.description);
+        try std.testing.expectEqualStrings(events_to_push[0].event.issue.?.tags, issue.event.tags);
     }
 
     //
@@ -1041,19 +1073,14 @@ fn testPushEvents(
     // the push consumed the edit into the server repo's db
     {
         const haxy_moment = try evt.currentMoment(repo_opts, &server_repo);
-
-        // get the map of issues
-        const event_id_to_issue_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, "event-id->issue")) orelse return error.NotFound;
-        const event_id_to_issue = try ServerRepo.DB.HashMap(.read_only).init(event_id_to_issue_cursor);
-
-        // get the issue out of the map that was edited
-        const issue_cursor = try event_id_to_issue.getCursor(hash.hashInt(repo_opts.hash, &issue_event_id)) orelse return error.NotFound;
-        const issue_map = try ServerRepo.DB.HashMap(.read_only).init(issue_cursor);
-        const issue = try evt.read(evt.Issue, ServerRepo.DB, repo_opts.hash, &arena, issue_map);
+        const records_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Issue.record_map_key)) orelse return error.NotFound;
+        const records = try ServerRepo.DB.HashMap(.read_only).init(records_cursor);
+        const issue_cursor = try records.getCursor(hash.hashInt(repo_opts.hash, &issue_event_id)) orelse return error.NotFound;
+        const issue = try evt.read(evt.Issue.Record, ServerRepo.DB, repo_opts.hash, &arena, try ServerRepo.DB.HashMap(.read_only).init(issue_cursor));
 
         // the description and tags were correctly edited
-        try std.testing.expectEqualStrings(events_to_push2[0].event.issue.?.description, issue.description);
-        try std.testing.expectEqualStrings(events_to_push2[0].event.issue.?.tags, issue.tags);
+        try std.testing.expectEqualStrings(events_to_push2[0].event.issue.?.description, issue.event.description);
+        try std.testing.expectEqualStrings(events_to_push2[0].event.issue.?.tags, issue.event.tags);
     }
 }
 
@@ -1740,9 +1767,14 @@ fn repoOnDiskPath(
     const admin_repo_path = try std.fs.path.join(allocator, &.{ cwd_path, data_dir_name, "admin" });
     defer allocator.free(admin_repo_path);
 
-    const event_id_hex = (try evt.resolveOrCreateRepo(io, allocator, admin_repo_path, "admin", repo_name, .{
-        .create = if (create) .{ .read_access = .public } else null,
-    })) orelse return null;
+    const event_id_hex = (try evt.resolveOrCreateRepo(
+        io,
+        allocator,
+        admin_repo_path,
+        "admin",
+        repo_name,
+        if (create) .{ .read_access = .public } else null,
+    )) orelse return null;
     return try std.fs.path.join(allocator, &.{ cwd_path, data_dir_name, "repos", &event_id_hex });
 }
 

@@ -3,6 +3,7 @@ pub const command = @import("./command.zig");
 pub const main = @import("./main.zig");
 pub const event = @import("./event.zig");
 pub const fork = @import("./fork.zig");
+pub const pch = @import("./patch.zig");
 pub const serve = @import("./serve.zig");
 pub const serve_ssh = @import("./serve_ssh.zig");
 pub const serve_ssh_protocol = @import("./serve_ssh_protocol.zig");

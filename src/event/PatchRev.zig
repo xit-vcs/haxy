@@ -27,6 +27,33 @@ pub const merge_policy: evt.MergePolicy = .target_wins;
 pub const record_map_key = "event-id->patchrev";
 pub const id_set_key = "patchrev-id-set";
 
+// create the mergeable squash commit represented by this patch revision
+pub fn writeSquashCommit(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    event: Self,
+    head_tree_oid: *const [hash.hexLen(repo_opts.hash)]u8,
+    author: []const u8,
+    committer: []const u8,
+    timestamp: u64,
+) ![hash.hexLen(repo_opts.hash)]u8 {
+    var base_oid: [hash.hexLen(repo_opts.hash)]u8 = undefined;
+    if (event.base_oid.len != base_oid.len) return error.InvalidPatch;
+    @memcpy(&base_oid, event.base_oid);
+    try validateOid(repo_opts.hash, &base_oid);
+    const parent_oids = [_][hash.hexLen(repo_opts.hash)]u8{base_oid};
+    return try obj.writeCommitWithoutRef(repo_kind, repo_opts, state, io, allocator, .{
+        .author = author,
+        .committer = committer,
+        .message = event.message,
+        .parent_oids = &parent_oids,
+        .timestamp = timestamp,
+    }, head_tree_oid);
+}
+
 pub fn readTrees(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
@@ -89,8 +116,7 @@ pub fn consume(
 
     try validateOid(hash_kind, record.event.base_oid);
     try validateOid(hash_kind, record.event.source_oid);
-    if (!std.mem.startsWith(u8, record.event.target_ref, "refs/heads/") or
-        !xit.ref.validateName(record.event.target_ref["refs/".len..])) return error.InvalidTarget;
+    try validateTarget(record.event.target_ref);
     try validateOid(hash_kind, record.event_oid);
     try validateOid(hash_kind, record.base_tree_oid);
     try validateOid(hash_kind, record.head_tree_oid);
@@ -122,10 +148,15 @@ pub fn consume(
     }
 }
 
-fn validateOid(comptime hash_kind: hash.HashKind, oid: []const u8) !void {
+pub fn validateOid(comptime hash_kind: hash.HashKind, oid: []const u8) !void {
     var bytes: [hash.byteLen(hash_kind)]u8 = undefined;
     _ = try std.fmt.hexToBytes(&bytes, oid);
     if (!std.mem.eql(u8, oid, &std.fmt.bytesToHex(bytes, .lower))) return error.InvalidOid;
+}
+
+pub fn validateTarget(target_ref: []const u8) !void {
+    if (!std.mem.startsWith(u8, target_ref, "refs/heads/") or
+        !xit.ref.validateName(target_ref["refs/".len..])) return error.InvalidTarget;
 }
 
 pub fn readById(
@@ -163,7 +194,7 @@ pub fn readNewest(
     return null;
 }
 
-// derived commits referenced only by patch revision records
+// squash commits referenced only by patch revision records
 pub fn gcRoots(
     comptime DB: type,
     comptime hash_kind: hash.HashKind,

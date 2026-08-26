@@ -20,9 +20,14 @@ pub fn resolveRepoPath(
     create_if_missing: bool,
 ) !RepoPath {
     const owner_repo = evt.parseOwnerRepoPath(requested) orelse return .invalid;
-    const event_id_hex = (try evt.resolveOrCreateRepo(io, allocator, admin_repo_path, owner_repo.owner, owner_repo.name, .{
-        .create = if (create_if_missing) .{} else null,
-    })) orelse return .not_found;
+    const event_id_hex = (try evt.resolveOrCreateRepo(
+        io,
+        allocator,
+        admin_repo_path,
+        owner_repo.owner,
+        owner_repo.name,
+        if (create_if_missing) .{} else null,
+    )) orelse return .not_found;
     return .{ .ok = try std.fs.path.join(allocator, &.{ repo_root_path, &event_id_hex }) };
 }
 

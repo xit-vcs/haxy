@@ -6,6 +6,7 @@ const obj = xit.object;
 const hash = xit.hash;
 const rf = xit.ref;
 const fork = @import("../../fork.zig");
+const pch = @import("../../patch.zig");
 
 const repo_opts: rp.RepoOpts(.xit) = .{ .is_test = true };
 const Repo = rp.Repo(.xit, repo_opts);
@@ -25,6 +26,42 @@ fn commitTree(
         .commit => |commit| commit.tree,
         else => error.InvalidObject,
     };
+}
+
+fn consumePatchWithRevision(
+    comptime role: evt.RepoRole,
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    repo: *Repo,
+    ref: rf.Ref,
+    revision_id: [evt.event_id_size]u8,
+    revision: evt.PatchRev,
+    tree_entries: []const evt.EventTreeEntry,
+    revision_timestamp: u64,
+    patch_id: [evt.event_id_size]u8,
+    patch_value: evt.Patch,
+    patch_timestamp: u64,
+) !void {
+    try evt.consume(role, .xit, repo_opts, io, allocator, repo, ref, &.{.{
+        .id = std.fmt.bytesToHex(revision_id, .lower),
+        .timestamp = revision_timestamp,
+        .author = author,
+        .tree_entries = tree_entries,
+        .event = .{ .patchrev = revision },
+    }});
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const moment = try evt.currentMoment(repo_opts, repo);
+    const record = (try evt.PatchRev.readById(Repo.DB, repo_opts.hash, moment, &arena, &revision_id)) orelse return error.NotFound;
+    var patch = patch_value;
+    patch.revision = evt.Patch.Revision.fromRecord(revision_id, record);
+    try evt.consume(role, .xit, repo_opts, io, allocator, repo, ref, &.{.{
+        .id = std.fmt.bytesToHex(patch_id, .lower),
+        .timestamp = patch_timestamp,
+        .author = author,
+        .event = .{ .patch = patch },
+    }});
 }
 
 test "patch event conflicts, stacking, and gc" {
@@ -110,7 +147,6 @@ test "patch event conflicts, stacking, and gc" {
         .title = "add the answer",
         .description = "adds a reusable answer constant",
         .tags = "enhancement",
-        .patchrev_id = std.fmt.bytesToHex(patchrev_id, .lower),
     };
     const tree_entries = [_]evt.EventTreeEntry{
         .{ .tree = .{ .name = "base", .oid = &base_tree_oid } },
@@ -122,25 +158,24 @@ test "patch event conflicts, stacking, and gc" {
     //
 
     {
-        try evt.consume(.repo, .xit, repo_opts, io, allocator, &target, evt.events_ref, &.{
-            .{
-                .id = std.fmt.bytesToHex(patchrev_id, .lower),
-                .timestamp = 3,
-                .author = author,
-                .tree_entries = &tree_entries,
-                .event = .{ .patchrev = .{ .base_oid = &base_oid, .source_oid = &source_oid, .target_ref = "refs/heads/master", .message = patch.title } },
-            },
-            .{
-                .id = std.fmt.bytesToHex(patch_id, .lower),
-                .timestamp = 4,
-                .author = author,
-                .event = .{ .patch = patch },
-            },
-        });
+        try consumePatchWithRevision(
+            .repo,
+            io,
+            allocator,
+            &target,
+            evt.events_ref,
+            patchrev_id,
+            .{ .base_oid = &base_oid, .source_oid = &source_oid, .target_ref = "refs/heads/master", .message = patch.title },
+            &tree_entries,
+            3,
+            patch_id,
+            patch,
+            4,
+        );
     }
 
     //
-    // check the records and derived commit
+    // check the records and squash commit
     //
 
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -148,9 +183,19 @@ test "patch event conflicts, stacking, and gc" {
     const moment = try evt.currentMoment(repo_opts, &target);
     const patch_record = (try evt.Patch.readById(Repo.DB, repo_opts.hash, moment, &arena, &patch_id)) orelse return error.NotFound;
     const patchrev_record = (try evt.PatchRev.readById(Repo.DB, repo_opts.hash, moment, &arena, &patchrev_id)) orelse return error.NotFound;
+    const records_cursor = try moment.getCursor(hash.hashInt(repo_opts.hash, evt.Patch.record_map_key)) orelse return error.NotFound;
+    const records = try Repo.DB.HashMap(.read_only).init(records_cursor);
+    const record_cursor = try records.getCursor(hash.hashInt(repo_opts.hash, &patch_id)) orelse return error.NotFound;
+    const record_map = try Repo.DB.HashMap(.read_only).init(record_cursor);
+    const event_cursor = try record_map.getCursor(hash.hashInt(repo_opts.hash, "event")) orelse return error.NotFound;
+    const event_map = try Repo.DB.HashMap(.read_only).init(event_cursor);
+    const revision_cursor = try event_map.getCursor(hash.hashInt(repo_opts.hash, "revision")) orelse return error.NotFound;
+    const revision_map = try Repo.DB.HashMap(.read_only).init(revision_cursor);
+    try std.testing.expect(null != try revision_map.getCursor(hash.hashInt(repo_opts.hash, "id")));
+    try std.testing.expectEqual(null, try record_map.getCursor(hash.hashInt(repo_opts.hash, "title")));
     try std.testing.expectEqualStrings(&base_tree_oid, patchrev_record.base_tree_oid);
     try std.testing.expectEqualStrings(&head_tree_oid, patchrev_record.head_tree_oid);
-    try std.testing.expectEqualStrings(&std.fmt.bytesToHex(patchrev_id, .lower), &(patch_record.event.patchrev_id orelse return error.NotFound));
+    try std.testing.expectEqualStrings(&std.fmt.bytesToHex(patchrev_id, .lower), &(patch_record.event.revision orelse return error.NotFound).id);
 
     var initial_patch_oid: [hash.hexLen(repo_opts.hash)]u8 = undefined;
     @memcpy(&initial_patch_oid, patchrev_record.patch_oid);
@@ -175,6 +220,12 @@ test "patch event conflicts, stacking, and gc" {
     //
 
     var updated_patch = patch;
+    updated_patch.revision = .{
+        .id = std.fmt.bytesToHex(patchrev_id, .lower),
+        .squash_oid = &initial_patch_oid,
+        .source_oid = &source_oid,
+        .target_ref = "refs/heads/master",
+    };
     updated_patch.title = "add a reusable answer";
     {
         try evt.consume(.repo, .xit, repo_opts, io, allocator, &target, evt.events_ref, &.{.{
@@ -240,24 +291,14 @@ test "patch event conflicts, stacking, and gc" {
         .{ .tree = .{ .name = "head", .oid = &source_a_tree } },
     };
     var target_patch = updated_patch;
-    target_patch.patchrev_id = std.fmt.bytesToHex(patchrev_a_id, .lower);
     target_patch.status = .closed;
     {
-        try evt.consume(.repo, .xit, repo_opts, io, allocator, &target, evt.events_ref, &.{
-            .{
-                .id = std.fmt.bytesToHex(patchrev_a_id, .lower),
-                .timestamp = 8,
-                .author = author,
-                .tree_entries = &target_entries,
-                .event = .{ .patchrev = .{ .base_oid = &base_oid, .source_oid = &source_a_oid, .target_ref = "refs/heads/master", .message = updated_patch.title } },
-            },
-            .{
-                .id = std.fmt.bytesToHex(patch_id, .lower),
-                .timestamp = 9,
-                .author = author,
-                .event = .{ .patch = target_patch },
-            },
-        });
+        try consumePatchWithRevision(.repo, io, allocator, &target, evt.events_ref, patchrev_a_id, .{
+            .base_oid = &base_oid,
+            .source_oid = &source_a_oid,
+            .target_ref = "refs/heads/master",
+            .message = updated_patch.title,
+        }, &target_entries, 8, patch_id, target_patch, 9);
     }
 
     //
@@ -270,24 +311,14 @@ test "patch event conflicts, stacking, and gc" {
         .{ .tree = .{ .name = "head", .oid = &source_b_tree } },
     };
     var parent_patch = updated_patch;
-    parent_patch.patchrev_id = std.fmt.bytesToHex(patchrev_b_id, .lower);
     parent_patch.status = .merged;
     {
-        try evt.consume(.repo, .xit, repo_opts, io, allocator, &target, side_events_ref, &.{
-            .{
-                .id = std.fmt.bytesToHex(patchrev_b_id, .lower),
-                .timestamp = 10,
-                .author = author,
-                .tree_entries = &parent_entries,
-                .event = .{ .patchrev = .{ .base_oid = &base_oid, .source_oid = &source_b_oid, .target_ref = "refs/heads/master", .message = updated_patch.title } },
-            },
-            .{
-                .id = std.fmt.bytesToHex(patch_id, .lower),
-                .timestamp = 11,
-                .author = author,
-                .event = .{ .patch = parent_patch },
-            },
-        });
+        try consumePatchWithRevision(.repo, io, allocator, &target, side_events_ref, patchrev_b_id, .{
+            .base_oid = &base_oid,
+            .source_oid = &source_b_oid,
+            .target_ref = "refs/heads/master",
+            .message = updated_patch.title,
+        }, &parent_entries, 10, patch_id, parent_patch, 11);
     }
 
     //
@@ -306,7 +337,7 @@ test "patch event conflicts, stacking, and gc" {
     _ = arena.reset(.retain_capacity);
     const merged_moment = try evt.currentMoment(repo_opts, &target);
     const merged = (try evt.Patch.readById(Repo.DB, repo_opts.hash, merged_moment, &arena, &patch_id)) orelse return error.NotFound;
-    try std.testing.expectEqualStrings(&std.fmt.bytesToHex(patchrev_a_id, .lower), &(merged.event.patchrev_id orelse return error.NotFound));
+    try std.testing.expectEqualStrings(&std.fmt.bytesToHex(patchrev_a_id, .lower), &(merged.event.revision orelse return error.NotFound).id);
     const merged_patchrev = (try evt.PatchRev.readById(Repo.DB, repo_opts.hash, merged_moment, &arena, &patchrev_a_id)) orelse return error.NotFound;
     try std.testing.expectEqualStrings(&source_a_oid, merged_patchrev.event.source_oid);
     try std.testing.expectEqualStrings(&source_a_tree, merged_patchrev.head_tree_oid);
@@ -316,10 +347,10 @@ test "patch event conflicts, stacking, and gc" {
     const conflict_cursor = try conflicts.getCursor(&evt.orderKeyDesc(merged.created_order, &patch_id)) orelse return error.NotFound;
     const conflict = try Repo.DB.HashMap(.read_only).init(conflict_cursor);
     const fields_cursor = try conflict.getCursor(hash.hashInt(repo_opts.hash, evt.conflicted_fields_key)) orelse return error.NotFound;
-    try std.testing.expectEqualStrings("patchrev_id status", try fields_cursor.readBytesAlloc(arena.allocator(), null));
+    try std.testing.expectEqualStrings("revision status", try fields_cursor.readBytesAlloc(arena.allocator(), null));
     const their_cursor = try conflict.getCursor(hash.hashInt(repo_opts.hash, evt.their_record_key)) orelse return error.NotFound;
     const theirs = try evt.read(evt.Patch.Record, Repo.DB, repo_opts.hash, &arena, try Repo.DB.HashMap(.read_only).init(their_cursor));
-    try std.testing.expectEqualStrings(&std.fmt.bytesToHex(patchrev_b_id, .lower), &(theirs.event.patchrev_id orelse return error.NotFound));
+    try std.testing.expectEqualStrings(&std.fmt.bytesToHex(patchrev_b_id, .lower), &(theirs.event.revision orelse return error.NotFound).id);
 
     //
     // create a patch stacked on the selected revision
@@ -332,38 +363,28 @@ test "patch event conflicts, stacking, and gc" {
         .{ .tree = .{ .name = "head", .oid = &source_b_tree } },
     };
     {
-        try evt.consume(.repo, .xit, repo_opts, io, allocator, &target, evt.events_ref, &.{
-            .{
-                .id = std.fmt.bytesToHex(child_patchrev_id, .lower),
-                .timestamp = 12,
-                .author = author,
-                .tree_entries = &child_entries,
-                .event = .{ .patchrev = .{ .base_oid = merged_patchrev.patch_oid, .source_oid = &source_b_oid, .target_ref = "refs/heads/master", .message = "stack another answer change" } },
-            },
-            .{
-                .id = std.fmt.bytesToHex(child_id, .lower),
-                .timestamp = 13,
-                .author = author,
-                .event = .{ .patch = .{
-                    .title = "stack another answer change",
-                    .description = "depends on the first patch",
-                    .tags = "enhancement",
-                    .target_patch_id = std.fmt.bytesToHex(patch_id, .lower),
-                    .patchrev_id = std.fmt.bytesToHex(child_patchrev_id, .lower),
-                } },
-            },
-        });
+        try consumePatchWithRevision(.repo, io, allocator, &target, evt.events_ref, child_patchrev_id, .{
+            .base_oid = merged_patchrev.patch_oid,
+            .source_oid = &source_b_oid,
+            .target_ref = "refs/heads/master",
+            .message = "stack another answer change",
+        }, &child_entries, 12, child_id, .{
+            .title = "stack another answer change",
+            .description = "depends on the first patch",
+            .tags = "enhancement",
+            .target_patch_id = std.fmt.bytesToHex(patch_id, .lower),
+        }, 13);
     }
 
     //
-    // check the derived commit and reverse index
+    // check the squash commit and reverse index
     //
 
     _ = arena.reset(.retain_capacity);
     const stacked_moment = try evt.currentMoment(repo_opts, &target);
     const child = (try evt.Patch.readById(Repo.DB, repo_opts.hash, stacked_moment, &arena, &child_id)) orelse return error.NotFound;
     var selected_patchrev_id: [evt.event_id_size]u8 = undefined;
-    _ = try std.fmt.hexToBytes(&selected_patchrev_id, &(child.event.patchrev_id orelse return error.NotFound));
+    _ = try std.fmt.hexToBytes(&selected_patchrev_id, &(child.event.revision orelse return error.NotFound).id);
     const child_patchrev = (try evt.PatchRev.readById(Repo.DB, repo_opts.hash, stacked_moment, &arena, &selected_patchrev_id)) orelse return error.NotFound;
     var child_oid: [hash.hexLen(repo_opts.hash)]u8 = undefined;
     @memcpy(&child_oid, child_patchrev.patch_oid);
@@ -593,7 +614,7 @@ test "patch lifecycle" {
         const initial_patch = (try evt.Patch.readById(Repo.DB, repo_opts.hash, initial_moment, &arena, &patch_id)) orelse return error.NotFound;
         try std.testing.expect(!initial_patch.removed);
         try std.testing.expectEqualStrings("add the answer", initial_patch.event.title);
-        try std.testing.expectEqual(null, initial_patch.event.patchrev_id);
+        try std.testing.expectEqual(null, initial_patch.event.revision);
         try std.testing.expectEqual(null, try evt.PatchRev.readNewest(Repo.DB, repo_opts.hash, initial_moment, &arena));
 
         var source_moment = try source.core.latestMoment();
@@ -602,53 +623,38 @@ test "patch lifecycle" {
         defer objects.deinit();
         try objects.include(&source_oid);
         try draft.copyObjects(.xit, repo_opts, &objects, io, null);
-        try evt.consume(.fork, .xit, repo_opts, io, allocator, &draft, evt.events_ref, &.{
-            .{
-                .id = first_patchrev_hex,
-                .timestamp = 3,
-                .author = author,
-                .tree_entries = &first_entries,
-                .event = .{ .patchrev = .{
-                    .base_oid = &base_oid,
-                    .source_oid = &source_oid,
-                    .target_ref = "refs/heads/master",
-                    .message = "add the answer",
-                } },
-            },
-            .{
-                .id = patch_id_hex,
-                .timestamp = 3,
-                .author = author,
-                .event = .{ .patch = .{
-                    .title = "add the answer",
-                    .tags = "enhancement",
-                    .description = "adds a reusable answer constant",
-                    .patchrev_id = first_patchrev_hex,
-                } },
-            },
-        });
+        try consumePatchWithRevision(.fork, io, allocator, &draft, evt.events_ref, first_patchrev_id, .{
+            .base_oid = &base_oid,
+            .source_oid = &source_oid,
+            .target_ref = "refs/heads/master",
+            .message = "add the answer",
+        }, &first_entries, 3, patch_id, .{
+            .title = "add the answer",
+            .tags = "enhancement",
+            .description = "adds a reusable answer constant",
+        }, 3);
 
         _ = arena.reset(.retain_capacity);
         const moment = try evt.currentMoment(repo_opts, &draft);
         const patch = (try evt.Patch.readById(Repo.DB, repo_opts.hash, moment, &arena, &patch_id)) orelse return error.NotFound;
         try std.testing.expect(!patch.removed);
-        try std.testing.expectEqualStrings(&first_patchrev_hex, &(patch.event.patchrev_id orelse return error.NotFound));
+        try std.testing.expectEqualStrings(&first_patchrev_hex, &(patch.event.revision orelse return error.NotFound).id);
         try std.testing.expect(null != try evt.PatchRev.readById(Repo.DB, repo_opts.hash, moment, &arena, &first_patchrev_id));
     }
     try std.testing.expectError(error.NotFound, evt.currentMoment(repo_opts, &target));
 
     //
-    // publish the metadata and revision pointer
+    // post the metadata and revision pointer
     //
 
-    try fork.publish(repo_opts, io, allocator, &admin, &target, draft_path, .{
+    try pch.post(repo_opts, io, allocator, &admin, &target, draft_path, .{
         .id = patch_id_hex,
         .user_id = user_id,
         .repo_id = repo_id,
         .author = author,
         .timestamp = 3,
     });
-    try fork.publish(repo_opts, io, allocator, &admin, &target, draft_path, .{
+    try pch.post(repo_opts, io, allocator, &admin, &target, draft_path, .{
         .id = patch_id_hex,
         .user_id = user_id,
         .repo_id = repo_id,
@@ -660,15 +666,15 @@ test "patch lifecycle" {
     defer arena.deinit();
     const moment = try evt.currentMoment(repo_opts, &target);
     const patch = (try evt.Patch.readById(Repo.DB, repo_opts.hash, moment, &arena, &patch_id)) orelse return error.NotFound;
-    try std.testing.expectEqualStrings(&first_patchrev_hex, &(patch.event.patchrev_id orelse return error.NotFound));
+    try std.testing.expectEqualStrings(&first_patchrev_hex, &(patch.event.revision orelse return error.NotFound).id);
     try std.testing.expectEqual(.open, patch.event.status);
     try std.testing.expectEqual(null, try evt.PatchRev.readById(Repo.DB, repo_opts.hash, moment, &arena, &first_patchrev_id));
 
     _ = arena.reset(.retain_capacity);
     const admin_moment = try evt.currentMoment(evt.admin_repo_opts, &admin);
-    const published_fork = (try evt.Fork.readById(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &arena, &patch_id)) orelse return error.NotFound;
-    try std.testing.expect(!published_fork.removed);
-    try std.testing.expectEqual(.posted, published_fork.event.stage);
+    const posted_fork = (try evt.Fork.readById(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &arena, &patch_id)) orelse return error.NotFound;
+    try std.testing.expect(!posted_fork.removed);
+    try std.testing.expectEqual(.posted, posted_fork.event.stage);
     const draft_key = evt.Fork.draftKey(&repo_id, &user_id);
     try std.testing.expectEqual(0, try indexedForkCount(admin_moment, evt.Fork.repo_user_to_draft_id_set_key, &draft_key));
     try std.testing.expectEqual(1, try indexedForkCount(admin_moment, evt.Fork.user_id_to_fork_id_set_key, &user_id));

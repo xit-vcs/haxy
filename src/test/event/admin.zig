@@ -425,7 +425,7 @@ test "fork query and removal lifecycle" {
     const draft_moment = try evt.currentMoment(fork_repo_opts, &draft_repo);
     const draft = (try evt.Patch.readById(evt.EventDB(fork_repo_opts.hash), fork_repo_opts.hash, draft_moment, &arena, &fork_id)) orelse return error.NotFound;
     try std.testing.expectEqualStrings("add a feature", draft.event.title);
-    try std.testing.expectEqual(null, draft.event.patchrev_id);
+    try std.testing.expectEqual(null, draft.event.revision);
 
     var wrong_user_id = user_id;
     wrong_user_id[0] ^= 1;
