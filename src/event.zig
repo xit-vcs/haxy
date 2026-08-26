@@ -1519,6 +1519,14 @@ pub fn parseOwnerRepoPath(path: []const u8) ?struct { owner: []const u8, name: [
     return .{ .owner = owner, .name = name };
 }
 
+pub const ResolveRepoOptions = struct {
+    create: ?CreateOptions = null,
+
+    pub const CreateOptions = struct {
+        read_access: Repo.Access = .private,
+    };
+};
+
 // resolve a pushed `<owner>/<repo>` to the hex event id that names its on-disk
 // directory under the repos dir
 pub fn resolveOrCreateRepo(
@@ -1527,7 +1535,7 @@ pub fn resolveOrCreateRepo(
     admin_repo_path: []const u8,
     owner_name: []const u8,
     repo_name: []const u8,
-    create_if_missing: bool,
+    options: ResolveRepoOptions,
 ) !?[event_id_size * 2]u8 {
     var repo = rp.Repo(.xit, admin_repo_opts).open(io, allocator, .{ .path = admin_repo_path }) catch |err| switch (err) {
         error.RepoNotFound => return null,
@@ -1546,7 +1554,7 @@ pub fn resolveOrCreateRepo(
         return std.fmt.bytesToHex(found.event_id, .lower);
     }
 
-    if (!create_if_missing) return null;
+    const create_options = options.create orelse return null;
 
     // the new repo is owned by the named user, read from the name index; an
     // unknown owner can't own a repo, so the push is rejected
@@ -1570,6 +1578,7 @@ pub fn resolveOrCreateRepo(
             .user_id = &owner_user_id,
             .name = repo_name,
             .description = "",
+            .read_access = create_options.read_access,
         } },
     }});
 

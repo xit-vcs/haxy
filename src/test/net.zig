@@ -1740,7 +1740,9 @@ fn repoOnDiskPath(
     const admin_repo_path = try std.fs.path.join(allocator, &.{ cwd_path, data_dir_name, "admin" });
     defer allocator.free(admin_repo_path);
 
-    const event_id_hex = (try evt.resolveOrCreateRepo(io, allocator, admin_repo_path, "admin", repo_name, create)) orelse return null;
+    const event_id_hex = (try evt.resolveOrCreateRepo(io, allocator, admin_repo_path, "admin", repo_name, .{
+        .create = if (create) .{ .read_access = .public } else null,
+    })) orelse return null;
     return try std.fs.path.join(allocator, &.{ cwd_path, data_dir_name, "repos", &event_id_hex });
 }
 
