@@ -240,6 +240,7 @@ pub fn main(init: std.process.Init) !void {
             var template_repo = try rp.Repo(.xit, .{}).init(io, allocator, .{ .path = template_path });
             defer template_repo.deinit(io, allocator);
 
+            try template_repo.setMergeAlgorithm(io, allocator, .diff3);
             try template_repo.addConfig(io, allocator, .{ .name = "user.name", .value = "haxy" });
             try template_repo.addConfig(io, allocator, .{ .name = "user.email", .value = "admin@example.test" });
             try template_repo.addConfig(io, allocator, .{ .name = "receive.denycurrentbranch", .value = "updateinstead" });

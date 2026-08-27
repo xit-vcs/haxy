@@ -575,6 +575,7 @@ pub fn receivePackAndConsume(
     writer: *std.Io.Writer,
     options: xit.net_server_receive_pack.Options,
     repo_root_path: []const u8,
+    error_writer: *std.Io.Writer,
 ) !void {
     const DB = rp.Repo(.xit, repo_opts).DB;
     const State = rp.Repo(.xit, repo_opts).State;
@@ -587,6 +588,7 @@ pub fn receivePackAndConsume(
         writer: *std.Io.Writer,
         options: xit.net_server_receive_pack.Options,
         repo_root_path: []const u8,
+        error_writer: *std.Io.Writer,
 
         pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
             var moment = try DB.HashMap(.read_write).init(cursor.*);
@@ -602,7 +604,7 @@ pub fn receivePackAndConsume(
             // transaction and must commit regardless.
             if (null != try rf.readRecur(.xit, repo_opts, state.readOnly(), ctx.io, .{ .ref = events_ref })) {
                 _ = try consumeInTransaction(.repo, .xit, repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, events_ref);
-                try pch.detectMerged(repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, ctx.repo_root_path, updates.items.items);
+                try pch.detectMerged(repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, ctx.repo_root_path, updates.items.items, ctx.error_writer);
             }
             try xit.undo.writeMessage(repo_opts, state, .push);
             try ctx.core.chunk_store_file.sync(ctx.io);
@@ -623,6 +625,7 @@ pub fn receivePackAndConsume(
             .writer = writer,
             .options = options,
             .repo_root_path = repo_root_path,
+            .error_writer = error_writer,
         },
     ) catch |err| switch (err) {
         error.CancelTransaction => {},

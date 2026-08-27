@@ -489,9 +489,13 @@ test "patch event conflicts, stacking, and gc" {
 }
 
 test "patch lifecycle" {
+    try patchLifecycle("temp-patch-lifecycle-squash", .squash);
+    try patchLifecycle("temp-patch-lifecycle-source", .source);
+}
+
+fn patchLifecycle(temp_dir_name: []const u8, merge_revision: pch.MergeRevision) !void {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    const temp_dir_name = "temp-patch-lifecycle";
     const cwd = std.Io.Dir.cwd();
 
     if (cwd.openDir(io, temp_dir_name, .{})) |dir_value| {
@@ -678,6 +682,7 @@ test "patch lifecycle" {
     const draft_key = evt.Fork.draftKey(&repo_id, &user_id);
     try std.testing.expectEqual(0, try indexedForkCount(admin_moment, evt.Fork.repo_user_to_draft_id_set_key, &draft_key));
     try std.testing.expectEqual(1, try indexedForkCount(admin_moment, evt.Fork.user_id_to_fork_id_set_key, &user_id));
+    var squash_oid: [hash.hexLen(repo_opts.hash)]u8 = undefined;
     {
         var draft = try Repo.open(io, allocator, .{ .path = draft_path });
         defer draft.deinit(io, allocator);
@@ -686,6 +691,7 @@ test "patch lifecycle" {
         const removed = (try evt.Patch.readById(Repo.DB, repo_opts.hash, draft_moment, &arena, &patch_id)) orelse return error.NotFound;
         try std.testing.expect(removed.removed);
         const revision = (try evt.PatchRev.readById(Repo.DB, repo_opts.hash, draft_moment, &arena, &first_patchrev_id)) orelse return error.NotFound;
+        @memcpy(&squash_oid, revision.patch_oid);
         try std.testing.expectEqualStrings("refs/heads/master", revision.event.target_ref);
         try std.testing.expectEqual(hash.hexLen(repo_opts.hash), revision.event_oid.len);
         var event_oid: [hash.hexLen(repo_opts.hash)]u8 = undefined;
@@ -698,6 +704,29 @@ test "patch lifecycle" {
         try std.testing.expectEqualStrings(revision.base_tree_oid, &trees.base);
         try std.testing.expectEqualStrings(revision.head_tree_oid, &trees.head);
     }
+
+    //
+    // merge the selected revision into the target
+    //
+
+    const selected_oid = switch (merge_revision) {
+        .squash => squash_oid,
+        .source => source_oid,
+    };
+    try pch.merge(repo_opts, io, allocator, repos_dir, &target, .{
+        .id = patch_id_hex,
+        .revision = merge_revision,
+        .author = author,
+        .timestamp = 5,
+    });
+    const target_oid = (try target.readRef(io, .{ .kind = .head, .name = "master" })) orelse return error.NotFound;
+    try std.testing.expectEqualStrings(&selected_oid, &target_oid);
+
+    _ = arena.reset(.retain_capacity);
+    const merged_moment = try evt.currentMoment(repo_opts, &target);
+    const merged = (try evt.Patch.readById(Repo.DB, repo_opts.hash, merged_moment, &arena, &patch_id)) orelse return error.NotFound;
+    try std.testing.expectEqual(.merged, merged.event.status);
+    try std.testing.expect(null != try evt.PatchRev.readById(Repo.DB, repo_opts.hash, merged_moment, &arena, &first_patchrev_id));
 }
 
 fn indexedForkCount(
