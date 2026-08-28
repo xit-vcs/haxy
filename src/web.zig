@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const xit = @import("xit");
 const rp = xit.repo;
 const obj = xit.object;
@@ -221,7 +220,7 @@ fn handleRequest(
                 // whoever seeded the store may have left a session to claim
                 if (user_id == null) {
                     var token: [SessionStore.token_hex_len]u8 = undefined;
-                    if (remote.session_store.claimAutoLogin(&token) and remote.session_store.lookup(&token, &user_id_buf)) {
+                    if (remote.session_store.autoLogin(&token) and remote.session_store.lookup(&token, &user_id_buf)) {
                         session_cookie = try std.fmt.bufPrint(&cookie_buf, session_cookie_fmt, .{token});
                         user_id = user_id_buf[0..evt.event_id_size];
                     }
@@ -1917,13 +1916,23 @@ fn decodeFormValue(allocator: std.mem.Allocator, encoded: []const u8) ![]u8 {
 pub const SessionStore = struct {
     io: std.Io,
     dir: std.Io.Dir,
+    auto_login: ?[token_hex_len]u8,
 
     pub const token_hex_len = evt.event_id_size * 2;
 
     pub fn init(io: std.Io, data_dir: std.Io.Dir) !SessionStore {
         try data_dir.createDirPath(io, "sessions");
         const dir = try data_dir.openDir(io, "sessions", .{});
-        return .{ .io = io, .dir = dir };
+        const auto_login = blk: {
+            const file = dir.openFile(io, auto_login_name, .{ .mode = .read_only }) catch break :blk null;
+            defer file.close(io);
+            var token: [token_hex_len]u8 = undefined;
+            var storage: [token_hex_len]u8 = undefined;
+            var reader = file.reader(io, &storage);
+            reader.interface.readSliceAll(&token) catch break :blk null;
+            break :blk token;
+        };
+        return .{ .io = io, .dir = dir, .auto_login = auto_login };
     }
 
     pub fn deinit(self: SessionStore) void {
@@ -1960,28 +1969,16 @@ pub const SessionStore = struct {
         self.dir.deleteFile(self.io, token_hex) catch {};
     }
 
-    // leave `token_hex`'s session for the next visitor arriving without one.
-    // only the `try` fixture writes one, and only a debug build honors it. the
-    // name isn't token-shaped, so it can't collide with a session file.
+    // leave `token_hex`'s session for visitors arriving without one. only the
+    // `try` fixture writes one. the name can't collide with a session token.
     pub fn offerAutoLogin(self: SessionStore, token_hex: *const [token_hex_len]u8) !void {
         const file = try self.dir.createFile(self.io, auto_login_name, .{});
         defer file.close(self.io);
         try file.writeStreamingAll(self.io, token_hex);
     }
 
-    // claim the offered session, if one is there. the delete picks the winner
-    // of a race, so the offer is only ever taken once. a release build never
-    // looks, because that would be an extra syscall for every GET request.
-    pub fn claimAutoLogin(self: SessionStore, out: *[token_hex_len]u8) bool {
-        if (builtin.mode != .Debug) return false;
-        {
-            const file = self.dir.openFile(self.io, auto_login_name, .{ .mode = .read_only }) catch return false;
-            defer file.close(self.io);
-            var storage: [token_hex_len]u8 = undefined;
-            var file_reader = file.reader(self.io, &storage);
-            file_reader.interface.readSliceAll(out) catch return false;
-        }
-        self.dir.deleteFile(self.io, auto_login_name) catch return false;
+    pub fn autoLogin(self: SessionStore, out: *[token_hex_len]u8) bool {
+        out.* = self.auto_login orelse return false;
         return true;
     }
 
