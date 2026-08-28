@@ -4,6 +4,7 @@ const evt = @import("../../event.zig");
 const ui = @import("../../ui.zig");
 const xit = @import("xit");
 const rp = xit.repo;
+const hash = xit.hash;
 const xitui = xit.xitui;
 const wgt = xitui.widget;
 const layout = xitui.layout;
@@ -17,19 +18,340 @@ const Attachment = @import("Attachment.zig");
 
 const wasm = builtin.target.cpu.arch == .wasm32;
 
+// read the selected thread's conflicted fields and attribute each side to its
+// event commit author
+pub fn readConflict(
+    comptime Data: type,
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    arena: *std.heap.ArenaAllocator,
+    repo: *rp.Repo(repo_kind, repo_opts),
+    io: std.Io,
+    admin_moment: ?evt.AdminDB.HashMap(.read_only),
+    haxy_moment: evt.EventDB(repo_opts.hash).HashMap(.read_only),
+    id_bytes: *const [evt.event_id_size]u8,
+    ours: Data.Event.Record,
+    conflict_entry: evt.EventDB(repo_opts.hash).HashMap(.read_only),
+) !Data.Conflict {
+    const Event = Data.Event;
+    const DB = evt.EventDB(repo_opts.hash);
+    const aa = arena.allocator();
+
+    const fields_cursor = (try conflict_entry.getCursor(hash.hashInt(repo_opts.hash, evt.conflicted_fields_key))) orelse return error.NotFound;
+    const conflicted_fields = try fields_cursor.readBytesAlloc(aa, null);
+    const their_cursor = (try conflict_entry.getCursor(hash.hashInt(repo_opts.hash, evt.their_record_key))) orelse return error.NotFound;
+    const theirs = try evt.read(Event.Record, DB, repo_opts.hash, arena, try DB.HashMap(.read_only).init(their_cursor));
+
+    // absent when both sides created the thread independently
+    var base: ?Event.Record = null;
+    if (try conflict_entry.getCursor(hash.hashInt(repo_opts.hash, evt.base_record_key))) |base_cursor| {
+        base = try evt.read(Event.Record, DB, repo_opts.hash, arena, try DB.HashMap(.read_only).init(base_cursor));
+    }
+
+    var their_field_oids: ?DB.SortedMap(.read_only) = null;
+    if (try conflict_entry.getCursor(hash.hashInt(repo_opts.hash, evt.their_field_to_oid_key))) |cursor|
+        their_field_oids = try DB.SortedMap(.read_only).init(cursor);
+    var our_field_oids: ?DB.SortedMap(.read_only) = null;
+    if (try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, Event.id_to_field_to_oid_key))) |map_cursor| {
+        const id_to_field_to_oid = try DB.HashMap(.read_only).init(map_cursor);
+        if (try id_to_field_to_oid.getCursor(hash.hashInt(repo_opts.hash, id_bytes))) |cursor|
+            our_field_oids = try DB.SortedMap(.read_only).init(cursor);
+    }
+
+    var conflict = Data.Conflict{};
+    var field_iter = std.mem.splitScalar(u8, conflicted_fields, ' ');
+    while (field_iter.next()) |field| {
+        const our_author = try oidAuthor(repo_kind, repo_opts, arena, repo, io, admin_moment, try readFieldOid(repo_opts.hash, our_field_oids, field));
+        const their_author = try oidAuthor(repo_kind, repo_opts, arena, repo, io, admin_moment, try readFieldOid(repo_opts.hash, their_field_oids, field));
+        if (std.mem.eql(u8, field, "title")) {
+            conflict.title = .{
+                .ours = .{ .text = ours.event.title, .author = our_author },
+                .theirs = .{ .text = theirs.event.title, .author = their_author },
+            };
+        } else if (std.mem.eql(u8, field, "tags")) {
+            conflict.tags = .{
+                .ours = .{ .text = ours.event.tags, .author = our_author },
+                .theirs = .{ .text = theirs.event.tags, .author = their_author },
+            };
+        } else if (std.mem.eql(u8, field, "description")) {
+            conflict.description = .{
+                .chunks = try diff3.chunks(io, arena.child_allocator, arena, if (base) |b| b.event.description else "", ours.event.description, theirs.event.description),
+                .ours_author = our_author,
+                .theirs_author = their_author,
+            };
+        } else if (comptime @hasField(Data.Conflict, "status")) {
+            if (std.mem.eql(u8, field, "status")) {
+                conflict.status = .{
+                    .ours = .{ .text = @tagName(ours.event.status), .author = our_author },
+                    .theirs = .{ .text = @tagName(theirs.event.status), .author = their_author },
+                };
+            } else if (std.mem.eql(u8, field, "revision")) {
+                conflict.revision = .{
+                    .ours = .{ .text = try revisionSummary(aa, ours.event.revision), .author = our_author },
+                    .theirs = .{ .text = try revisionSummary(aa, theirs.event.revision), .author = their_author },
+                };
+            }
+        }
+    }
+    return conflict;
+}
+
+fn revisionSummary(allocator: std.mem.Allocator, revision_maybe: ?evt.Patch.Revision) ![]const u8 {
+    const revision = revision_maybe orelse return "(none)";
+    return std.fmt.allocPrint(allocator, "{s}\nsquash {s}\nsource {s}", .{ revision.target_ref, revision.squash_oid, revision.source_oid });
+}
+
+fn readFieldOid(
+    comptime hash_kind: hash.HashKind,
+    field_oids_maybe: ?evt.EventDB(hash_kind).SortedMap(.read_only),
+    field: []const u8,
+) !?[hash.byteLen(hash_kind)]u8 {
+    const field_oids = field_oids_maybe orelse return null;
+    const cursor = (try field_oids.getCursor(field)) orelse return null;
+    var oid: [hash.byteLen(hash_kind)]u8 = undefined;
+    _ = try cursor.readBytes(&oid);
+    return oid;
+}
+
+fn oidAuthor(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    arena: *std.heap.ArenaAllocator,
+    repo: *rp.Repo(repo_kind, repo_opts),
+    io: std.Io,
+    admin_moment: ?evt.AdminDB.HashMap(.read_only),
+    oid_maybe: ?[hash.byteLen(repo_opts.hash)]u8,
+) !ui.Author {
+    const oid = oid_maybe orelse return .unknown;
+    const gpa = arena.child_allocator;
+    var start_oids = [_][hash.hexLen(repo_opts.hash)]u8{std.fmt.bytesToHex(oid, .lower)};
+    var commit_iter = repo.log(io, gpa, start_oids[0..1]) catch return .unknown;
+    defer commit_iter.deinit();
+    const commit_object = (commit_iter.next(gpa) catch return .unknown) orelse return .unknown;
+    defer commit_object.deinit();
+    return try ui.Author.init(admin_moment, arena, commit_object.content.commit.metadata.author orelse "");
+}
+
+pub fn statusSet(
+    comptime Data: type,
+    comptime DB: type,
+    statuses: DB.SortedMap(.read_only),
+    status: Data.Status,
+) !?DB.SortedSet(.read_only) {
+    const cursor = (try statuses.getCursor(@tagName(status))) orelse return null;
+    return try DB.SortedSet(.read_only).init(cursor);
+}
+
+pub fn tagStatusSet(
+    comptime Data: type,
+    comptime DB: type,
+    tag_statuses: DB.SortedMap(.read_only),
+    tag: []const u8,
+    status: Data.Status,
+) !?DB.SortedSet(.read_only) {
+    var key_buffer: Data.Event.TagStatusKey = undefined;
+    const key = Data.Event.tagStatusKey(&key_buffer, tag, status) catch return null;
+    const cursor = (try tag_statuses.getCursor(key)) orelse return null;
+    return try DB.SortedSet(.read_only).init(cursor);
+}
+
+pub fn loadTags(
+    comptime Data: type,
+    comptime hash_kind: hash.HashKind,
+    arena: *std.heap.ArenaAllocator,
+    haxy_moment: evt.EventDB(hash_kind).HashMap(.read_only),
+) ![]const []const u8 {
+    const aa = arena.allocator();
+    const DB = evt.EventDB(hash_kind);
+    const cursor = try haxy_moment.getCursor(hash.hashInt(hash_kind, Data.Event.tag_status_to_id_set_key)) orelse return &.{};
+    const tag_statuses = try DB.SortedMap(.read_only).init(cursor);
+    var tags: std.ArrayList([]const u8) = .empty;
+    var iter = try tag_statuses.iterator();
+    while (try iter.next()) |pair_cursor| {
+        if (tags.items.len == Data.max_tags) break;
+        var entry_cursor = pair_cursor;
+        const pair = try entry_cursor.readKeyValuePair();
+        const key = try pair.key_cursor.readBytesAlloc(aa, null);
+        const space = std.mem.indexOfScalar(u8, key, ' ') orelse continue;
+        const tag = key[0..space];
+        if (tags.getLastOrNull()) |last| {
+            if (std.mem.eql(u8, last, tag)) continue;
+        }
+        try tags.append(aa, tag);
+    }
+    return tags.items;
+}
+
+pub fn loadWindow(
+    comptime Data: type,
+    comptime hash_kind: hash.HashKind,
+    arena: *std.heap.ArenaAllocator,
+    admin_moment: ?evt.AdminDB.HashMap(.read_only),
+    haxy_moment: evt.EventDB(hash_kind).HashMap(.read_only),
+    records: evt.EventDB(hash_kind).HashMap(.read_only),
+    set_maybe: ?evt.EventDB(hash_kind).SortedSet(.read_only),
+    root_key: ?[]const u8,
+    conflict_set: ?evt.EventDB(hash_kind).SortedSet(.read_only),
+    selected_id: []const u8,
+    comments_start: usize,
+) !Data.Window {
+    const set = set_maybe orelse return .empty;
+    const DB = evt.EventDB(hash_kind);
+    const aa = arena.allocator();
+
+    var prev_id: ?[]const u8 = null;
+    var iter = if (root_key) |key| blk: {
+        const rank = try set.rank(key);
+        if (rank > 0 and rank <= Data.page_size) {
+            prev_id = "";
+        } else if (rank > Data.page_size) {
+            const pair = try set.getIndexKeyValuePair(@intCast(rank - Data.page_size)) orelse return error.NotFound;
+            var previous: [@sizeOf(u64) + evt.event_id_size]u8 = undefined;
+            _ = try pair.key_cursor.readBytes(&previous);
+            const hex = std.fmt.bytesToHex(previous[@sizeOf(u64)..].*, .lower);
+            prev_id = try aa.dupe(u8, &hex);
+        }
+        break :blk try set.iteratorFrom(key);
+    } else try set.iteratorFromIndex(0);
+
+    var items: std.ArrayList(Data.Entry) = .empty;
+    var next_id: ?[]const u8 = null;
+    while (try iter.next()) |cursor_value| {
+        var cursor = cursor_value;
+        const pair = try cursor.readKeyValuePair();
+        var order_key: [@sizeOf(u64) + evt.event_id_size]u8 = undefined;
+        _ = try pair.key_cursor.readBytes(&order_key);
+        const id = order_key[@sizeOf(u64)..];
+        const id_hex = std.fmt.bytesToHex(id.*, .lower);
+        if (items.items.len == Data.page_size) {
+            next_id = try aa.dupe(u8, &id_hex);
+            break;
+        }
+        const record_cursor = try records.getCursor(hash.hashInt(hash_kind, id)) orelse continue;
+        const record = try evt.read(Data.Event.Record, DB, hash_kind, arena, try DB.HashMap(.read_only).init(record_cursor));
+        try items.append(aa, .{
+            .id = try aa.dupe(u8, &id_hex),
+            .record = record,
+            .author = try ui.Author.initFromEmail(admin_moment, arena, record.author_email),
+            .conflicted = if (conflict_set) |conflicts| try conflicts.contains(&order_key) else false,
+            .comments = try Comment.loadWindow(
+                hash_kind,
+                arena,
+                admin_moment,
+                haxy_moment,
+                evt.Comment.thread_id_to_comment_id_set_key,
+                &id_hex,
+                if (std.mem.eql(u8, &id_hex, selected_id)) comments_start else 0,
+            ),
+            .attachments = try Attachment.load(hash_kind, arena, haxy_moment, &id_hex),
+        });
+    }
+
+    return .{
+        .items = items.items,
+        .prev_id = prev_id,
+        .next_id = next_id,
+        .count = @intCast(try set.count()),
+    };
+}
+
+// the common tab strip used by each thread page's sub-header
+pub const Header = struct {
+    box: wgt.Box(ui.Widget),
+    // focus id -> semantic stack index; some pages omit unavailable tabs
+    tab_ids: std.AutoArrayHashMapUnmanaged(usize, usize),
+
+    pub fn init(allocator: std.mem.Allocator) !Header {
+        var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
+        errdefer box.deinit(allocator);
+        return .{ .box = box, .tab_ids = .empty };
+    }
+
+    pub fn addTab(self: *Header, allocator: std.mem.Allocator, label: []const u8, link: []const u8, view_index: usize) !void {
+        var text_box = try wgt.TextBox(ui.Widget).init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+        errdefer text_box.deinit(allocator);
+        text_box.getFocus().focusable = true;
+        text_box.getFocus().kind = .{ .custom = link };
+        try self.tab_ids.put(allocator, text_box.getFocus().id, view_index);
+        try self.box.children.put(allocator, text_box.getFocus().id, .{
+            .widget = .{ .text_box = text_box },
+            .rect = null,
+            .min_size = .{ .width = label.len + 2, .height = null },
+        });
+    }
+
+    pub fn select(self: *Header, view_index: usize) void {
+        for (self.tab_ids.keys(), self.tab_ids.values()) |id, index| {
+            if (index == view_index) {
+                self.getFocus().child_id = id;
+                return;
+            }
+        }
+    }
+
+    pub fn deinit(self: *Header, allocator: std.mem.Allocator) void {
+        self.box.deinit(allocator);
+        self.tab_ids.deinit(allocator);
+    }
+
+    pub fn build(self: *Header, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
+        self.clearGrid();
+        // only the selected tab shows its border
+        for (self.box.children.keys(), self.box.children.values()) |id, *child| {
+            switch (child.widget) {
+                .text_box => |*tb| tb.options.border_style = if (self.getFocus().child_id == id) .single else .hidden,
+                else => {},
+            }
+        }
+        try self.box.build(allocator, constraint, root_focus);
+    }
+
+    pub fn input(self: *Header, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
+        _ = allocator;
+        const current_tab = self.currentTabIndex() orelse return;
+        if (inp.moveTab(key, current_tab, self.tab_ids.count())) |new_tab| {
+            root_focus.setFocus(self.tab_ids.keys()[new_tab]);
+        }
+    }
+
+    pub fn clearGrid(self: *Header) void {
+        self.box.clearGrid();
+    }
+
+    pub fn getGrid(self: Header) ?Grid {
+        return self.box.getGrid();
+    }
+
+    pub fn getFocus(self: *Header) *Focus {
+        return self.box.getFocus();
+    }
+
+    pub fn getSelectedIndex(self: Header) ?usize {
+        const index = self.currentTabIndex() orelse return null;
+        return self.tab_ids.values()[index];
+    }
+
+    fn currentTabIndex(self: Header) ?usize {
+        const child_id = self.box.focus.child_id orelse return null;
+        return self.tab_ids.getIndex(child_id);
+    }
+};
+
 pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
     const Self = Data;
-    const Header = Data.Header;
+    const HeaderType = Data.Header;
     const Window = Data.Window;
     const Entry = Data.Entry;
     const Event = Data.Event;
     const Status = Data.Status;
     const has_status = @hasField(Event, "status");
     const has_conflicts = Event.merge_policy == .field_conflicts;
+    const has_drafts = @hasField(Self, "drafts");
     const FieldConflict = if (has_conflicts) Data.FieldConflict else void;
     const ViewKind = Data.ViewKind;
     const thread_name = switch (kind) {
         .issue => "issue",
+        .patch => "patch",
         .discuss => "discussion",
         else => @compileError("unsupported thread event kind"),
     };
@@ -37,29 +359,30 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
     return struct {
         const This = @This();
         // a vertical box: the header tabs on top, then a stack holding a
-        // master-detail split (issue list + description pane) per status list,
+        // master-detail split (thread list + description pane) per status list,
         // plus the tags view.
         box: wgt.Box(ui.Widget), // vert: [header_index] = tabs, [stack_index] = stack
         data: *const Self,
         session: *ui.Session,
-        // per-split state, indexed like the stack's split children: the issue the
-        // pane shows, and its description, author and open/close button focus ids.
+        // per-split state, indexed like the stack's split children: the thread the
+        // pane shows and its focus ids.
         detailed_index: [view_count]?usize,
         description_id: [view_count]?usize,
         author_id: [view_count]?usize,
-        status_button_id: [view_count]?usize,
+        primary_button_id: [view_count]?usize,
 
         const header_index: usize = 0;
         const stack_index: usize = 1;
         // indices within the stack, 1:1 with the header tabs.
         const status_count = @typeInfo(Status).@"enum".fields.len;
         const tags_view_index: usize = status_count;
-        // the new-issue form, or the edit, comment, or resolve form when the page was
+        // the new-thread form, or the edit, comment, or resolve form when the page was
         // loaded at one of their urls.
         const form_view_index: usize = tags_view_index + 1;
         // the conflicts split; the tab and stack child exist only when the repo
-        // has conflicted issues.
-        const conflict_view_index: usize = form_view_index + 1;
+        // has conflicted threads.
+        const drafts_view_index: usize = form_view_index + 1;
+        const conflict_view_index: usize = drafts_view_index + @intFromBool(has_drafts);
         const view_count: usize = conflict_view_index + @intFromBool(has_conflicts);
         // indices within a split (the horizontal box inside the stack).
         const list_index: usize = 0;
@@ -80,6 +403,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             if (std.mem.eql(u8, name, "tags")) return tags_view_index;
             if (std.mem.eql(u8, name, "new") or std.mem.eql(u8, name, "edit") or std.mem.eql(u8, name, "new_comment") or std.mem.eql(u8, name, "edit_comment") or std.mem.eql(u8, name, "remove") or std.mem.eql(u8, name, "resolve")) return form_view_index;
             if (std.mem.eql(u8, name, "conflicts")) return conflict_view_index;
+            if (std.mem.eql(u8, name, "drafts")) return drafts_view_index;
             if (std.mem.eql(u8, name, "description")) unreachable;
             inline for (@typeInfo(Status).@"enum".fields, 0..) |field, index| {
                 if (std.mem.eql(u8, name, field.name)) return index;
@@ -101,9 +425,28 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             return if (has_status) entry.record.event.status else @enumFromInt(0);
         }
 
+        fn entryDraft(entry: Entry) bool {
+            return if (has_drafts) entry.draft else false;
+        }
+
+        fn statusAction(status: Status) ?[]const u8 {
+            const name = @tagName(status);
+            if (std.mem.eql(u8, name, "open")) return "close";
+            if (std.mem.eql(u8, name, "closed")) return "open";
+            return null;
+        }
+
+        fn toggledStatus(status: Status) ?Status {
+            const name = @tagName(status);
+            if (std.mem.eql(u8, name, "open")) return std.meta.stringToEnum(Status, "closed");
+            if (std.mem.eql(u8, name, "closed")) return std.meta.stringToEnum(Status, "open");
+            return null;
+        }
+
         fn listRoute(identity: []const u8, status: Status, tag: []const u8, selected: []const u8) ?ui.RoutablePage {
             return switch (kind) {
                 .issue => ui.RoutablePage.repoIssuesRoute(identity, status, tag, selected),
+                .patch => ui.RoutablePage.repoPatchesRoute(identity, status, tag, selected),
                 .discuss => ui.RoutablePage.repoDiscussionsRoute(identity, tag, selected),
                 else => @compileError("unsupported thread event kind"),
             };
@@ -137,6 +480,13 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             return ui.RoutablePage.repoThreadNewRoute(kind, identity);
         }
 
+        fn draftsRoute(identity: []const u8) ?ui.RoutablePage {
+            return switch (kind) {
+                .patch => ui.RoutablePage.repoPatchesDraftsRoute(identity),
+                else => null,
+            };
+        }
+
         fn descriptionRoute(identity: []const u8, selected: []const u8) ?ui.RoutablePage {
             return ui.RoutablePage.repoThreadDescriptionRoute(kind, identity, selected);
         }
@@ -148,6 +498,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         fn conflictsRoute(identity: []const u8, selected: []const u8) ?ui.RoutablePage {
             return switch (kind) {
                 .issue => ui.RoutablePage.repoIssuesConflictsRoute(identity, selected),
+                .patch => ui.RoutablePage.repoPatchesConflictsRoute(identity, selected),
                 else => @compileError("thread event kind has no conflict route"),
             };
         }
@@ -155,6 +506,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         fn resolveRoute(identity: []const u8, selected: []const u8, picks: []const u8) ?ui.RoutablePage {
             return switch (kind) {
                 .issue => ui.RoutablePage.repoIssuesResolveRoute(identity, selected, picks),
+                .patch => ui.RoutablePage.repoPatchesResolveRoute(identity, selected, picks),
                 else => @compileError("thread event kind has no resolve route"),
             };
         }
@@ -169,9 +521,13 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             return std.fmt.allocPrint(page_arena.allocator(), "ai:{s}", .{try route.toUrl(page_arena)});
         }
 
-        fn windowLink(page_arena: *std.heap.ArenaAllocator, data: *const Self, status_maybe: ?Status, id: []const u8) ![]const u8 {
-            if (has_conflicts and status_maybe == null) {
+        fn windowLink(page_arena: *std.heap.ArenaAllocator, data: *const Self, status_maybe: ?Status, drafts: bool, id: []const u8) ![]const u8 {
+            if (has_conflicts and status_maybe == null and !drafts) {
                 const route = conflictsRoute(data.identity, id) orelse return error.RouteTooLong;
+                return std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{try route.toUrl(page_arena)});
+            }
+            if (drafts and id.len == 0) {
+                const route = draftsRoute(data.identity) orelse return error.RouteTooLong;
                 return std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{try route.toUrl(page_arena)});
             }
             return listLink(page_arena, data.identity, status_maybe orelse @enumFromInt(0), data.tag, id);
@@ -193,10 +549,11 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
 
             // the tabs at the top.
             {
-                var hdr = try Header.init(allocator, session, data);
+                var hdr = try Data.initHeader(allocator, session, data);
                 errdefer hdr.deinit(allocator);
                 switch (kind) {
                     .issue => try outer.children.put(allocator, hdr.getFocus().id, .{ .widget = .{ .repo_issues_header = hdr }, .rect = null, .min_size = null }),
+                    .patch => try outer.children.put(allocator, hdr.getFocus().id, .{ .widget = .{ .repo_patches_header = hdr }, .rect = null, .min_size = null }),
                     .discuss => try outer.children.put(allocator, hdr.getFocus().id, .{ .widget = .{ .repo_discussions_header = hdr }, .rect = null, .min_size = null }),
                     else => @compileError("unsupported thread event kind"),
                 }
@@ -212,7 +569,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             const stack = &outer.children.values()[stack_index].widget.stack;
 
             inline for (@typeInfo(Status).@"enum".fields) |field| {
-                var split = try initSplit(allocator, session, data, @enumFromInt(field.value));
+                var split = try initSplit(allocator, session, data, @enumFromInt(field.value), false);
                 errdefer split.deinit(allocator);
                 try stack.children.put(allocator, split.getFocus().id, .{ .box = split });
             }
@@ -319,11 +676,17 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 try stack.children.put(allocator, message.getFocus().id, .{ .unauthorized = message });
             }
 
+            if (has_drafts) {
+                var split = try initSplit(allocator, session, data, null, true);
+                errdefer split.deinit(allocator);
+                try stack.children.put(allocator, split.getFocus().id, .{ .box = split });
+            }
+
             // the conflicts split; its tab exists only when the repo has
             // conflicts, so skip the child too to keep the stack 1:1 with the
             // tabs.
             if (has_conflicts and data.conflicts.count > 0) {
-                var split = try initSplit(allocator, session, data, null);
+                var split = try initSplit(allocator, session, data, null, false);
                 errdefer split.deinit(allocator);
                 try stack.children.put(allocator, split.getFocus().id, .{ .box = split });
             }
@@ -341,17 +704,17 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 .detailed_index = @splat(null),
                 .description_id = @splat(null),
                 .author_id = @splat(null),
-                .status_button_id = @splat(null),
+                .primary_button_id = @splat(null),
             };
         }
 
         // the master-detail split showing `status`'s window, or the conflicts
         // window when null.
-        fn initSplit(allocator: std.mem.Allocator, session: *ui.Session, data: *const Self, status_maybe: ?Status) !wgt.Box(ui.Widget) {
+        fn initSplit(allocator: std.mem.Allocator, session: *ui.Session, data: *const Self, status_maybe: ?Status, drafts: bool) !wgt.Box(ui.Widget) {
             var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
             errdefer box.deinit(allocator);
 
-            const win = if (status_maybe) |status| data.window(status) else if (has_conflicts) &data.conflicts else unreachable;
+            const win = if (status_maybe) |status| data.window(status) else if (drafts and has_drafts) &data.drafts else if (has_conflicts) &data.conflicts else unreachable;
 
             // the issue list (one focusable row per title), plus a "next" link that
             // reloads the page rooted at the following issue.
@@ -360,7 +723,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     var list_box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert, .stretch = true });
                     errdefer list_box.deinit(allocator);
                     if (win.prev_id) |prev|
-                        try addRow(allocator, &list_box, "← previous", "", try windowLink(session.page_arena, data, status_maybe, prev));
+                        try addRow(allocator, &list_box, "← previous", "", try windowLink(session.page_arena, data, status_maybe, drafts, prev));
                     for (win.items) |entry| {
                         // conflicts take precedence over the comment count
                         const label: []const u8 = if (entryConflicted(entry) and status_maybe != null)
@@ -372,7 +735,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                         try addRow(allocator, &list_box, entry.record.event.title, label, try rowLink(session.page_arena, data.identity, entry.id));
                     }
                     if (win.next_id) |next|
-                        try addRow(allocator, &list_box, "next →", "", try windowLink(session.page_arena, data, status_maybe, next));
+                        try addRow(allocator, &list_box, "next →", "", try windowLink(session.page_arena, data, status_maybe, drafts, next));
                     // select the window's first issue (past a leading "previous"
                     // row) so its description shows on load.
                     if (win.items.len > 0)
@@ -453,7 +816,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 try box.children.put(allocator, description.getFocus().id, .{ .widget = .{ .text_input = description }, .rect = null, .min_size = null });
             }
 
-            try addSubmitButton(allocator, &box);
+            try addSubmitButtonLabeled(allocator, &box, if (kind == .patch and record == null) "submit private draft" else "submit");
 
             box.getFocus().child_id = box.children.keys()[title_field_index];
             return box;
@@ -544,7 +907,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
 
             var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert });
             errdefer box.deinit(allocator);
-            const route = resolveRoute(data.identity, data.selected_id, "") orelse return error.RouteTooLong;
+            const route = resolveRoute(data.identity, data.selected_id, data.theirs_picks) orelse return error.RouteTooLong;
             box.getFocus().kind = .{ .custom = try std.fmt.allocPrint(aa, "form:{s}", .{try route.toUrl(session.page_arena)}) };
 
             if (conflict.title) |*fc| {
@@ -554,6 +917,16 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             if (conflict.tags) |*fc| {
                 try addLabel(allocator, &box, "tags conflict:");
                 try addFieldConflict(allocator, &box, session, data, "tags", fc);
+            }
+            if (comptime kind == .patch) {
+                if (conflict.status) |*fc| {
+                    try addLabel(allocator, &box, "status conflict:");
+                    try addAtomicConflict(allocator, &box, session, data, "status", fc);
+                }
+                if (conflict.revision) |*fc| {
+                    try addLabel(allocator, &box, "revision conflict:");
+                    try addAtomicConflict(allocator, &box, session, data, "revision", fc);
+                }
             }
 
             if (conflict.description) |*desc| {
@@ -619,6 +992,22 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             resolution_input.getFocus().focusable = true;
             try resolution_input.setContent(allocator, if (data.theirsPicked(name)) fc.theirs.text else fc.ours.text);
             try box.children.put(allocator, resolution_input.getFocus().id, .{ .widget = .{ .text_input = resolution_input }, .rect = null, .min_size = null });
+        }
+
+        // atomic fields can only pick one complete side
+        fn addAtomicConflict(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), session: *ui.Session, data: *const Self, comptime name: []const u8, fc: *const FieldConflict) !void {
+            const aa = session.page_arena.allocator();
+            try addVersionRow(allocator, box, try sideLabel(aa, fc.ours.author, true), fc.ours.text, try useThisLink(session, data, name, false));
+            try addVersionRow(allocator, box, try sideLabel(aa, fc.theirs.author, false), fc.theirs.text, try useThisLink(session, data, name, true));
+            var selected = try wgt.TextBox(ui.Widget).init(allocator, if (data.theirsPicked(name)) fc.theirs.text else fc.ours.text, .{
+                .border_style = .single,
+                .rounded_corners = true,
+                .wrap_kind = .word,
+                .label = " resolution ",
+            });
+            errdefer selected.deinit(allocator);
+            selected.getFocus().focusable = true;
+            try box.children.put(allocator, selected.getFocus().id, .{ .widget = .{ .text_box = selected }, .rect = null, .min_size = null });
         }
 
         // a blank row setting a conflict group apart from its neighbors
@@ -732,9 +1121,10 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             self.box.deinit(allocator);
         }
 
-        fn header(self: *This) *Header {
+        fn header(self: *This) *HeaderType {
             return switch (kind) {
                 .issue => &self.box.children.values()[header_index].widget.repo_issues_header,
+                .patch => &self.box.children.values()[header_index].widget.repo_patches_header,
                 .discuss => &self.box.children.values()[header_index].widget.repo_discussions_header,
                 else => @compileError("unsupported thread event kind"),
             };
@@ -813,6 +1203,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
 
         fn window(self: *This, index: usize) *const Window {
             if (has_conflicts and index == conflict_view_index) return &self.data.conflicts;
+            if (has_drafts and index == drafts_view_index) return &self.data.drafts;
             return self.data.window(splitStatus(index));
         }
 
@@ -826,7 +1217,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         // new-issue form shows).
         fn selectedSplitIndex(self: *This) ?usize {
             const idx = self.stackSelectedIndex() orelse return null;
-            return if (idx < status_count or idx == conflict_view_index) idx else null;
+            return if (idx < status_count or (has_drafts and idx == drafts_view_index) or idx == conflict_view_index) idx else null;
         }
 
         fn detailActive(self: *This, index: usize) bool {
@@ -889,6 +1280,11 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     })
                 else if (has_conflicts and index == conflict_view_index)
                     conflictsRoute(self.data.identity, if (self.data.view == .conflicts) self.data.selected_id else "")
+                else if (has_drafts and index == drafts_view_index)
+                    if (index == viewIndex(self.data.view) and self.data.selected_id.len != 0)
+                        commentsRoute(self.data.identity, self.data.selected_id, 0)
+                    else
+                        draftsRoute(self.data.identity)
                 else if (index == viewIndex(self.data.view) and self.data.selected_id.len != 0)
                     (if (self.data.description_page)
                         descriptionRoute(self.data.identity, self.data.selected_id)
@@ -1023,10 +1419,9 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             inner.children.clearAndFree(allocator);
             inner.getFocus().child_id = null;
             self.author_id[index] = null;
-            self.status_button_id[index] = null;
+            self.primary_button_id[index] = null;
 
-            // the tool row: the open/close and edit buttons; the description page
-            // shows none.
+            // the tool row; the description page shows none.
             {
                 const row = self.toolRow(index);
                 for (row.children.values()) |*child| child.widget.deinit(allocator);
@@ -1044,77 +1439,90 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     try row.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null });
                 }
 
-                // a terminal has no file picker, so attaching is web only. the
-                // renderer covers this button with a file input, so clicking it
-                // opens the browser's own picker and posts what it chose.
-                if (!self.session.is_terminal and !entryConflicted(entry) and (self.session.data.is_local or self.session.data.user_id != null)) {
-                    const label = "add attachment";
-                    var button = try wgt.TextBox(ui.Widget).init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
-                    errdefer button.deinit(allocator);
-                    button.getFocus().focusable = true;
-                    button.getFocus().kind = .{ .custom = if (self.data.identity.len == 0)
-                        try std.fmt.allocPrint(pa, "{s}/{s}:{s}/attach", .{ ui.file_input_prefix, @tagName(kind), entry.id })
-                    else
-                        try std.fmt.allocPrint(pa, "{s}/repo/{s}/{s}:{s}/attach", .{ ui.file_input_prefix, self.data.identity, @tagName(kind), entry.id }) };
-                    try row.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = .{ .width = label.len + 2, .height = null } });
-                }
-
-                // a conflicted issue's only action is resolving it. the button
-                // stays visible logged out; the resolve page shows the
-                // unauthorized view then.
-                if (has_conflicts and entryConflicted(entry)) {
-                    const label = "resolve conflict";
-                    var button = try wgt.TextBox(ui.Widget).init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
-                    errdefer button.deinit(allocator);
-                    button.getFocus().focusable = true;
-                    const route = resolveRoute(self.data.identity, entry.id, "") orelse return error.RouteTooLong;
-                    button.getFocus().kind = .{ .custom = try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}) };
-                    try row.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = .{ .width = label.len + 2, .height = null } });
-                } else {
-                    // a logged-out session can't flip the status, so it gets no
-                    // open/close button
-                    if (has_status and (self.session.data.is_local or self.session.data.user_id != null)) {
-                        const action: []const u8 = switch (entryStatus(entry)) {
-                            .open => "close",
-                            .closed => "open",
-                        };
-                        const route = commentsRoute(self.data.identity, entry.id, 0) orelse return error.RouteTooLong;
-                        row.getFocus().kind = .{ .custom = try std.fmt.allocPrint(pa, "form:{s}/{s}", .{ try route.toUrl(self.session.page_arena), action }) };
-
-                        var button = try wgt.TextBox(ui.Widget).init(allocator, action, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+                if (has_drafts and entryDraft(entry)) {
+                    if (entry.revision_ready) {
+                        const route = listRoute(self.data.identity, @enumFromInt(0), "", entry.id) orelse return error.RouteTooLong;
+                        row.getFocus().kind = .{ .custom = try std.fmt.allocPrint(pa, "form:{s}/post", .{try route.toUrl(self.session.page_arena)}) };
+                        var button = try wgt.TextBox(ui.Widget).init(allocator, "post", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
                         errdefer button.deinit(allocator);
                         button.getFocus().focusable = true;
-                        // the renderer distinguishes plain clickables from buttons
-                        // that should POST to a server route by this kind.
                         button.getFocus().kind = .{ .custom = "submit" };
-                        self.status_button_id[index] = button.getFocus().id;
-                        try row.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = .{ .width = action.len + 2, .height = null } });
+                        self.primary_button_id[index] = button.getFocus().id;
+                        try row.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = .{ .width = "post".len + 2, .height = null } });
                     }
-
-                    // the edit button links to the issue's edit page.
-                    {
-                        var button = try wgt.TextBox(ui.Widget).init(allocator, "edit", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+                    if (row.children.count() > first_in_row_index)
+                        row.getFocus().child_id = row.children.keys()[first_in_row_index];
+                } else {
+                    // a terminal has no file picker, so attaching is web only. the
+                    // renderer covers this button with a file input, so clicking it
+                    // opens the browser's own picker and posts what it chose.
+                    if (!self.session.is_terminal and !entryConflicted(entry) and (self.session.data.is_local or self.session.data.user_id != null)) {
+                        const label = "add attachment";
+                        var button = try wgt.TextBox(ui.Widget).init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
                         errdefer button.deinit(allocator);
                         button.getFocus().focusable = true;
-                        const route = editRoute(self.data.identity, entry.id) orelse return error.RouteTooLong;
-                        button.getFocus().kind = .{ .custom = try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}) };
-                        try row.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = .{ .width = "edit".len + 2, .height = null } });
+                        button.getFocus().kind = .{ .custom = if (self.data.identity.len == 0)
+                            try std.fmt.allocPrint(pa, "{s}/{s}:{s}/attach", .{ ui.file_input_prefix, @tagName(kind), entry.id })
+                        else
+                            try std.fmt.allocPrint(pa, "{s}/repo/{s}/{s}:{s}/attach", .{ ui.file_input_prefix, self.data.identity, @tagName(kind), entry.id }) };
+                        try row.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = .{ .width = label.len + 2, .height = null } });
                     }
-                }
 
-                if (self.session.data.is_local or self.session.data.user_id != null) {
-                    var remove = try wgt.TextBox(ui.Widget).init(allocator, "✕", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
-                    errdefer remove.deinit(allocator);
-                    remove.getFocus().focusable = true;
-                    const route = removeRoute(self.data.identity, entry.id, "") orelse return error.RouteTooLong;
-                    remove.getFocus().kind = .{ .custom = try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}) };
-                    try row.children.put(allocator, remove.getFocus().id, .{ .widget = .{ .text_box = remove }, .rect = null, .min_size = .{ .width = 3, .height = null } });
-                }
+                    // a conflicted issue's only action is resolving it. the button
+                    // stays visible logged out; the resolve page shows the
+                    // unauthorized view then.
+                    if (has_conflicts and entryConflicted(entry)) {
+                        const label = "resolve conflict";
+                        var button = try wgt.TextBox(ui.Widget).init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+                        errdefer button.deinit(allocator);
+                        button.getFocus().focusable = true;
+                        const route = resolveRoute(self.data.identity, entry.id, "") orelse return error.RouteTooLong;
+                        button.getFocus().kind = .{ .custom = try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}) };
+                        try row.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = .{ .width = label.len + 2, .height = null } });
+                    } else {
+                        // a logged-out session can't flip the status, so it gets no
+                        // open/close button
+                        if (has_status and (self.session.data.is_local or self.session.data.user_id != null)) {
+                            if (statusAction(entryStatus(entry))) |action| {
+                                const route = commentsRoute(self.data.identity, entry.id, 0) orelse return error.RouteTooLong;
+                                row.getFocus().kind = .{ .custom = try std.fmt.allocPrint(pa, "form:{s}/{s}", .{ try route.toUrl(self.session.page_arena), action }) };
 
-                // the leftmost button: the attachment button when the session has
-                // one, else the resolve button on a conflicted issue, the
-                // open/close button when present, the edit button otherwise
-                row.getFocus().child_id = row.children.keys()[first_in_row_index];
+                                var button = try wgt.TextBox(ui.Widget).init(allocator, action, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+                                errdefer button.deinit(allocator);
+                                button.getFocus().focusable = true;
+                                // the renderer distinguishes plain clickables from buttons
+                                // that should POST to a server route by this kind.
+                                button.getFocus().kind = .{ .custom = "submit" };
+                                self.primary_button_id[index] = button.getFocus().id;
+                                try row.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = .{ .width = action.len + 2, .height = null } });
+                            }
+                        }
+
+                        // the edit button links to the issue's edit page.
+                        {
+                            var button = try wgt.TextBox(ui.Widget).init(allocator, "edit", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+                            errdefer button.deinit(allocator);
+                            button.getFocus().focusable = true;
+                            const route = editRoute(self.data.identity, entry.id) orelse return error.RouteTooLong;
+                            button.getFocus().kind = .{ .custom = try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}) };
+                            try row.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = .{ .width = "edit".len + 2, .height = null } });
+                        }
+                    }
+
+                    if (self.session.data.is_local or self.session.data.user_id != null) {
+                        var remove = try wgt.TextBox(ui.Widget).init(allocator, "✕", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+                        errdefer remove.deinit(allocator);
+                        remove.getFocus().focusable = true;
+                        const route = removeRoute(self.data.identity, entry.id, "") orelse return error.RouteTooLong;
+                        remove.getFocus().kind = .{ .custom = try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}) };
+                        try row.children.put(allocator, remove.getFocus().id, .{ .widget = .{ .text_box = remove }, .rect = null, .min_size = .{ .width = 3, .height = null } });
+                    }
+
+                    // the leftmost button: the attachment button when the session has
+                    // one, else the resolve button on a conflicted issue, the
+                    // open/close button when present, the edit button otherwise
+                    row.getFocus().child_id = row.children.keys()[first_in_row_index];
+                }
             }
 
             if (comment_page) |page| {
@@ -1211,6 +1619,20 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 try inner.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
                 break :blk tb.getFocus().id;
             };
+
+            if (has_drafts and entryDraft(entry)) {
+                if (self.data.target_branch.len != 0 and (self.session.data.clone_http_port != null or self.session.data.clone_ssh_port != null)) {
+                    var push = try ui.CloneUrl.View.initPush(allocator, self.session, self.data.identity, entry.id, self.data.target_branch);
+                    errdefer push.deinit(allocator);
+                    try inner.children.put(allocator, push.getFocus().id, .{ .widget = .{ .clone_url = push }, .rect = null, .min_size = null });
+                }
+                inner.getFocus().child_id = inner.children.keys()[title_child_index];
+                const sc = self.detailScroll(index);
+                sc.x = 0;
+                sc.y = 0;
+                sc.getFocus().version +%= 1;
+                return;
+            }
 
             const parent_route = commentsRoute(self.data.identity, entry.id, 0) orelse return error.RouteTooLong;
             try Attachment.appendRows(allocator, inner, self.session, self.data.identity, try parent_route.toUrl(self.session.page_arena), entry.attachments);
@@ -1355,9 +1777,28 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 try self.tagsInput(index, key, root_focus);
             } else if (self.descriptionFocused(index)) {
                 try self.descriptionInput(index, key, root_focus);
-            } else if (try self.attachmentInput(allocator, index, key, root_focus)) {} else {
+            } else if (try self.cloneUrlInput(allocator, index, key, root_focus)) {} else if (try self.attachmentInput(allocator, index, key, root_focus)) {} else {
                 try self.commentInput(allocator, index, key, root_focus);
             }
+        }
+
+        fn cloneUrlInput(self: *This, allocator: std.mem.Allocator, index: usize, key: Key, root_focus: *Focus) !bool {
+            const child_index = self.focusedDetailChild(index, root_focus) orelse return false;
+            const child = &self.detailInner(index).children.values()[child_index].widget;
+            const clone_url = switch (child.*) {
+                .clone_url => |*view| view,
+                else => return false,
+            };
+            switch (key) {
+                .arrow_up => _ = self.moveDetailVertical(index, root_focus, false),
+                .arrow_down => _ = self.moveDetailVertical(index, root_focus, true),
+                .arrow_left => if (clone_url.selected == 0)
+                    try self.focusList(index, root_focus)
+                else
+                    try clone_url.input(allocator, key, root_focus),
+                else => try clone_url.input(allocator, key, root_focus),
+            }
+            return true;
         }
 
         fn attachmentInput(self: *This, allocator: std.mem.Allocator, index: usize, key: Key, root_focus: *Focus) !bool {
@@ -1382,14 +1823,11 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             return true;
         }
 
-        // the tool row: enter or a click on the open/close button flips the
-        // issue's status; the edit and resolve buttons are a: links the host
-        // follows. arrows cross between the buttons and to the neighboring
-        // widgets.
+        // enter or a click runs the primary action; links are handled by the host
         fn toolRowInput(self: *This, allocator: std.mem.Allocator, index: usize, key: Key, root_focus: *Focus) !void {
             const row = self.toolRow(index);
             const cur = if (row.getFocus().child_id) |cid| row.children.getIndex(cid) orelse return else return;
-            const on_status = if (self.status_button_id[index]) |id| row.getFocus().child_id == id else false;
+            const on_primary = if (self.primary_button_id[index]) |id| row.getFocus().child_id == id else false;
             switch (key) {
                 .arrow_left => if (cur > first_in_row_index) root_focus.setFocus(row.children.keys()[cur - 1]) else try self.focusList(index, root_focus),
                 .arrow_right => if (cur + 1 < row.children.count()) root_focus.setFocus(row.children.keys()[cur + 1]),
@@ -1398,12 +1836,31 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     self.focusDetailEdge(index, root_focus, false);
                     self.detailScroll(index).y = 0;
                 },
-                .enter => if (on_status) try self.toggleStatus(allocator, index),
-                .mouse => |mouse| if (self.status_button_id[index]) |id| {
-                    if (inp.leftClickOn(root_focus, id, mouse)) try self.toggleStatus(allocator, index);
+                .enter => if (on_primary) try self.primaryAction(allocator, index),
+                .mouse => |mouse| if (self.primary_button_id[index]) |id| {
+                    if (inp.leftClickOn(root_focus, id, mouse)) try self.primaryAction(allocator, index);
                 },
                 else => {},
             }
+        }
+
+        fn primaryAction(self: *This, allocator: std.mem.Allocator, index: usize) !void {
+            const selected = self.detailed_index[index] orelse return;
+            const entry = self.window(index).items[selected];
+            if (has_drafts and entryDraft(entry))
+                try self.postDraft(allocator, index)
+            else
+                try self.toggleStatus(allocator, index);
+        }
+
+        fn postDraft(self: *This, allocator: std.mem.Allocator, index: usize) !void {
+            if (!has_drafts or comptime wasm) return;
+            const selected = self.detailed_index[index] orelse return;
+            const entry = self.window(index).items[selected];
+            if (!entryDraft(entry) or !entry.revision_ready) return;
+            try self.data.postDraft(self.session, allocator, entry.id);
+            const route = listRoute(self.data.identity, @enumFromInt(0), "", entry.id) orelse return;
+            try self.session.navigate(route);
         }
 
         fn titleInput(self: *This, index: usize, key: Key, root_focus: *Focus) !void {
@@ -1864,22 +2321,32 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 else => {},
             };
 
-            var id_bytes: [evt.event_id_size]u8 = undefined;
-            _ = try std.fmt.hexToBytes(&id_bytes, entry.id[0 .. evt.event_id_size * 2]);
+            const id_bytes = try evt.parseEventId(entry.id);
 
             switch (src.repo_kind) {
                 inline else => |repo_kind| {
                     var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, src.localInitOpts());
                     defer any_repo.deinit(io, allocator);
                     switch (any_repo) {
-                        inline else => |*repo| Event.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &id_bytes, .{ .resolve = .{
-                            .title = title,
-                            .tags = tags,
-                            .hunks = hunks.items,
-                        } }, author) catch |err| switch (err) {
-                            // leave the form up for correction
-                            error.InvalidFields => return,
-                            else => |e| return e,
+                        inline else => |*repo| {
+                            const change: Event.Update = if (comptime kind == .patch)
+                                .{ .resolve = .{
+                                    .title = title,
+                                    .tags = tags,
+                                    .hunks = hunks.items,
+                                    .theirs = self.data.theirs_picks,
+                                } }
+                            else
+                                .{ .resolve = .{
+                                    .title = title,
+                                    .tags = tags,
+                                    .hunks = hunks.items,
+                                } };
+                            Event.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &id_bytes, change, author) catch |err| switch (err) {
+                                // leave the form up for correction
+                                error.InvalidFields => return,
+                                else => |e| return e,
+                            };
                         },
                     }
                 },
@@ -1917,8 +2384,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     defer any_repo.deinit(io, allocator);
                     switch (any_repo) {
                         inline else => |*repo| if (editing) {
-                            var comment_id: [evt.event_id_size]u8 = undefined;
-                            _ = std.fmt.hexToBytes(&comment_id, self.data.comment_id) catch return;
+                            const comment_id = evt.parseEventId(self.data.comment_id) catch return;
                             try evt.Comment.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &thread_id, &comment_id, body, author);
                             event_id_hex = std.fmt.bytesToHex(comment_id, .lower);
                         } else {
@@ -1966,6 +2432,16 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             defer allocator.free(description);
 
             if (!Event.fieldsValid(title, tags)) return;
+
+            if (comptime kind == .patch) {
+                const event_id_hex = try Data.createDraft(self.data, self.session, allocator, title, tags, description);
+                title_input.clear(allocator);
+                tags_input.clear(allocator);
+                description_input.clear(allocator);
+                const route = commentsRoute(self.data.identity, &event_id_hex, 0) orelse return;
+                try self.session.navigate(route);
+                return;
+            }
 
             var id_bytes: [evt.event_id_size]u8 = undefined;
             io.random(&id_bytes);
@@ -2025,8 +2501,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
 
             if (!Event.fieldsValid(title, tags)) return;
 
-            var id_bytes: [evt.event_id_size]u8 = undefined;
-            _ = try std.fmt.hexToBytes(&id_bytes, entry.id[0 .. evt.event_id_size * 2]);
+            const id_bytes = try evt.parseEventId(entry.id);
 
             switch (src.repo_kind) {
                 inline else => |repo_kind| {
@@ -2052,8 +2527,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         fn submitRemove(self: *This, allocator: std.mem.Allocator) !void {
             const comment = self.data.comment_id.len != 0;
             const event_id = if (comment) self.data.comment_id else self.data.selected_id;
-            var id: [evt.event_id_size]u8 = undefined;
-            _ = std.fmt.hexToBytes(&id, event_id) catch return;
+            const id = evt.parseEventId(event_id) catch return;
             try self.removeEvent(allocator, if (comment) .comment else kind, id);
         }
 
@@ -2090,13 +2564,9 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             const entry = self.window(index).items[sel];
             const author = (try self.session.eventAuthor()) orelse return;
 
-            const status: Status = switch (entryStatus(entry)) {
-                .open => .closed,
-                .closed => .open,
-            };
+            const status = toggledStatus(entryStatus(entry)) orelse return;
 
-            var id_bytes: [evt.event_id_size]u8 = undefined;
-            _ = try std.fmt.hexToBytes(&id_bytes, entry.id[0 .. evt.event_id_size * 2]);
+            const id_bytes = try evt.parseEventId(entry.id);
 
             switch (src.repo_kind) {
                 inline else => |repo_kind| {

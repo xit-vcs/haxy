@@ -2,6 +2,7 @@ const std = @import("std");
 const evt = @import("../event.zig");
 const ui = @import("../ui.zig");
 const xit = @import("xit");
+const rp = xit.repo;
 const hash = xit.hash;
 const xitui = xit.xitui;
 const wgt = xitui.widget;
@@ -10,6 +11,7 @@ const Key = xitui.input.Key;
 const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
 const inp = @import("./input.zig");
+const fork = @import("../fork.zig");
 
 pub const Header = @import("./User/Header.zig");
 pub const Settings = @import("./Settings.zig");
@@ -18,11 +20,19 @@ pub const Quit = @import("./Quit.zig");
 
 pub const page_size = 20; // how many repos one window of the repos tab shows
 
+pub const ForkItem = struct {
+    target: []const u8,
+    title: []const u8,
+};
+
 header: Header,
 user: evt.User.Public,
 repos: []const evt.Repo.Record,
 repos_start: usize, // the repos window this page was built with, mirrored into the url
 repos_next_start: ?usize, // the `start` for the "next" row, or null on the last window
+forks: []const ForkItem,
+forks_start: usize,
+forks_next_start: ?usize,
 settings: Settings,
 auth: Auth,
 quit: Quit,
@@ -32,9 +42,11 @@ const Self = @This();
 
 pub fn init(
     arena: *std.heap.ArenaAllocator,
+    session: *ui.Session,
     haxy_moment: evt.AdminDB.HashMap(.read_only),
     name: ui.RoutablePage.Array(evt.User.name_max_len),
-    start: usize,
+    repos_start: usize,
+    forks_start: usize,
 ) !Self {
     const DB = evt.AdminDB;
     const hash_kind = evt.admin_repo_opts.hash;
@@ -67,9 +79,9 @@ pub fn init(
 
             // read the window [start, start+page_size) with one seek to the start
             // rank, then a sequential walk.
-            const end = @min(start + page_size, count);
-            var repos_iter = try user_repos.iteratorFromIndex(start);
-            var i = start;
+            const end = @min(repos_start + page_size, count);
+            var repos_iter = try user_repos.iteratorFromIndex(repos_start);
+            var i = repos_start;
             while (i < end) : (i += 1) {
                 var kv_cursor = (try repos_iter.next()) orelse break;
                 const kv = try kv_cursor.readKeyValuePair();
@@ -87,12 +99,59 @@ pub fn init(
         }
     }
 
+    var forks: std.ArrayList(ForkItem) = .empty;
+    var forks_next_start: ?usize = null;
+    if (try haxy_moment.getCursor(hash.hashInt(hash_kind, evt.Fork.user_id_to_fork_id_set_key))) |by_user_cursor| {
+        const by_user = try DB.HashMap(.read_only).init(by_user_cursor);
+        if (try by_user.getCursor(hash.hashInt(hash_kind, user_id))) |user_forks_cursor| {
+            const user_forks = try DB.SortedSet(.read_only).init(user_forks_cursor);
+            const repos_cursor = try haxy_moment.getCursor(hash.hashInt(hash_kind, evt.Repo.record_map_key)) orelse return error.NotFound;
+            const repo_records = try DB.HashMap(.read_only).init(repos_cursor);
+            const count = try user_forks.count();
+            const end = @min(forks_start + page_size, count);
+            var iter = try user_forks.iteratorFromIndex(forks_start);
+            var i = forks_start;
+            while (i < end) : (i += 1) {
+                const cursor = (try iter.next()) orelse break;
+                var kv_cursor = cursor;
+                const kv = try kv_cursor.readKeyValuePair();
+                var order_key: [@sizeOf(u64) + evt.event_id_size]u8 = undefined;
+                _ = try kv.key_cursor.readBytes(&order_key);
+                const fork_id = order_key[@sizeOf(u64)..];
+                const record = (try evt.Fork.readById(DB, hash_kind, haxy_moment, arena, fork_id)) orelse continue;
+
+                const repo_cursor = try repo_records.getCursor(hash.hashInt(hash_kind, record.event.repo_id)) orelse continue;
+                const target_repo = try evt.read(evt.Repo.Record, DB, hash_kind, arena, try DB.HashMap(.read_only).init(repo_cursor));
+                const owner = (try evt.User.readById(DB, hash_kind, haxy_moment, arena, target_repo.event.user_id)) orelse continue;
+                const target = try std.fmt.allocPrint(arena.allocator(), "{s}/{s}", .{ owner.event.name, target_repo.event.name });
+
+                var title: []const u8 = "(unavailable)";
+                if (session.io) |io| if (session.repos_dir) |repos_dir| {
+                    const id_hex = std.fmt.bytesToHex(fork_id.*, .lower);
+                    const path = try fork.forkPath(arena.allocator(), repos_dir, &id_hex);
+                    if (rp.Repo(.xit, .{}).open(io, arena.child_allocator, .{ .path = path, .require_repo_root = true })) |opened| {
+                        var fork_repo = opened;
+                        defer fork_repo.deinit(io, arena.child_allocator);
+                        if (evt.currentMoment(.{}, &fork_repo)) |moment| {
+                            if (try evt.Patch.readById(evt.EventDB(.sha1), .sha1, moment, arena, fork_id)) |patch| title = patch.event.title;
+                        } else |_| {}
+                    } else |_| {}
+                };
+                try forks.append(arena.allocator(), .{ .target = target, .title = title });
+            }
+            forks_next_start = if (end < count) end else null;
+        }
+    }
+
     return .{
         .header = try Header.init(arena, user.event.name),
         .user = evt.project(evt.User.Public, user.event),
         .repos = repos.items,
-        .repos_start = start,
+        .repos_start = repos_start,
         .repos_next_start = repos_next_start,
+        .forks = forks.items,
+        .forks_start = forks_start,
+        .forks_next_start = forks_next_start,
         .settings = Settings.init(),
         .auth = Auth.init(),
         .quit = Quit.init(),
@@ -153,6 +212,25 @@ pub const View = struct {
                 try stack.children.put(allocator, list.getFocus().id, .{ .flow_box_scroll = list });
             }
 
+            // forks list
+            {
+                var list = try ui.FlowBox.Scroll.init(allocator, .{}, !session.is_terminal);
+                errdefer list.deinit(allocator);
+
+                var item_arena = std.heap.ArenaAllocator.init(allocator);
+                defer item_arena.deinit();
+                const aa = item_arena.allocator();
+                var items: std.ArrayList(ui.FlowBox.Item) = .empty;
+                if (data.forks_start > 0)
+                    try items.append(aa, .{ .text = "← previous", .link = try std.fmt.allocPrint(aa, "a:/user/{s}/forks/start:{d}", .{ data.user.name, data.forks_start -| page_size }) });
+                for (data.forks) |fork_item|
+                    try items.append(aa, .{ .text = try std.fmt.allocPrint(aa, "{s}\n{s}", .{ fork_item.target, fork_item.title }), .link = "" });
+                if (data.forks_next_start) |next_start|
+                    try items.append(aa, .{ .text = "next →", .link = try std.fmt.allocPrint(aa, "a:/user/{s}/forks/start:{d}", .{ data.user.name, next_start }) });
+                try list.setItems(allocator, items.items);
+                try stack.children.put(allocator, list.getFocus().id, .{ .flow_box_scroll = list });
+            }
+
             // the header has no settings tab without a login, so keep the
             // stack's children 1:1 with the tabs by skipping the view too
             if (session.data.user_id != null) {
@@ -197,14 +275,17 @@ pub const View = struct {
         if (header.getSelectedIndex()) |index| {
             stack.getFocus().child_id = stack.children.keys()[index];
             const name = self.data.route_name;
-            switch (std.meta.activeTag(stack.children.values()[index])) {
-                .home_settings => self.session.data.current_page = .{ .user_settings = name },
-                .home_auth => self.session.data.current_page = .{ .user_auth = name },
-                // the quit tab is tty-only and not a route, so leave current_page
-                // alone (nothing to mirror into the url).
-                .quit => {},
-                // the repos list (the default tab)
-                else => self.session.data.current_page = .{ .user_repos = .{ .name = name, .start = self.data.repos_start } },
+            switch (index) {
+                0 => self.session.data.current_page = .{ .user_repos = .{ .name = name, .start = self.data.repos_start } },
+                1 => self.session.data.current_page = .{ .user_forks = .{ .name = name, .start = self.data.forks_start } },
+                else => switch (std.meta.activeTag(stack.children.values()[index])) {
+                    .home_settings => self.session.data.current_page = .{ .user_settings = name },
+                    .home_auth => self.session.data.current_page = .{ .user_auth = name },
+                    // the quit tab is tty-only and not a route, so leave current_page
+                    // alone (nothing to mirror into the url).
+                    .quit => {},
+                    else => {},
+                },
             }
         }
         try self.box.build(allocator, constraint, root_focus);

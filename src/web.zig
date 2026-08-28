@@ -6,6 +6,8 @@ const hash = xit.hash;
 const evt = @import("./event.zig");
 const serve_common = @import("./serve_common.zig");
 const ui = @import("./ui.zig");
+const fork = @import("./fork.zig");
+const pch = @import("./patch.zig");
 const xitui = xit.xitui;
 const wgt = xitui.widget;
 const Focus = xitui.focus.Focus;
@@ -120,7 +122,9 @@ fn handleRequest(
     host: Host,
 ) !void {
     const method = request.head.method;
-    const uri = try std.Uri.parseAfterScheme("", request.head.target);
+    const owned_target = if (method == .POST) try allocator.dupe(u8, request.head.target) else null;
+    defer if (owned_target) |target| allocator.free(target);
+    const uri = try std.Uri.parseAfterScheme("", owned_target orelse request.head.target);
     const path = uri.path.percent_encoded;
 
     // POST routes can be scoped by any page, so they can redirect using
@@ -129,7 +133,7 @@ fn handleRequest(
     if (method == .POST) {
         switch (host) {
             .remote => |remote| {
-                const PostRoute = enum { login, logout, ansi, new, edit, remove, open, close, resolve, attach };
+                const PostRoute = enum { login, logout, ansi, new, edit, remove, open, close, resolve, post, attach };
                 inline for (@typeInfo(PostRoute).@"enum".fields) |field| {
                     const suffix = "/" ++ field.name;
                     if (std.mem.endsWith(u8, path, suffix)) {
@@ -141,9 +145,10 @@ fn handleRequest(
                             .new => handleNew(io, request, allocator, base, host),
                             .edit => handleEdit(io, request, allocator, base, host),
                             .remove => handleRemove(io, request, allocator, base, host),
-                            .open => handleIssueStatus(io, request, allocator, base, host, .open),
-                            .close => handleIssueStatus(io, request, allocator, base, host, .closed),
-                            .resolve => handleIssueResolve(io, request, allocator, base, host),
+                            .open => handleThreadStatus(io, request, allocator, base, host, true),
+                            .close => handleThreadStatus(io, request, allocator, base, host, false),
+                            .resolve => handleThreadResolve(io, request, allocator, base, host),
+                            .post => handlePatchPost(io, request, allocator, base, host),
                             .attach => handleAttach(io, request, allocator, base, host),
                         };
                     }
@@ -159,9 +164,9 @@ fn handleRequest(
                             .new => handleNew(io, request, allocator, base, host),
                             .edit => handleEdit(io, request, allocator, base, host),
                             .remove => handleRemove(io, request, allocator, base, host),
-                            .open => handleIssueStatus(io, request, allocator, base, host, .open),
-                            .close => handleIssueStatus(io, request, allocator, base, host, .closed),
-                            .resolve => handleIssueResolve(io, request, allocator, base, host),
+                            .open => handleThreadStatus(io, request, allocator, base, host, true),
+                            .close => handleThreadStatus(io, request, allocator, base, host, false),
+                            .resolve => handleThreadResolve(io, request, allocator, base, host),
                             .sync => handleSync(io, request, allocator, base, local),
                             .attach => handleAttach(io, request, allocator, base, host),
                         };
@@ -304,9 +309,7 @@ fn handleLogin(
     admin_repo_path: []const u8,
     session_store: SessionStore,
 ) !void {
-    var body_buf: [256]u8 = undefined;
-    const reader = request.readerExpectNone(&body_buf);
-    const body = reader.allocRemaining(allocator, .limited(65536)) catch &[_]u8{};
+    const body = try readFormBody(request, allocator);
     defer allocator.free(body);
 
     const username = (try parseFormField(allocator, body, "username")) orelse try allocator.dupe(u8, "");
@@ -471,6 +474,9 @@ fn handleNew(
     const discussions_suffix = "/discussions";
     if (std.mem.endsWith(u8, base, discussions_suffix))
         return handleTopicNew(io, request, allocator, base[0 .. base.len - discussions_suffix.len], host, .discuss);
+    const patches_suffix = "/patches";
+    if (std.mem.endsWith(u8, base, patches_suffix))
+        return handleTopicNew(io, request, allocator, base[0 .. base.len - patches_suffix.len], host, .patch);
 
     try request.respond("new event target not found", .{
         .status = .not_found,
@@ -490,10 +496,18 @@ fn handleTopicNew(
     var author_arena = std.heap.ArenaAllocator.init(allocator);
     defer author_arena.deinit();
     const author = (try eventAuthor(io, allocator, &author_arena, request, host)) orelse return respondLoginRequired(request);
-
-    var body_buf: [256]u8 = undefined;
-    const reader = request.readerExpectNone(&body_buf);
-    const body = reader.allocRemaining(allocator, .limited(65536)) catch &[_]u8{};
+    var patch_user_id: ?[evt.event_id_size]u8 = null;
+    if (kind == .patch) {
+        const remote = switch (host) {
+            .remote => |remote| remote,
+            .local => return respondRemoveNotFound(request),
+        };
+        const token = getCookieValue(request, cookie_name) orelse return respondLoginRequired(request);
+        var user_id: [evt.event_id_size]u8 = undefined;
+        if (!remote.session_store.lookup(token, &user_id)) return respondLoginRequired(request);
+        patch_user_id = user_id;
+    }
+    const body = try readFormBody(request, allocator);
     defer allocator.free(body);
 
     const title = (try parseFormField(allocator, body, "title")) orelse try allocator.dupe(u8, "");
@@ -509,12 +523,14 @@ fn handleTopicNew(
 
     const valid = switch (kind) {
         .issue => evt.Issue.fieldsValid(title, tags),
+        .patch => evt.Patch.fieldsValid(title, tags),
         .discuss => evt.Discussion.fieldsValid(title, tags),
         else => unreachable,
     };
     if (!valid) {
         const list_name: []const u8 = switch (kind) {
             .issue => "issues",
+            .patch => "patches",
             .discuss => "discussions",
             else => unreachable,
         };
@@ -531,12 +547,43 @@ fn handleTopicNew(
     io.random(&id_bytes);
     const event_id_hex = std.fmt.bytesToHex(id_bytes, .lower);
 
+    if (kind == .patch) {
+        const remote = switch (host) {
+            .remote => |remote| remote,
+            .local => return respondRemoveNotFound(request),
+        };
+        const user_id = patch_user_id orelse return respondLoginRequired(request);
+        const request_repo = (try requestRepoSource(io, allocator, host, base)) orelse return respondRemoveNotFound(request);
+        defer request_repo.deinit(allocator);
+        const repo_id = evt.parseEventId(std.fs.path.basename(request_repo.source.path)) catch return respondRemoveNotFound(request);
+        var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = remote.admin_repo_path });
+        defer admin_repo.deinit(io, allocator);
+        const repos_dir = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(remote.admin_repo_path) orelse ".", "repos" });
+        defer allocator.free(repos_dir);
+        const path = try fork.create(.{}, io, allocator, repos_dir, &admin_repo, .{
+            .id = event_id_hex,
+            .user_id = user_id,
+            .repo_id = repo_id,
+            .title = title,
+            .description = description,
+            .tags = tags,
+            .author = author,
+            .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
+        });
+        defer allocator.free(path);
+        const location = try std.fmt.allocPrint(allocator, "{s}/patch:{s}", .{ base, &event_id_hex });
+        defer allocator.free(location);
+        try request.respond("", .{ .status = .see_other, .extra_headers = &.{.{ .name = "location", .value = location }} });
+        return;
+    }
+
     const event = evt.EventWithId{
         .id = event_id_hex,
         .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
         .author = author,
         .event = switch (kind) {
             .issue => .{ .issue = .{ .title = title, .description = description, .tags = tags } },
+            .patch => unreachable,
             .discuss => .{ .discuss = .{ .title = title, .description = description, .tags = tags } },
             else => unreachable,
         },
@@ -581,18 +628,59 @@ fn commentBaseParts(base: []const u8) ?CommentBaseParts {
     const route = ui.RoutablePage.fromUrl(base) orelse ui.RoutablePage.fromUrlLocal(base) orelse return null;
     const identity, const thread_kind, const thread_hex, const comment_hex = switch (route) {
         .repo_issues => |*issue| .{ issue.name.slice(), evt.EventKind.issue, issue.selected.slice(), issue.comment.slice() },
+        .repo_patches => |*patch| .{ patch.name.slice(), evt.EventKind.patch, patch.selected.slice(), patch.comment.slice() },
         .repo_discussions => |*discussion| .{ discussion.name.slice(), evt.EventKind.discuss, discussion.selected.slice(), discussion.comment.slice() },
         else => return null,
     };
-    var thread_id: [evt.event_id_size]u8 = undefined;
-    _ = std.fmt.hexToBytes(&thread_id, thread_hex) catch return null;
-    const comment_id = if (comment_hex.len == 0) null else blk: {
-        var id: [evt.event_id_size]u8 = undefined;
-        _ = std.fmt.hexToBytes(&id, comment_hex) catch return null;
-        break :blk id;
-    };
+    const thread_id = evt.parseEventId(thread_hex) catch return null;
+    const comment_id = if (comment_hex.len == 0) null else evt.parseEventId(comment_hex) catch return null;
     const repo_base_len = if (identity.len == 0) 0 else "/repo/".len + identity.len;
     return .{ .repo_base = base[0..repo_base_len], .thread_kind = thread_kind, .thread_id = thread_id, .comment_id = comment_id };
+}
+
+fn handlePatchPost(
+    io: std.Io,
+    request: *std.http.Server.Request,
+    allocator: std.mem.Allocator,
+    base: []const u8,
+    host: Host,
+) !void {
+    const parts = commentBaseParts(base) orelse return respondRemoveNotFound(request);
+    if (parts.thread_kind != .patch or parts.comment_id != null) return respondRemoveNotFound(request);
+    const remote = switch (host) {
+        .remote => |remote| remote,
+        .local => return respondRemoveNotFound(request),
+    };
+    const token = getCookieValue(request, cookie_name) orelse return respondLoginRequired(request);
+    var user_id: [evt.event_id_size]u8 = undefined;
+    if (!remote.session_store.lookup(token, &user_id)) return respondLoginRequired(request);
+    var author_arena = std.heap.ArenaAllocator.init(allocator);
+    defer author_arena.deinit();
+    const author = (try eventAuthor(io, allocator, &author_arena, request, host)) orelse return respondLoginRequired(request);
+
+    const request_repo = (try requestRepoSource(io, allocator, host, parts.repo_base)) orelse return respondRemoveNotFound(request);
+    defer request_repo.deinit(allocator);
+    const repo_id = evt.parseEventId(std.fs.path.basename(request_repo.source.path)) catch return respondRemoveNotFound(request);
+    var target_repo = try rp.Repo(.xit, .{}).open(io, allocator, request_repo.source.localInitOpts());
+    defer target_repo.deinit(io, allocator);
+    var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = remote.admin_repo_path });
+    defer admin_repo.deinit(io, allocator);
+    const id = std.fmt.bytesToHex(parts.thread_id, .lower);
+    const repos_dir = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(remote.admin_repo_path) orelse ".", "repos" });
+    defer allocator.free(repos_dir);
+    const path = try fork.forkPath(allocator, repos_dir, &id);
+    defer allocator.free(path);
+    try pch.post(.{}, io, allocator, &admin_repo, &target_repo, path, .{
+        .id = id,
+        .user_id = user_id,
+        .repo_id = repo_id,
+        .author = author,
+        .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
+    });
+    try request.respond("", .{
+        .status = .see_other,
+        .extra_headers = &.{.{ .name = "location", .value = base }},
+    });
 }
 
 // create a reply and redirect to its permalink.
@@ -616,9 +704,7 @@ fn handleCommentNew(
     defer author_arena.deinit();
     const author = (try eventAuthor(io, allocator, &author_arena, request, host)) orelse return respondLoginRequired(request);
 
-    var body_buf: [256]u8 = undefined;
-    const reader = request.readerExpectNone(&body_buf);
-    const posted = reader.allocRemaining(allocator, .limited(65536)) catch &[_]u8{};
+    const posted = try readFormBody(request, allocator);
     defer allocator.free(posted);
     const body_crlf = (try parseFormField(allocator, posted, "body")) orelse try allocator.dupe(u8, "");
     defer allocator.free(body_crlf);
@@ -674,12 +760,9 @@ const AttachmentRequest = struct {
 // an attachment url is its repo's base and the attachment's event id
 fn attachmentRequest(path: []const u8) ?AttachmentRequest {
     const infix = "/attachment:";
-    const id_len = evt.event_id_size * 2;
     const at = std.mem.lastIndexOf(u8, path, infix) orelse return null;
     const tail = path[at + infix.len ..];
-    if (tail.len != id_len) return null;
-    var id: [evt.event_id_size]u8 = undefined;
-    _ = std.fmt.hexToBytes(&id, tail) catch return null;
+    const id = evt.parseEventId(tail) catch return null;
     return .{ .repo_base = path[0..at], .id = id };
 }
 
@@ -803,14 +886,11 @@ const AttachParentParts = struct {
 // what an attachment hangs off: the `<kind>:<id>` segment the form's page ends
 // with, whatever kind that is
 fn attachParentParts(base: []const u8) ?AttachParentParts {
-    const id_len = evt.event_id_size * 2;
-    if (base.len < id_len + 1) return null;
-    const head = base[0 .. base.len - id_len];
-    if (head[head.len - 1] != ':') return null;
-    var id_bytes: [evt.event_id_size]u8 = undefined;
-    _ = std.fmt.hexToBytes(&id_bytes, base[base.len - id_len ..]) catch return null;
-    const segment_at = std.mem.lastIndexOfScalar(u8, head, '/') orelse return null;
-    return .{ .repo_base = head[0..segment_at], .id_bytes = id_bytes };
+    const segment_at = std.mem.lastIndexOfScalar(u8, base, '/') orelse return null;
+    const segment = base[segment_at + 1 ..];
+    const colon_at = std.mem.lastIndexOfScalar(u8, segment, ':') orelse return null;
+    const id_bytes = evt.parseEventId(segment[colon_at + 1 ..]) catch return null;
+    return .{ .repo_base = base[0..segment_at], .id_bytes = id_bytes };
 }
 
 // attach the posted file to the event the url names, then reload. the file is
@@ -823,12 +903,7 @@ fn handleAttach(
     base: []const u8,
     host: Host,
 ) !void {
-    // reading the body invalidates the request head's memory, and the url is
-    // still needed to resolve the repo afterward
-    const base_copy = try allocator.dupe(u8, base);
-    defer allocator.free(base_copy);
-
-    const parts = attachParentParts(base_copy) orelse return respondAttachmentParentNotFound(request);
+    const parts = attachParentParts(base) orelse return respondAttachmentParentNotFound(request);
 
     var author_arena = std.heap.ArenaAllocator.init(allocator);
     defer author_arena.deinit();
@@ -940,9 +1015,7 @@ fn handleCommentEdit(
     defer author_arena.deinit();
     const author = (try eventAuthor(io, allocator, &author_arena, request, host)) orelse return respondLoginRequired(request);
 
-    var body_buf: [256]u8 = undefined;
-    const reader = request.readerExpectNone(&body_buf);
-    const posted = reader.allocRemaining(allocator, .limited(65536)) catch &[_]u8{};
+    const posted = try readFormBody(request, allocator);
     defer allocator.free(posted);
     const body_crlf = (try parseFormField(allocator, posted, "body")) orelse try allocator.dupe(u8, "");
     defer allocator.free(body_crlf);
@@ -977,11 +1050,28 @@ fn handleCommentEdit(
     });
 }
 
-const IssueBaseParts = struct { repo_base: []const u8, id_bytes: [evt.event_id_size]u8 };
-fn issueBaseParts(base: []const u8) ?IssueBaseParts {
-    const parts = commentBaseParts(base) orelse return null;
-    if (parts.thread_kind != .issue or parts.comment_id != null) return null;
-    return .{ .repo_base = parts.repo_base, .id_bytes = parts.thread_id };
+fn updateThread(
+    comptime Event: type,
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    host: Host,
+    repo_base: []const u8,
+    id: *const [evt.event_id_size]u8,
+    update: Event.Update,
+    author: evt.CommitAuthor,
+) !void {
+    const request_repo = (try requestRepoSource(io, allocator, host, repo_base)) orelse return error.NotFound;
+    defer request_repo.deinit(allocator);
+    const source = request_repo.source;
+    switch (source.repo_kind) {
+        inline else => |repo_kind| {
+            var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, source.localInitOpts());
+            defer any_repo.deinit(io, allocator);
+            switch (any_repo) {
+                inline else => |*repo| try Event.update(repo_kind, repo.self_repo_opts, io, allocator, repo, id, update, author),
+            }
+        },
+    }
 }
 
 const RemoveParts = struct {
@@ -1055,31 +1145,6 @@ fn respondRemoveNotFound(request: *std.http.Server.Request) !void {
     });
 }
 
-// re-emit the issue `parts` names with `update` applied, in the repo the
-// host resolves the base to. error.NotFound when the base names no repo or
-// the id no issue.
-fn updateIssue(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    host: Host,
-    parts: IssueBaseParts,
-    update: evt.Issue.Update,
-    author: evt.CommitAuthor,
-) !void {
-    const request_repo = (try requestRepoSource(io, allocator, host, parts.repo_base)) orelse return error.NotFound;
-    defer request_repo.deinit(allocator);
-    const source = request_repo.source;
-    switch (source.repo_kind) {
-        inline else => |repo_kind| {
-            var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, source.localInitOpts());
-            defer any_repo.deinit(io, allocator);
-            switch (any_repo) {
-                inline else => |*repo| try evt.Issue.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &parts.id_bytes, update, author),
-            }
-        },
-    }
-}
-
 fn updateDiscussion(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -1108,16 +1173,16 @@ fn updateDiscussion(
 // set the status of the issue the url names (base is
 // "/repo/<owner>/<name>/issue:<id>", identity elided in local mode) by
 // re-emitting its event, then redirect back to it
-fn handleIssueStatus(
+fn handleThreadStatus(
     io: std.Io,
     request: *std.http.Server.Request,
     allocator: std.mem.Allocator,
     base: []const u8,
     host: Host,
-    status: evt.Issue.Status,
+    open: bool,
 ) !void {
-    const not_found = "issue not found";
-    const parts = issueBaseParts(base) orelse {
+    const not_found = "thread not found";
+    const parts = commentBaseParts(base) orelse {
         try request.respond(not_found, .{
             .status = .not_found,
             .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
@@ -1129,7 +1194,11 @@ fn handleIssueStatus(
     defer author_arena.deinit();
     const author = (try eventAuthor(io, allocator, &author_arena, request, host)) orelse return respondLoginRequired(request);
 
-    updateIssue(io, allocator, host, parts, .{ .status = status }, author) catch |err| switch (err) {
+    (switch (parts.thread_kind) {
+        .issue => updateThread(evt.Issue, io, allocator, host, parts.repo_base, &parts.thread_id, .{ .status = if (open) .open else .closed }, author),
+        .patch => updateThread(evt.Patch, io, allocator, host, parts.repo_base, &parts.thread_id, .{ .status = if (open) .open else .closed }, author),
+        else => return respondRemoveNotFound(request),
+    }) catch |err| switch (err) {
         error.NotFound => {
             try request.respond(not_found, .{
                 .status = .not_found,
@@ -1162,9 +1231,7 @@ fn handleTopicEdit(
     defer author_arena.deinit();
     const author = (try eventAuthor(io, allocator, &author_arena, request, host)) orelse return respondLoginRequired(request);
 
-    var body_buf: [256]u8 = undefined;
-    const reader = request.readerExpectNone(&body_buf);
-    const body = reader.allocRemaining(allocator, .limited(65536)) catch &[_]u8{};
+    const body = try readFormBody(request, allocator);
     defer allocator.free(body);
 
     const title = (try parseFormField(allocator, body, "title")) orelse try allocator.dupe(u8, "");
@@ -1181,6 +1248,7 @@ fn handleTopicEdit(
     // invalid fields send the user back to the edit form
     const valid = switch (parts.thread_kind) {
         .issue => evt.Issue.fieldsValid(title, tags),
+        .patch => evt.Patch.fieldsValid(title, tags),
         .discuss => evt.Discussion.fieldsValid(title, tags),
         else => unreachable,
     };
@@ -1196,11 +1264,17 @@ fn handleTopicEdit(
 
     const not_found = switch (parts.thread_kind) {
         .issue => "issue not found",
+        .patch => "patch not found",
         .discuss => "discussion not found",
         else => unreachable,
     };
     (switch (parts.thread_kind) {
-        .issue => updateIssue(io, allocator, host, .{ .repo_base = parts.repo_base, .id_bytes = parts.thread_id }, .{ .fields = .{
+        .issue => updateThread(evt.Issue, io, allocator, host, parts.repo_base, &parts.thread_id, .{ .fields = .{
+            .title = title,
+            .tags = tags,
+            .description = description,
+        } }, author),
+        .patch => updateThread(evt.Patch, io, allocator, host, parts.repo_base, &parts.thread_id, .{ .fields = .{
             .title = title,
             .tags = tags,
             .description = description,
@@ -1224,10 +1298,8 @@ fn handleTopicEdit(
     });
 }
 
-// resolve the conflict of the issue the url names (base is
-// "/repo/<owner>/<name>/issue:<id>", identity elided in local mode; the
-// form posts to "<base>/resolve")
-fn handleIssueResolve(
+// resolve every conflicted field of the thread the url names
+fn handleThreadResolve(
     io: std.Io,
     request: *std.http.Server.Request,
     allocator: std.mem.Allocator,
@@ -1238,9 +1310,7 @@ fn handleIssueResolve(
     defer author_arena.deinit();
     const author = (try eventAuthor(io, allocator, &author_arena, request, host)) orelse return respondLoginRequired(request);
 
-    var body_buf: [256]u8 = undefined;
-    const reader = request.readerExpectNone(&body_buf);
-    const body = reader.allocRemaining(allocator, .limited(65536)) catch &[_]u8{};
+    const body = try readFormBody(request, allocator);
     defer allocator.free(body);
 
     var field_arena = std.heap.ArenaAllocator.init(allocator);
@@ -1259,20 +1329,48 @@ fn handleIssueResolve(
         try hunks.append(aa, try std.mem.replaceOwned(u8, aa, posted, "\r\n", "\n"));
     }
 
-    const not_found = "issue not found";
-    const parts = issueBaseParts(base) orelse {
-        try request.respond(not_found, .{
+    const parts = commentBaseParts(base) orelse {
+        try request.respond("thread not found", .{
             .status = .not_found,
             .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
         });
         return;
     };
+    if (parts.comment_id != null or (parts.thread_kind != .issue and parts.thread_kind != .patch)) {
+        try request.respond("thread not found", .{
+            .status = .not_found,
+            .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+        });
+        return;
+    }
+    const route = ui.RoutablePage.fromUrl(base) orelse ui.RoutablePage.fromUrlLocal(base) orelse {
+        try request.respond("thread not found", .{
+            .status = .not_found,
+            .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+        });
+        return;
+    };
+    const theirs: []const u8 = switch (route) {
+        .repo_patches => |*patch| patch.theirs.slice(),
+        .repo_issues => "",
+        else => unreachable,
+    };
+    const not_found = if (parts.thread_kind == .patch) "patch not found" else "issue not found";
 
-    updateIssue(io, allocator, host, parts, .{ .resolve = .{
-        .title = title,
-        .tags = tags,
-        .hunks = hunks.items,
-    } }, author) catch |err| switch (err) {
+    (switch (parts.thread_kind) {
+        .issue => updateThread(evt.Issue, io, allocator, host, parts.repo_base, &parts.thread_id, .{ .resolve = .{
+            .title = title,
+            .tags = tags,
+            .hunks = hunks.items,
+        } }, author),
+        .patch => updateThread(evt.Patch, io, allocator, host, parts.repo_base, &parts.thread_id, .{ .resolve = .{
+            .title = title,
+            .tags = tags,
+            .hunks = hunks.items,
+            .theirs = theirs,
+        } }, author),
+        else => unreachable,
+    }) catch |err| switch (err) {
         error.NotFound => {
             try request.respond(not_found, .{
                 .status = .not_found,
@@ -1886,6 +1984,11 @@ fn parseFormField(allocator: std.mem.Allocator, body: []const u8, key: []const u
         }
     }
     return null;
+}
+
+fn readFormBody(request: *std.http.Server.Request, allocator: std.mem.Allocator) ![]u8 {
+    var buffer: [256]u8 = undefined;
+    return request.readerExpectNone(&buffer).allocRemaining(allocator, .limited(65536));
 }
 
 fn decodeFormValue(allocator: std.mem.Allocator, encoded: []const u8) ![]u8 {

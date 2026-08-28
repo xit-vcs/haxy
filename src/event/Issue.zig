@@ -39,6 +39,8 @@ pub const record_map_key = "event-id->issue";
 pub const id_set_key = "issue-id-set";
 pub const conflicts_key = "conflicted-issue-id->conflict";
 pub const id_to_field_to_oid_key = "issue-id->field->oid";
+pub const status_to_id_set_key = "status->issue-id-set";
+pub const tag_status_to_id_set_key = "tag+status->issue-id-set";
 
 // a "tag status" key names a tag's per-status issue set (tags can't contain
 // spaces, so the pair is unambiguous)
@@ -75,16 +77,16 @@ pub fn consume(
 ) !void {
     const issue_key = hash.hashInt(hash_kind, event_id);
 
-    const event_id_to_issue_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, "event-id->issue"));
+    const event_id_to_issue_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, record_map_key));
     const event_id_to_issue = try DB.HashMap(.read_write).init(event_id_to_issue_cursor);
 
     // the per-status sets the issues views list, ordered by creation,
     // keyed by status name
-    const status_to_issues_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, "status->issue-id-set"));
+    const status_to_issues_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, status_to_id_set_key));
     const status_to_issues = try DB.SortedMap(.read_write).init(status_to_issues_cursor);
 
     // the per-tag, per-status sets, keyed "tag,status"
-    const tag_to_issues_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, "tag+status->issue-id-set"));
+    const tag_to_issues_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, tag_status_to_id_set_key));
     const tag_to_issues = try DB.SortedMap(.read_write).init(tag_to_issues_cursor);
 
     const conflicts_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, conflicts_key));
@@ -316,7 +318,7 @@ fn readById(
         return null
     else
         evt.currentMoment(repo_opts, repo)) catch return null;
-    const event_id_to_issue_cursor = (try moment.getCursor(hash.hashInt(repo_opts.hash, "event-id->issue"))) orelse return null;
+    const event_id_to_issue_cursor = (try moment.getCursor(hash.hashInt(repo_opts.hash, record_map_key))) orelse return null;
     const event_id_to_issue = try DB.HashMap(.read_only).init(event_id_to_issue_cursor);
     const issue_cursor = (try event_id_to_issue.getCursor(hash.hashInt(repo_opts.hash, id_bytes))) orelse return null;
     const issue_map = try DB.HashMap(.read_only).init(issue_cursor);

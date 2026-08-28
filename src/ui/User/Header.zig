@@ -72,6 +72,7 @@ pub const View = struct {
         // kinds that borrow them live as long as this page's widget tree.
         const aa = session.page_arena.allocator();
         const repos_link = try std.fmt.allocPrint(aa, "ai:/user/{s}", .{data.name});
+        const forks_link = try std.fmt.allocPrint(aa, "ai:/user/{s}/forks", .{data.name});
         const settings_link = try std.fmt.allocPrint(aa, "ai:/user/{s}/settings", .{data.name});
         const auth_link = try std.fmt.allocPrint(aa, "ai:/user/{s}/auth", .{data.name});
 
@@ -80,6 +81,7 @@ pub const View = struct {
         const current_link: []const u8 = switch (session.data.current_page) {
             .user_settings => settings_link,
             .user_auth => auth_link,
+            .user_forks => forks_link,
             else => repos_link,
         };
         var selected_tab: ?usize = null;
@@ -96,6 +98,21 @@ pub const View = struct {
                 .widget = .{ .text_box = text_box },
                 .rect = null,
                 .min_size = .{ .width = "repos".len + 2, .height = null },
+            });
+        }
+
+        // forks tab
+        {
+            var text_box = try wgt.TextBox(ui.Widget).init(allocator, "forks", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            errdefer text_box.deinit(allocator);
+            text_box.getFocus().focusable = true;
+            text_box.getFocus().kind = .{ .custom = forks_link };
+            try tab_ids.put(allocator, text_box.getFocus().id, {});
+            if (std.mem.eql(u8, forks_link, current_link)) selected_tab = text_box.getFocus().id;
+            try box.children.put(allocator, text_box.getFocus().id, .{
+                .widget = .{ .text_box = text_box },
+                .rect = null,
+                .min_size = .{ .width = "forks".len + 2, .height = null },
             });
         }
 

@@ -63,13 +63,14 @@ pub const Page = union(PageKind) {
             .user => blk: {
                 const haxy_moment = session.haxy_moment orelse return error.NoMoment;
                 break :blk switch (route) {
-                    .user_repos => |u| .{ .user = try User.init(arena, haxy_moment, u.name, u.start) },
-                    .user_settings, .user_auth => |name| .{ .user = try User.init(arena, haxy_moment, name, 0) },
+                    .user_repos => |u| .{ .user = try User.init(arena, session, haxy_moment, u.name, u.start, 0) },
+                    .user_forks => |u| .{ .user = try User.init(arena, session, haxy_moment, u.name, 0, u.start) },
+                    .user_settings, .user_auth => |name| .{ .user = try User.init(arena, session, haxy_moment, name, 0, 0) },
                     else => return error.UnexpectedRoute,
                 };
             },
             .repo => switch (route) {
-                .repo_files, .repo_commits, .repo_refs, .repo_issues, .repo_discussions, .repo_events, .repo_settings, .repo_auth => .{ .repo = try Repo.init(arena, session, route) },
+                .repo_files, .repo_commits, .repo_refs, .repo_issues, .repo_patches, .repo_discussions, .repo_events, .repo_settings, .repo_auth => .{ .repo = try Repo.init(arena, session, route) },
                 else => return error.UnexpectedRoute,
             },
         };
@@ -93,6 +94,7 @@ pub const RoutablePage = union(enum) {
     home_settings,
     home_auth,
     user_repos: struct { name: Array(evt.User.name_max_len), start: usize = 0 },
+    user_forks: struct { name: Array(evt.User.name_max_len), start: usize = 0 },
     user_settings: Array(evt.User.name_max_len),
     user_auth: Array(evt.User.name_max_len),
     repo_files: RepoFilesRoute,
@@ -122,6 +124,15 @@ pub const RoutablePage = union(enum) {
         // the comment shown in the detail pane (empty = the issue thread).
         comment: Array(evt.event_id_size * 2) = .{},
     },
+    repo_patches: struct {
+        name: Array(repo_route_max_len),
+        tag: Array(patch_tag_route_max_len) = .{},
+        selected: Array(evt.event_id_size * 2) = .{},
+        theirs: Array(theirs_route_max_len) = .{},
+        view: PatchesView = .open,
+        comments_start: usize = 0,
+        comment: Array(evt.event_id_size * 2) = .{},
+    },
     repo_discussions: struct {
         name: Array(repo_route_max_len),
         tag: Array(discussion_tag_route_max_len) = .{},
@@ -139,6 +150,8 @@ pub const RoutablePage = union(enum) {
     pub const RefKind = enum { branch, tag };
 
     pub const IssuesView = enum { open, closed, tags, new, edit, description, new_comment, edit_comment, remove, conflicts, resolve };
+
+    pub const PatchesView = enum { open, closed, merged, tags, new, drafts, edit, description, new_comment, edit_comment, remove, conflicts, resolve };
 
     pub const DiscussionsView = enum { recent, tags, new, edit, description, new_comment, edit_comment, remove };
 
@@ -231,6 +244,7 @@ pub const RoutablePage = union(enum) {
     const line_seg = @tagName(Params.ParamKey.line) ++ ":";
     const theirs_seg = @tagName(Params.ParamKey.theirs) ++ ":";
     const issue_seg = "issue:";
+    const patch_seg = "patch:";
     const discuss_seg = "discuss:";
     const comment_seg = "comment:";
     // marks a files or commits route's trailing path: the value is the raw
@@ -252,6 +266,7 @@ pub const RoutablePage = union(enum) {
 
     // a url-encoded tag can grow to three bytes per source byte.
     pub const issue_tag_route_max_len = evt.Issue.tag_max_len * 3;
+    pub const patch_tag_route_max_len = evt.Patch.tag_max_len * 3;
     pub const discussion_tag_route_max_len = evt.Discussion.tag_max_len * 3;
 
     // caps the resolve view's theirs: field list (a longer one doesn't route).
@@ -402,6 +417,26 @@ pub const RoutablePage = union(enum) {
         } };
     }
 
+    pub fn repoPatchesRoute(identity: []const u8, status: evt.Patch.Status, tag: []const u8, selected: []const u8) ?RoutablePage {
+        return .{ .repo_patches = .{
+            .name = Array(repo_route_max_len).from(identity) orelse return null,
+            .tag = Array(patch_tag_route_max_len).from(tag) orelse return null,
+            .selected = Array(evt.event_id_size * 2).from(selected) orelse return null,
+            .view = switch (status) {
+                .open => .open,
+                .closed => .closed,
+                .merged => .merged,
+            },
+        } };
+    }
+
+    pub fn repoPatchesDraftsRoute(identity: []const u8) ?RoutablePage {
+        return .{ .repo_patches = .{
+            .name = Array(repo_route_max_len).from(identity) orelse return null,
+            .view = .drafts,
+        } };
+    }
+
     pub fn repoDiscussionsRoute(identity: []const u8, tag: []const u8, selected: []const u8) ?RoutablePage {
         return .{ .repo_discussions = .{
             .name = Array(repo_route_max_len).from(identity) orelse return null,
@@ -414,6 +449,7 @@ pub const RoutablePage = union(enum) {
     pub fn repoThreadRoute(kind: evt.EventKind, identity: []const u8, tag: []const u8, selected: []const u8) ?RoutablePage {
         return switch (kind) {
             .issue => repoIssuesRoute(identity, .open, tag, selected),
+            .patch => repoPatchesRoute(identity, .open, tag, selected),
             .discuss => repoDiscussionsRoute(identity, tag, selected),
             else => null,
         };
@@ -424,6 +460,7 @@ pub const RoutablePage = union(enum) {
         var route = repoThreadRoute(kind, identity, "", selected) orelse return null;
         switch (route) {
             .repo_issues => |*thread| thread.comments_start = start,
+            .repo_patches => |*thread| thread.comments_start = start,
             .repo_discussions => |*thread| thread.comments_start = start,
             else => unreachable,
         }
@@ -437,6 +474,7 @@ pub const RoutablePage = union(enum) {
         const comment = Array(evt.event_id_size * 2).from(comment_id) orelse return null;
         switch (route) {
             .repo_issues => |*thread| thread.comment = comment,
+            .repo_patches => |*thread| thread.comment = comment,
             .repo_discussions => |*thread| thread.comment = comment,
             else => unreachable,
         }
@@ -450,6 +488,10 @@ pub const RoutablePage = union(enum) {
         const parent_event_id = Array(evt.event_id_size * 2).from(parent_id) orelse return null;
         switch (route) {
             .repo_issues => |*thread| {
+                thread.comment = parent_event_id;
+                thread.view = .new_comment;
+            },
+            .repo_patches => |*thread| {
                 thread.comment = parent_event_id;
                 thread.view = .new_comment;
             },
@@ -467,6 +509,7 @@ pub const RoutablePage = union(enum) {
         var route = repoThreadCommentRoute(kind, identity, thread_id, comment_id, 0) orelse return null;
         switch (route) {
             .repo_issues => |*thread| thread.view = .edit_comment,
+            .repo_patches => |*thread| thread.view = .edit_comment,
             .repo_discussions => |*thread| thread.view = .edit_comment,
             else => unreachable,
         }
@@ -481,6 +524,7 @@ pub const RoutablePage = union(enum) {
             repoThreadCommentRoute(kind, identity, thread_id, comment_id, 0) orelse return null;
         switch (route) {
             .repo_issues => |*thread| thread.view = .remove,
+            .repo_patches => |*thread| thread.view = .remove,
             .repo_discussions => |*thread| thread.view = .remove,
             else => unreachable,
         }
@@ -492,6 +536,7 @@ pub const RoutablePage = union(enum) {
         var route = repoThreadRoute(kind, identity, tag, "") orelse return null;
         switch (route) {
             .repo_issues => |*thread| thread.view = .tags,
+            .repo_patches => |*thread| thread.view = .tags,
             .repo_discussions => |*thread| thread.view = .tags,
             else => unreachable,
         }
@@ -503,6 +548,7 @@ pub const RoutablePage = union(enum) {
         var route = repoThreadRoute(kind, identity, "", "") orelse return null;
         switch (route) {
             .repo_issues => |*thread| thread.view = .new,
+            .repo_patches => |*thread| thread.view = .new,
             .repo_discussions => |*thread| thread.view = .new,
             else => unreachable,
         }
@@ -515,6 +561,7 @@ pub const RoutablePage = union(enum) {
         var route = repoThreadRoute(kind, identity, "", selected) orelse return null;
         switch (route) {
             .repo_issues => |*thread| thread.view = .edit,
+            .repo_patches => |*thread| thread.view = .edit,
             .repo_discussions => |*thread| thread.view = .edit,
             else => unreachable,
         }
@@ -527,6 +574,7 @@ pub const RoutablePage = union(enum) {
         var route = repoThreadRoute(kind, identity, "", selected) orelse return null;
         switch (route) {
             .repo_issues => |*thread| thread.view = .description,
+            .repo_patches => |*thread| thread.view = .description,
             .repo_discussions => |*thread| thread.view = .description,
             else => unreachable,
         }
@@ -549,6 +597,24 @@ pub const RoutablePage = union(enum) {
     pub fn repoIssuesResolveRoute(identity: []const u8, selected: []const u8, theirs: []const u8) ?RoutablePage {
         if (selected.len == 0) return null;
         return .{ .repo_issues = .{
+            .name = Array(repo_route_max_len).from(identity) orelse return null,
+            .selected = Array(evt.event_id_size * 2).from(selected) orelse return null,
+            .theirs = Array(theirs_route_max_len).from(theirs) orelse return null,
+            .view = .resolve,
+        } };
+    }
+
+    pub fn repoPatchesConflictsRoute(identity: []const u8, start: []const u8) ?RoutablePage {
+        return .{ .repo_patches = .{
+            .name = Array(repo_route_max_len).from(identity) orelse return null,
+            .selected = Array(evt.event_id_size * 2).from(start) orelse return null,
+            .view = .conflicts,
+        } };
+    }
+
+    pub fn repoPatchesResolveRoute(identity: []const u8, selected: []const u8, theirs: []const u8) ?RoutablePage {
+        if (selected.len == 0) return null;
+        return .{ .repo_patches = .{
             .name = Array(repo_route_max_len).from(identity) orelse return null,
             .selected = Array(evt.event_id_size * 2).from(selected) orelse return null,
             .theirs = Array(theirs_route_max_len).from(theirs) orelse return null,
@@ -598,6 +664,10 @@ pub const RoutablePage = union(enum) {
                 try std.fmt.allocPrint(arena.allocator(), user_segment ++ "{s}/repos", .{u.name.slice()})
             else
                 try std.fmt.allocPrint(arena.allocator(), user_segment ++ "{s}/repos/" ++ start_seg ++ "{d}", .{ u.name.slice(), u.start }),
+            .user_forks => |u| if (u.start == 0)
+                try std.fmt.allocPrint(arena.allocator(), user_segment ++ "{s}/forks", .{u.name.slice()})
+            else
+                try std.fmt.allocPrint(arena.allocator(), user_segment ++ "{s}/forks/" ++ start_seg ++ "{d}", .{ u.name.slice(), u.start }),
             .user_settings => |name| try std.fmt.allocPrint(arena.allocator(), user_segment ++ "{s}/settings", .{name.slice()}),
             .user_auth => |name| try std.fmt.allocPrint(arena.allocator(), user_segment ++ "{s}/auth", .{name.slice()}),
             .repo_files => |f| blk: {
@@ -665,6 +735,40 @@ pub const RoutablePage = union(enum) {
                 else
                     try std.fmt.allocPrint(arena.allocator(), "{s}/issues/{s}/" ++ tag_filter_seg ++ "{s}", .{ prefix, @tagName(i.view), i.tag.slice() });
             },
+            .repo_patches => |p| blk: {
+                const prefix = try repoUrlPrefix(arena, p.name.slice());
+                if (p.view == .edit) break :blk try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ patch_seg ++ "{s}/edit", .{ prefix, p.selected.slice() });
+                if (p.view == .description) break :blk try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ patch_seg ++ "{s}/description", .{ prefix, p.selected.slice() });
+                if (p.view == .resolve) break :blk if (p.theirs.len == 0)
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ patch_seg ++ "{s}/resolve", .{ prefix, p.selected.slice() })
+                else
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ patch_seg ++ "{s}/" ++ theirs_seg ++ "{s}/resolve", .{ prefix, p.selected.slice(), p.theirs.slice() });
+                if (p.view == .new_comment) break :blk if (p.comment.len == 0)
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ patch_seg ++ "{s}/new", .{ prefix, p.selected.slice() })
+                else
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ patch_seg ++ "{s}/" ++ comment_seg ++ "{s}/new", .{ prefix, p.selected.slice(), p.comment.slice() });
+                if (p.view == .edit_comment) break :blk try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ patch_seg ++ "{s}/" ++ comment_seg ++ "{s}/edit", .{ prefix, p.selected.slice(), p.comment.slice() });
+                if (p.view == .remove) break :blk if (p.comment.len == 0)
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ patch_seg ++ "{s}/remove", .{ prefix, p.selected.slice() })
+                else
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ patch_seg ++ "{s}/" ++ comment_seg ++ "{s}/remove", .{ prefix, p.selected.slice(), p.comment.slice() });
+                if (p.view == .conflicts) break :blk if (p.selected.len == 0)
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/patches/conflicts", .{prefix})
+                else
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/patches/" ++ start_seg ++ "{s}/conflicts", .{ prefix, p.selected.slice() });
+                if (p.comment.len != 0) break :blk if (p.comments_start == 0)
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ patch_seg ++ "{s}/" ++ comment_seg ++ "{s}", .{ prefix, p.selected.slice(), p.comment.slice() })
+                else
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ patch_seg ++ "{s}/" ++ comment_seg ++ "{s}/" ++ start_seg ++ "{d}", .{ prefix, p.selected.slice(), p.comment.slice(), p.comments_start });
+                if (p.selected.len != 0) break :blk if (p.comments_start == 0)
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ patch_seg ++ "{s}", .{ prefix, p.selected.slice() })
+                else
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ patch_seg ++ "{s}/" ++ start_seg ++ "{d}", .{ prefix, p.selected.slice(), p.comments_start });
+                break :blk if (p.tag.len == 0)
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/patches/{s}", .{ prefix, @tagName(p.view) })
+                else
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/patches/{s}/" ++ tag_filter_seg ++ "{s}", .{ prefix, @tagName(p.view), p.tag.slice() });
+            },
             .repo_discussions => |t| blk: {
                 const prefix = try repoUrlPrefix(arena, t.name.slice());
                 if (t.view == .edit) break :blk try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ discuss_seg ++ "{s}/edit", .{ prefix, t.selected.slice() });
@@ -719,6 +823,7 @@ pub const RoutablePage = union(enum) {
             const parsed = Array(evt.User.name_max_len).from(name) orelse return null; // name too long
             const sub = segments.next() orelse return .{ .user_repos = .{ .name = parsed } };
             if (std.mem.eql(u8, sub, "repos")) return .{ .user_repos = .{ .name = parsed, .start = listStart(&segments) orelse return null } };
+            if (std.mem.eql(u8, sub, "forks")) return .{ .user_forks = .{ .name = parsed, .start = listStart(&segments) orelse return null } };
             if (std.mem.eql(u8, sub, "settings")) return if (segments.next() == null) .{ .user_settings = parsed } else null;
             if (std.mem.eql(u8, sub, "auth")) return if (segments.next() == null) .{ .user_auth = parsed } else null;
             return null; // unknown sub-path
@@ -760,6 +865,7 @@ pub const RoutablePage = union(enum) {
     pub fn fullHeight(self: RoutablePage) bool {
         return switch (self) {
             .repo_issues => |i| i.view == .resolve,
+            .repo_patches => |p| p.view == .resolve,
             else => false,
         };
     }
@@ -772,6 +878,7 @@ pub const RoutablePage = union(enum) {
             .repo_commits => |*c| c.name.slice(),
             .repo_refs => |*r| r.name.slice(),
             .repo_issues => |*i| i.name.slice(),
+            .repo_patches => |*p| p.name.slice(),
             .repo_discussions => |*t| t.name.slice(),
             .repo_events => |*e| e.name.slice(),
             .repo_settings, .repo_auth => |*name| name.slice(),
@@ -786,6 +893,7 @@ pub const RoutablePage = union(enum) {
             .home => .default,
             .user => switch (self) {
                 .user_repos => |u| .{ .user_repos = .{ .name = u.name } },
+                .user_forks => |u| .{ .user_repos = .{ .name = u.name } },
                 .user_settings, .user_auth => |name| .{ .user_repos = .{ .name = name } },
                 else => self,
             },
@@ -797,8 +905,8 @@ pub const RoutablePage = union(enum) {
     pub fn parent(self: RoutablePage) PageKind {
         return switch (self) {
             .home_users, .home_repos, .home_settings, .home_auth => .home,
-            .user_repos, .user_settings, .user_auth => .user,
-            .repo_files, .repo_commits, .repo_refs, .repo_issues, .repo_discussions, .repo_events, .repo_settings, .repo_auth => .repo,
+            .user_repos, .user_forks, .user_settings, .user_auth => .user,
+            .repo_files, .repo_commits, .repo_refs, .repo_issues, .repo_patches, .repo_discussions, .repo_events, .repo_settings, .repo_auth => .repo,
         };
     }
 
@@ -870,6 +978,41 @@ pub const RoutablePage = union(enum) {
             if (!params.only(&.{.start})) return null;
             return repoThreadCommentsRoute(.issue, pair, issue_id, params.start() orelse return null);
         }
+        if (std.mem.startsWith(u8, tab, patch_seg)) {
+            const patch_id = tab[patch_seg.len..];
+            if (patch_id.len == 0) return null;
+            if (segments.peek()) |tail| {
+                if (std.mem.startsWith(u8, tail, comment_seg)) {
+                    _ = segments.next();
+                    const comment_id = tail[comment_seg.len..];
+                    if (comment_id.len == 0) return null;
+                    const word = params.scanTail(&segments) catch return null;
+                    if (word) |last| {
+                        if (!params.only(&.{})) return null;
+                        if (std.mem.eql(u8, last, "new")) return repoThreadCommentNewRoute(.patch, pair, patch_id, comment_id);
+                        if (std.mem.eql(u8, last, "edit")) return repoThreadCommentEditRoute(.patch, pair, patch_id, comment_id);
+                        if (std.mem.eql(u8, last, "remove")) return repoThreadRemoveRoute(.patch, pair, patch_id, comment_id);
+                        return null;
+                    }
+                    if (!params.only(&.{.start})) return null;
+                    return repoThreadCommentRoute(.patch, pair, patch_id, comment_id, params.start() orelse return null);
+                }
+            }
+            const word = params.scanTail(&segments) catch return null;
+            if (word) |tail| {
+                if (std.mem.eql(u8, tail, "new")) return if (params.only(&.{})) repoThreadCommentNewRoute(.patch, pair, patch_id, "") else null;
+                if (std.mem.eql(u8, tail, "edit")) return if (params.only(&.{})) repoThreadEditRoute(.patch, pair, patch_id) else null;
+                if (std.mem.eql(u8, tail, "remove")) return if (params.only(&.{})) repoThreadRemoveRoute(.patch, pair, patch_id, "") else null;
+                if (std.mem.eql(u8, tail, "description")) return if (params.only(&.{})) repoThreadDescriptionRoute(.patch, pair, patch_id) else null;
+                if (std.mem.eql(u8, tail, "resolve")) {
+                    if (!params.only(&.{.theirs})) return null;
+                    return repoPatchesResolveRoute(pair, patch_id, params.values.get(.theirs) orelse "");
+                }
+                return null;
+            }
+            if (!params.only(&.{.start})) return null;
+            return repoThreadCommentsRoute(.patch, pair, patch_id, params.start() orelse return null);
+        }
         if (std.mem.startsWith(u8, tab, discuss_seg)) {
             const discussion_id = tab[discuss_seg.len..];
             if (discussion_id.len == 0) return null;
@@ -916,6 +1059,21 @@ pub const RoutablePage = union(enum) {
             if (std.meta.stringToEnum(evt.Issue.Status, w)) |status| return repoIssuesRoute(pair, status, tag_value, "");
             if (std.mem.eql(u8, w, "tags")) return repoThreadTagsRoute(.issue, pair, tag_value);
             if (std.mem.eql(u8, w, "new")) return if (tag_value.len == 0) repoThreadNewRoute(.issue, pair) else null;
+            return null;
+        }
+        if (std.mem.eql(u8, tab, "patches")) {
+            const word = params.scanTail(&segments) catch return null;
+            const tag_value = params.values.get(.tag) orelse "";
+            const view = word orelse return if (params.only(&.{})) repoPatchesRoute(pair, .open, "", "") else null;
+            if (std.mem.eql(u8, view, "conflicts")) {
+                if (!params.only(&.{.start})) return null;
+                return repoPatchesConflictsRoute(pair, params.values.get(.start) orelse "");
+            }
+            if (!params.only(&.{.tag})) return null;
+            if (std.meta.stringToEnum(evt.Patch.Status, view)) |status| return repoPatchesRoute(pair, status, tag_value, "");
+            if (std.mem.eql(u8, view, "tags")) return repoThreadTagsRoute(.patch, pair, tag_value);
+            if (std.mem.eql(u8, view, "new")) return if (tag_value.len == 0) repoThreadNewRoute(.patch, pair) else null;
+            if (std.mem.eql(u8, view, "drafts")) return if (tag_value.len == 0) repoPatchesDraftsRoute(pair) else null;
             return null;
         }
         if (std.mem.eql(u8, tab, "discussions")) {
@@ -975,6 +1133,7 @@ pub const RoutablePage = union(enum) {
             .home_users => |a_start| a_start == b.home_users,
             .home_repos => |a_start| a_start == b.home_repos,
             .user_repos => |a_u| std.mem.eql(u8, a_u.name.slice(), b.user_repos.name.slice()) and a_u.start == b.user_repos.start,
+            .user_forks => |a_u| std.mem.eql(u8, a_u.name.slice(), b.user_forks.name.slice()) and a_u.start == b.user_forks.start,
             .user_settings => |a_name| std.mem.eql(u8, a_name.slice(), b.user_settings.slice()),
             .user_auth => |a_name| std.mem.eql(u8, a_name.slice(), b.user_auth.slice()),
             .repo_files => |a_f| std.mem.eql(u8, a_f.name.slice(), b.repo_files.name.slice()) and
@@ -1006,6 +1165,13 @@ pub const RoutablePage = union(enum) {
                 a_t.view == b.repo_discussions.view and
                 a_t.comments_start == b.repo_discussions.comments_start and
                 std.mem.eql(u8, a_t.comment.slice(), b.repo_discussions.comment.slice()),
+            .repo_patches => |a_p| std.mem.eql(u8, a_p.name.slice(), b.repo_patches.name.slice()) and
+                std.mem.eql(u8, a_p.tag.slice(), b.repo_patches.tag.slice()) and
+                std.mem.eql(u8, a_p.selected.slice(), b.repo_patches.selected.slice()) and
+                std.mem.eql(u8, a_p.theirs.slice(), b.repo_patches.theirs.slice()) and
+                a_p.view == b.repo_patches.view and
+                a_p.comments_start == b.repo_patches.comments_start and
+                std.mem.eql(u8, a_p.comment.slice(), b.repo_patches.comment.slice()),
             .repo_events => |a_e| std.mem.eql(u8, a_e.name.slice(), b.repo_events.name.slice()) and
                 a_e.view == b.repo_events.view and
                 a_e.kind == b.repo_events.kind and
@@ -1033,6 +1199,10 @@ pub const RoutablePage = union(enum) {
         return switch (a) {
             .user_repos => |aa| switch (b) {
                 .user_repos => |bb| std.mem.eql(u8, aa.name.slice(), bb.name.slice()) and aa.start != bb.start,
+                else => false,
+            },
+            .user_forks => |aa| switch (b) {
+                .user_forks => |bb| std.mem.eql(u8, aa.name.slice(), bb.name.slice()) and aa.start != bb.start,
                 else => false,
             },
             else => false,
@@ -1198,6 +1368,7 @@ pub const Session = struct {
     // during page construction. both null on wasm, which has no filesystem and
     // rebuilds pages from the serialized snapshot rather than from disk.
     io: ?std.Io = null,
+    admin_repo: ?*rp.Repo(.xit, evt.admin_repo_opts) = null,
     repos_dir: ?[]const u8 = null,
     // the single on-disk repo this session views, when running in local mode
     // (haxy invoked with no arguments inside a repo). null on the server paths,
@@ -1278,6 +1449,7 @@ pub const Session = struct {
             // allocations land in the session arena. on the web path that's the
             // intended behavior, since the whole arena is per-request.
             .page_arena = arena,
+            .admin_repo = repo,
             .haxy_moment = try evt.currentMoment(evt.admin_repo_opts, repo),
         };
         try session.loadUser();
@@ -1874,11 +2046,13 @@ pub const Widget = union(enum) {
     repo_files_header: Repo.Files.Header.View,
     repo_commits_header: Repo.Commits.Header.View,
     repo_issues_header: Repo.Issues.Header,
+    repo_patches_header: Repo.Patches.Header,
     repo_discussions_header: Repo.Discussions.Header,
     repo_files: Repo.Files.View,
     repo_commits: Repo.Commits.View,
     repo_refs: Repo.Refs.View,
     repo_issues: Repo.Issues.View,
+    repo_patches: Repo.Patches.View,
     repo_discussions: Repo.Discussions.View,
     repo_events_header: Repo.Events.Header.View,
     repo_events: Repo.Events.View,

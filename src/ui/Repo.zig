@@ -16,6 +16,7 @@ pub const Files = @import("./Repo/Files.zig");
 pub const Commits = @import("./Repo/Commits.zig");
 pub const Refs = @import("./Repo/Refs.zig");
 pub const Issues = @import("./Repo/Issues.zig");
+pub const Patches = @import("./Repo/Patches.zig");
 pub const Discussions = @import("./Repo/Discussions.zig");
 pub const Comment = @import("./Repo/Comment.zig");
 pub const Events = @import("./Repo/Events.zig");
@@ -31,6 +32,7 @@ files: Files,
 commits: Commits,
 refs: Refs,
 issues: Issues,
+patches: Patches,
 discussions: Discussions,
 events: Events,
 settings: Settings,
@@ -129,6 +131,30 @@ pub fn init(
         .repo_issues => |i| i.comments_start,
         else => 0,
     };
+    const patches_tag: []const u8 = switch (route) {
+        .repo_patches => |*p| p.tag.slice(),
+        else => "",
+    };
+    const patches_selected: []const u8 = switch (route) {
+        .repo_patches => |*p| p.selected.slice(),
+        else => "",
+    };
+    const patches_comment: []const u8 = switch (route) {
+        .repo_patches => |*p| p.comment.slice(),
+        else => "",
+    };
+    const patches_theirs: []const u8 = switch (route) {
+        .repo_patches => |*p| p.theirs.slice(),
+        else => "",
+    };
+    const patches_view: ui.RoutablePage.PatchesView = switch (route) {
+        .repo_patches => |p| p.view,
+        else => .open,
+    };
+    const patches_comments_start: usize = switch (route) {
+        .repo_patches => |p| p.comments_start,
+        else => 0,
+    };
     const discussions_tag: []const u8 = switch (route) {
         .repo_discussions => |*t| t.tag.slice(),
         else => "",
@@ -166,6 +192,7 @@ pub fn init(
     // the repo and owner-name metadata the header shows. local mode already
     // knows all three; the server paths resolve them from the admin db.
     var source: ?ui.RepoSource = null;
+    var repo_id_maybe: ?[evt.event_id_size]u8 = null;
     var repo: evt.Repo.Record = undefined;
     var owner_name: []const u8 = undefined;
     if (session.local) |local| {
@@ -182,6 +209,7 @@ pub fn init(
         const haxy_moment = session.haxy_moment orelse return error.NoMoment;
         const found = (try evt.Repo.readByOwnerAndName(DB, hash_kind, haxy_moment, arena, repo_identity.owner, repo_identity.name)) orelse return error.NotFound;
         repo = found.repo;
+        repo_id_maybe = found.event_id;
 
         // resolve the creating user so the header can show their name to the left
         // of the repo title.
@@ -203,7 +231,7 @@ pub fn init(
     // route named none), so they end up viewing the same one and either's
     // resolved ref can canonicalize the tab mirror urls below. no filesystem
     // (wasm), nowhere to look, or a failed open: empty tabs.
-    const files, const commits, const refs, var issues, var discussions, const events = blk: {
+    const files, const commits, const refs, var issues, var patches, var discussions, const events = blk: {
         read: {
             const io = session.io orelse break :read;
             const src = source orelse break :read;
@@ -221,6 +249,7 @@ pub fn init(
                                 try Commits.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, session.haxy_moment, repo_identity.identity, requested_ref_or_oid, requested_ref_value, commits_content),
                                 try Refs.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, repo_identity.identity, refs_kind, refs_from),
                                 try Issues.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, issues_tag, issues_selected, issues_comment, issues_comments_start, issues_theirs, issues_view),
+                                try Patches.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, session, repo_id_maybe, repo_identity.identity, patches_tag, patches_selected, patches_comment, patches_comments_start, patches_theirs, patches_view),
                                 try Discussions.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, discussions_tag, discussions_selected, discussions_comment, discussions_comments_start, discussions_view),
                                 try Events.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, events_view, events_kind, events_selected, session.local != null, session.data.sync_failure),
                             };
@@ -235,11 +264,15 @@ pub fn init(
             try Commits.emptyResult(aa, repo_identity.identity, requested_ref_or_oid orelse .branch, requested_ref_value, commits_content),
             try Refs.emptyResult(arena, repo_identity.identity, refs_kind, refs_from),
             try Issues.emptyResult(aa, repo_identity.identity, issues_tag, issues_selected, issues_comment, issues_comments_start, issues_theirs, issues_view),
+            try Patches.emptyResult(aa, repo_identity.identity, patches_tag, patches_selected, patches_comment, patches_comments_start, patches_theirs, patches_view),
             try Discussions.emptyResult(aa, repo_identity.identity, discussions_tag, discussions_selected, discussions_comment, discussions_comments_start, discussions_view),
             try Events.empty(aa, repo_identity.identity, events_view, session.local != null, session.data.sync_failure),
         };
     };
     issues.repo_source = source;
+    patches.repo_source = source;
+    patches.repo_id = repo_id_maybe;
+    patches.target_branch = if (files.ref_or_oid == .branch) files.ref_or_oid_value else "";
     discussions.repo_source = source;
 
     // each tab mirror carries this page's route for that tab; tabs not targeted
@@ -261,12 +294,13 @@ pub fn init(
     return .{
         // files and commits resolve the same ref, so either's serves the header,
         // which points both tabs at it.
-        .header = try Header.init(arena, repo.event.name, owner_name, files.ref_or_oid, files.ref_or_oid_value, issues_tag, discussions_tag),
+        .header = try Header.init(arena, repo.event.name, owner_name, files.ref_or_oid, files.ref_or_oid_value, issues_tag, patches_tag, discussions_tag),
         .repo = repo,
         .files = files,
         .commits = commits,
         .refs = refs,
         .issues = issues,
+        .patches = patches,
         .discussions = discussions,
         .events = events,
         .settings = Settings.init(),
@@ -328,6 +362,13 @@ pub const View = struct {
                 var issues_view = try Issues.View.init(allocator, &data.issues, session);
                 errdefer issues_view.deinit(allocator);
                 try stack.children.put(allocator, issues_view.getFocus().id, .{ .repo_issues = issues_view });
+            }
+
+            // patches and their comment permalinks.
+            {
+                var patches_view = try Patches.View.init(allocator, &data.patches, session);
+                errdefer patches_view.deinit(allocator);
+                try stack.children.put(allocator, patches_view.getFocus().id, .{ .repo_patches = patches_view });
             }
 
             // discussions and their comment permalinks.
@@ -396,6 +437,7 @@ pub const View = struct {
                 // the issues tab mirrors this page's tag filter (issue urls
                 // themselves never carry the tag).
                 .repo_issues => self.session.data.current_page = ui.RoutablePage.repoIssuesRoute(self.data.identity.slice(), .open, self.data.issues.tag, "") orelse self.session.data.current_page,
+                .repo_patches => self.session.data.current_page = ui.RoutablePage.repoPatchesRoute(self.data.identity.slice(), .open, self.data.patches.tag, "") orelse self.session.data.current_page,
                 .repo_discussions => self.session.data.current_page = ui.RoutablePage.repoDiscussionsRoute(self.data.identity.slice(), self.data.discussions.tag, "") orelse self.session.data.current_page,
                 .repo_events => self.session.data.current_page = ui.RoutablePage.repoEventsRoute(self.data.identity.slice(), self.data.events.view, null, "") orelse self.session.data.current_page,
                 .home_settings => {
@@ -438,6 +480,7 @@ pub const View = struct {
                                         .repo_commits => |*v| v.getSelectedIndex() == 0,
                                         .repo_refs => |*v| v.getSelectedIndex() == 0,
                                         .repo_issues => |*v| v.getSelectedIndex() == 0,
+                                        .repo_patches => |*v| v.getSelectedIndex() == 0,
                                         .repo_discussions => |*v| v.getSelectedIndex() == 0,
                                         .repo_events => |*v| v.getSelectedIndex() == 0,
                                         .home_settings => |*v| v.getSelectedIndex() == 0,

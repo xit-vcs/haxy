@@ -1,6 +1,8 @@
 const std = @import("std");
 const evt = @import("../event.zig");
+const diff3 = @import("../diff3.zig");
 const xit = @import("xit");
+const rp = xit.repo;
 const hash = xit.hash;
 
 title: []const u8,
@@ -52,6 +54,19 @@ pub const Status = enum {
         for (@typeInfo(Status).@"enum".fields) |field| len = @max(len, field.name.len);
         break :blk len;
     };
+};
+
+pub const Resolve = struct {
+    title: ?[]const u8 = null,
+    tags: ?[]const u8 = null,
+    hunks: []const []const u8 = &.{},
+    theirs: []const u8 = "",
+};
+
+pub const Update = union(enum) {
+    status: Status,
+    fields: struct { title: []const u8, tags: []const u8, description: []const u8 },
+    resolve: Resolve,
 };
 
 pub const tag_max_len = 64;
@@ -225,6 +240,131 @@ pub fn resolveMerge(
         merged.status = .merged;
         outcome[status_index] = .parent;
     }
+}
+
+pub fn update(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    repo: *rp.Repo(repo_kind, repo_opts),
+    id: *const [evt.event_id_size]u8,
+    change: Update,
+    author: evt.CommitAuthor,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const record = (try readFromRepo(repo_kind, repo_opts, io, allocator, &arena, repo, id)) orelse return error.NotFound;
+    if (record.removed) return error.NotFound;
+
+    var updated = record.event;
+    switch (change) {
+        .status => |status| {
+            if (updated.status == status) return;
+            updated.status = status;
+        },
+        .fields => |fields| {
+            updated.title = fields.title;
+            updated.tags = fields.tags;
+            updated.description = fields.description;
+        },
+        .resolve => |resolve| {
+            updated = try resolveFields(repo_kind, repo_opts, io, allocator, &arena, repo, id, record, resolve);
+        },
+    }
+    if (!fieldsValid(updated.title, updated.tags)) return error.InvalidFields;
+
+    try evt.consume(.repo, repo_kind, repo_opts, io, allocator, repo, evt.events_ref, &.{.{
+        .id = std.fmt.bytesToHex(id.*, .lower),
+        .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
+        .author = author,
+        .event = .{ .patch = updated },
+    }});
+}
+
+fn resolveFields(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    arena: *std.heap.ArenaAllocator,
+    repo: *rp.Repo(repo_kind, repo_opts),
+    id: *const [evt.event_id_size]u8,
+    live: Record,
+    resolve: Resolve,
+) !Self {
+    const DB = evt.EventDB(repo_opts.hash);
+    var updated = live.event;
+    if (resolve.title) |title| updated.title = title;
+    if (resolve.tags) |tags| updated.tags = tags;
+
+    var event_db_maybe: ?evt.LocalEventDB(repo_opts.hash) = if (repo_kind == .git) try evt.LocalEventDB(repo_opts.hash).openReadOnly(io, allocator, repo.core.repo_dir) else null;
+    defer if (event_db_maybe) |*event_db| event_db.deinit(io, allocator);
+    const moment = (if (event_db_maybe) |*event_db|
+        evt.currentMomentFromDb(repo_opts.hash, event_db.db)
+    else if (repo_kind == .git)
+        return updated
+    else
+        evt.currentMoment(repo_opts, repo)) catch return updated;
+    const conflicts_cursor = (try moment.getCursor(hash.hashInt(repo_opts.hash, conflicts_key))) orelse return updated;
+    const conflicts = try DB.SortedMap(.read_only).init(conflicts_cursor);
+    const conflict_cursor = (try conflicts.getCursor(&evt.orderKeyDesc(live.created_order, id))) orelse return updated;
+    const entry = try DB.HashMap(.read_only).init(conflict_cursor);
+    const fields_cursor = (try entry.getCursor(hash.hashInt(repo_opts.hash, evt.conflicted_fields_key))) orelse return updated;
+    const fields = try fields_cursor.readBytesAlloc(arena.allocator(), null);
+    const their_cursor = (try entry.getCursor(hash.hashInt(repo_opts.hash, evt.their_record_key))) orelse return updated;
+    const theirs = try evt.read(Record, DB, repo_opts.hash, arena, try DB.HashMap(.read_only).init(their_cursor));
+
+    var field_iter = std.mem.splitScalar(u8, fields, ' ');
+    while (field_iter.next()) |field| {
+        if (std.mem.eql(u8, field, "status") and fieldListed(resolve.theirs, ',', field)) updated.status = theirs.event.status;
+        if (std.mem.eql(u8, field, "revision") and fieldListed(resolve.theirs, ',', field)) updated.revision = theirs.event.revision;
+    }
+
+    if (!fieldListed(fields, ' ', "description")) return updated;
+    var base_description: []const u8 = "";
+    if (try entry.getCursor(hash.hashInt(repo_opts.hash, evt.base_record_key))) |base_cursor| {
+        const base = try evt.read(Record, DB, repo_opts.hash, arena, try DB.HashMap(.read_only).init(base_cursor));
+        base_description = base.event.description;
+    }
+    const chunks = try diff3.chunks(io, allocator, arena, base_description, live.event.description, theirs.event.description);
+    var resolutions: std.ArrayList([]const u8) = .empty;
+    var hunk_index: usize = 0;
+    for (chunks) |chunk| {
+        if (chunk != .conflict) continue;
+        try resolutions.append(arena.allocator(), if (hunk_index < resolve.hunks.len) resolve.hunks[hunk_index] else (chunk.conflict.ours orelse ""));
+        hunk_index += 1;
+    }
+    updated.description = try diff3.assemble(arena.allocator(), chunks, resolutions.items);
+    return updated;
+}
+
+fn fieldListed(fields: []const u8, delimiter: u8, name: []const u8) bool {
+    var iter = std.mem.splitScalar(u8, fields, delimiter);
+    while (iter.next()) |field| {
+        if (std.mem.eql(u8, field, name)) return true;
+    }
+    return false;
+}
+
+fn readFromRepo(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    arena: *std.heap.ArenaAllocator,
+    repo: *rp.Repo(repo_kind, repo_opts),
+    id: *const [evt.event_id_size]u8,
+) !?Record {
+    var event_db_maybe: ?evt.LocalEventDB(repo_opts.hash) = if (repo_kind == .git) try evt.LocalEventDB(repo_opts.hash).openReadOnly(io, allocator, repo.core.repo_dir) else null;
+    defer if (event_db_maybe) |*event_db| event_db.deinit(io, allocator);
+    const moment = (if (event_db_maybe) |*event_db|
+        evt.currentMomentFromDb(repo_opts.hash, event_db.db)
+    else if (repo_kind == .git)
+        return null
+    else
+        evt.currentMoment(repo_opts, repo)) catch return null;
+    return readById(evt.EventDB(repo_opts.hash), repo_opts.hash, moment, arena, id);
 }
 
 fn revisionKey(allocator: std.mem.Allocator, target_ref: []const u8, oid: []const u8) ![]u8 {

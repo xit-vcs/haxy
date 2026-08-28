@@ -9,7 +9,11 @@ const srv = hx.serve;
 const evt = hx.event;
 const xit = hx.xit;
 const rp = xit.repo;
+const hash = xit.hash;
+const obj = xit.object;
 const ui = hx.ui;
+const fork = hx.fork;
+const pch = hx.pch;
 
 // cook the terminal before a panic/segfault trace is printed, so the trace
 // isn't mangled by raw mode and the alternate buffer
@@ -818,12 +822,20 @@ pub fn main(init: std.process.Init) !void {
             var template_dir = try cwd.openDir(io, template_path, .{ .iterate = true });
             defer template_dir.close(io);
 
-            for (repo_event_ids) |id_bytes| {
+            for (repo_event_ids, 0..) |id_bytes, repo_index| {
                 const repo_id = std.fmt.bytesToHex(id_bytes, .lower);
                 const repo_path = try std.fs.path.join(arena.allocator(), &.{ server_path, "repos", &repo_id });
-                var dest_dir = try cwd.createDirPathOpen(io, repo_path, .{});
-                defer dest_dir.close(io);
-                try copyDir(io, template_dir, dest_dir);
+                {
+                    var dest_dir = try cwd.createDirPathOpen(io, repo_path, .{});
+                    defer dest_dir.close(io);
+                    try copyDir(io, template_dir, dest_dir);
+                }
+
+                if (repo_index + 1 == repo_data.len) {
+                    var target_repo = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = repo_path, .require_repo_root = true });
+                    defer target_repo.deinit(io, allocator);
+                    try seedPatches(io, allocator, server_path, &repo, &target_repo, &repo_event_ids[repo_index], &admin_user_id, prng.random());
+                }
             }
         }
 
@@ -960,6 +972,305 @@ fn addNextTag(repo: *rp.Repo(.xit, .{}), io: std.Io, allocator: std.mem.Allocato
     const name = try std.fmt.bufPrint(&buf, "v{d}", .{n.*});
     _ = try repo.addTag(io, allocator, .{ .name = name });
     n.* += 1;
+}
+
+const PatchRevisionFixture = struct {
+    id: [evt.event_id_size]u8,
+    oid: [hash.hexLen(.sha1)]u8,
+    tree_oid: [hash.hexLen(.sha1)]u8,
+    timestamp: u64,
+
+    fn event(self: *const PatchRevisionFixture, title: []const u8) evt.PatchRev {
+        return .{
+            .base_oid = &self.oid,
+            .source_oid = &self.oid,
+            .target_ref = "refs/heads/master",
+            .message = title,
+        };
+    }
+};
+
+fn commitTree(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    repo: *rp.Repo(.xit, .{}),
+    oid: *const [hash.hexLen(.sha1)]u8,
+) ![hash.hexLen(.sha1)]u8 {
+    var moment = try repo.core.latestMoment();
+    const state = rp.Repo(.xit, .{}).State(.read_only){ .core = &repo.core, .extra = .{ .moment = &moment } };
+    var object = try obj.Object(.xit, .{}).init(state, io, allocator, oid);
+    defer object.deinit();
+    return switch (object.content) {
+        .commit => |commit| commit.tree,
+        else => error.InvalidObject,
+    };
+}
+
+fn seedPatchRevision(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    repos_path: []const u8,
+    patch_id: *const [evt.event_id_size]u8,
+    title: []const u8,
+    timestamp: u64,
+    random: std.Random,
+) !PatchRevisionFixture {
+    const patch_hex = std.fmt.bytesToHex(patch_id.*, .lower);
+    const fork_path = try fork.forkPath(allocator, repos_path, &patch_hex);
+    defer allocator.free(fork_path);
+    var fork_repo = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = fork_path, .require_repo_root = true });
+    defer fork_repo.deinit(io, allocator);
+
+    const source_oid = (try fork_repo.readRef(io, fork.ref)) orelse return error.NotFound;
+    var fixture = PatchRevisionFixture{
+        .id = evt.EventWithId.randomId(random),
+        .oid = source_oid,
+        .tree_oid = try commitTree(io, allocator, &fork_repo, &source_oid),
+        .timestamp = timestamp,
+    };
+    const revision = fixture.event(title);
+    const tree_entries = [_]evt.EventTreeEntry{
+        .{ .tree = .{ .name = "base", .oid = &fixture.tree_oid } },
+        .{ .tree = .{ .name = "head", .oid = &fixture.tree_oid } },
+    };
+    try evt.consume(.fork, .xit, .{}, io, allocator, &fork_repo, evt.events_ref, &.{.{
+        .id = std.fmt.bytesToHex(fixture.id, .lower),
+        .timestamp = timestamp,
+        .author = .{ .name = "admin", .email = "admin@example.test" },
+        .tree_entries = &tree_entries,
+        .event = .{ .patchrev = revision },
+    }});
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const moment = try evt.currentMoment(.{}, &fork_repo);
+    const revision_record = (try evt.PatchRev.readById(evt.EventDB(.sha1), .sha1, moment, &arena, &fixture.id)) orelse return error.NotFound;
+    const patch_record = (try evt.Patch.readById(evt.EventDB(.sha1), .sha1, moment, &arena, patch_id)) orelse return error.NotFound;
+    var patch = patch_record.event;
+    patch.revision = evt.Patch.Revision.fromRecord(fixture.id, revision_record);
+    try evt.consume(.fork, .xit, .{}, io, allocator, &fork_repo, evt.events_ref, &.{.{
+        .id = patch_hex,
+        .timestamp = timestamp + 1,
+        .author = .{ .name = "admin", .email = "admin@example.test" },
+        .event = .{ .patch = patch },
+    }});
+    return fixture;
+}
+
+fn seedPatches(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    server_path: []const u8,
+    admin_repo: *rp.Repo(.xit, evt.admin_repo_opts),
+    target_repo: *rp.Repo(.xit, .{}),
+    repo_id: *const [evt.event_id_size]u8,
+    user_id: *const [evt.event_id_size]u8,
+    random: std.Random,
+) !void {
+    const patch_data = [_]struct {
+        title: []const u8,
+        description: []const u8,
+        tags: []const u8,
+        status: ?evt.Patch.Status,
+    }{
+        .{
+            .title = "Draft a faster dependency scanner",
+            .description = "Rework dependency discovery so a large workspace can be scanned without repeatedly opening the same manifests.",
+            .tags = "performance build",
+            .status = null,
+        },
+        .{
+            .title = "Remove the legacy configuration loader",
+            .description = "Delete the compatibility loader now that the replacement format has shipped and the migration warning has been available for a full release.",
+            .tags = "cleanup config",
+            .status = .merged,
+        },
+        .{
+            .title = "Cache parsed manifests between commands",
+            .description = "Keep parsed manifests in the command context so consecutive operations do not repeat identical filesystem and parsing work.",
+            .tags = "performance cache",
+            .status = .closed,
+        },
+        .{
+            .title = "Add structured output to the inspect command",
+            .description = "Add a stable JSON representation of inspect results for scripts and editor integrations.",
+            .tags = "enhancement cli",
+            .status = .open,
+        },
+        .{
+            .title = "Preserve file permissions during export",
+            .description = "Carry executable bits through archive exports so unpacked command-line tools remain runnable without a manual chmod step.",
+            .tags = "bug export permissions",
+            .status = .open,
+        },
+    };
+
+    const repos_path = try std.fs.path.join(allocator, &.{ server_path, "repos" });
+    defer allocator.free(repos_path);
+    var patch_ids: [patch_data.len][evt.event_id_size]u8 = undefined;
+    for (patch_data, 0..) |patch, i| {
+        patch_ids[i] = evt.EventWithId.randomId(random);
+        const patch_hex = std.fmt.bytesToHex(patch_ids[i], .lower);
+        const path = try fork.create(.{}, io, allocator, repos_path, admin_repo, .{
+            .id = patch_hex,
+            .user_id = user_id.*,
+            .repo_id = repo_id.*,
+            .title = patch.title,
+            .description = patch.description,
+            .tags = patch.tags,
+            .author = .{ .name = "admin", .email = "admin@example.test" },
+            .timestamp = @intCast(500 + i * 10),
+        });
+        allocator.free(path);
+        const status = patch.status orelse continue;
+
+        const revision = try seedPatchRevision(io, allocator, repos_path, &patch_ids[i], patch.title, @intCast(502 + i * 10), random);
+        const fork_path = try fork.forkPath(allocator, repos_path, &patch_hex);
+        defer allocator.free(fork_path);
+        try pch.post(.{}, io, allocator, admin_repo, target_repo, fork_path, .{
+            .id = patch_hex,
+            .user_id = user_id.*,
+            .repo_id = repo_id.*,
+            .author = .{ .name = "admin", .email = "admin@example.test" },
+            .timestamp = @intCast(505 + i * 10),
+        });
+
+        if (status == .merged) {
+            const event = revision.event(patch.title);
+            const tree_entries = [_]evt.EventTreeEntry{
+                .{ .tree = .{ .name = "base", .oid = &revision.tree_oid } },
+                .{ .tree = .{ .name = "head", .oid = &revision.tree_oid } },
+            };
+            try evt.consume(.repo, .xit, .{}, io, allocator, target_repo, evt.events_ref, &.{.{
+                .id = std.fmt.bytesToHex(revision.id, .lower),
+                .timestamp = revision.timestamp,
+                .author = .{ .name = "admin", .email = "admin@example.test" },
+                .tree_entries = &tree_entries,
+                .event = .{ .patchrev = event },
+            }});
+        }
+        if (status != .open) {
+            try evt.Patch.update(.xit, .{}, io, allocator, target_repo, &patch_ids[i], .{ .status = status }, .{
+                .name = "admin",
+                .email = "admin@example.test",
+            });
+        }
+    }
+
+    // seed a small comment tree on the newest patch
+    var comment_ids: [5][evt.event_id_size]u8 = undefined;
+    for (&comment_ids) |*id| id.* = evt.EventWithId.randomId(random);
+    const comment_bodies = [_][]const u8{
+        "This also needs to preserve the executable bit for files nested inside generated directories.",
+        "I tested the archive path and the direct-copy path; both currently lose the mode.",
+        "The archive writer is the right place to centralize it, since every exporter already goes through that layer.",
+        "Please include a regression fixture with a mix of executable and ordinary files.",
+        "I'll add that fixture and cover both supported archive formats.",
+    };
+    var comments: [comment_ids.len]evt.EventWithId = undefined;
+    for (&comments, 0..) |*comment, i| {
+        comment.* = .{
+            .id = std.fmt.bytesToHex(comment_ids[i], .lower),
+            .timestamp = @intCast(700 + i),
+            .author = .{ .name = if (i % 2 == 0) "alice" else "bob", .email = if (i % 2 == 0) "alice@example.test" else "bob@example.test" },
+            .event = .{ .comment = .{
+                .thread_id = std.fmt.bytesToHex(patch_ids[patch_ids.len - 1], .lower),
+                .parent_id = switch (i) {
+                    0, 1 => std.fmt.bytesToHex(patch_ids[patch_ids.len - 1], .lower),
+                    2, 4 => std.fmt.bytesToHex(comment_ids[0], .lower),
+                    3 => std.fmt.bytesToHex(comment_ids[2], .lower),
+                    else => unreachable,
+                },
+                .body = comment_bodies[i],
+            } },
+        };
+    }
+    try evt.consume(.repo, .xit, .{}, io, allocator, target_repo, evt.events_ref, &comments);
+
+    // create divergent metadata edits on the next three patches
+    var patch_arena = std.heap.ArenaAllocator.init(allocator);
+    defer patch_arena.deinit();
+    const moment = try evt.currentMoment(.{}, target_repo);
+    var values: [3]evt.Patch = undefined;
+    for (1..4) |i| {
+        const record = (try evt.Patch.readById(evt.EventDB(.sha1), .sha1, moment, &patch_arena, &patch_ids[i])) orelse return error.NotFound;
+        values[i - 1] = record.event;
+    }
+    var ours_values = values;
+    ours_values[0].title = "Drop the legacy configuration loader";
+    ours_values[0].tags = "cleanup config breaking";
+    ours_values[1].description = "Cache parsed manifests for the lifetime of a command invocation and invalidate entries when their files change.";
+    ours_values[2].description = "Add JSON output to inspect with versioned field names and deterministic object ordering.";
+    var theirs_values = values;
+    theirs_values[0].title = "Delete compatibility configuration support";
+    theirs_values[0].tags = "config maintenance";
+    theirs_values[1].description = "Keep a process-wide manifest cache shared by every command and refresh it after writes.";
+    theirs_values[2].description = "Expose inspect results as newline-delimited JSON so callers can stream large repositories.";
+
+    const seed_tip = (try target_repo.readRef(io, evt.events_ref)) orelse return error.NotFound;
+    const other_ref = xit.ref.Ref{ .kind = .head, .name = "haxy/patch-other" };
+    var ours = [_]evt.EventWithId{
+        .{
+            .id = std.fmt.bytesToHex(patch_ids[1], .lower),
+            .timestamp = 800,
+            .author = .{ .name = "alice", .email = "alice@example.test" },
+            .event = .{ .patch = ours_values[0] },
+        },
+        .{
+            .id = std.fmt.bytesToHex(patch_ids[2], .lower),
+            .timestamp = 801,
+            .author = .{ .name = "alice", .email = "alice@example.test" },
+            .event = .{ .patch = ours_values[1] },
+        },
+        .{
+            .id = std.fmt.bytesToHex(patch_ids[3], .lower),
+            .timestamp = 802,
+            .author = .{ .name = "alice", .email = "alice@example.test" },
+            .event = .{ .patch = ours_values[2] },
+        },
+    };
+
+    var theirs = ours;
+    theirs[0].timestamp = 810;
+    theirs[0].author = .{ .name = "bob", .email = "bob@example.test" };
+    theirs[0].event.patch = theirs_values[0];
+    theirs[1].timestamp = 811;
+    theirs[1].author = .{ .name = "bob", .email = "bob@example.test" };
+    theirs[1].event.patch = theirs_values[1];
+    theirs[2].timestamp = 812;
+    theirs[2].author = .{ .name = "bob", .email = "bob@example.test" };
+    theirs[2].event.patch = theirs_values[2];
+
+    try evt.consume(.repo, .xit, .{}, io, allocator, target_repo, evt.events_ref, &ours);
+    var json: std.Io.Writer.Allocating = .init(allocator);
+    defer json.deinit();
+    for (theirs, 0..) |event, i| {
+        json.clearRetainingCapacity();
+        try std.json.Stringify.value(event, .{}, &json.writer);
+        const author = try std.fmt.allocPrint(allocator, "{s} <{s}>", .{ event.author.name, event.author.email });
+        defer allocator.free(author);
+        _ = try target_repo.commitAtRef(io, allocator, .{
+            .author = author,
+            .message = json.written(),
+            .timestamp = event.timestamp,
+            .parent_oids = if (i == 0) &.{seed_tip} else null,
+        }, null, other_ref);
+    }
+    {
+        var to_events = try target_repo.switchDir(io, allocator, .{ .target = .{ .ref = evt.events_ref } });
+        defer to_events.deinit();
+    }
+    {
+        var merge = try target_repo.merge(io, allocator, .{ .kind = .full, .action = .{ .new = .{ .source = &.{.{ .ref = other_ref }} } } }, null);
+        defer merge.deinit();
+        if (merge.result != .success) return error.MergeFailed;
+    }
+    {
+        var to_master = try target_repo.switchDir(io, allocator, .{ .target = .{ .ref = .{ .kind = .head, .name = "master" } } });
+        defer to_master.deinit();
+    }
+    try target_repo.removeBranch(io, .{ .name = other_ref.name });
+    try evt.consume(.repo, .xit, .{}, io, allocator, target_repo, evt.events_ref, &.{});
 }
 
 // recursively copy the contents of src_dir into dest_dir

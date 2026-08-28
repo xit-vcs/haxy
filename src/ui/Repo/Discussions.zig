@@ -5,13 +5,6 @@ const ui = @import("../../ui.zig");
 const xit = @import("xit");
 const rp = xit.repo;
 const hash = xit.hash;
-const xitui = xit.xitui;
-const wgt = xitui.widget;
-const layout = xitui.layout;
-const Key = xitui.input.Key;
-const Grid = xitui.grid.Grid;
-const Focus = xitui.focus.Focus;
-const inp = @import("../input.zig");
 const Comment = @import("Comment.zig");
 const Attachment = @import("Attachment.zig");
 const Threads = @import("Threads.zig");
@@ -154,9 +147,7 @@ pub fn init(
 
     var root_key: ?[]const u8 = null;
     if (rooted) {
-        if (empty.selected_id.len != evt.event_id_size * 2) return error.NotFound;
-        var id: [evt.event_id_size]u8 = undefined;
-        _ = std.fmt.hexToBytes(&id, empty.selected_id) catch return error.NotFound;
+        const id = evt.parseEventId(empty.selected_id) catch return error.NotFound;
         const record_cursor = try records.getCursor(hash.hashInt(repo_opts.hash, &id)) orelse return error.NotFound;
         const record = try evt.read(evt.Discussion.Record, DB, repo_opts.hash, arena, try DB.HashMap(.read_only).init(record_cursor));
         if (record.removed) return error.NotFound;
@@ -267,122 +258,54 @@ fn loadWindow(
 }
 pub const View = Threads.View(.discuss, Self);
 
-// tabs switching between the discussions page's views.
-pub const Header = struct {
-    box: wgt.Box(ui.Widget),
-    tab_ids: std.AutoArrayHashMapUnmanaged(usize, void),
+pub const Header = Threads.Header;
 
-    pub fn init(allocator: std.mem.Allocator, session: *ui.Session, data: *const Self) !Header {
-        var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
-        errdefer box.deinit(allocator);
+// tabs switching between the discussions page's views
+pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *const Self) !Header {
+    var header = try Header.init(allocator);
+    errdefer header.deinit(allocator);
+    const aa = session.page_arena.allocator();
 
-        var tab_ids: std.AutoArrayHashMapUnmanaged(usize, void) = .empty;
-        errdefer tab_ids.deinit(allocator);
-
-        const aa = session.page_arena.allocator();
-
-        // recent discussions
-        {
-            const route = ui.RoutablePage.repoDiscussionsRoute(data.identity, data.tag, "") orelse return error.RouteTooLong;
-            const link = try std.fmt.allocPrint(aa, "ai:{s}", .{try route.toUrl(session.page_arena)});
-            var label_buf: [64]u8 = undefined;
-            const label = try std.fmt.bufPrint(&label_buf, "recent ({d})", .{data.recent.count});
-            try addTab(allocator, &box, &tab_ids, label, link);
-        }
-
-        // tags tab, labeled with the active tag filter
-        {
-            const tags_route = ui.RoutablePage.repoThreadTagsRoute(.discuss, data.identity, data.tag) orelse return error.RouteTooLong;
-            const tags_link = try std.fmt.allocPrint(aa, "ai:{s}", .{try tags_route.toUrl(session.page_arena)});
-            const label = if (data.tag.len == 0) "tags" else blk: {
-                const decoded = std.Uri.percentDecodeInPlace(try aa.dupe(u8, data.tag));
-                break :blk try std.fmt.allocPrint(aa, "tags ({s})", .{decoded});
-            };
-            try addTab(allocator, &box, &tab_ids, label, tags_link);
-        }
-
-        // new-discussion tab; an edit or comment url shows its tab in this place
-        {
-            const route = switch (data.view) {
-                .edit => ui.RoutablePage.repoThreadEditRoute(.discuss, data.identity, data.selected_id) orelse return error.RouteTooLong,
-                .new_comment => ui.RoutablePage.repoThreadCommentNewRoute(.discuss, data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong,
-                .edit_comment => ui.RoutablePage.repoThreadCommentEditRoute(.discuss, data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong,
-                .remove => ui.RoutablePage.repoThreadRemoveRoute(.discuss, data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong,
-                else => ui.RoutablePage.repoThreadNewRoute(.discuss, data.identity) orelse return error.RouteTooLong,
-            };
-            const link = try std.fmt.allocPrint(aa, "ai:{s}", .{try route.toUrl(session.page_arena)});
-            const label: []const u8 = switch (data.view) {
-                .edit => "edit",
-                .new_comment => "reply",
-                .edit_comment => "edit",
-                .remove => "remove",
-                else => "new",
-            };
-            try addTab(allocator, &box, &tab_ids, label, link);
-        }
-
-        var self = Header{ .box = box, .tab_ids = tab_ids };
-        // the tab matching the page's view is selected initially.
-        self.getFocus().child_id = self.tab_ids.keys()[View.viewIndex(data.view)];
-        return self;
+    // recent discussions
+    {
+        const route = ui.RoutablePage.repoDiscussionsRoute(data.identity, data.tag, "") orelse return error.RouteTooLong;
+        const link = try std.fmt.allocPrint(aa, "ai:{s}", .{try route.toUrl(session.page_arena)});
+        var label_buf: [64]u8 = undefined;
+        const label = try std.fmt.bufPrint(&label_buf, "recent ({d})", .{data.recent.count});
+        try header.addTab(allocator, label, link, 0);
     }
 
-    fn addTab(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), tab_ids: *std.AutoArrayHashMapUnmanaged(usize, void), label: []const u8, link: []const u8) !void {
-        var text_box = try wgt.TextBox(ui.Widget).init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
-        errdefer text_box.deinit(allocator);
-        text_box.getFocus().focusable = true;
-        text_box.getFocus().kind = .{ .custom = link };
-        try tab_ids.put(allocator, text_box.getFocus().id, {});
-        try box.children.put(allocator, text_box.getFocus().id, .{
-            .widget = .{ .text_box = text_box },
-            .rect = null,
-            .min_size = .{ .width = label.len + 2, .height = null },
-        });
+    // tags tab, labeled with the active tag filter
+    {
+        const tags_route = ui.RoutablePage.repoThreadTagsRoute(.discuss, data.identity, data.tag) orelse return error.RouteTooLong;
+        const tags_link = try std.fmt.allocPrint(aa, "ai:{s}", .{try tags_route.toUrl(session.page_arena)});
+        const label = if (data.tag.len == 0) "tags" else blk: {
+            const decoded = std.Uri.percentDecodeInPlace(try aa.dupe(u8, data.tag));
+            break :blk try std.fmt.allocPrint(aa, "tags ({s})", .{decoded});
+        };
+        try header.addTab(allocator, label, tags_link, View.viewIndex(.tags));
     }
 
-    pub fn deinit(self: *Header, allocator: std.mem.Allocator) void {
-        self.box.deinit(allocator);
-        self.tab_ids.deinit(allocator);
+    // new-discussion tab; an edit or comment url shows its tab in this place
+    {
+        const route = switch (data.view) {
+            .edit => ui.RoutablePage.repoThreadEditRoute(.discuss, data.identity, data.selected_id) orelse return error.RouteTooLong,
+            .new_comment => ui.RoutablePage.repoThreadCommentNewRoute(.discuss, data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong,
+            .edit_comment => ui.RoutablePage.repoThreadCommentEditRoute(.discuss, data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong,
+            .remove => ui.RoutablePage.repoThreadRemoveRoute(.discuss, data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong,
+            else => ui.RoutablePage.repoThreadNewRoute(.discuss, data.identity) orelse return error.RouteTooLong,
+        };
+        const link = try std.fmt.allocPrint(aa, "ai:{s}", .{try route.toUrl(session.page_arena)});
+        const label: []const u8 = switch (data.view) {
+            .edit => "edit",
+            .new_comment => "reply",
+            .edit_comment => "edit",
+            .remove => "remove",
+            else => "new",
+        };
+        try header.addTab(allocator, label, link, View.viewIndex(.new));
     }
 
-    pub fn build(self: *Header, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
-        self.clearGrid();
-        // only the selected tab shows its border
-        for (self.box.children.keys(), self.box.children.values()) |id, *child| {
-            switch (child.widget) {
-                .text_box => |*tb| tb.options.border_style = if (self.getFocus().child_id == id) .single else .hidden,
-                else => {},
-            }
-        }
-        try self.box.build(allocator, constraint, root_focus);
-    }
-
-    pub fn input(self: *Header, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
-        _ = allocator;
-        const current_tab = self.currentTabIndex() orelse return;
-        if (inp.moveTab(key, current_tab, self.tab_ids.count())) |new_tab| {
-            root_focus.setFocus(self.tab_ids.keys()[new_tab]);
-        }
-    }
-
-    pub fn clearGrid(self: *Header) void {
-        self.box.clearGrid();
-    }
-
-    pub fn getGrid(self: Header) ?Grid {
-        return self.box.getGrid();
-    }
-
-    pub fn getFocus(self: *Header) *Focus {
-        return self.box.getFocus();
-    }
-
-    pub fn getSelectedIndex(self: Header) ?usize {
-        return self.currentTabIndex();
-    }
-
-    fn currentTabIndex(self: Header) ?usize {
-        const child_id = self.box.focus.child_id orelse return null;
-        return self.tab_ids.getIndex(child_id);
-    }
-};
+    header.select(View.viewIndex(data.view));
+    return header;
+}

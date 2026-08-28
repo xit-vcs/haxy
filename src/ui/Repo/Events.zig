@@ -275,6 +275,9 @@ fn readItem(
         .patch => {
             const record = (try readRecord(evt.Patch, hash_kind, arena, haxy_moment, id)) orelse return null;
             item.author = try ui.Author.initFromEmail(admin_moment, arena, record.author_email);
+            if (!include_view_url) return item;
+            const route = ui.RoutablePage.repoThreadCommentsRoute(.patch, identity, item.id, 0) orelse return error.RouteTooLong;
+            item.view_url = try route.toUrl(arena);
         },
         .patchrev => {
             const record = (try readRecord(evt.PatchRev, hash_kind, arena, haxy_moment, id)) orelse return null;

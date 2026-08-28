@@ -10,6 +10,8 @@ const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
 const inp = @import("input.zig");
 
+const debug_ssh_prefix = "GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR' \\\r\n";
+
 pub const View = struct {
     box: wgt.Box(ui.Widget),
     session: *ui.Session,
@@ -19,7 +21,7 @@ pub const View = struct {
 
     const Protocol = struct {
         name: []const u8,
-        url: []const u8,
+        text: []const u8,
         copyable_text: []const u8,
     };
 
@@ -31,25 +33,51 @@ pub const View = struct {
             const url = try std.fmt.allocPrint(aa, "http://localhost:{d}/repo/{s}", .{ port, identity });
             protocols[protocol_count] = .{
                 .name = "http",
-                .url = url,
+                .text = url,
                 .copyable_text = try std.fmt.allocPrint(aa, "git clone {s}", .{url}),
             };
             protocol_count += 1;
         }
         if (session.data.clone_ssh_port) |port| {
-            const debug_prefix = "GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR' \\\r\n";
             const url = try std.fmt.allocPrint(aa, "ssh://localhost:{d}/repo/{s}", .{ port, identity });
             protocols[protocol_count] = .{
                 .name = "ssh",
-                .url = url,
-                .copyable_text = try std.fmt.allocPrint(aa, "{s}git clone {s}", .{ if (builtin.mode == .Debug) debug_prefix else "", url }),
+                .text = url,
+                .copyable_text = try std.fmt.allocPrint(aa, "{s}git clone {s}", .{ if (builtin.mode == .Debug) debug_ssh_prefix else "", url }),
             };
             protocol_count += 1;
         }
+        return initProtocols(allocator, session, protocols, protocol_count, " clone ");
+    }
+
+    pub fn initPush(allocator: std.mem.Allocator, session: *ui.Session, identity: []const u8, id: []const u8, branch: []const u8) !View {
+        const aa = session.page_arena.allocator();
+        var protocols: [2]Protocol = undefined;
+        var protocol_count: usize = 0;
+        if (session.data.clone_http_port) |port| {
+            const url = try std.fmt.allocPrint(aa, "http://localhost:{d}/repo/{s}/patch:{s}/branch:{s}", .{ port, identity, id, branch });
+            const command = try std.fmt.allocPrint(aa, "git push {s} HEAD:patch", .{url});
+            protocols[protocol_count] = .{ .name = "http", .text = command, .copyable_text = command };
+            protocol_count += 1;
+        }
+        if (session.data.clone_ssh_port) |port| {
+            const url = try std.fmt.allocPrint(aa, "ssh://localhost:{d}/repo/{s}/patch:{s}/branch:{s}", .{ port, identity, id, branch });
+            const command = try std.fmt.allocPrint(aa, "git push {s} HEAD:patch", .{url});
+            protocols[protocol_count] = .{
+                .name = "ssh",
+                .text = command,
+                .copyable_text = if (builtin.mode == .Debug) try std.fmt.allocPrint(aa, "{s}{s}", .{ debug_ssh_prefix, command }) else command,
+            };
+            protocol_count += 1;
+        }
+        return initProtocols(allocator, session, protocols, protocol_count, " push ");
+    }
+
+    fn initProtocols(allocator: std.mem.Allocator, session: *ui.Session, protocols: [2]Protocol, protocol_count: usize, input_label: []const u8) !View {
         if (protocol_count == 0) return error.MissingClonePort;
 
-        var max_url_len: usize = 0;
-        for (protocols[0..protocol_count]) |protocol| max_url_len = @max(max_url_len, protocol.url.len);
+        var max_text_len: usize = 0;
+        for (protocols[0..protocol_count]) |protocol| max_text_len = @max(max_text_len, protocol.text.len);
 
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
         errdefer box.deinit(allocator);
@@ -62,29 +90,29 @@ pub const View = struct {
             try box.children.put(allocator, label.getFocus().id, .{ .widget = .{ .text_box = label }, .rect = null, .min_size = .{ .width = protocol.name.len + 2, .height = 3 } });
         }
 
-        var url_input = try wgt.TextInput(ui.Widget).init(allocator, .{
+        var text_input = try wgt.TextInput(ui.Widget).init(allocator, .{
             .border_style = .single,
-            .label = " clone ",
+            .label = input_label,
             .render_content = session.is_terminal,
-            .visible_width = max_url_len,
+            .visible_width = max_text_len,
         });
-        errdefer url_input.deinit(allocator);
-        url_input.getFocus().focusable = true;
-        try url_input.setContent(allocator, protocols[0].url);
-        box.getFocus().child_id = url_input.getFocus().id;
-        try box.children.put(allocator, url_input.getFocus().id, .{ .widget = .{ .text_input = url_input }, .rect = null, .min_size = .{ .width = max_url_len + 2, .height = 3 } });
+        errdefer text_input.deinit(allocator);
+        text_input.getFocus().focusable = true;
+        try text_input.setContent(allocator, protocols[0].text);
+        box.getFocus().child_id = text_input.getFocus().id;
+        try box.children.put(allocator, text_input.getFocus().id, .{ .widget = .{ .text_input = text_input }, .rect = null, .min_size = .{ .width = max_text_len + 2, .height = 3 } });
 
         return .{ .box = box, .session = session, .protocols = protocols, .protocol_count = protocol_count };
     }
 
     pub fn minWidth(self: *const View) usize {
         var width: usize = 0;
-        var max_url_len: usize = 0;
+        var max_text_len: usize = 0;
         for (self.protocols[0..self.protocol_count]) |protocol| {
             width += protocol.name.len + 2;
-            max_url_len = @max(max_url_len, protocol.url.len);
+            max_text_len = @max(max_text_len, protocol.text.len);
         }
-        return width + max_url_len + 2;
+        return width + max_text_len + 2;
     }
 
     pub fn deinit(self: *View, allocator: std.mem.Allocator) void {
@@ -102,29 +130,29 @@ pub const View = struct {
             if (clicked) |selected| {
                 if (selected != self.selected) {
                     self.selected = selected;
-                    try self.urlInput().setContent(allocator, self.protocols[selected].url);
+                    try self.textInput().setContent(allocator, self.protocols[selected].text);
                 }
-                root_focus.setFocus(self.urlInput().getFocus().id);
+                root_focus.setFocus(self.textInput().getFocus().id);
             }
         }
 
-        const focused = root_focus.grandchild_id == self.urlInput().getFocus().id;
+        const focused = root_focus.grandchild_id == self.textInput().getFocus().id;
         for (0..self.protocol_count) |i| {
             self.protocolLabel(i).options.border_style = if (i == self.selected)
                 (if (focused) .double else .single)
             else
                 .hidden;
         }
-        self.urlInput().options.border_style = .single;
-        self.urlInput().cursor = 0;
-        self.urlInput().scroll_offset = 0;
+        self.textInput().options.border_style = .single;
+        self.textInput().cursor = 0;
+        self.textInput().scroll_offset = 0;
         try self.box.build(allocator, constraint, root_focus);
 
         if (!self.session.is_terminal) {
             const aa = self.session.arena.allocator();
-            const id = self.urlInput().getFocus().id;
-            try self.session.text_inputs.put(aa, id, self.urlInput());
-            try self.session.input_values.put(aa, id, self.protocols[self.selected].url);
+            const id = self.textInput().getFocus().id;
+            try self.session.text_inputs.put(aa, id, self.textInput());
+            try self.session.input_values.put(aa, id, self.protocols[self.selected].text);
         }
     }
 
@@ -140,17 +168,17 @@ pub const View = struct {
                 for (0..self.protocol_count) |i| {
                     if (inp.leftClickOn(root_focus, self.protocolLabel(i).getFocus().id, mouse)) break :blk i;
                 }
-                if (self.session.is_terminal and !mouse.ctrl and inp.leftClickOn(root_focus, self.urlInput().getFocus().id, mouse))
+                if (self.session.is_terminal and !mouse.ctrl and inp.leftClickOn(root_focus, self.textInput().getFocus().id, mouse))
                     self.session.host_request = .{ .show_copyable_text = self.protocols[self.selected].copyable_text };
                 return;
             },
             else => return,
         };
         self.selected = next;
-        try self.urlInput().setContent(allocator, self.protocols[next].url);
+        try self.textInput().setContent(allocator, self.protocols[next].text);
     }
 
-    fn urlInput(self: *View) *wgt.TextInput(ui.Widget) {
+    fn textInput(self: *View) *wgt.TextInput(ui.Widget) {
         return &self.box.children.values()[self.protocol_count].widget.text_input;
     }
 
