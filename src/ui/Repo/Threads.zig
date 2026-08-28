@@ -369,7 +369,6 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         detailed_index: [view_count]?usize,
         description_id: [view_count]?usize,
         author_id: [view_count]?usize,
-        primary_button_id: [view_count]?usize,
 
         const header_index: usize = 0;
         const stack_index: usize = 1;
@@ -389,7 +388,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         const detail_index: usize = 1;
         const list_max_width: usize = 40;
         const detail_min_width: usize = 40;
-        // indices within the issue form.
+        // indices within the thread form.
         const title_field_index: usize = 0;
         const tags_field_index: usize = 1;
         const description_field_index: usize = 2;
@@ -412,7 +411,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         }
 
         // the status a status split lists; the conflicts split has none (its
-        // issues carry their own).
+        // threads carry their own).
         fn splitStatus(index: usize) Status {
             return @enumFromInt(index);
         }
@@ -429,17 +428,21 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             return if (has_drafts) entry.draft else false;
         }
 
-        fn statusAction(status: Status) ?[]const u8 {
-            const name = @tagName(status);
-            if (std.mem.eql(u8, name, "open")) return "close";
-            if (std.mem.eql(u8, name, "closed")) return "open";
-            return null;
-        }
+        const StatusChange = struct {
+            action: []const u8,
+            status: Status,
+        };
 
-        fn toggledStatus(status: Status) ?Status {
+        fn statusChange(status: Status) ?StatusChange {
             const name = @tagName(status);
-            if (std.mem.eql(u8, name, "open")) return std.meta.stringToEnum(Status, "closed");
-            if (std.mem.eql(u8, name, "closed")) return std.meta.stringToEnum(Status, "open");
+            if (std.mem.eql(u8, name, "open")) return .{
+                .action = "close",
+                .status = std.meta.stringToEnum(Status, "closed") orelse return null,
+            };
+            if (std.mem.eql(u8, name, "closed")) return .{
+                .action = "open",
+                .status = std.meta.stringToEnum(Status, "open") orelse return null,
+            };
             return null;
         }
 
@@ -452,47 +455,11 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             };
         }
 
-        fn commentsRoute(identity: []const u8, selected: []const u8, start: usize) ?ui.RoutablePage {
-            return ui.RoutablePage.repoThreadCommentsRoute(kind, identity, selected, start);
-        }
-
-        fn commentRoute(identity: []const u8, thread_id: []const u8, comment_id: []const u8, start: usize) ?ui.RoutablePage {
-            return ui.RoutablePage.repoThreadCommentRoute(kind, identity, thread_id, comment_id, start);
-        }
-
-        fn newCommentRoute(identity: []const u8, thread_id: []const u8, parent_id: []const u8) ?ui.RoutablePage {
-            return ui.RoutablePage.repoThreadCommentNewRoute(kind, identity, thread_id, parent_id);
-        }
-
-        fn editCommentRoute(identity: []const u8, thread_id: []const u8, comment_id: []const u8) ?ui.RoutablePage {
-            return ui.RoutablePage.repoThreadCommentEditRoute(kind, identity, thread_id, comment_id);
-        }
-
-        fn removeRoute(identity: []const u8, thread_id: []const u8, comment_id: []const u8) ?ui.RoutablePage {
-            return ui.RoutablePage.repoThreadRemoveRoute(kind, identity, thread_id, comment_id);
-        }
-
-        fn editRoute(identity: []const u8, selected: []const u8) ?ui.RoutablePage {
-            return ui.RoutablePage.repoThreadEditRoute(kind, identity, selected);
-        }
-
-        fn newRoute(identity: []const u8) ?ui.RoutablePage {
-            return ui.RoutablePage.repoThreadNewRoute(kind, identity);
-        }
-
         fn draftsRoute(identity: []const u8) ?ui.RoutablePage {
             return switch (kind) {
                 .patch => ui.RoutablePage.repoPatchesDraftsRoute(identity),
                 else => null,
             };
-        }
-
-        fn descriptionRoute(identity: []const u8, selected: []const u8) ?ui.RoutablePage {
-            return ui.RoutablePage.repoThreadDescriptionRoute(kind, identity, selected);
-        }
-
-        fn tagsRoute(identity: []const u8, tag: []const u8) ?ui.RoutablePage {
-            return ui.RoutablePage.repoThreadTagsRoute(kind, identity, tag);
         }
 
         fn conflictsRoute(identity: []const u8, selected: []const u8) ?ui.RoutablePage {
@@ -531,11 +498,6 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 return std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{try route.toUrl(page_arena)});
             }
             return listLink(page_arena, data.identity, status_maybe orelse @enumFromInt(0), data.tag, id);
-        }
-
-        fn descriptionLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, id: []const u8) ![]const u8 {
-            const route = descriptionRoute(identity, id) orelse return error.RouteTooLong;
-            return std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{try route.toUrl(page_arena)});
         }
 
         fn tagLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, status: Status, tag: []const u8) ![]const u8 {
@@ -589,14 +551,14 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 try stack.children.put(allocator, tf.getFocus().id, .{ .tag_flow = tf });
             }
 
-            // the new-issue form, or — on an edit, comment, or resolve url — that form in
-            // its place, prefilled with the selected issue's content. a
+            // the new-thread form, or — on an edit, comment, or resolve url — that form in
+            // its place, prefilled with the selected thread's content. a
             // logged-out session can't create events, so the unauthorized view
             // stands in.
             if (session.data.is_local or session.data.user_id != null) {
                 if (data.view == .remove) {
                     const aa = session.page_arena.allocator();
-                    const route = removeRoute(data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong;
+                    const route = ui.RoutablePage.repoThreadRemoveRoute(kind, data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong;
                     const action = try std.fmt.allocPrint(aa, "form:{s}", .{try route.toUrl(session.page_arena)});
                     const event_name = if (data.comment_id.len == 0) thread_name else "comment";
                     var label_buf: ["remove ".len + @max(thread_name.len, "comment".len)]u8 = undefined;
@@ -607,24 +569,24 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 } else if (data.view == .new_comment or data.view == .edit_comment) {
                     const editing = data.view == .edit_comment;
                     const route = if (editing)
-                        editCommentRoute(data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong
+                        ui.RoutablePage.repoThreadCommentEditRoute(kind, data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong
                     else
-                        newCommentRoute(data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong;
+                        ui.RoutablePage.repoThreadCommentNewRoute(kind, data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong;
                     const page_url = try route.toUrl(session.page_arena);
                     const action = try std.fmt.allocPrint(session.page_arena.allocator(), "form:{s}", .{page_url});
                     const page = data.comment_page;
                     const top_level = if (page) |p| std.mem.eql(u8, &p.selected.comment.event.parent_id, &p.selected.comment.event.thread_id) else false;
                     const parent_route = if (editing)
                         if (top_level)
-                            commentsRoute(data.identity, data.selected_id, 0)
+                            ui.RoutablePage.repoThreadCommentsRoute(kind, data.identity, data.selected_id, 0)
                         else if (page) |p|
-                            commentRoute(data.identity, data.selected_id, &p.selected.comment.event.parent_id, 0)
+                            ui.RoutablePage.repoThreadCommentRoute(kind, data.identity, data.selected_id, &p.selected.comment.event.parent_id, 0)
                         else
                             null
                     else if (page) |p|
-                        commentRoute(data.identity, data.selected_id, &p.selected.id, 0)
+                        ui.RoutablePage.repoThreadCommentRoute(kind, data.identity, data.selected_id, &p.selected.id, 0)
                     else
-                        commentsRoute(data.identity, data.selected_id, 0);
+                        ui.RoutablePage.repoThreadCommentsRoute(kind, data.identity, data.selected_id, 0);
                     const parent_author: ui.Author = if (editing)
                         if (top_level)
                             if (data.selectedThread()) |entry| entry.author else .unknown
@@ -658,9 +620,9 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 } else {
                     const aa = session.page_arena.allocator();
                     const route = if (data.view == .edit)
-                        editRoute(data.identity, data.selected_id) orelse return error.RouteTooLong
+                        ui.RoutablePage.repoThreadEditRoute(kind, data.identity, data.selected_id) orelse return error.RouteTooLong
                     else
-                        newRoute(data.identity) orelse return error.RouteTooLong;
+                        ui.RoutablePage.repoThreadNewRoute(kind, data.identity) orelse return error.RouteTooLong;
                     const action = try std.fmt.allocPrint(aa, "form:{s}", .{try route.toUrl(session.page_arena)});
                     const record = if (data.view == .edit)
                         (if (data.selectedThread()) |entry| &entry.record else null)
@@ -704,7 +666,6 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 .detailed_index = @splat(null),
                 .description_id = @splat(null),
                 .author_id = @splat(null),
-                .primary_button_id = @splat(null),
             };
         }
 
@@ -716,8 +677,8 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
 
             const win = if (status_maybe) |status| data.window(status) else if (drafts and has_drafts) &data.drafts else if (has_conflicts) &data.conflicts else unreachable;
 
-            // the issue list (one focusable row per title), plus a "next" link that
-            // reloads the page rooted at the following issue.
+            // the thread list (one focusable row per title), plus a "next" link that
+            // reloads the page rooted at the following thread.
             {
                 var list_scroll = blk: {
                     var list_box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert, .stretch = true });
@@ -736,7 +697,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     }
                     if (win.next_id) |next|
                         try addRow(allocator, &list_box, "next →", "", try windowLink(session.page_arena, data, status_maybe, drafts, next));
-                    // select the window's first issue (past a leading "previous"
+                    // select the window's first thread (past a leading "previous"
                     // row) so its description shows on load.
                     if (win.items.len > 0)
                         list_box.getFocus().child_id = list_box.children.keys()[if (win.prev_id != null) 1 else 0]
@@ -762,7 +723,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     var frame = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = .hidden, .direction = .vert });
                     errdefer frame.deinit(allocator);
                     // the tool row sits above the scroll (populateDetail fills
-                    // it per issue) so it can't scroll out from under the web
+                    // it per thread) so it can't scroll out from under the web
                     // overlay <form>, whose position doesn't track pane scrolling.
                     {
                         var row = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
@@ -816,7 +777,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 try box.children.put(allocator, description.getFocus().id, .{ .widget = .{ .text_input = description }, .rect = null, .min_size = null });
             }
 
-            try addSubmitButtonLabeled(allocator, &box, if (kind == .patch and record == null) "submit private draft" else "submit");
+            try addSubmitButtonLabeled(allocator, &box, if (kind == .patch and record == null) "submit draft" else "submit");
 
             box.getFocus().child_id = box.children.keys()[title_field_index];
             return box;
@@ -879,10 +840,6 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         // a form's submit button, then a spacer absorbing the leftover
         // min-height the box hands its last child, so the button keeps its
         // natural height
-        fn addSubmitButton(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget)) !void {
-            return addSubmitButtonLabeled(allocator, box, "submit");
-        }
-
         fn addSubmitButtonLabeled(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8) !void {
             {
                 var submit = try ui.SubmitButton.initLabeled(allocator, label);
@@ -974,7 +931,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 }
             }
 
-            try addSubmitButton(allocator, &box);
+            try addSubmitButtonLabeled(allocator, &box, "submit");
 
             box.getFocus().child_id = box.children.keys()[0];
             return box;
@@ -1117,6 +1074,14 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             try box.children.put(allocator, row.getFocus().id, .{ .widget = .{ .text_box = row }, .rect = null, .min_size = null, .max_size = .{ .width = null, .height = 5 } });
         }
 
+        fn addToolButton(allocator: std.mem.Allocator, row: *wgt.Box(ui.Widget), label: []const u8, action: []const u8) !void {
+            var button = try wgt.TextBox(ui.Widget).init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            errdefer button.deinit(allocator);
+            button.getFocus().focusable = true;
+            button.getFocus().kind = .{ .custom = action };
+            try row.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = .{ .width = try xitui.width.displayWidth(label) + 2, .height = null } });
+        }
+
         pub fn deinit(self: *This, allocator: std.mem.Allocator) void {
             self.box.deinit(allocator);
         }
@@ -1144,7 +1109,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             return &self.viewStack().children.values()[tags_view_index].tag_flow;
         }
 
-        // the new-issue, edit, or resolve form inside the stack, or null when the
+        // the new-thread, edit, or resolve form inside the stack, or null when the
         // unauthorized view stands in for it.
         fn threadForm(self: *This) ?*wgt.Box(ui.Widget) {
             return switch (self.viewStack().children.values()[form_view_index]) {
@@ -1214,7 +1179,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         }
 
         // the stack's selected master-detail split (null when the tags view or the
-        // new-issue form shows).
+        // new-thread form shows).
         fn selectedSplitIndex(self: *This) ?usize {
             const idx = self.stackSelectedIndex() orelse return null;
             return if (idx < status_count or (has_drafts and idx == drafts_view_index) or idx == conflict_view_index) idx else null;
@@ -1241,8 +1206,8 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             return self.stackSelectedIndex() == form_view_index;
         }
 
-        // the selected issue's index, or null when a window-navigation row is
-        // selected (a leading "previous" row shifts the issue rows down by one).
+        // the selected thread's index, or null when a window-navigation row is
+        // selected (a leading "previous" row shifts the thread rows down by one).
         fn selectedThreadIndex(self: *This, index: usize) ?usize {
             const lb = self.listBox(index);
             const cid = lb.getFocus().child_id orelse return null;
@@ -1265,63 +1230,69 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 stack.getFocus().child_id = stack.children.keys()[index];
                 self.session.data.current_page = (if (index == form_view_index)
                     (if (has_conflicts) switch (self.data.view) {
-                        .edit => editRoute(self.data.identity, self.data.selected_id),
-                        .new_comment => newCommentRoute(self.data.identity, self.data.selected_id, self.data.comment_id),
-                        .edit_comment => editCommentRoute(self.data.identity, self.data.selected_id, self.data.comment_id),
-                        .remove => removeRoute(self.data.identity, self.data.selected_id, self.data.comment_id),
+                        .edit => ui.RoutablePage.repoThreadEditRoute(kind, self.data.identity, self.data.selected_id),
+                        .new_comment => ui.RoutablePage.repoThreadCommentNewRoute(kind, self.data.identity, self.data.selected_id, self.data.comment_id),
+                        .edit_comment => ui.RoutablePage.repoThreadCommentEditRoute(kind, self.data.identity, self.data.selected_id, self.data.comment_id),
+                        .remove => ui.RoutablePage.repoThreadRemoveRoute(kind, self.data.identity, self.data.selected_id, self.data.comment_id),
                         .resolve => resolveRoute(self.data.identity, self.data.selected_id, self.data.theirs_picks),
-                        else => newRoute(self.data.identity),
+                        else => ui.RoutablePage.repoThreadNewRoute(kind, self.data.identity),
                     } else switch (self.data.view) {
-                        .edit => editRoute(self.data.identity, self.data.selected_id),
-                        .new_comment => newCommentRoute(self.data.identity, self.data.selected_id, self.data.comment_id),
-                        .edit_comment => editCommentRoute(self.data.identity, self.data.selected_id, self.data.comment_id),
-                        .remove => removeRoute(self.data.identity, self.data.selected_id, self.data.comment_id),
-                        else => newRoute(self.data.identity),
+                        .edit => ui.RoutablePage.repoThreadEditRoute(kind, self.data.identity, self.data.selected_id),
+                        .new_comment => ui.RoutablePage.repoThreadCommentNewRoute(kind, self.data.identity, self.data.selected_id, self.data.comment_id),
+                        .edit_comment => ui.RoutablePage.repoThreadCommentEditRoute(kind, self.data.identity, self.data.selected_id, self.data.comment_id),
+                        .remove => ui.RoutablePage.repoThreadRemoveRoute(kind, self.data.identity, self.data.selected_id, self.data.comment_id),
+                        else => ui.RoutablePage.repoThreadNewRoute(kind, self.data.identity),
                     })
                 else if (has_conflicts and index == conflict_view_index)
                     conflictsRoute(self.data.identity, if (self.data.view == .conflicts) self.data.selected_id else "")
                 else if (has_drafts and index == drafts_view_index)
                     if (index == viewIndex(self.data.view) and self.data.selected_id.len != 0)
-                        commentsRoute(self.data.identity, self.data.selected_id, 0)
+                        ui.RoutablePage.repoThreadCommentsRoute(kind, self.data.identity, self.data.selected_id, 0)
                     else
                         draftsRoute(self.data.identity)
                 else if (index == viewIndex(self.data.view) and self.data.selected_id.len != 0)
                     (if (self.data.description_page)
-                        descriptionRoute(self.data.identity, self.data.selected_id)
+                        ui.RoutablePage.repoThreadDescriptionRoute(kind, self.data.identity, self.data.selected_id)
                     else if (self.data.comment_page) |page|
-                        commentRoute(self.data.identity, self.data.selected_id, &page.selected.id, page.replies.start)
+                        ui.RoutablePage.repoThreadCommentRoute(kind, self.data.identity, self.data.selected_id, &page.selected.id, page.replies.start)
                     else
-                        commentsRoute(self.data.identity, self.data.selected_id, self.data.comments_start))
+                        ui.RoutablePage.repoThreadCommentsRoute(kind, self.data.identity, self.data.selected_id, self.data.comments_start))
                 else if (index == tags_view_index)
-                    tagsRoute(self.data.identity, self.data.tag)
+                    ui.RoutablePage.repoThreadTagsRoute(kind, self.data.identity, self.data.tag)
                 else
                     listRoute(self.data.identity, splitStatus(index), self.data.tag, "")) orelse self.session.data.current_page;
             }
 
             if (self.selectedSplitIndex()) |i| {
-                // swap the detail pane to the selected issue when it changes.
-                try self.refreshDetail(allocator, i);
+                // swap the detail pane to the selected thread when it changes.
+                if (self.selectedThreadIndex(i)) |selected| {
+                    const changed = if (self.detailed_index[i]) |current| current != selected else true;
+                    if (changed) {
+                        try self.populateDetail(allocator, i, selected);
+                        self.detailed_index[i] = selected;
+                    }
+                }
 
-                // mirror the focused issue into the url, but only while focus is
-                // inside the split. an issue's url is the same whether or not the
+                // mirror the focused thread into the url, but only while focus is
+                // inside the split. a thread's url is the same whether or not the
                 // list is filtered, so the mirror drops the tag.
                 if (root_focus.grandchild_id) |g| {
                     if (self.resultsBox(i).getFocus().children.contains(g)) {
                         if (self.selectedThreadIndex(i)) |sel| {
-                            // selecting another issue leaves the description page
+                            // selecting another thread leaves the description page
                             // behind, like it leaves the tag filter behind.
                             const entry = &self.window(i).items[sel];
                             const mirrored = if (self.data.description_page and std.mem.eql(u8, entry.id, self.data.selected_id))
-                                descriptionRoute(self.data.identity, entry.id)
+                                ui.RoutablePage.repoThreadDescriptionRoute(kind, self.data.identity, entry.id)
                             else if (self.data.comment_page) |page|
                                 if (std.mem.eql(u8, entry.id, self.data.selected_id))
-                                    commentRoute(self.data.identity, entry.id, &page.selected.id, page.replies.start)
+                                    ui.RoutablePage.repoThreadCommentRoute(kind, self.data.identity, entry.id, &page.selected.id, page.replies.start)
                                 else
-                                    commentsRoute(self.data.identity, entry.id, 0)
+                                    ui.RoutablePage.repoThreadCommentsRoute(kind, self.data.identity, entry.id, 0)
                             else if (std.mem.eql(u8, entry.id, self.data.selected_id))
-                                commentsRoute(self.data.identity, entry.id, entry.comments.start)
+                                ui.RoutablePage.repoThreadCommentsRoute(kind, self.data.identity, entry.id, entry.comments.start)
                             else
-                                commentsRoute(self.data.identity, entry.id, 0);
+                                ui.RoutablePage.repoThreadCommentsRoute(kind, self.data.identity, entry.id, 0);
                             if (mirrored) |route| self.session.data.current_page = route;
                         }
                     }
@@ -1366,7 +1337,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     else => {},
                 };
 
-                // on an edit page, register the issue's content as the inputs'
+                // on an edit page, register the thread's content as the inputs'
                 // page-constant initial values, which the web overlay renders
                 // into them.
                 if (self.data.view == .edit) {
@@ -1400,18 +1371,11 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             try self.box.build(allocator, constraint, root_focus);
         }
 
-        fn refreshDetail(self: *This, allocator: std.mem.Allocator, index: usize) !void {
-            const sel = self.selectedThreadIndex(index) orelse return;
-            if (self.detailed_index[index]) |d| if (d == sel) return;
-            try self.populateDetail(allocator, index, sel);
-            self.detailed_index[index] = sel;
-        }
-
         fn populateDetail(self: *This, allocator: std.mem.Allocator, index: usize, sel: usize) !void {
             const entry = self.window(index).items[sel];
             const inner = self.detailInner(index);
-            // the /description page replaces its issue's detail with a back link
-            // and the whole description; other issues keep their normal detail.
+            // the /description page replaces its thread's detail with a back link
+            // and the whole description; other threads keep their normal detail.
             const description_page = self.data.description_page and std.mem.eql(u8, entry.id, self.data.selected_id);
             const comment_page = if (std.mem.eql(u8, entry.id, self.data.selected_id)) self.data.comment_page else null;
 
@@ -1419,7 +1383,6 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             inner.children.clearAndFree(allocator);
             inner.getFocus().child_id = null;
             self.author_id[index] = null;
-            self.primary_button_id[index] = null;
 
             // the tool row; the description page shows none.
             {
@@ -1443,12 +1406,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     if (entry.revision_ready) {
                         const route = listRoute(self.data.identity, @enumFromInt(0), "", entry.id) orelse return error.RouteTooLong;
                         row.getFocus().kind = .{ .custom = try std.fmt.allocPrint(pa, "form:{s}/post", .{try route.toUrl(self.session.page_arena)}) };
-                        var button = try wgt.TextBox(ui.Widget).init(allocator, "post", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
-                        errdefer button.deinit(allocator);
-                        button.getFocus().focusable = true;
-                        button.getFocus().kind = .{ .custom = "submit" };
-                        self.primary_button_id[index] = button.getFocus().id;
-                        try row.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = .{ .width = "post".len + 2, .height = null } });
+                        try addToolButton(allocator, row, "post", "submit");
                     }
                     if (row.children.count() > first_in_row_index)
                         row.getFocus().child_id = row.children.keys()[first_in_row_index];
@@ -1458,68 +1416,45 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     // opens the browser's own picker and posts what it chose.
                     if (!self.session.is_terminal and !entryConflicted(entry) and (self.session.data.is_local or self.session.data.user_id != null)) {
                         const label = "add attachment";
-                        var button = try wgt.TextBox(ui.Widget).init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
-                        errdefer button.deinit(allocator);
-                        button.getFocus().focusable = true;
-                        button.getFocus().kind = .{ .custom = if (self.data.identity.len == 0)
+                        const action = if (self.data.identity.len == 0)
                             try std.fmt.allocPrint(pa, "{s}/{s}:{s}/attach", .{ ui.file_input_prefix, @tagName(kind), entry.id })
                         else
-                            try std.fmt.allocPrint(pa, "{s}/repo/{s}/{s}:{s}/attach", .{ ui.file_input_prefix, self.data.identity, @tagName(kind), entry.id }) };
-                        try row.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = .{ .width = label.len + 2, .height = null } });
+                            try std.fmt.allocPrint(pa, "{s}/repo/{s}/{s}:{s}/attach", .{ ui.file_input_prefix, self.data.identity, @tagName(kind), entry.id });
+                        try addToolButton(allocator, row, label, action);
                     }
 
-                    // a conflicted issue's only action is resolving it. the button
+                    // a conflicted thread's only action is resolving it. the button
                     // stays visible logged out; the resolve page shows the
                     // unauthorized view then.
                     if (has_conflicts and entryConflicted(entry)) {
                         const label = "resolve conflict";
-                        var button = try wgt.TextBox(ui.Widget).init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
-                        errdefer button.deinit(allocator);
-                        button.getFocus().focusable = true;
                         const route = resolveRoute(self.data.identity, entry.id, "") orelse return error.RouteTooLong;
-                        button.getFocus().kind = .{ .custom = try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}) };
-                        try row.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = .{ .width = label.len + 2, .height = null } });
+                        try addToolButton(allocator, row, label, try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}));
                     } else {
                         // a logged-out session can't flip the status, so it gets no
                         // open/close button
                         if (has_status and (self.session.data.is_local or self.session.data.user_id != null)) {
-                            if (statusAction(entryStatus(entry))) |action| {
-                                const route = commentsRoute(self.data.identity, entry.id, 0) orelse return error.RouteTooLong;
-                                row.getFocus().kind = .{ .custom = try std.fmt.allocPrint(pa, "form:{s}/{s}", .{ try route.toUrl(self.session.page_arena), action }) };
-
-                                var button = try wgt.TextBox(ui.Widget).init(allocator, action, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
-                                errdefer button.deinit(allocator);
-                                button.getFocus().focusable = true;
-                                // the renderer distinguishes plain clickables from buttons
-                                // that should POST to a server route by this kind.
-                                button.getFocus().kind = .{ .custom = "submit" };
-                                self.primary_button_id[index] = button.getFocus().id;
-                                try row.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = .{ .width = action.len + 2, .height = null } });
+                            if (statusChange(entryStatus(entry))) |change| {
+                                const route = ui.RoutablePage.repoThreadCommentsRoute(kind, self.data.identity, entry.id, 0) orelse return error.RouteTooLong;
+                                row.getFocus().kind = .{ .custom = try std.fmt.allocPrint(pa, "form:{s}/{s}", .{ try route.toUrl(self.session.page_arena), change.action }) };
+                                try addToolButton(allocator, row, change.action, "submit");
                             }
                         }
 
-                        // the edit button links to the issue's edit page.
+                        // the edit button links to the thread's edit page.
                         {
-                            var button = try wgt.TextBox(ui.Widget).init(allocator, "edit", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
-                            errdefer button.deinit(allocator);
-                            button.getFocus().focusable = true;
-                            const route = editRoute(self.data.identity, entry.id) orelse return error.RouteTooLong;
-                            button.getFocus().kind = .{ .custom = try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}) };
-                            try row.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = .{ .width = "edit".len + 2, .height = null } });
+                            const route = ui.RoutablePage.repoThreadEditRoute(kind, self.data.identity, entry.id) orelse return error.RouteTooLong;
+                            try addToolButton(allocator, row, "edit", try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}));
                         }
                     }
 
                     if (self.session.data.is_local or self.session.data.user_id != null) {
-                        var remove = try wgt.TextBox(ui.Widget).init(allocator, "✕", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
-                        errdefer remove.deinit(allocator);
-                        remove.getFocus().focusable = true;
-                        const route = removeRoute(self.data.identity, entry.id, "") orelse return error.RouteTooLong;
-                        remove.getFocus().kind = .{ .custom = try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}) };
-                        try row.children.put(allocator, remove.getFocus().id, .{ .widget = .{ .text_box = remove }, .rect = null, .min_size = .{ .width = 3, .height = null } });
+                        const route = ui.RoutablePage.repoThreadRemoveRoute(kind, self.data.identity, entry.id, "") orelse return error.RouteTooLong;
+                        try addToolButton(allocator, row, "✕", try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}));
                     }
 
                     // the leftmost button: the attachment button when the session has
-                    // one, else the resolve button on a conflicted issue, the
+                    // one, else the resolve button on a conflicted thread, the
                     // open/close button when present, the edit button otherwise
                     row.getFocus().child_id = row.children.keys()[first_in_row_index];
                 }
@@ -1528,7 +1463,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             if (comment_page) |page| {
                 var back_label_buf: ["← back to ".len + thread_name.len]u8 = undefined;
                 const back_label = try std.fmt.bufPrint(&back_label_buf, "← back to {s}", .{thread_name});
-                var back = try Comment.linkBox(allocator, self.session, back_label, commentsRoute(self.data.identity, entry.id, 0) orelse return error.RouteTooLong);
+                var back = try Comment.linkBox(allocator, self.session, back_label, ui.RoutablePage.repoThreadCommentsRoute(kind, self.data.identity, entry.id, 0) orelse return error.RouteTooLong);
                 errdefer back.deinit(allocator);
                 try inner.children.put(allocator, back.getFocus().id, .{ .widget = .{ .text_box = back }, .rect = null, .min_size = null });
 
@@ -1560,7 +1495,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 tb.getFocus().kind = .{ .custom = try listLink(self.session.page_arena, self.data.identity, entryStatus(entry), "", entry.id) };
                 try inner.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
             } else {
-                // the issue's title as a focusable word-wrapped text box.
+                // the thread's title as a focusable word-wrapped text box.
                 {
                     var tb = try wgt.TextBox(ui.Widget).init(allocator, entry.record.event.title, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .word, .label = " title " });
                     errdefer tb.deinit(allocator);
@@ -1575,7 +1510,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     break :blk tb.getFocus().id;
                 };
 
-                // the issue's tags, each linking to this status's list filtered to
+                // the thread's tags, each linking to this status's list filtered to
                 // that tag.
                 {
                     var items: std.ArrayList(ui.TagFlow.Item) = .empty;
@@ -1615,7 +1550,10 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 });
                 errdefer tb.deinit(allocator);
                 tb.getFocus().focusable = true;
-                if (cut_short) tb.getFocus().kind = .{ .custom = try descriptionLink(self.session.page_arena, self.data.identity, entry.id) };
+                if (cut_short) {
+                    const route = ui.RoutablePage.repoThreadDescriptionRoute(kind, self.data.identity, entry.id) orelse return error.RouteTooLong;
+                    tb.getFocus().kind = .{ .custom = try std.fmt.allocPrint(self.session.page_arena.allocator(), "a:{s}", .{try route.toUrl(self.session.page_arena)}) };
+                }
                 try inner.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
                 break :blk tb.getFocus().id;
             };
@@ -1634,11 +1572,11 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 return;
             }
 
-            const parent_route = commentsRoute(self.data.identity, entry.id, 0) orelse return error.RouteTooLong;
+            const parent_route = ui.RoutablePage.repoThreadCommentsRoute(kind, self.data.identity, entry.id, 0) orelse return error.RouteTooLong;
             try Attachment.appendRows(allocator, inner, self.session, self.data.identity, try parent_route.toUrl(self.session.page_arena), entry.attachments);
 
             if (!description_page) {
-                var reply = try Comment.linkBox(allocator, self.session, "new comment", newCommentRoute(self.data.identity, entry.id, "") orelse return error.RouteTooLong);
+                var reply = try Comment.linkBox(allocator, self.session, "new comment", ui.RoutablePage.repoThreadCommentNewRoute(kind, self.data.identity, entry.id, "") orelse return error.RouteTooLong);
                 errdefer reply.deinit(allocator);
                 try inner.children.put(allocator, reply.getFocus().id, .{ .widget = .{ .text_box = reply }, .rect = null, .min_size = null });
 
@@ -1654,7 +1592,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             // select the title by default
             inner.getFocus().child_id = inner.children.keys()[title_child_index];
 
-            // reset the scroll to the top for the newly-shown issue: directly on the
+            // reset the scroll to the top for the newly-shown thread: directly on the
             // terminal (the wasm offset), and via a version bump on the web (so the
             // renderer's scroll id changes and JS drops the preserved position).
             const sc = self.detailScroll(index);
@@ -1706,7 +1644,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             if (self.detailActive(i)) {
                 try self.detailInput(allocator, i, key, root_focus);
             } else {
-                try self.listInput(i, key, root_focus);
+                self.listInput(i, key, root_focus);
             }
         }
 
@@ -1728,7 +1666,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             }
         }
 
-        fn listInput(self: *This, index: usize, key: Key, root_focus: *Focus) !void {
+        fn listInput(self: *This, index: usize, key: Key, root_focus: *Focus) void {
             // up/down (and the scroll wheel) move the selection a row; page up/down
             // jump a fixed amount. right/Enter cross into the detail pane. up from
             // the top row crosses into the header tabs.
@@ -1740,7 +1678,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 return;
             }
             switch (key) {
-                .enter, .arrow_right => try self.focusDetail(index, root_focus),
+                .enter, .arrow_right => self.focusDetail(index, root_focus),
                 else => {},
             }
         }
@@ -1766,70 +1704,90 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 else => {},
             }
             if (self.data.comment_page != null and std.mem.eql(u8, self.window(index).items[self.detailed_index[index] orelse return].id, self.data.selected_id)) {
-                try self.commentInput(allocator, index, key, root_focus);
-            } else if (self.toolRowFocused(index)) {
+                self.commentInput(index, key, root_focus);
+                return;
+            }
+            if (self.toolRowFocused(index)) {
                 try self.toolRowInput(allocator, index, key, root_focus);
-            } else if (self.titleFocused(index)) {
-                try self.titleInput(index, key, root_focus);
-            } else if (self.authorFocused(index)) {
-                try self.authorInput(index, key, root_focus);
-            } else if (self.tagsFocused(index)) {
-                try self.tagsInput(index, key, root_focus);
-            } else if (self.descriptionFocused(index)) {
-                try self.descriptionInput(index, key, root_focus);
-            } else if (try self.cloneUrlInput(allocator, index, key, root_focus)) {} else if (try self.attachmentInput(allocator, index, key, root_focus)) {} else {
-                try self.commentInput(allocator, index, key, root_focus);
+                return;
             }
-        }
 
-        fn cloneUrlInput(self: *This, allocator: std.mem.Allocator, index: usize, key: Key, root_focus: *Focus) !bool {
-            const child_index = self.focusedDetailChild(index, root_focus) orelse return false;
-            const child = &self.detailInner(index).children.values()[child_index].widget;
-            const clone_url = switch (child.*) {
-                .clone_url => |*view| view,
-                else => return false,
-            };
-            switch (key) {
-                .arrow_up => _ = self.moveDetailVertical(index, root_focus, false),
-                .arrow_down => _ = self.moveDetailVertical(index, root_focus, true),
-                .arrow_left => if (clone_url.selected == 0)
-                    try self.focusList(index, root_focus)
-                else
-                    try clone_url.input(allocator, key, root_focus),
-                else => try clone_url.input(allocator, key, root_focus),
+            const child_index = self.focusedDetailChild(index, root_focus) orelse return;
+            const inner = self.detailInner(index);
+            const child_id = inner.children.keys()[child_index];
+            const child = &inner.children.values()[child_index].widget;
+
+            if (child_index == title_child_index) {
+                switch (key) {
+                    .arrow_left => self.focusList(index, root_focus),
+                    .arrow_up => self.focusToolRow(index, root_focus),
+                    .arrow_down => _ = self.moveDetailVertical(index, root_focus, true),
+                    else => {},
+                }
+                return;
             }
-            return true;
-        }
+            if (child_id == self.author_id[index]) {
+                // the author's a: link is followed by the host; arrows cross to
+                // neighboring widgets.
+                switch (key) {
+                    .arrow_left => self.focusList(index, root_focus),
+                    .arrow_up => _ = self.moveDetailVertical(index, root_focus, false),
+                    .arrow_down => _ = self.moveDetailVertical(index, root_focus, true),
+                    else => {},
+                }
+                return;
+            }
+            if (child_id == self.description_id[index]) {
+                self.descriptionInput(index, key, root_focus);
+                return;
+            }
 
-        fn attachmentInput(self: *This, allocator: std.mem.Allocator, index: usize, key: Key, root_focus: *Focus) !bool {
-            const child_index = self.focusedDetailChild(index, root_focus) orelse return false;
-            const child = &self.detailInner(index).children.values()[child_index].widget;
-            const row = switch (child.*) {
-                .box => |*box| box,
-                else => return false,
-            };
-            const attachment_id = Attachment.removeId(row) orelse return false;
-            if (row.children.count() < 2) return false;
-            const remove_id = row.children.keys()[1];
-            switch (key) {
-                .arrow_left => if (!self.moveCommentHorizontal(index, root_focus, false)) try self.focusList(index, root_focus),
-                .arrow_right => _ = self.moveCommentHorizontal(index, root_focus, true),
-                .arrow_up => _ = self.moveDetailVertical(index, root_focus, false),
-                .arrow_down => _ = self.moveDetailVertical(index, root_focus, true),
-                .enter => if (row.getFocus().child_id == remove_id) try self.removeEvent(allocator, .attach, attachment_id),
-                .mouse => |mouse| if (inp.leftClickOn(root_focus, remove_id, mouse)) try self.removeEvent(allocator, .attach, attachment_id),
+            switch (child.*) {
+                .tag_flow => |*tf| {
+                    self.tagsInput(index, child_index, tf, key, root_focus);
+                    return;
+                },
+                .clone_url => |*clone_url| {
+                    switch (key) {
+                        .arrow_up => _ = self.moveDetailVertical(index, root_focus, false),
+                        .arrow_down => _ = self.moveDetailVertical(index, root_focus, true),
+                        .arrow_left => if (clone_url.selected == 0)
+                            self.focusList(index, root_focus)
+                        else
+                            try clone_url.input(allocator, key, root_focus),
+                        else => try clone_url.input(allocator, key, root_focus),
+                    }
+                    return;
+                },
+                .box => |*row| if (Attachment.removeId(row)) |attachment_id| {
+                    const remove_id = row.children.keys()[1];
+                    switch (key) {
+                        .arrow_left => if (!self.moveCommentHorizontal(index, root_focus, false)) self.focusList(index, root_focus),
+                        .arrow_right => _ = self.moveCommentHorizontal(index, root_focus, true),
+                        .arrow_up => _ = self.moveDetailVertical(index, root_focus, false),
+                        .arrow_down => _ = self.moveDetailVertical(index, root_focus, true),
+                        .enter => if (row.getFocus().child_id == remove_id) try self.removeEvent(allocator, .attach, attachment_id),
+                        .mouse => |mouse| if (inp.leftClickOn(root_focus, remove_id, mouse)) try self.removeEvent(allocator, .attach, attachment_id),
+                        else => {},
+                    }
+                    return;
+                },
                 else => {},
             }
-            return true;
+            self.commentInput(index, key, root_focus);
         }
 
         // enter or a click runs the primary action; links are handled by the host
         fn toolRowInput(self: *This, allocator: std.mem.Allocator, index: usize, key: Key, root_focus: *Focus) !void {
             const row = self.toolRow(index);
             const cur = if (row.getFocus().child_id) |cid| row.children.getIndex(cid) orelse return else return;
-            const on_primary = if (self.primary_button_id[index]) |id| row.getFocus().child_id == id else false;
+            const child_id = row.children.keys()[cur];
+            const on_primary = switch (row.children.values()[cur].widget.getFocus().kind) {
+                .custom => |action| std.mem.eql(u8, action, "submit"),
+                else => false,
+            };
             switch (key) {
-                .arrow_left => if (cur > first_in_row_index) root_focus.setFocus(row.children.keys()[cur - 1]) else try self.focusList(index, root_focus),
+                .arrow_left => if (cur > first_in_row_index) root_focus.setFocus(row.children.keys()[cur - 1]) else self.focusList(index, root_focus),
                 .arrow_right => if (cur + 1 < row.children.count()) root_focus.setFocus(row.children.keys()[cur + 1]),
                 .arrow_up => self.focusHeader(root_focus),
                 .arrow_down => {
@@ -1837,9 +1795,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     self.detailScroll(index).y = 0;
                 },
                 .enter => if (on_primary) try self.primaryAction(allocator, index),
-                .mouse => |mouse| if (self.primary_button_id[index]) |id| {
-                    if (inp.leftClickOn(root_focus, id, mouse)) try self.primaryAction(allocator, index);
-                },
+                .mouse => |mouse| if (on_primary and inp.leftClickOn(root_focus, child_id, mouse)) try self.primaryAction(allocator, index),
                 else => {},
             }
         }
@@ -1863,27 +1819,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             try self.session.navigate(route);
         }
 
-        fn titleInput(self: *This, index: usize, key: Key, root_focus: *Focus) !void {
-            switch (key) {
-                .arrow_left => try self.focusList(index, root_focus),
-                .arrow_up => self.focusToolRow(index, root_focus),
-                .arrow_down => _ = self.moveDetailVertical(index, root_focus, true),
-                else => {},
-            }
-        }
-
-        // the author box's a: link (when it has one) is followed by the host on
-        // enter / a click; arrows cross to the neighboring widgets.
-        fn authorInput(self: *This, index: usize, key: Key, root_focus: *Focus) !void {
-            switch (key) {
-                .arrow_left => try self.focusList(index, root_focus),
-                .arrow_up => _ = self.moveDetailVertical(index, root_focus, false),
-                .arrow_down => _ = self.moveDetailVertical(index, root_focus, true),
-                else => {},
-            }
-        }
-
-        fn descriptionInput(self: *This, index: usize, key: Key, root_focus: *Focus) !void {
+        fn descriptionInput(self: *This, index: usize, key: Key, root_focus: *Focus) void {
             const sc = self.detailScroll(index);
             switch (key) {
                 .arrow_left => return self.focusList(index, root_focus),
@@ -1915,11 +1851,9 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 },
                 else => return,
             }
-            sc.clampToContent();
         }
 
-        fn commentInput(self: *This, allocator: std.mem.Allocator, index: usize, key: Key, root_focus: *Focus) !void {
-            _ = allocator;
+        fn commentInput(self: *This, index: usize, key: Key, root_focus: *Focus) void {
             switch (key) {
                 .arrow_left => if (!self.moveCommentHorizontal(index, root_focus, false)) return self.focusList(index, root_focus),
                 .arrow_right => _ = self.moveCommentHorizontal(index, root_focus, true),
@@ -2285,8 +2219,8 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             }
         }
 
-        // re-emit the conflicted issue's event with the resolved content; any
-        // event on the issue settles its conflict entry. this is the terminal
+        // re-emit the conflicted thread's event with the resolved content; any
+        // event on the thread settles its conflict entry. this is the terminal
         // path; the web posts the form to the resolve route.
         fn submitResolution(self: *This, allocator: std.mem.Allocator) !void {
             if (comptime wasm) return;
@@ -2395,12 +2329,12 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             }
 
             body_input.clear(allocator);
-            const route = commentRoute(self.data.identity, &thread_id, &event_id_hex, 0) orelse return;
+            const route = ui.RoutablePage.repoThreadCommentRoute(kind, self.data.identity, &thread_id, &event_id_hex, 0) orelse return;
             try self.session.navigate(route);
         }
 
-        // the terminal submit paths: the new form commits a new-issue event, the
-        // edit form re-emits the selected issue's event with the form's content.
+        // the terminal submit paths: the new form commits a new thread event, the
+        // edit form re-emits the selected thread's event with the form's content.
         // the web posts the forms to their routes instead.
         fn submitForm(self: *This, allocator: std.mem.Allocator) !void {
             if (self.data.view == .edit) {
@@ -2410,8 +2344,8 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             }
         }
 
-        // commit the new issue to the repo's events branch and navigate to it.
-        // this is the terminal path; the web posts the form to the issue route,
+        // commit the new thread to the repo's events branch and navigate to it.
+        // this is the terminal path; the web posts the form to the thread route,
         // so the wasm side never runs (or compiles) the repo access below.
         fn submitNewThread(self: *This, allocator: std.mem.Allocator) !void {
             if (comptime wasm) return;
@@ -2438,7 +2372,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 title_input.clear(allocator);
                 tags_input.clear(allocator);
                 description_input.clear(allocator);
-                const route = commentsRoute(self.data.identity, &event_id_hex, 0) orelse return;
+                const route = ui.RoutablePage.repoThreadCommentsRoute(kind, self.data.identity, &event_id_hex, 0) orelse return;
                 try self.session.navigate(route);
                 return;
             }
@@ -2477,8 +2411,8 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             try self.session.navigate(route);
         }
 
-        // re-emit the selected issue's event with the form's content (status
-        // preserved), then reload the issue's page. this is the terminal path;
+        // re-emit the selected thread's event with the form's content (status
+        // preserved), then reload the thread's page. this is the terminal path;
         // the web posts the form to the edit route.
         fn submitEditedThread(self: *This, allocator: std.mem.Allocator) !void {
             if (comptime wasm) return;
@@ -2552,8 +2486,8 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             try self.session.navigate(route);
         }
 
-        // flip the shown issue's status by re-emitting its event, then reload the
-        // page rooted at the issue so the view reflects the change. this is the
+        // flip the shown thread's status by re-emitting its event, then reload the
+        // page rooted at the thread so the view reflects the change. this is the
         // terminal path; the web posts the button's form to the status route.
         fn toggleStatus(self: *This, allocator: std.mem.Allocator, index: usize) !void {
             if (comptime !has_status) return;
@@ -2564,7 +2498,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             const entry = self.window(index).items[sel];
             const author = (try self.session.eventAuthor()) orelse return;
 
-            const status = toggledStatus(entryStatus(entry)) orelse return;
+            const status = (statusChange(entryStatus(entry)) orelse return).status;
 
             const id_bytes = try evt.parseEventId(entry.id);
 
@@ -2584,50 +2518,33 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
 
         // arrow keys move the tag selection; at the flow's edges focus crosses to
         // the neighboring widgets.
-        fn tagsInput(self: *This, index: usize, key: Key, root_focus: *Focus) !void {
-            const tf = self.tagFlow(index) orelse return;
+        fn tagsInput(self: *This, index: usize, child_index: usize, tf: *ui.TagFlow, key: Key, root_focus: *Focus) void {
             const cid = tf.focus.child_id orelse return;
             const cur = tf.indexOfFocusId(cid) orelse return;
             const count = tf.text_boxes.items.len;
             switch (key) {
-                .arrow_left => if (cur > 0) self.focusTag(index, tf, root_focus, cur - 1) else try self.focusList(index, root_focus),
-                .arrow_right => if (cur + 1 < count) self.focusTag(index, tf, root_focus, cur + 1),
+                .arrow_left => if (cur > 0) self.focusTag(index, child_index, tf, root_focus, cur - 1) else self.focusList(index, root_focus),
+                .arrow_right => if (cur + 1 < count) self.focusTag(index, child_index, tf, root_focus, cur + 1),
                 .arrow_up => if (tf.rowStep(cur, false)) |i| {
-                    self.focusTag(index, tf, root_focus, i);
+                    self.focusTag(index, child_index, tf, root_focus, i);
                 } else {
                     _ = self.moveDetailVertical(index, root_focus, false);
                 },
                 .arrow_down => if (tf.rowStep(cur, true)) |i| {
-                    self.focusTag(index, tf, root_focus, i);
+                    self.focusTag(index, child_index, tf, root_focus, i);
                 } else {
                     _ = self.moveDetailVertical(index, root_focus, true);
                 },
-                .home => self.focusTag(index, tf, root_focus, 0),
-                .end => self.focusTag(index, tf, root_focus, count - 1),
+                .home => self.focusTag(index, child_index, tf, root_focus, 0),
+                .end => self.focusTag(index, child_index, tf, root_focus, count - 1),
                 else => {},
             }
         }
 
         const title_child_index: usize = 0;
-        const tags_child_index: usize = 2;
 
         // the tool row's first child after the spacer that pushes it right
         const first_in_row_index: usize = 1;
-
-        fn tagFlow(self: *This, index: usize) ?*ui.TagFlow {
-            const inner = self.detailInner(index);
-            if (inner.children.count() <= tags_child_index) return null;
-            return switch (inner.children.values()[tags_child_index].widget) {
-                .tag_flow => |*tf| tf,
-                else => null,
-            };
-        }
-
-        fn tagsFocused(self: *This, index: usize) bool {
-            const inner = self.detailInner(index);
-            const cid = inner.getFocus().child_id orelse return false;
-            return inner.children.getIndex(cid) == tags_child_index and self.tagFlow(index) != null;
-        }
 
         fn toolRowFocused(self: *This, index: usize) bool {
             const outer = self.detailOuter(index);
@@ -2635,35 +2552,18 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             return outer.children.getIndex(cid) == tool_row_index;
         }
 
-        fn focusTag(self: *This, index: usize, tf: *ui.TagFlow, root_focus: *Focus, item: usize) void {
+        fn focusTag(self: *This, index: usize, child_index: usize, tf: *ui.TagFlow, root_focus: *Focus, item: usize) void {
             root_focus.setFocus(tf.text_boxes.items[item].getFocus().id);
             // keep the tag visible on the terminal: its rect offset by the flow's
             // position in the pane.
             if (self.session.is_terminal and item < tf.rects.items.len) {
-                if (self.detailInner(index).children.values()[tags_child_index].rect) |flow_rect| {
+                if (self.detailInner(index).children.values()[child_index].rect) |flow_rect| {
                     var rect = tf.rects.items[item];
                     rect.x += flow_rect.x;
                     rect.y += flow_rect.y;
                     self.detailScroll(index).scrollToRect(rect);
                 }
             }
-        }
-
-        fn titleFocused(self: *This, index: usize) bool {
-            const inner = self.detailInner(index);
-            const cid = inner.getFocus().child_id orelse return false;
-            return inner.children.getIndex(cid) == title_child_index;
-        }
-
-        fn authorFocused(self: *This, index: usize) bool {
-            const inner = self.detailInner(index);
-            const cid = inner.getFocus().child_id orelse return false;
-            return cid == self.author_id[index];
-        }
-
-        fn descriptionFocused(self: *This, index: usize) bool {
-            const cid = self.detailInner(index).getFocus().child_id orelse return false;
-            return cid == self.description_id[index];
         }
 
         // return to the tool row's last-focused button (the header when the
@@ -2673,14 +2573,14 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             root_focus.setFocus(cid);
         }
 
-        // enter the detail pane. an empty pane (no issues) can't be entered.
-        fn focusDetail(self: *This, index: usize, root_focus: *Focus) !void {
+        // enter the detail pane. an empty pane can't be entered.
+        fn focusDetail(self: *This, index: usize, root_focus: *Focus) void {
             if (self.detailInner(index).children.count() == 0) return;
             root_focus.setFocus(self.detailOuter(index).getFocus().id);
         }
 
         // return to the list.
-        fn focusList(self: *This, index: usize, root_focus: *Focus) !void {
+        fn focusList(self: *This, index: usize, root_focus: *Focus) void {
             root_focus.setFocus(self.listScroll(index).getFocus().id);
         }
 
