@@ -1488,12 +1488,11 @@ fn renderIndexHtml(
     };
     session.io = io;
 
-    const snapshot: ui.Snapshot = .{
-        .page = try ui.Page.init(session.page_arena, &session, session.data.current_page),
-        .session = session.data,
-    };
-    var root = try ui.initRoot(allocator, &snapshot.page, &session);
+    var page = try ui.Page.init(session.page_arena, &session, session.data.current_page);
+    var root = try ui.initRoot(allocator, &page, &session);
     defer root.deinit(allocator);
+
+    const snapshot: ui.Snapshot = .{ .page = page, .session = session.data };
 
     const content = try generateHtml(allocator, &root);
     defer allocator.free(content);

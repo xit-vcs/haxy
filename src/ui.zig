@@ -11,6 +11,7 @@ const layout = xitui.layout;
 const Key = xitui.input.Key;
 const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
+const ansi_arts: []const []const u8 = if (builtin.cpu.arch == .wasm32) &.{} else @import("ansi_art").art;
 const evt = @import("./event.zig");
 const inp = @import("./ui/input.zig");
 
@@ -1417,6 +1418,9 @@ pub const Session = struct {
         current_page: RoutablePage = .default,
         // whether to render the ANSI art backdrop
         enable_ansi: bool = true,
+        // the selected ANSI art. the server serializes one image for WASM so
+        // the browser does not need the whole build-generated collection.
+        ansi_art: []const u8 = "",
         // the bound clone-service ports. absent in local mode, where clone urls
         // are not shown.
         clone_http_port: ?u16 = null,
@@ -1916,6 +1920,7 @@ pub const Nav = struct {
                 self.arena = entry.arena;
                 session.page_arena = entry.arena;
                 session.data.current_page = entry.route;
+                chooseAnsiArtForNavigation(session);
                 return;
             }
             // nothing to go back to; switch to the quit confirmation
@@ -1982,14 +1987,14 @@ pub fn initRoot(allocator: std.mem.Allocator, page: *const Page, session: *Sessi
         .repo => |*p| .{ .repo = try .init(allocator, p, session) },
     };
 
-    const demon_art = @embedFile("embed/demon.ans");
+    chooseAnsiArtForNavigation(session);
 
     // on the TUI/SSH, the page sits above a one-row footer showing the url
     var root = if (session.is_terminal) blk: {
         var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });
         errdefer box.deinit(allocator);
         const bg_id = bg_blk: {
-            var background = try AnsiBackground.init(allocator, page_widget, demon_art, session);
+            var background = try AnsiBackground.init(allocator, page_widget, session);
             errdefer background.deinit(allocator);
             const id = background.getFocus().id;
             try box.children.put(allocator, id, .{ .widget = .{ .background = background }, .rect = null, .min_size = null });
@@ -2002,7 +2007,7 @@ pub fn initRoot(allocator: std.mem.Allocator, page: *const Page, session: *Sessi
         }
         box.getFocus().child_id = bg_id;
         break :blk Widget{ .box = box };
-    } else Widget{ .background = try AnsiBackground.init(allocator, page_widget, demon_art, session) };
+    } else Widget{ .background = try AnsiBackground.init(allocator, page_widget, session) };
     errdefer root.deinit(allocator);
 
     // input-owning views build their TextInputs in init — so reset the
@@ -2016,6 +2021,16 @@ pub fn initRoot(allocator: std.mem.Allocator, page: *const Page, session: *Sessi
     }, root.getFocus());
 
     return root;
+}
+
+// native and server-side sessions choose from the embedded collection. WASM
+// keeps the art serialized by the server instead.
+fn chooseAnsiArtForNavigation(session: *Session) void {
+    if (comptime ansi_arts.len == 0) return;
+    const io = session.io orelse return;
+    var random: usize = undefined;
+    io.random(std.mem.asBytes(&random));
+    session.data.ansi_art = ansi_arts[random % ansi_arts.len];
 }
 
 pub const Widget = union(enum) {
@@ -2948,8 +2963,11 @@ pub const AnsiArt = struct {
                 const len = std.unicode.utf8ByteSequenceLength(byte) catch 1;
                 const end = @min(content.len, i + len);
                 const rune = content[i..end];
-                const transparent = end - i == 1 and rune[0] == ' ' and
-                    style.fg == null and style.bg == null and !style.inverted;
+                // a foreground color does not make a space visible. only an
+                // effective background makes it opaque; foreground state often
+                // remains active through the padding at the end of a row.
+                const effective_background = if (style.inverted) style.fg else style.bg;
+                const transparent = end - i == 1 and rune[0] == ' ' and effective_background == null;
                 try row.append(allocator, .{
                     .rune = if (transparent) null else rune,
                     .style = style,
@@ -3045,7 +3063,7 @@ pub const AnsiBackground = struct {
     art: AnsiArt,
     session: *Session,
 
-    pub fn init(allocator: std.mem.Allocator, child_widget: Widget, art_content: []const u8, session: *Session) !AnsiBackground {
+    pub fn init(allocator: std.mem.Allocator, child_widget: Widget, session: *Session) !AnsiBackground {
         var cw = child_widget;
         const child = allocator.create(Widget) catch |e| {
             cw.deinit(allocator);
@@ -3056,7 +3074,7 @@ pub const AnsiBackground = struct {
             child.deinit(allocator);
             allocator.destroy(child);
         }
-        return .{ .grid = null, .child = child, .art = try AnsiArt.init(allocator, art_content), .session = session };
+        return .{ .grid = null, .child = child, .art = try AnsiArt.init(allocator, session.data.ansi_art), .session = session };
     }
 
     pub fn deinit(self: *AnsiBackground, allocator: std.mem.Allocator) void {
@@ -3079,6 +3097,7 @@ pub const AnsiBackground = struct {
         }, root_focus);
 
         if (self.session.data.enable_ansi) {
+            self.art.content = self.session.data.ansi_art;
             if (self.child.getGrid()) |fg| {
                 self.grid = try artBehind(allocator, fg, &self.art, .top_right, self.session.is_terminal, root_focus);
             }
@@ -3120,7 +3139,7 @@ pub const AnsiBackground = struct {
 
     // the art is dimmed to this fraction of its brightness so foreground text
     // stays legible over it
-    const art_brightness = 45; // percent
+    const art_brightness = 35; // percent
 
     fn dimColor(color: ?Grid.Color) ?Grid.Color {
         const c = color orelse return null;
