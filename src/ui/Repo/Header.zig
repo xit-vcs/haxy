@@ -365,15 +365,9 @@ pub const View = struct {
         const tabs_child = self.tabsChild();
         const tabs_box = &tabs_child.widget.box;
 
-        const viewport_width = constraint.max_size.width orelse constraint.min_size.width;
-        // the outer box's hidden border occupies two columns
-        const content_width = if (viewport_width) |width| width -| 2 else null;
-        const wrap = if (content_width) |width| self.first_group_width >= width / 2 else false;
-        box.options.direction = if (wrap) .vert else .horiz;
-        tabs_child.min_size = if (wrap) .{ .width = content_width, .height = null } else null;
-
         // only the selected tab shows its border
         const selected_tab = if (box.getFocus().child_id == self.tabs_id) tabs_box.getFocus().child_id else null;
+        var tabs_width: usize = 0;
         for (tabs_box.children.keys(), tabs_box.children.values()) |id, *child| {
             const tb: ?*wgt.TextBox(ui.Widget) = switch (child.widget) {
                 .text_box => |*x| x,
@@ -387,7 +381,17 @@ pub const View = struct {
             if (tb) |t| {
                 t.options.border_style = if (selected_tab == id) .single else .hidden;
             }
+            tabs_width += if (child.min_size) |min_size| min_size.width orelse 0 else 0;
         }
+
+        const viewport_width = constraint.max_size.width orelse constraint.min_size.width;
+        // the outer box's hidden border occupies two columns. keep the title
+        // and tabs together if they fit; otherwise tab strip on its own row.
+        const content_width = if (viewport_width) |width| width -| 2 else null;
+        const wrap = if (content_width) |width| self.first_group_width + tabs_width > width else false;
+        box.options.direction = if (wrap) .vert else .horiz;
+        tabs_child.min_size = if (wrap) .{ .width = content_width, .height = null } else null;
+
         var scroll_constraint = constraint;
         scroll_constraint.min_size.width = viewport_width;
         try self.scroll.build(allocator, scroll_constraint, root_focus);
