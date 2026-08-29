@@ -298,9 +298,9 @@ pub fn init(
     empty.drafts = drafts_window;
     if (draft_selected) empty.view = .drafts;
 
-    // an explicitly named posted patch or tag that doesn't exist is a bad url
-    // (NotFound -> 404); drafts and bare routes can use the empty fallback.
-    const strict = tagged or (rooted and !draft_selected);
+    // an explicitly named posted patch that doesn't exist is a bad url
+    // (NotFound -> 404); drafts, tags, and bare routes can use the empty fallback.
+    const strict = rooted and !draft_selected;
 
     // a repo with no consumed events has no moment yet.
     const gpa = arena.child_allocator;
@@ -322,14 +322,13 @@ pub fn init(
     var closed_set: ?DB.SortedSet(.read_only) = null;
     var merged_set: ?DB.SortedSet(.read_only) = null;
     if (tagged) {
-        const tag_to_patches_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Patch.tag_status_to_id_set_key)) orelse return error.NotFound;
-        const tag_to_patches = try DB.SortedMap(.read_only).init(tag_to_patches_cursor);
-        const decoded = std.Uri.percentDecodeInPlace(try aa.dupe(u8, empty.tag));
-        open_set = try Threads.tagStatusSet(Self, DB, tag_to_patches, decoded, .open);
-        closed_set = try Threads.tagStatusSet(Self, DB, tag_to_patches, decoded, .closed);
-        merged_set = try Threads.tagStatusSet(Self, DB, tag_to_patches, decoded, .merged);
-        // a tag no patch carries is a bad url
-        if (open_set == null and closed_set == null and merged_set == null) return error.NotFound;
+        if (try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Patch.tag_status_to_id_set_key))) |tag_to_patches_cursor| {
+            const tag_to_patches = try DB.SortedMap(.read_only).init(tag_to_patches_cursor);
+            const decoded = std.Uri.percentDecodeInPlace(try aa.dupe(u8, empty.tag));
+            open_set = try Threads.tagStatusSet(Self, DB, tag_to_patches, decoded, .open);
+            closed_set = try Threads.tagStatusSet(Self, DB, tag_to_patches, decoded, .closed);
+            merged_set = try Threads.tagStatusSet(Self, DB, tag_to_patches, decoded, .merged);
+        }
     } else if (try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Patch.status_to_id_set_key))) |status_to_patches_cursor| {
         const status_to_patches = try DB.SortedMap(.read_only).init(status_to_patches_cursor);
         open_set = try Threads.statusSet(Self, DB, status_to_patches, .open);
