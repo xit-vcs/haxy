@@ -422,26 +422,7 @@ pub const View = struct {
         self.clearGrid();
         if (self.header().getSelectedIndex()) |index|
             self.contentStack().getFocus().child_id = self.contentStack().children.keys()[index];
-        const view = self.selectedView();
-        var selected_kind: ?evt.EventKind = null;
-        var selected_id: []const u8 = "";
-        if (view == self.data.view) {
-            if (self.data.selected) |selected| {
-                selected_kind = selected.kind;
-                selected_id = selected.id;
-            }
-        }
-        if (ui.RoutablePage.repoEventsRoute(self.data.identity, view, selected_kind, selected_id)) |route|
-            self.session.data.current_page = route;
         try self.refreshDetail(allocator);
-
-        if (root_focus.grandchild_id) |id| if (self.box.getFocus().children.contains(id)) {
-            if (self.selectedEventIndex()) |index| {
-                const event = self.eventWindow().events[index];
-                if (ui.RoutablePage.repoEventsRoute(self.data.identity, view, event.kind, event.id)) |route|
-                    self.session.data.current_page = route;
-            }
-        };
 
         const list = self.listBox();
         for (list.children.keys(), list.children.values()) |id, *child| switch (child.widget) {
@@ -604,7 +585,8 @@ pub const Header = struct {
                 var tab = try wgt.TextBox(ui.Widget).init(allocator, label, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .none });
                 errdefer tab.deinit(allocator);
                 tab.getFocus().focusable = true;
-                tab.getFocus().kind = .{ .custom = try std.fmt.allocPrint(session.page_arena.allocator(), "ai:{s}", .{try route.toUrl(session.page_arena)}) };
+                const selected = std.meta.activeTag(session.data.current_page) == .repo_events and data.view == view;
+                tab.getFocus().kind = .{ .custom = try ui.inPageTabLink(session, route, selected) };
                 tab_ids[i] = tab.getFocus().id;
                 try box.children.put(allocator, tab.getFocus().id, .{ .widget = .{ .text_box = tab }, .rect = null, .min_size = .{ .width = label.len + 2, .height = null } });
             }

@@ -63,10 +63,8 @@ fn tick(min_height: u32, max_width: u32) !void {
         .max_size = .{ .width = max_width, .height = max_height },
     }, root_ptr.getFocus());
 
-    // mirror the page Header settled on into the browser URL. these are
-    // passive same-page changes, like moving down the commits list, so we
-    // replace the URL in place rather than pushing a history entry. real
-    // cross-page navigations go through _navigate.
+    // push input-driven in-page route changes into the browser url without
+    // adding history entries. real cross-page navigations go through _navigate.
     const current_page = session.data.current_page;
     const should_push = if (last_pushed_page_maybe) |lp| !lp.eql(current_page) else true;
     if (should_push) {
@@ -127,24 +125,30 @@ fn onKeyDown(key_code: u32) !void {
         40 => .arrow_down,
         else => return,
     };
+    const root_focus = root_ptr.getFocus();
+    const focused_before = root_focus.grandchild_id;
 
     if (key == .enter) {
-        if (root_ptr.getFocus().grandchild_id) |gid| {
+        if (root_focus.grandchild_id) |gid| {
             // follow a cross-page link
-            if (ui.crossPageLink(root_ptr.getFocus(), gid, session.data)) |route| {
+            if (ui.crossPageLink(root_focus, gid, session.data)) |route| {
                 const url = try route.toUrl(&page_arena);
                 _navigate(url.ptr, @intCast(url.len));
                 return;
             }
             // follow a link to bytes the server serves directly
-            if (ui.rawLink(root_ptr.getFocus(), gid)) |url| {
+            if (ui.rawLink(root_focus, gid)) |url| {
                 _navigate(url.ptr, @intCast(url.len));
                 return;
             }
         }
     }
 
-    try root_ptr.input(allocator, key, root_ptr.getFocus());
+    try root_ptr.input(allocator, key, root_focus);
+    const focused_after = root_focus.grandchild_id;
+    if (key != .enter and focused_before == focused_after) return;
+    const focus_id = focused_after orelse return;
+    if (ui.inPageLink(root_focus, focus_id, session.data)) |route| session.data.current_page = route;
 }
 
 fn onMouseClick(focus_id: usize) !void {
@@ -160,12 +164,14 @@ fn onMouseClick(focus_id: usize) !void {
         _navigate(url.ptr, @intCast(url.len));
         return;
     }
-    root_ptr.getFocus().setFocus(focus_id);
+    try setFocus(focus_id);
 }
 
 fn setFocus(focus_id: usize) !void {
     const root_ptr = if (root) |*root_value| root_value else return error.NotStarted;
-    root_ptr.getFocus().setFocus(focus_id);
+    const root_focus = root_ptr.getFocus();
+    root_focus.setFocus(focus_id);
+    if (ui.inPageLink(root_focus, focus_id, session.data)) |route| session.data.current_page = route;
 }
 
 fn consoleLog(arg: []const u8) void {

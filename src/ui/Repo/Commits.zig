@@ -442,11 +442,12 @@ pub const View = struct {
             var list_scroll = blk: {
                 var list_box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert, .stretch = true });
                 errdefer list_box.deinit(allocator);
-                for (data.commits) |commit| {
+                for (data.commits, 0..) |commit, index| {
                     // an in-page "ai:" anchor so a commit row is clickable with
                     // js off (the browser follows it, rooting the list there);
                     // with wasm the click just selects it and swaps the diff pane.
-                    try addRow(allocator, &list_box, firstLine(commit.message), try commitRowLink(session.page_arena, data.identity, commit.oid, ""));
+                    const content = if (index == 0) data.content else Content{ .diff = .{} };
+                    try addRow(allocator, &list_box, firstLine(commit.message), try commitRowLink(session.page_arena, data.identity, commit, content));
                 }
                 if (data.next_start) |next| {
                     try addRow(allocator, &list_box, "next →", try commitsLink(session.page_arena, data.identity, next, 0, ""));
@@ -630,27 +631,6 @@ pub const View = struct {
 
         // swap the diff pane to the selected commit when it changes.
         try self.refreshDiff(allocator);
-
-        // mirror the focused commit into the url so it updates as the selection
-        // moves, but only while focus is inside this view (the list or diff). when
-        // focus sits on the header tab, use the page's base /commits route.
-        if (root_focus.grandchild_id) |g| {
-            if (self.box.getFocus().children.contains(g)) {
-                if (self.selectedCommitIndex()) |sel| {
-                    const oid = self.data.commits[sel].oid;
-                    const window_start = self.data.commits[sel].window_start;
-                    // mirror the commit's current diff window so the url stays
-                    // linkable (0 for any commit but the windowed start one).
-                    // selecting another commit leaves the message behind, like
-                    // it leaves the path filter behind.
-                    const mirrored = switch (self.paneContent(sel)) {
-                        .message => ui.RoutablePage.repoCommitMessageRoute(self.data.identity, .object, oid),
-                        .diff => |d| ui.RoutablePage.repoCommitsRoute(self.data.identity, .object, oid, window_start, d.path),
-                    };
-                    if (mirrored) |route| self.session.data.current_page = route;
-                }
-            }
-        }
 
         // the selected list row shows a border (the focused TextBox upgrades it
         // to a double border itself); the rest stay borderless.
@@ -989,11 +969,13 @@ fn filesObjectLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, o
     return std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{url});
 }
 
-// the in-page "ai:" anchor for selecting `oid` in `identity`'s commit list. it
-// points at the same route as commitsLink but the "ai:" prefix keeps wasm clicks
-// in-page (crossPageLink ignores it); the href is only followed with js off.
-fn commitRowLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, oid: []const u8, path: []const u8) ![]const u8 {
-    const route = ui.RoutablePage.repoCommitsRoute(identity, .object, oid, 0, path) orelse return error.RouteTooLong;
+// the in-page "ai:" anchor for selecting a commit with its current pane content
+// and window. the href is only followed with js off.
+fn commitRowLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, commit: Commit, content: Content) ![]const u8 {
+    const route = (switch (content) {
+        .message => ui.RoutablePage.repoCommitMessageRoute(identity, .object, commit.oid),
+        .diff => |diff| ui.RoutablePage.repoCommitsRoute(identity, .object, commit.oid, commit.window_start, diff.path),
+    }) orelse return error.RouteTooLong;
     const url = try route.toUrl(page_arena);
     return std.fmt.allocPrint(page_arena.allocator(), "ai:{s}", .{url});
 }

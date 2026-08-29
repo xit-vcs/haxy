@@ -24,8 +24,6 @@ pub const Settings = @import("./Settings.zig");
 pub const Auth = @import("./Auth.zig");
 pub const Quit = @import("./Quit.zig");
 
-const Array = ui.RoutablePage.Array(ui.RoutablePage.repo_identity_max_len);
-
 header: Header,
 repo: evt.Repo.Record,
 files: Files,
@@ -38,14 +36,6 @@ events: Events,
 settings: Settings,
 auth: Auth,
 quit: Quit,
-// the full files route this page renders, mirrored into current_page when
-// the files tab is selected.
-route_name: ui.RoutablePage.RepoFilesRoute,
-// the commits route this page renders ("owner/name/commits[/<oid>]"), mirrored
-// when the commits tab is selected.
-commits_route_name: ui.RoutablePage.RepoCommitsRoute,
-// "owner/name" alone, mirrored when the settings/auth tab is selected.
-identity: Array,
 
 const Self = @This();
 
@@ -90,10 +80,6 @@ pub fn init(
     const commits_content: ui.RoutablePage.RepoCommitsRoute.Content = switch (route) {
         .repo_commits => |c| c.content,
         else => .{ .diff = .{} },
-    };
-    const commits_start = switch (commits_content) {
-        .diff => |d| d.start,
-        .message => 0,
     };
     // the refs tab windows one column at a time: `refs_from` (a url-encoded
     // ref name) roots `refs_kind`'s column, the other stays at its first window.
@@ -228,8 +214,7 @@ pub fn init(
 
     // open the on-disk repo once and read every tab's data from it. files and
     // commits resolve the same requested ref (the default branch when the
-    // route named none), so they end up viewing the same one and either's
-    // resolved ref can canonicalize the tab mirror urls below. no filesystem
+    // route named none), so they end up viewing the same one. no filesystem
     // (wasm), nowhere to look, or a failed open: empty tabs.
     const files, const commits, const refs, var issues, var patches, var discussions, const events = blk: {
         read: {
@@ -275,22 +260,6 @@ pub fn init(
     patches.target_branch = if (files.ref_or_oid == .branch) files.ref_or_oid_value else "";
     discussions.repo_source = source;
 
-    // each tab mirror carries this page's route for that tab; tabs not targeted
-    // by the incoming route fall back to their root/first-page route. the files
-    // mirror carries the selected file (when the route named one) so the url
-    // keeps it before focus enters the view.
-    const files_path = if (files.selected_file) |f| try Files.childDir(arena.allocator(), files.dir, f) else files.dir;
-    // the content window only applies to a selected file, so the bare
-    // directory route drops it.
-    const files_route_line = if (files.selected_file != null) files_line else 0;
-    const route_name = (ui.RoutablePage.repoFilesRoute(repo_identity.identity, files.ref_or_oid, files.ref_or_oid_value, files_path, files_route_line) orelse return error.NotFound).repo_files;
-    // the message page mirrors its own url, not the log's
-    const commits_route = switch (commits.content) {
-        .message => ui.RoutablePage.repoCommitMessageRoute(repo_identity.identity, commits.ref_or_oid, commits.ref_or_oid_value),
-        .diff => |d| ui.RoutablePage.repoCommitsRoute(repo_identity.identity, commits.ref_or_oid, commits.ref_or_oid_value, commits_start, d.path),
-    };
-    const commits_route_name = (commits_route orelse return error.NotFound).repo_commits;
-
     return .{
         // files and commits resolve the same ref, so either's serves the header,
         // which points both tabs at it.
@@ -306,16 +275,11 @@ pub fn init(
         .settings = Settings.init(),
         .auth = Auth.init(),
         .quit = Quit.init(),
-        .route_name = route_name,
-        .commits_route_name = commits_route_name,
-        .identity = Array.from(repo_identity.identity) orelse return error.NotFound,
     };
 }
 
 pub const View = struct {
     box: wgt.Box(ui.Widget),
-    data: *const Self,
-    session: *ui.Session,
 
     const header_index: usize = 0;
     const stack_index: usize = 1;
@@ -408,7 +372,7 @@ pub const View = struct {
             try box.children.put(allocator, stack.getFocus().id, .{ .widget = .{ .stack = stack }, .rect = null, .min_size = null });
         }
 
-        var self = View{ .box = box, .data = data, .session = session };
+        var self = View{ .box = box };
         self.getFocus().child_id = box.children.keys()[header_index];
         return self;
     }
@@ -422,39 +386,9 @@ pub const View = struct {
         const header = &self.box.children.values()[header_index].widget.repo_header;
         const stack = &self.box.children.values()[stack_index].widget.stack;
 
-        // each header tab maps 1:1 to a stack child by position. mirror the
-        // selection into current_page so the host can push the matching url;
-        // all repo tabs share the .repo parent, so this stays on the page
-        // rather than navigating.
-        if (header.getSelectedIndex()) |index| {
+        // each header tab maps 1:1 to a stack child by position
+        if (header.getSelectedIndex()) |index|
             stack.getFocus().child_id = stack.children.keys()[index];
-            switch (std.meta.activeTag(stack.children.values()[index])) {
-                // files/commits carry this page's content route (directory / log
-                // page); settings/auth carry only "owner/name".
-                .repo_commits => self.session.data.current_page = .{ .repo_commits = self.data.commits_route_name },
-                // the refs tab mirrors this page's windowed column.
-                .repo_refs => self.session.data.current_page = ui.RoutablePage.repoRefsRoute(self.data.identity.slice(), self.data.refs.kind, self.data.refs.from) orelse self.session.data.current_page,
-                // the issues tab mirrors this page's tag filter (issue urls
-                // themselves never carry the tag).
-                .repo_issues => self.session.data.current_page = ui.RoutablePage.repoIssuesRoute(self.data.identity.slice(), .open, self.data.issues.tag, "") orelse self.session.data.current_page,
-                .repo_patches => self.session.data.current_page = ui.RoutablePage.repoPatchesRoute(self.data.identity.slice(), .open, self.data.patches.tag, "") orelse self.session.data.current_page,
-                .repo_discussions => self.session.data.current_page = ui.RoutablePage.repoDiscussionsRoute(self.data.identity.slice(), self.data.discussions.tag, "") orelse self.session.data.current_page,
-                .repo_events => self.session.data.current_page = ui.RoutablePage.repoEventsRoute(self.data.identity.slice(), self.data.events.view, null, "") orelse self.session.data.current_page,
-                .home_settings => {
-                    if (ui.RoutablePage.Array(ui.RoutablePage.repo_route_max_len).from(self.data.identity.slice())) |identity|
-                        self.session.data.current_page = .{ .repo_settings = identity };
-                },
-                .home_auth => {
-                    if (ui.RoutablePage.Array(ui.RoutablePage.repo_route_max_len).from(self.data.identity.slice())) |identity|
-                        self.session.data.current_page = .{ .repo_auth = identity };
-                },
-                // the quit tab is tty-only and not a route, so leave current_page
-                // alone (nothing to mirror into the url).
-                .quit => {},
-                // the files tab (this page's directory route)
-                else => self.session.data.current_page = .{ .repo_files = self.data.route_name },
-            }
-        }
         try self.box.build(allocator, constraint, root_focus);
     }
 

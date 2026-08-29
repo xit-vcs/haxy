@@ -25,7 +25,6 @@ pub fn init(arena: *std.heap.ArenaAllocator) !Self {
 
 pub const View = struct {
     scroll: wgt.Scroll(ui.Widget),
-    data: *const Self,
     tab_ids: std.AutoArrayHashMapUnmanaged(usize, void),
 
     pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !View {
@@ -61,11 +60,16 @@ pub const View = struct {
 
         // the tab matching the current page is focused initially; matching by
         // link (rather than position) keeps this robust to tab changes.
-        const current_link: []const u8 = switch (session.data.current_page) {
-            .home_users => "ai:/users",
-            .home_settings => "ai:/settings",
-            .home_auth => "ai:/auth",
-            else => "ai:/repos",
+        const current_tag = std.meta.activeTag(session.data.current_page);
+        const repos_link = try ui.inPageTabLink(session, .{ .home_repos = 0 }, current_tag == .home_repos);
+        const users_link = try ui.inPageTabLink(session, .{ .home_users = 0 }, current_tag == .home_users);
+        const settings_link = try ui.inPageTabLink(session, .home_settings, current_tag == .home_settings);
+        const auth_link = try ui.inPageTabLink(session, .home_auth, current_tag == .home_auth);
+        const current_link: []const u8 = switch (current_tag) {
+            .home_users => users_link,
+            .home_settings => settings_link,
+            .home_auth => auth_link,
+            else => repos_link,
         };
         var selected_tab: ?usize = null;
 
@@ -74,9 +78,9 @@ pub const View = struct {
             var text_box = try wgt.TextBox(ui.Widget).init(allocator, "repos", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().focusable = true;
-            text_box.getFocus().kind = .{ .custom = "ai:/repos" };
+            text_box.getFocus().kind = .{ .custom = repos_link };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
-            if (std.mem.eql(u8, "ai:/repos", current_link)) selected_tab = text_box.getFocus().id;
+            if (std.mem.eql(u8, repos_link, current_link)) selected_tab = text_box.getFocus().id;
             try box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
@@ -89,9 +93,9 @@ pub const View = struct {
             var text_box = try wgt.TextBox(ui.Widget).init(allocator, "users", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().focusable = true;
-            text_box.getFocus().kind = .{ .custom = "ai:/users" };
+            text_box.getFocus().kind = .{ .custom = users_link };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
-            if (std.mem.eql(u8, "ai:/users", current_link)) selected_tab = text_box.getFocus().id;
+            if (std.mem.eql(u8, users_link, current_link)) selected_tab = text_box.getFocus().id;
             try box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
@@ -116,9 +120,9 @@ pub const View = struct {
             var text_box = try wgt.TextBox(ui.Widget).init(allocator, "settings", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().focusable = true;
-            text_box.getFocus().kind = .{ .custom = "ai:/settings" };
+            text_box.getFocus().kind = .{ .custom = settings_link };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
-            if (std.mem.eql(u8, "ai:/settings", current_link)) selected_tab = text_box.getFocus().id;
+            if (std.mem.eql(u8, settings_link, current_link)) selected_tab = text_box.getFocus().id;
             try box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
@@ -130,8 +134,9 @@ pub const View = struct {
         {
             var auth_tab = try AuthTab.View.init(allocator, session);
             errdefer auth_tab.deinit(allocator);
+            auth_tab.text_box.getFocus().kind = .{ .custom = auth_link };
             try tab_ids.put(allocator, auth_tab.getFocus().id, {});
-            if (std.mem.eql(u8, "ai:/auth", current_link)) selected_tab = auth_tab.getFocus().id;
+            if (std.mem.eql(u8, auth_link, current_link)) selected_tab = auth_tab.getFocus().id;
             try box.children.put(allocator, auth_tab.getFocus().id, .{
                 .widget = .{ .auth_tab = auth_tab },
                 .rect = null,
@@ -156,7 +161,6 @@ pub const View = struct {
 
         var self = View{
             .scroll = try wgt.Scroll(ui.Widget).init(allocator, .{ .box = box }, .{ .direction = .horiz, .show_bar = false, .web_native = !session.is_terminal }),
-            .data = data,
             .tab_ids = tab_ids,
         };
         self.getFocus().child_id = selected_tab orelse self.tab_ids.keys()[0];

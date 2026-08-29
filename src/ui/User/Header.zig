@@ -27,7 +27,6 @@ pub fn init(arena: *std.heap.ArenaAllocator, name: []const u8) !Self {
 
 pub const View = struct {
     scroll: wgt.Scroll(ui.Widget),
-    data: *const Self,
     tab_ids: std.AutoArrayHashMapUnmanaged(usize, void),
 
     pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !View {
@@ -71,14 +70,17 @@ pub const View = struct {
         // still followed with js off. allocated in the page arena so the focus
         // kinds that borrow them live as long as this page's widget tree.
         const aa = session.page_arena.allocator();
-        const repos_link = try std.fmt.allocPrint(aa, "ai:/user/{s}", .{data.name});
-        const forks_link = try std.fmt.allocPrint(aa, "ai:/user/{s}/forks", .{data.name});
-        const settings_link = try std.fmt.allocPrint(aa, "ai:/user/{s}/settings", .{data.name});
-        const auth_link = try std.fmt.allocPrint(aa, "ai:/user/{s}/auth", .{data.name});
+        const current_page = session.data.current_page;
+        const current_tag = std.meta.activeTag(current_page);
+        const current_link = try std.fmt.allocPrint(aa, "ai:{s}", .{try current_page.toUrl(session.page_arena)});
+        const repos_link = if (current_tag == .user_repos) current_link else try std.fmt.allocPrint(aa, "ai:/user/{s}", .{data.name});
+        const forks_link = if (current_tag == .user_forks) current_link else try std.fmt.allocPrint(aa, "ai:/user/{s}/forks", .{data.name});
+        const settings_link = if (current_tag == .user_settings) current_link else try std.fmt.allocPrint(aa, "ai:/user/{s}/settings", .{data.name});
+        const auth_link = if (current_tag == .user_auth) current_link else try std.fmt.allocPrint(aa, "ai:/user/{s}/auth", .{data.name});
 
         // the tab matching the current page is focused initially; matching by
         // link (rather than position) keeps this robust to tab changes.
-        const current_link: []const u8 = switch (session.data.current_page) {
+        const selected_link: []const u8 = switch (current_page) {
             .user_settings => settings_link,
             .user_auth => auth_link,
             .user_forks => forks_link,
@@ -93,7 +95,7 @@ pub const View = struct {
             text_box.getFocus().focusable = true;
             text_box.getFocus().kind = .{ .custom = repos_link };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
-            if (std.mem.eql(u8, repos_link, current_link)) selected_tab = text_box.getFocus().id;
+            if (std.mem.eql(u8, repos_link, selected_link)) selected_tab = text_box.getFocus().id;
             try box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
@@ -108,7 +110,7 @@ pub const View = struct {
             text_box.getFocus().focusable = true;
             text_box.getFocus().kind = .{ .custom = forks_link };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
-            if (std.mem.eql(u8, forks_link, current_link)) selected_tab = text_box.getFocus().id;
+            if (std.mem.eql(u8, forks_link, selected_link)) selected_tab = text_box.getFocus().id;
             try box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
@@ -135,7 +137,7 @@ pub const View = struct {
             text_box.getFocus().focusable = true;
             text_box.getFocus().kind = .{ .custom = settings_link };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
-            if (std.mem.eql(u8, settings_link, current_link)) selected_tab = text_box.getFocus().id;
+            if (std.mem.eql(u8, settings_link, selected_link)) selected_tab = text_box.getFocus().id;
             try box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
@@ -150,7 +152,7 @@ pub const View = struct {
             errdefer auth_tab.deinit(allocator);
             auth_tab.text_box.getFocus().kind = .{ .custom = auth_link };
             try tab_ids.put(allocator, auth_tab.getFocus().id, {});
-            if (std.mem.eql(u8, auth_link, current_link)) selected_tab = auth_tab.getFocus().id;
+            if (std.mem.eql(u8, auth_link, selected_link)) selected_tab = auth_tab.getFocus().id;
             try box.children.put(allocator, auth_tab.getFocus().id, .{
                 .widget = .{ .auth_tab = auth_tab },
                 .rect = null,
@@ -175,7 +177,6 @@ pub const View = struct {
 
         var self = View{
             .scroll = try wgt.Scroll(ui.Widget).init(allocator, .{ .box = box }, .{ .direction = .horiz, .show_bar = false, .web_native = !session.is_terminal }),
-            .data = data,
             .tab_ids = tab_ids,
         };
         self.getFocus().child_id = selected_tab orelse self.tab_ids.keys()[0];

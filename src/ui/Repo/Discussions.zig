@@ -265,11 +265,13 @@ pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *con
     var header = try Header.init(allocator);
     errdefer header.deinit(allocator);
     const aa = session.page_arena.allocator();
+    const selected_index = View.viewIndex(data.view);
+    const page_selected = std.meta.activeTag(session.data.current_page) == .repo_discussions;
 
     // recent discussions
     {
         const route = ui.RoutablePage.repoDiscussionsRoute(data.identity, data.tag, "") orelse return error.RouteTooLong;
-        const link = try std.fmt.allocPrint(aa, "ai:{s}", .{try route.toUrl(session.page_arena)});
+        const link = try ui.inPageTabLink(session, route, page_selected and selected_index == 0);
         var label_buf: [64]u8 = undefined;
         const label = try std.fmt.bufPrint(&label_buf, "recent ({d})", .{data.recent.count});
         try header.addTab(allocator, label, link, 0);
@@ -278,7 +280,7 @@ pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *con
     // tags tab, labeled with the active tag filter
     {
         const tags_route = ui.RoutablePage.repoThreadTagsRoute(.discuss, data.identity, data.tag) orelse return error.RouteTooLong;
-        const tags_link = try std.fmt.allocPrint(aa, "ai:{s}", .{try tags_route.toUrl(session.page_arena)});
+        const tags_link = try ui.inPageTabLink(session, tags_route, page_selected and selected_index == View.viewIndex(.tags));
         const label = if (data.tag.len == 0) "tags" else blk: {
             const decoded = std.Uri.percentDecodeInPlace(try aa.dupe(u8, data.tag));
             break :blk try std.fmt.allocPrint(aa, "tags ({s})", .{decoded});
@@ -295,7 +297,7 @@ pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *con
             .remove => ui.RoutablePage.repoThreadRemoveRoute(.discuss, data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong,
             else => ui.RoutablePage.repoThreadNewRoute(.discuss, data.identity) orelse return error.RouteTooLong,
         };
-        const link = try std.fmt.allocPrint(aa, "ai:{s}", .{try route.toUrl(session.page_arena)});
+        const link = try ui.inPageTabLink(session, route, page_selected and selected_index == View.viewIndex(.new));
         const label: []const u8 = switch (data.view) {
             .edit => "edit",
             .new_comment => "reply",

@@ -531,11 +531,13 @@ pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *con
     var header = try Header.init(allocator);
     errdefer header.deinit(allocator);
     const aa = session.page_arena.allocator();
+    const selected_index = View.viewIndex(data.view);
+    const page_selected = std.meta.activeTag(session.data.current_page) == .repo_patches;
 
     // a list tab per status, labeled with its listing's patch count
     for ([_]evt.Patch.Status{ .open, .closed, .merged }, 0..) |status, index| {
         const route = ui.RoutablePage.repoPatchesRoute(data.identity, status, data.tag, "") orelse return error.RouteTooLong;
-        const link = try std.fmt.allocPrint(aa, "ai:{s}", .{try route.toUrl(session.page_arena)});
+        const link = try ui.inPageTabLink(session, route, page_selected and selected_index == index);
         var label_buf: [64]u8 = undefined;
         const label = try std.fmt.bufPrint(&label_buf, "{s} ({d})", .{ @tagName(status), data.window(status).count });
         try header.addTab(allocator, label, link, index);
@@ -544,7 +546,7 @@ pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *con
     // tags tab, labeled with the active tag filter
     {
         const tags_route = ui.RoutablePage.repoThreadTagsRoute(.patch, data.identity, data.tag) orelse return error.RouteTooLong;
-        const tags_link = try std.fmt.allocPrint(aa, "ai:{s}", .{try tags_route.toUrl(session.page_arena)});
+        const tags_link = try ui.inPageTabLink(session, tags_route, page_selected and selected_index == View.viewIndex(.tags));
         const label = if (data.tag.len == 0) "tags" else blk: {
             const decoded = std.Uri.percentDecodeInPlace(try aa.dupe(u8, data.tag));
             break :blk try std.fmt.allocPrint(aa, "tags ({s})", .{decoded});
@@ -562,7 +564,7 @@ pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *con
             .resolve => ui.RoutablePage.repoPatchesResolveRoute(data.identity, data.selected_id, data.theirs_picks) orelse return error.RouteTooLong,
             else => ui.RoutablePage.repoThreadNewRoute(.patch, data.identity) orelse return error.RouteTooLong,
         };
-        const link = try std.fmt.allocPrint(aa, "ai:{s}", .{try route.toUrl(session.page_arena)});
+        const link = try ui.inPageTabLink(session, route, page_selected and selected_index == View.viewIndex(.new));
         const label: []const u8 = switch (data.view) {
             .edit => "edit",
             .new_comment => "reply",
@@ -577,7 +579,7 @@ pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *con
     // drafts belong to the logged-in user and are not available locally
     if (session.local == null) {
         const route = ui.RoutablePage.repoPatchesDraftsRoute(data.identity) orelse return error.RouteTooLong;
-        const link = try std.fmt.allocPrint(aa, "ai:{s}", .{try route.toUrl(session.page_arena)});
+        const link = try ui.inPageTabLink(session, route, page_selected and selected_index == View.viewIndex(.drafts));
         var label_buf: [64]u8 = undefined;
         const label = try std.fmt.bufPrint(&label_buf, "drafts ({d})", .{data.drafts.count});
         try header.addTab(allocator, label, link, View.viewIndex(.drafts));
@@ -586,7 +588,7 @@ pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *con
     // conflicts tab, labeled with the conflict count
     if (data.conflicts.count > 0) {
         const route = ui.RoutablePage.repoPatchesConflictsRoute(data.identity, "") orelse return error.RouteTooLong;
-        const link = try std.fmt.allocPrint(aa, "ai:{s}", .{try route.toUrl(session.page_arena)});
+        const link = try ui.inPageTabLink(session, route, page_selected and selected_index == View.viewIndex(.conflicts));
         var label_buf: [64]u8 = undefined;
         const label = try std.fmt.bufPrint(&label_buf, "conflicts ({d})", .{data.conflicts.count});
         try header.addTab(allocator, label, link, View.viewIndex(.conflicts));

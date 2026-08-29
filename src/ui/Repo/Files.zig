@@ -266,7 +266,7 @@ pub const View = struct {
                     const link = if (entry.is_dir)
                         try dirLink(session.page_arena, data, path)
                     else
-                        try fileLink(session.page_arena, data, path, entry.loaded);
+                        try fileLink(session.page_arena, data, path, entry.loaded, lineNumber(entry.window_start));
                     try addRow(allocator, &list_box, label, link);
                 }
                 // select the file the route named, else prefer a README so its
@@ -445,28 +445,6 @@ pub const View = struct {
         // swap the detail pane to the selected entry when the selection changes.
         try self.refreshDetail(allocator);
 
-        // mirror the selected file into the url so it updates as the selection
-        // moves, but only while focus is inside this view (so landing on the tab
-        // keeps the page's base route).
-        if (root_focus.grandchild_id) |g| {
-            if (self.box.getFocus().children.contains(g)) {
-                var buf: [ui.RoutablePage.repo_route_max_len]u8 = undefined;
-                var sel_path = self.data.dir;
-                var sel_line: usize = 0;
-                if (self.selectedEntry()) |entry| {
-                    if (!entry.is_dir and entry.loaded) {
-                        sel_path = if (self.data.dir.len == 0)
-                            entry.name
-                        else
-                            std.fmt.bufPrint(&buf, "{s}/{s}", .{ self.data.dir, entry.name }) catch self.data.dir;
-                        sel_line = lineNumber(entry.window_start);
-                    }
-                }
-                if (ui.RoutablePage.repoFilesRoute(self.data.identity, self.data.ref_or_oid, self.data.ref_or_oid_value, sel_path, sel_line)) |route|
-                    self.session.data.current_page = route;
-            }
-        }
-
         // the selected list row shows a border (the focused TextBox upgrades it
         // to a double border itself); the rest stay borderless.
         const lb = self.listBox();
@@ -550,7 +528,7 @@ pub const View = struct {
                     // the placeholder carries the file's "a:" link, so enter
                     // (or a click) here loads the file like on its list row.
                     const path = try childDir(self.session.page_arena.allocator(), self.data.dir, entry.name);
-                    const link = try fileLink(self.session.page_arena, self.data, path, false);
+                    const link = try fileLink(self.session.page_arena, self.data, path, false, 0);
                     try self.addContentBox(allocator, inner, "(press enter to load this file)", link);
                 } else if (entry.is_binary) {
                     try self.addContentBox(allocator, inner, "(binary file)", "");
@@ -834,8 +812,8 @@ fn dirLink(page_arena: *std.heap.ArenaAllocator, data: *const Self, path: []cons
 // (crossPageLink ignores it, so a click selects the row in place and shows its
 // contents); an unloaded file gets an "a:" link, so activating it reloads the
 // page with that file selected and its content read.
-fn fileLink(page_arena: *std.heap.ArenaAllocator, data: *const Self, path: []const u8, loaded: bool) ![]const u8 {
-    const route = ui.RoutablePage.repoFilesRoute(data.identity, data.ref_or_oid, data.ref_or_oid_value, path, 0) orelse return error.RouteTooLong;
+fn fileLink(page_arena: *std.heap.ArenaAllocator, data: *const Self, path: []const u8, loaded: bool, line: usize) ![]const u8 {
+    const route = ui.RoutablePage.repoFilesRoute(data.identity, data.ref_or_oid, data.ref_or_oid_value, path, line) orelse return error.RouteTooLong;
     const prefix = if (loaded) "ai:" else "a:";
     return std.fmt.allocPrint(page_arena.allocator(), "{s}{s}", .{ prefix, try route.toUrl(page_arena) });
 }

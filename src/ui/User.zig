@@ -36,7 +36,6 @@ forks_next_start: ?usize,
 settings: Settings,
 auth: Auth,
 quit: Quit,
-route_name: ui.RoutablePage.Array(evt.User.name_max_len),
 
 const Self = @This();
 
@@ -155,14 +154,11 @@ pub fn init(
         .settings = Settings.init(),
         .auth = Auth.init(),
         .quit = Quit.init(),
-        .route_name = name,
     };
 }
 
 pub const View = struct {
     box: wgt.Box(ui.Widget),
-    data: *const Self,
-    session: *ui.Session,
 
     const header_index: usize = 0;
     const stack_index: usize = 1;
@@ -254,7 +250,7 @@ pub const View = struct {
             try box.children.put(allocator, stack.getFocus().id, .{ .widget = .{ .stack = stack }, .rect = null, .min_size = null });
         }
 
-        var self = View{ .box = box, .data = data, .session = session };
+        var self = View{ .box = box };
         self.getFocus().child_id = box.children.keys()[header_index];
         return self;
     }
@@ -268,26 +264,9 @@ pub const View = struct {
         const header = &self.box.children.values()[header_index].widget.user_header;
         const stack = &self.box.children.values()[stack_index].widget.stack;
 
-        // each header tab maps 1:1 to a stack child by position. mirror the
-        // selection into current_page so the host can push the matching url;
-        // all user tabs share the .user parent, so this stays on the page
-        // rather than navigating.
-        if (header.getSelectedIndex()) |index| {
+        // each header tab maps 1:1 to a stack child by position
+        if (header.getSelectedIndex()) |index|
             stack.getFocus().child_id = stack.children.keys()[index];
-            const name = self.data.route_name;
-            switch (index) {
-                0 => self.session.data.current_page = .{ .user_repos = .{ .name = name, .start = self.data.repos_start } },
-                1 => self.session.data.current_page = .{ .user_forks = .{ .name = name, .start = self.data.forks_start } },
-                else => switch (std.meta.activeTag(stack.children.values()[index])) {
-                    .home_settings => self.session.data.current_page = .{ .user_settings = name },
-                    .home_auth => self.session.data.current_page = .{ .user_auth = name },
-                    // the quit tab is tty-only and not a route, so leave current_page
-                    // alone (nothing to mirror into the url).
-                    .quit => {},
-                    else => {},
-                },
-            }
-        }
         try self.box.build(allocator, constraint, root_focus);
     }
 

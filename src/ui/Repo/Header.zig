@@ -130,38 +130,29 @@ pub const View = struct {
         // helper so the /repo/.../files url format lives in one place.
         // both tabs link to the ref/oid this page is viewing, so switching tabs
         // keeps the same ref (the files tab opens at its root directory).
+        const current_page = session.data.current_page;
+        const current_tag = std.meta.activeTag(current_page);
         const files_route = ui.RoutablePage.repoFilesRoute(identity, data.ref_or_oid, data.ref_or_oid_value, "", 0) orelse return error.RouteTooLong;
-        const files_link = try std.fmt.allocPrint(aa, "ai:{s}", .{try files_route.toUrl(session.page_arena)});
+        const files_link = try ui.inPageTabLink(session, files_route, current_tag == .repo_files);
         const commits_route = ui.RoutablePage.repoCommitsRoute(identity, data.ref_or_oid, data.ref_or_oid_value, 0, "") orelse return error.RouteTooLong;
-        const commits_link = try std.fmt.allocPrint(aa, "ai:{s}", .{try commits_route.toUrl(session.page_arena)});
+        const commits_link = try ui.inPageTabLink(session, commits_route, current_tag == .repo_commits);
         const refs_route = ui.RoutablePage.repoRefsRoute(identity, .branch, "") orelse return error.RouteTooLong;
-        const refs_link = try std.fmt.allocPrint(aa, "ai:{s}", .{try refs_route.toUrl(session.page_arena)});
+        const refs_link = try ui.inPageTabLink(session, refs_route, current_tag == .repo_refs);
         const issues_route = ui.RoutablePage.repoIssuesRoute(identity, .open, data.issues_tag, "") orelse return error.RouteTooLong;
-        const issues_link = try std.fmt.allocPrint(aa, "ai:{s}", .{try issues_route.toUrl(session.page_arena)});
+        const issues_link = try ui.inPageTabLink(session, issues_route, current_tag == .repo_issues);
         const patches_route = ui.RoutablePage.repoPatchesRoute(identity, .open, data.patches_tag, "") orelse return error.RouteTooLong;
-        const patches_link = try std.fmt.allocPrint(aa, "ai:{s}", .{try patches_route.toUrl(session.page_arena)});
+        const patches_link = try ui.inPageTabLink(session, patches_route, current_tag == .repo_patches);
         const discussions_route = ui.RoutablePage.repoDiscussionsRoute(identity, data.discussions_tag, "") orelse return error.RouteTooLong;
-        const discussions_link = try std.fmt.allocPrint(aa, "ai:{s}", .{try discussions_route.toUrl(session.page_arena)});
+        const discussions_link = try ui.inPageTabLink(session, discussions_route, current_tag == .repo_discussions);
         const events_route = ui.RoutablePage.repoEventsRoute(identity, .active, null, "") orelse return error.RouteTooLong;
-        const events_link = try std.fmt.allocPrint(aa, "ai:{s}", .{try events_route.toUrl(session.page_arena)});
+        const events_link = try ui.inPageTabLink(session, events_route, current_tag == .repo_events);
         const settings_route = ui.RoutablePage{ .repo_settings = Array.from(identity) orelse return error.RouteTooLong };
-        const settings_link = try std.fmt.allocPrint(aa, "ai:{s}", .{try settings_route.toUrl(session.page_arena)});
+        const settings_link = try ui.inPageTabLink(session, settings_route, current_tag == .repo_settings);
         const auth_route = ui.RoutablePage{ .repo_auth = Array.from(identity) orelse return error.RouteTooLong };
-        const auth_link = try std.fmt.allocPrint(aa, "ai:{s}", .{try auth_route.toUrl(session.page_arena)});
+        const auth_link = try ui.inPageTabLink(session, auth_route, current_tag == .repo_auth);
 
         // the tab matching the current page is focused initially; matching by
         // link (rather than position) keeps this robust to tab changes.
-        const current_link: []const u8 = switch (session.data.current_page) {
-            .repo_commits => commits_link,
-            .repo_refs => refs_link,
-            .repo_issues => issues_link,
-            .repo_patches => patches_link,
-            .repo_discussions => discussions_link,
-            .repo_events => events_link,
-            .repo_settings => settings_link,
-            .repo_auth => auth_link,
-            else => files_link,
-        };
         var selected_tab: ?usize = null;
 
         // files tab
@@ -171,7 +162,7 @@ pub const View = struct {
             text_box.getFocus().focusable = true;
             text_box.getFocus().kind = .{ .custom = files_link };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
-            if (std.mem.eql(u8, files_link, current_link)) selected_tab = text_box.getFocus().id;
+            if (current_tag == .repo_files) selected_tab = text_box.getFocus().id;
             try tabs_box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
@@ -186,7 +177,7 @@ pub const View = struct {
             text_box.getFocus().focusable = true;
             text_box.getFocus().kind = .{ .custom = commits_link };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
-            if (std.mem.eql(u8, commits_link, current_link)) selected_tab = text_box.getFocus().id;
+            if (current_tag == .repo_commits) selected_tab = text_box.getFocus().id;
             try tabs_box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
@@ -201,7 +192,7 @@ pub const View = struct {
             text_box.getFocus().focusable = true;
             text_box.getFocus().kind = .{ .custom = refs_link };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
-            if (std.mem.eql(u8, refs_link, current_link)) selected_tab = text_box.getFocus().id;
+            if (current_tag == .repo_refs) selected_tab = text_box.getFocus().id;
             try tabs_box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
@@ -216,7 +207,7 @@ pub const View = struct {
             text_box.getFocus().focusable = true;
             text_box.getFocus().kind = .{ .custom = issues_link };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
-            if (std.mem.eql(u8, issues_link, current_link)) selected_tab = text_box.getFocus().id;
+            if (current_tag == .repo_issues) selected_tab = text_box.getFocus().id;
             try tabs_box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
@@ -231,7 +222,7 @@ pub const View = struct {
             text_box.getFocus().focusable = true;
             text_box.getFocus().kind = .{ .custom = patches_link };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
-            if (std.mem.eql(u8, patches_link, current_link)) selected_tab = text_box.getFocus().id;
+            if (current_tag == .repo_patches) selected_tab = text_box.getFocus().id;
             try tabs_box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
@@ -246,7 +237,7 @@ pub const View = struct {
             text_box.getFocus().focusable = true;
             text_box.getFocus().kind = .{ .custom = discussions_link };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
-            if (std.mem.eql(u8, discussions_link, current_link)) selected_tab = text_box.getFocus().id;
+            if (current_tag == .repo_discussions) selected_tab = text_box.getFocus().id;
             try tabs_box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
@@ -261,7 +252,7 @@ pub const View = struct {
             text_box.getFocus().focusable = true;
             text_box.getFocus().kind = .{ .custom = events_link };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
-            if (std.mem.eql(u8, events_link, current_link)) selected_tab = text_box.getFocus().id;
+            if (current_tag == .repo_events) selected_tab = text_box.getFocus().id;
             try tabs_box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
@@ -289,7 +280,7 @@ pub const View = struct {
             text_box.getFocus().focusable = true;
             text_box.getFocus().kind = .{ .custom = settings_link };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
-            if (std.mem.eql(u8, settings_link, current_link)) selected_tab = text_box.getFocus().id;
+            if (current_tag == .repo_settings) selected_tab = text_box.getFocus().id;
             try tabs_box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
@@ -305,7 +296,7 @@ pub const View = struct {
             errdefer auth_tab.deinit(allocator);
             auth_tab.text_box.getFocus().kind = .{ .custom = auth_link };
             try tab_ids.put(allocator, auth_tab.getFocus().id, {});
-            if (std.mem.eql(u8, auth_link, current_link)) selected_tab = auth_tab.getFocus().id;
+            if (current_tag == .repo_auth) selected_tab = auth_tab.getFocus().id;
             try tabs_box.children.put(allocator, auth_tab.getFocus().id, .{
                 .widget = .{ .auth_tab = auth_tab },
                 .rect = null,

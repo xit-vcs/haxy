@@ -45,8 +45,6 @@ pub fn init(
 
 pub const View = struct {
     box: wgt.Box(ui.Widget),
-    data: *const Self,
-    session: *ui.Session,
 
     const header_index: usize = 0;
     const stack_index: usize = 1;
@@ -104,8 +102,6 @@ pub const View = struct {
 
         var self = View{
             .box = box,
-            .data = data,
-            .session = session,
         };
         self.getFocus().child_id = box.children.keys()[header_index];
         return self;
@@ -120,22 +116,9 @@ pub const View = struct {
         const header = &self.box.children.values()[header_index].widget.home_header;
         const stack = &self.box.children.values()[stack_index].widget.stack;
 
-        // each header tab maps 1:1 to a stack child by position; mirror the
-        // selected child's page into the url, keyed by its kind
-        if (header.getSelectedIndex()) |index| {
+        // each header tab maps 1:1 to a stack child by position
+        if (header.getSelectedIndex()) |index|
             stack.getFocus().child_id = stack.children.keys()[index];
-            switch (std.meta.activeTag(stack.children.values()[index])) {
-                // mirror each list tab's built pagination window so the url stays
-                // consistent with what's shown (and so a build doesn't reset it).
-                .home_users => self.session.data.current_page = .{ .home_users = self.data.users.start },
-                .home_repos => self.session.data.current_page = .{ .home_repos = self.data.repos.start },
-                .home_settings => self.session.data.current_page = .home_settings,
-                .home_auth => self.session.data.current_page = .home_auth,
-                // the quit tab is tty-only and not a route, so leave current_page
-                // alone (nothing to mirror into the url).
-                else => {},
-            }
-        }
         try self.box.build(allocator, constraint, root_focus);
     }
 

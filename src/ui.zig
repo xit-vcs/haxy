@@ -1194,7 +1194,7 @@ pub const RoutablePage = union(enum) {
     }
 
     // true when `a` and `b` are the same user paginated to a different repos
-    // window. switching between a user's tabs is in-page (header-handled), so
+    // window. switching between a user's tabs is in-page, so
     // only a changed `start` on the repos list navigates.
     pub fn userPageChanged(a: RoutablePage, b: RoutablePage) bool {
         return switch (a) {
@@ -1654,16 +1654,24 @@ fn showCopyableText(io: std.Io, copyable_text: []const u8) !void {
 }
 
 pub fn inputKey(allocator: std.mem.Allocator, root: *Widget, key: Key, session: *Session) !void {
+    const root_focus = root.getFocus();
+    const focused_before = root_focus.grandchild_id;
+    var activate_in_page_link = false;
     switch (key) {
         // request a navigation pop; the host's Nav.sync goes back a page, or
         // quits when there's no history left.
-        .escape => session.nav_back = true,
+        .escape => {
+            session.nav_back = true;
+            return;
+        },
         .ctrl => |letter| switch (letter) {
-            'r' => session.refresh_requested = true,
-            else => try root.input(allocator, key, root.getFocus()),
+            'r' => {
+                session.refresh_requested = true;
+                return;
+            },
+            else => try root.input(allocator, key, root_focus),
         },
         .enter => {
-            const root_focus = root.getFocus();
             if (root_focus.grandchild_id) |gid| {
                 // follow a cross-page link
                 if (crossPageLink(root_focus, gid, session.data)) |route| {
@@ -1671,11 +1679,11 @@ pub fn inputKey(allocator: std.mem.Allocator, root: *Widget, key: Key, session: 
                 }
                 if (rawLink(root_focus, gid)) |url| return requestRawLink(session, url);
             }
+            activate_in_page_link = true;
             try root.input(allocator, key, root_focus);
         },
         .mouse => |mouse| {
             if (mouse.action == .press and mouse.action.press == .left) {
-                const root_focus = root.getFocus();
                 var clicked: ?usize = null;
                 var iter = root_focus.children.iterator();
                 while (iter.next()) |entry| {
@@ -1699,22 +1707,38 @@ pub fn inputKey(allocator: std.mem.Allocator, root: *Widget, key: Key, session: 
                         return;
                     }
                     root_focus.setFocus(focus_id);
+                    activate_in_page_link = true;
                 }
                 // forward the press into the widget tree so buttons (and any
                 // future click-aware widgets) can react. widgets that don't
                 // care about presses ignore it.
-                try root.input(allocator, key, root.getFocus());
+                try root.input(allocator, key, root_focus);
             } else {
-                try root.input(allocator, key, root.getFocus());
+                try root.input(allocator, key, root_focus);
             }
         },
-        else => try root.input(allocator, key, root.getFocus()),
+        else => try root.input(allocator, key, root_focus),
     }
+
+    const focused_after = root_focus.grandchild_id;
+    if (!activate_in_page_link and focused_before == focused_after) return;
+    const focus_id = focused_after orelse return;
+    if (inPageLink(root_focus, focus_id, session.data)) |route| session.data.current_page = route;
 }
 
 // a link to bytes the server serves directly rather than to a page route, so
 // it never resolves to a RoutablePage
 pub const raw_link_prefix = "ax:";
+
+// a route already loaded into the current page; focusing it changes the url
+// without rebuilding the page
+pub const in_page_link_prefix = "ai:";
+
+// an in-page tab's base route, or the exact current route when it is selected
+pub fn inPageTabLink(session: *Session, route: RoutablePage, selected: bool) ![]const u8 {
+    const target = if (selected) session.data.current_page else route;
+    return std.fmt.allocPrint(session.page_arena.allocator(), "{s}{s}", .{ in_page_link_prefix, try target.toUrl(session.page_arena) });
+}
 
 // a button the web overlay covers with a file picker that posts the chosen
 // file to the url after the prefix
@@ -1752,21 +1776,29 @@ fn terminalWebUrl(allocator: std.mem.Allocator, session: *const Session, path: [
 // link into a navigation rather than a focus change.
 pub fn crossPageLink(root_focus: *Focus, focus_id: usize, data: Session.Data) ?RoutablePage {
     const current = data.current_page;
+    const route = pageLink(root_focus, focus_id, data, "a:") orelse return null;
+    // a link to a different parent page always navigates; within a page, a
+    // files-directory / commits-page / list-window change navigates while tab
+    // links stay in-page.
+    if (route.parent() != current.parent() or RoutablePage.repoPageChanged(route, current) or RoutablePage.homePageChanged(route, current) or RoutablePage.userPageChanged(route, current)) return route;
+    return null;
+}
+
+// the route carried by an `ai:` focus target, or null for any other target
+pub fn inPageLink(root_focus: *Focus, focus_id: usize, data: Session.Data) ?RoutablePage {
+    return pageLink(root_focus, focus_id, data, in_page_link_prefix);
+}
+
+fn pageLink(root_focus: *Focus, focus_id: usize, data: Session.Data, prefix: []const u8) ?RoutablePage {
     const child = root_focus.children.get(focus_id) orelse return null;
     const custom = switch (child.focus.kind) {
         .custom => |c| c,
         else => return null,
     };
-    const a_prefix = "a:";
-    if (!std.mem.startsWith(u8, custom, a_prefix)) return null;
-    const path = custom[a_prefix.len..];
+    if (!std.mem.startsWith(u8, custom, prefix)) return null;
+    const path = custom[prefix.len..];
     // local sessions build (and parse) links with the repo identity elided
-    const route = (if (data.is_local) RoutablePage.fromUrlLocal(path) else RoutablePage.fromUrl(path)) orelse return null;
-    // a link to a different parent page always navigates; within a page, a
-    // files-directory / commits-page / list-window change navigates while tab
-    // links stay in-page (header-handled).
-    if (route.parent() != current.parent() or RoutablePage.repoPageChanged(route, current) or RoutablePage.homePageChanged(route, current) or RoutablePage.userPageChanged(route, current)) return route;
-    return null;
+    return if (data.is_local) RoutablePage.fromUrlLocal(path) else RoutablePage.fromUrl(path);
 }
 
 // a display author, resolved against the admin db at read time

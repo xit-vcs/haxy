@@ -483,8 +483,17 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             return std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{try route.toUrl(page_arena)});
         }
 
-        fn rowLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, id: []const u8) ![]const u8 {
-            const route = listRoute(identity, @enumFromInt(0), "", id) orelse return error.RouteTooLong;
+        fn rowLink(page_arena: *std.heap.ArenaAllocator, data: *const Self, id: []const u8) ![]const u8 {
+            const selected = std.mem.eql(u8, id, data.selected_id);
+            const route = (if (selected and data.description_page)
+                ui.RoutablePage.repoThreadDescriptionRoute(kind, data.identity, id)
+            else if (selected)
+                if (data.comment_page) |page|
+                    ui.RoutablePage.repoThreadCommentRoute(kind, data.identity, id, &page.selected.id, page.replies.start)
+                else
+                    ui.RoutablePage.repoThreadCommentsRoute(kind, data.identity, id, data.comments_start)
+            else
+                ui.RoutablePage.repoThreadCommentsRoute(kind, data.identity, id, 0)) orelse return error.RouteTooLong;
             return std.fmt.allocPrint(page_arena.allocator(), "ai:{s}", .{try route.toUrl(page_arena)});
         }
 
@@ -693,7 +702,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                             try std.fmt.allocPrint(session.page_arena.allocator(), " {d} comments ", .{entry.comments.count})
                         else
                             "";
-                        try addRow(allocator, &list_box, entry.record.event.title, label, try rowLink(session.page_arena, data.identity, entry.id));
+                        try addRow(allocator, &list_box, entry.record.event.title, label, try rowLink(session.page_arena, data, entry.id));
                     }
                     if (win.next_id) |next|
                         try addRow(allocator, &list_box, "next →", "", try windowLink(session.page_arena, data, status_maybe, drafts, next));
@@ -1221,46 +1230,10 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         pub fn build(self: *This, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
             self.clearGrid();
 
-            // each header tab maps 1:1 to a stack child by position. mirror the
-            // selection into the url: the view the page's window is rooted at
-            // keeps its rooted url, the others get their list route (keeping the
-            // tag filter).
+            // each header tab maps 1:1 to a stack child by position
             if (self.header().getSelectedIndex()) |index| {
                 const stack = self.viewStack();
                 stack.getFocus().child_id = stack.children.keys()[index];
-                self.session.data.current_page = (if (index == form_view_index)
-                    (if (has_conflicts) switch (self.data.view) {
-                        .edit => ui.RoutablePage.repoThreadEditRoute(kind, self.data.identity, self.data.selected_id),
-                        .new_comment => ui.RoutablePage.repoThreadCommentNewRoute(kind, self.data.identity, self.data.selected_id, self.data.comment_id),
-                        .edit_comment => ui.RoutablePage.repoThreadCommentEditRoute(kind, self.data.identity, self.data.selected_id, self.data.comment_id),
-                        .remove => ui.RoutablePage.repoThreadRemoveRoute(kind, self.data.identity, self.data.selected_id, self.data.comment_id),
-                        .resolve => resolveRoute(self.data.identity, self.data.selected_id, self.data.theirs_picks),
-                        else => ui.RoutablePage.repoThreadNewRoute(kind, self.data.identity),
-                    } else switch (self.data.view) {
-                        .edit => ui.RoutablePage.repoThreadEditRoute(kind, self.data.identity, self.data.selected_id),
-                        .new_comment => ui.RoutablePage.repoThreadCommentNewRoute(kind, self.data.identity, self.data.selected_id, self.data.comment_id),
-                        .edit_comment => ui.RoutablePage.repoThreadCommentEditRoute(kind, self.data.identity, self.data.selected_id, self.data.comment_id),
-                        .remove => ui.RoutablePage.repoThreadRemoveRoute(kind, self.data.identity, self.data.selected_id, self.data.comment_id),
-                        else => ui.RoutablePage.repoThreadNewRoute(kind, self.data.identity),
-                    })
-                else if (has_conflicts and index == conflict_view_index)
-                    conflictsRoute(self.data.identity, if (self.data.view == .conflicts) self.data.selected_id else "")
-                else if (has_drafts and index == drafts_view_index)
-                    if (index == viewIndex(self.data.view) and self.data.selected_id.len != 0)
-                        ui.RoutablePage.repoThreadCommentsRoute(kind, self.data.identity, self.data.selected_id, 0)
-                    else
-                        draftsRoute(self.data.identity)
-                else if (index == viewIndex(self.data.view) and self.data.selected_id.len != 0)
-                    (if (self.data.description_page)
-                        ui.RoutablePage.repoThreadDescriptionRoute(kind, self.data.identity, self.data.selected_id)
-                    else if (self.data.comment_page) |page|
-                        ui.RoutablePage.repoThreadCommentRoute(kind, self.data.identity, self.data.selected_id, &page.selected.id, page.replies.start)
-                    else
-                        ui.RoutablePage.repoThreadCommentsRoute(kind, self.data.identity, self.data.selected_id, self.data.comments_start))
-                else if (index == tags_view_index)
-                    ui.RoutablePage.repoThreadTagsRoute(kind, self.data.identity, self.data.tag)
-                else
-                    listRoute(self.data.identity, splitStatus(index), self.data.tag, "")) orelse self.session.data.current_page;
             }
 
             if (self.selectedSplitIndex()) |i| {
@@ -1270,31 +1243,6 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     if (changed) {
                         try self.populateDetail(allocator, i, selected);
                         self.detailed_index[i] = selected;
-                    }
-                }
-
-                // mirror the focused thread into the url, but only while focus is
-                // inside the split. a thread's url is the same whether or not the
-                // list is filtered, so the mirror drops the tag.
-                if (root_focus.grandchild_id) |g| {
-                    if (self.resultsBox(i).getFocus().children.contains(g)) {
-                        if (self.selectedThreadIndex(i)) |sel| {
-                            // selecting another thread leaves the description page
-                            // behind, like it leaves the tag filter behind.
-                            const entry = &self.window(i).items[sel];
-                            const mirrored = if (self.data.description_page and std.mem.eql(u8, entry.id, self.data.selected_id))
-                                ui.RoutablePage.repoThreadDescriptionRoute(kind, self.data.identity, entry.id)
-                            else if (self.data.comment_page) |page|
-                                if (std.mem.eql(u8, entry.id, self.data.selected_id))
-                                    ui.RoutablePage.repoThreadCommentRoute(kind, self.data.identity, entry.id, &page.selected.id, page.replies.start)
-                                else
-                                    ui.RoutablePage.repoThreadCommentsRoute(kind, self.data.identity, entry.id, 0)
-                            else if (std.mem.eql(u8, entry.id, self.data.selected_id))
-                                ui.RoutablePage.repoThreadCommentsRoute(kind, self.data.identity, entry.id, entry.comments.start)
-                            else
-                                ui.RoutablePage.repoThreadCommentsRoute(kind, self.data.identity, entry.id, 0);
-                            if (mirrored) |route| self.session.data.current_page = route;
-                        }
                     }
                 }
 
