@@ -181,7 +181,7 @@ pub const View = struct {
 
             // repos list — the default tab
             {
-                var list = try ui.FlowBox.Scroll.init(allocator, .{}, !session.is_terminal);
+                var list = try ui.widget.FlowBox.Scroll.init(allocator, .{}, !session.is_terminal);
                 errdefer list.deinit(allocator);
 
                 var arena = std.heap.ArenaAllocator.init(allocator);
@@ -191,7 +191,7 @@ pub const View = struct {
                 // a leading "previous" row off the first window, one row per repo,
                 // then a trailing "next" row when more remain. each window row
                 // navigates to the adjacent window of this user's repos.
-                var items: std.ArrayList(ui.FlowBox.Item) = .empty;
+                var items: std.ArrayList(ui.widget.FlowBox.Item) = .empty;
                 if (data.repos_start > 0)
                     try items.append(aa, .{ .text = "← previous", .link = try std.fmt.allocPrint(aa, "a:/user/{s}/repos/start:{d}", .{ data.user.name, data.repos_start -| page_size }) });
                 for (data.repos) |repo|
@@ -210,13 +210,13 @@ pub const View = struct {
 
             // forks list
             {
-                var list = try ui.FlowBox.Scroll.init(allocator, .{}, !session.is_terminal);
+                var list = try ui.widget.FlowBox.Scroll.init(allocator, .{}, !session.is_terminal);
                 errdefer list.deinit(allocator);
 
                 var item_arena = std.heap.ArenaAllocator.init(allocator);
                 defer item_arena.deinit();
                 const aa = item_arena.allocator();
-                var items: std.ArrayList(ui.FlowBox.Item) = .empty;
+                var items: std.ArrayList(ui.widget.FlowBox.Item) = .empty;
                 if (data.forks_start > 0)
                     try items.append(aa, .{ .text = "← previous", .link = try std.fmt.allocPrint(aa, "a:/user/{s}/forks/start:{d}", .{ data.user.name, data.forks_start -| page_size }) });
                 for (data.forks) |fork_item|

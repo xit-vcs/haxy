@@ -20,7 +20,7 @@ pub const View = struct {
     // the shown view
     focus: *Focus,
     // the settings controls, shown when logged in
-    authorized: ui.Center,
+    authorized: ui.widget.Center,
     unauthorized: ui.Unauthorized.View,
     session: *ui.Session,
     button_id: usize,
@@ -46,7 +46,7 @@ pub const View = struct {
             }
 
             box.getFocus().child_id = button_id;
-            break :blk try ui.Center.init(allocator, .{ .box = box });
+            break :blk try ui.widget.Center.init(allocator, .{ .box = box });
         };
         errdefer authorized.deinit(allocator);
 

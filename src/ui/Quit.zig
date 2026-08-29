@@ -22,7 +22,7 @@ pub fn init() Self {
 }
 
 pub const View = struct {
-    center: ui.Center,
+    center: ui.widget.Center,
     session: *ui.Session,
     button_id: usize,
 
@@ -56,7 +56,7 @@ pub const View = struct {
         box.getFocus().child_id = button_id;
 
         return .{
-            .center = try ui.Center.init(allocator, .{ .box = box }),
+            .center = try ui.widget.Center.init(allocator, .{ .box = box }),
             .session = session,
             .button_id = button_id,
         };

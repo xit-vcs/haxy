@@ -262,7 +262,7 @@ pub const View = struct {
 
         // spacer pushes settings + auth to the right
         {
-            var spacer = try ui.Spacer.init(allocator);
+            var spacer = try ui.widget.Spacer.init(allocator);
             errdefer spacer.deinit(allocator);
             try tabs_box.children.put(allocator, spacer.getFocus().id, .{
                 .widget = .{ .spacer = spacer },

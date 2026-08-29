@@ -11,7 +11,7 @@ const wgt = xitui.widget;
 const diff3 = @import("../../diff3.zig");
 const Comment = @import("Comment.zig");
 const Attachment = @import("Attachment.zig");
-const Threads = @import("Threads.zig");
+const thread = ui.widget.thread;
 const fork = @import("../../fork.zig");
 const pch = @import("../../patch.zig");
 
@@ -345,15 +345,15 @@ pub fn init(
         if (try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Patch.tag_status_to_id_set_key))) |tag_to_patches_cursor| {
             const tag_to_patches = try DB.SortedMap(.read_only).init(tag_to_patches_cursor);
             const decoded = std.Uri.percentDecodeInPlace(try aa.dupe(u8, empty.tag));
-            open_set = try Threads.tagStatusSet(Self, DB, tag_to_patches, decoded, .open);
-            closed_set = try Threads.tagStatusSet(Self, DB, tag_to_patches, decoded, .closed);
-            merged_set = try Threads.tagStatusSet(Self, DB, tag_to_patches, decoded, .merged);
+            open_set = try thread.tagStatusSet(Self, DB, tag_to_patches, decoded, .open);
+            closed_set = try thread.tagStatusSet(Self, DB, tag_to_patches, decoded, .closed);
+            merged_set = try thread.tagStatusSet(Self, DB, tag_to_patches, decoded, .merged);
         }
     } else if (try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Patch.status_to_id_set_key))) |status_to_patches_cursor| {
         const status_to_patches = try DB.SortedMap(.read_only).init(status_to_patches_cursor);
-        open_set = try Threads.statusSet(Self, DB, status_to_patches, .open);
-        closed_set = try Threads.statusSet(Self, DB, status_to_patches, .closed);
-        merged_set = try Threads.statusSet(Self, DB, status_to_patches, .merged);
+        open_set = try thread.statusSet(Self, DB, status_to_patches, .open);
+        closed_set = try thread.statusSet(Self, DB, status_to_patches, .closed);
+        merged_set = try thread.statusSet(Self, DB, status_to_patches, .merged);
     } else if (strict) return error.NotFound;
 
     const event_id_to_patch_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Patch.record_map_key)) orelse {
@@ -422,7 +422,7 @@ pub fn init(
                     if (conflicts_map) |map| {
                         if (try map.getCursor(order_key)) |conflict_cursor| {
                             const conflict_entry = try DB.HashMap(.read_only).init(conflict_cursor);
-                            conflict_data = try Threads.readConflict(Self, repo_kind, repo_opts, arena, repo, io, admin_moment, haxy_moment, &id_bytes, patch_event, conflict_entry);
+                            conflict_data = try thread.readConflict(Self, repo_kind, repo_opts, arena, repo, io, admin_moment, haxy_moment, &id_bytes, patch_event, conflict_entry);
                             resolved_view = .resolve;
                         }
                     }
@@ -431,10 +431,10 @@ pub fn init(
         }
     }
     const thread_comments_start = if (empty.comment_id.len == 0) comments_start else 0;
-    const open_window = try Threads.loadWindow(Self, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_patch, open_set, open_root, conflict_set, empty.selected_id, thread_comments_start);
-    const closed_window = try Threads.loadWindow(Self, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_patch, closed_set, closed_root, conflict_set, empty.selected_id, thread_comments_start);
-    const merged_window = try Threads.loadWindow(Self, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_patch, merged_set, merged_root, conflict_set, empty.selected_id, thread_comments_start);
-    const conflicts_window = try Threads.loadWindow(Self, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_patch, conflict_set, conflicts_root, conflict_set, empty.selected_id, thread_comments_start);
+    const open_window = try thread.loadWindow(Self, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_patch, open_set, open_root, conflict_set, empty.selected_id, thread_comments_start);
+    const closed_window = try thread.loadWindow(Self, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_patch, closed_set, closed_root, conflict_set, empty.selected_id, thread_comments_start);
+    const merged_window = try thread.loadWindow(Self, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_patch, merged_set, merged_root, conflict_set, empty.selected_id, thread_comments_start);
+    const conflicts_window = try thread.loadWindow(Self, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_patch, conflict_set, conflicts_root, conflict_set, empty.selected_id, thread_comments_start);
     if (view == .conflicts and conflicts_window.count > 0) resolved_view = .conflicts;
 
     const comment_page = if (empty.comment_id.len == 0)
@@ -442,7 +442,7 @@ pub fn init(
     else
         try Comment.init(repo_opts.hash, arena, admin_moment, haxy_moment, empty.selected_id, empty.comment_id, comments_start);
 
-    const tags = try Threads.loadTags(Self, repo_opts.hash, arena, haxy_moment);
+    const tags = try thread.loadTags(Self, repo_opts.hash, arena, haxy_moment);
 
     return .{
         .identity = empty.identity,
@@ -563,13 +563,13 @@ fn loadDraftWindow(
     };
 }
 
-pub const View = Threads.View(.patch, Self);
+pub const View = thread.View(.patch, Self);
 
-pub const Header = Threads.Header;
+pub const Header = thread.Header;
 
 pub fn appendDraftDetails(self: *const Self, allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), session: *ui.Session, entry: Entry) !void {
     const aa = session.page_arena.allocator();
-    var fields: [2]ui.CopyableText.Choice = undefined;
+    var fields: [2]ui.widget.CopyableText.Choice = undefined;
     var field_count: usize = 0;
 
     if (entry.target_branch.len != 0) if (session.data.git_ssh_port) |port| {
@@ -580,7 +580,7 @@ pub fn appendDraftDetails(self: *const Self, allocator: std.mem.Allocator, box: 
             try std.fmt.allocPrint(aa, "git clone {s}", .{url})
         else
             try std.fmt.allocPrint(aa, "git clone {s} {s}", .{ url, clone_name });
-        const choices: [2]ui.CopyableText.Choice = .{
+        const choices: [2]ui.widget.CopyableText.Choice = .{
             .{
                 .selector = "push",
                 .text = push_command,
@@ -594,7 +594,7 @@ pub fn appendDraftDetails(self: *const Self, allocator: std.mem.Allocator, box: 
                 .label = " clone this patch ",
             },
         };
-        var copyable_text = try ui.CopyableText.View.init(allocator, session, &choices);
+        var copyable_text = try ui.widget.CopyableText.init(allocator, session, &choices);
         errdefer copyable_text.deinit(allocator);
         try box.children.put(allocator, copyable_text.getFocus().id, .{ .widget = .{ .copyable_text = copyable_text }, .rect = null, .min_size = null });
         try addDetailGap(allocator, box);
@@ -616,7 +616,7 @@ pub fn appendDraftDetails(self: *const Self, allocator: std.mem.Allocator, box: 
     }
 
     for (fields[0..field_count], 0..) |field, i| {
-        var copyable_text = try ui.CopyableText.View.init(allocator, session, &.{field});
+        var copyable_text = try ui.widget.CopyableText.init(allocator, session, &.{field});
         errdefer copyable_text.deinit(allocator);
         try box.children.put(allocator, copyable_text.getFocus().id, .{ .widget = .{ .copyable_text = copyable_text }, .rect = null, .min_size = null });
         if (i + 1 < field_count) try addDetailGap(allocator, box);
@@ -625,7 +625,7 @@ pub fn appendDraftDetails(self: *const Self, allocator: std.mem.Allocator, box: 
 }
 
 fn addDetailGap(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget)) !void {
-    var spacer = try ui.Spacer.init(allocator);
+    var spacer = try ui.widget.Spacer.init(allocator);
     errdefer spacer.deinit(allocator);
     try box.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = .{ .width = null, .height = 1 }, .max_size = .{ .width = null, .height = 1 } });
 }

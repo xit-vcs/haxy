@@ -763,7 +763,7 @@ pub const View = struct {
         // jump a fixed amount. right/Enter cross into the diff pane. Enter/clicks
         // on the "next" row become navigation in the host before reaching here.
         if (inp.rowDelta(key, @intCast(self.listBox().children.count()))) |delta| {
-            ui.moveRowFocus(self.listBox(), self.listScroll(), root_focus, delta);
+            ui.widget.moveRowFocus(self.listBox(), self.listScroll(), root_focus, delta);
             return;
         }
         switch (key) {
@@ -1008,14 +1008,14 @@ pub const Header = struct {
             errdefer box.deinit(allocator);
 
             if (!session.data.is_local and (session.data.git_http_port != null or session.data.git_ssh_port != null)) {
-                var clone_url = try ui.CopyableText.View.initClone(allocator, session, identity);
+                var clone_url = try ui.widget.CopyableText.initClone(allocator, session, identity);
                 errdefer clone_url.deinit(allocator);
                 const min_width = clone_url.minWidth();
                 box.getFocus().child_id = clone_url.getFocus().id;
                 try box.children.put(allocator, clone_url.getFocus().id, .{ .widget = .{ .copyable_text = clone_url }, .rect = null, .min_size = .{ .width = min_width, .height = 3 } });
             }
 
-            var spacer = try ui.Spacer.init(allocator);
+            var spacer = try ui.widget.Spacer.init(allocator);
             errdefer spacer.deinit(allocator);
             try box.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null });
 
@@ -1050,7 +1050,7 @@ pub const Header = struct {
             return self.cloneUrl() != null;
         }
 
-        fn cloneUrl(self: *Header.View) ?*ui.CopyableText.View {
+        fn cloneUrl(self: *Header.View) ?*ui.widget.CopyableText {
             for (self.box.children.values()) |*child| switch (child.widget) {
                 .copyable_text => |*copyable_text| return copyable_text,
                 else => {},

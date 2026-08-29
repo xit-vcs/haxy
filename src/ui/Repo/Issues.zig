@@ -8,7 +8,7 @@ const hash = xit.hash;
 const diff3 = @import("../../diff3.zig");
 const Comment = @import("Comment.zig");
 const Attachment = @import("Attachment.zig");
-const Threads = @import("Threads.zig");
+const thread = ui.widget.thread;
 
 const wasm = builtin.target.cpu.arch == .wasm32;
 
@@ -235,14 +235,14 @@ pub fn init(
         const tag_to_issues_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Issue.tag_status_to_id_set_key)) orelse return error.NotFound;
         const tag_to_issues = try DB.SortedMap(.read_only).init(tag_to_issues_cursor);
         const decoded = std.Uri.percentDecodeInPlace(try aa.dupe(u8, empty.tag));
-        open_set = try Threads.tagStatusSet(Self, DB, tag_to_issues, decoded, .open);
-        closed_set = try Threads.tagStatusSet(Self, DB, tag_to_issues, decoded, .closed);
+        open_set = try thread.tagStatusSet(Self, DB, tag_to_issues, decoded, .open);
+        closed_set = try thread.tagStatusSet(Self, DB, tag_to_issues, decoded, .closed);
         // a tag no issue carries is a bad url
         if (open_set == null and closed_set == null) return error.NotFound;
     } else if (try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Issue.status_to_id_set_key))) |status_to_issues_cursor| {
         const status_to_issues = try DB.SortedMap(.read_only).init(status_to_issues_cursor);
-        open_set = try Threads.statusSet(Self, DB, status_to_issues, .open);
-        closed_set = try Threads.statusSet(Self, DB, status_to_issues, .closed);
+        open_set = try thread.statusSet(Self, DB, status_to_issues, .open);
+        closed_set = try thread.statusSet(Self, DB, status_to_issues, .closed);
     } else if (rooted) return error.NotFound;
 
     const event_id_to_issue_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Issue.record_map_key)) orelse {
@@ -307,7 +307,7 @@ pub fn init(
                     if (conflicts_map) |map| {
                         if (try map.getCursor(order_key)) |conflict_cursor| {
                             const conflict_entry = try DB.HashMap(.read_only).init(conflict_cursor);
-                            conflict_data = try Threads.readConflict(Self, repo_kind, repo_opts, arena, repo, io, admin_moment, haxy_moment, &id_bytes, issue_event, conflict_entry);
+                            conflict_data = try thread.readConflict(Self, repo_kind, repo_opts, arena, repo, io, admin_moment, haxy_moment, &id_bytes, issue_event, conflict_entry);
                             resolved_view = .resolve;
                         }
                     }
@@ -317,9 +317,9 @@ pub fn init(
     }
 
     const thread_comments_start = if (empty.comment_id.len == 0) comments_start else 0;
-    const open_window = try Threads.loadWindow(Self, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_issue, open_set, open_root, conflict_set, empty.selected_id, thread_comments_start);
-    const closed_window = try Threads.loadWindow(Self, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_issue, closed_set, closed_root, conflict_set, empty.selected_id, thread_comments_start);
-    const conflicts_window = try Threads.loadWindow(Self, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_issue, conflict_set, conflicts_root, conflict_set, empty.selected_id, thread_comments_start);
+    const open_window = try thread.loadWindow(Self, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_issue, open_set, open_root, conflict_set, empty.selected_id, thread_comments_start);
+    const closed_window = try thread.loadWindow(Self, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_issue, closed_set, closed_root, conflict_set, empty.selected_id, thread_comments_start);
+    const conflicts_window = try thread.loadWindow(Self, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_issue, conflict_set, conflicts_root, conflict_set, empty.selected_id, thread_comments_start);
     if (view == .conflicts and conflicts_window.count > 0) resolved_view = .conflicts;
 
     const comment_page = if (empty.comment_id.len == 0)
@@ -327,7 +327,7 @@ pub fn init(
     else
         try Comment.init(repo_opts.hash, arena, admin_moment, haxy_moment, empty.selected_id, empty.comment_id, comments_start);
 
-    const tags = try Threads.loadTags(Self, repo_opts.hash, arena, haxy_moment);
+    const tags = try thread.loadTags(Self, repo_opts.hash, arena, haxy_moment);
 
     return .{
         .identity = empty.identity,
@@ -347,9 +347,9 @@ pub fn init(
     };
 }
 
-pub const View = Threads.View(.issue, Self);
+pub const View = thread.View(.issue, Self);
 
-pub const Header = Threads.Header;
+pub const Header = thread.Header;
 
 // tabs switching between the issues page's views
 pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *const Self) !Header {

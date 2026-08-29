@@ -7,7 +7,7 @@ const rp = xit.repo;
 const hash = xit.hash;
 const Comment = @import("Comment.zig");
 const Attachment = @import("Attachment.zig");
-const Threads = @import("Threads.zig");
+const thread = ui.widget.thread;
 
 const wasm = builtin.target.cpu.arch == .wasm32;
 
@@ -262,9 +262,9 @@ fn loadWindow(
         .count = @intCast(try set.count()),
     };
 }
-pub const View = Threads.View(.discuss, Self);
+pub const View = thread.View(.discuss, Self);
 
-pub const Header = Threads.Header;
+pub const Header = thread.Header;
 
 // tabs switching between the discussions page's views
 pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *const Self) !Header {

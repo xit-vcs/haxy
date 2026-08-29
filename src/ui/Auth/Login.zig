@@ -27,7 +27,7 @@ pub fn init() Self {
 }
 
 pub const View = struct {
-    center: ui.Center,
+    center: ui.widget.Center,
     data: *const Self,
     session: *ui.Session,
     nav_ids: [3]usize,
@@ -86,7 +86,7 @@ pub const View = struct {
         box.getFocus().child_id = nav_ids[username_index];
 
         return .{
-            .center = try ui.Center.init(allocator, .{ .box = box }),
+            .center = try ui.widget.Center.init(allocator, .{ .box = box }),
             .data = data,
             .session = session,
             .nav_ids = nav_ids,

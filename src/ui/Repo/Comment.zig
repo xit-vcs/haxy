@@ -152,7 +152,7 @@ pub const Item = struct {
             var bar = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
             errdefer bar.deinit(allocator);
 
-            var spacer = try ui.Spacer.init(allocator);
+            var spacer = try ui.widget.Spacer.init(allocator);
             errdefer spacer.deinit(allocator);
             try bar.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null });
 

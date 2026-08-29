@@ -16,7 +16,7 @@ pub fn init() Self {
 
 // shown in place of a view that requires being logged in
 pub const View = struct {
-    center: ui.Center,
+    center: ui.widget.Center,
 
     const message =
         \\you must be logged in to view this.
@@ -31,7 +31,7 @@ pub const View = struct {
     pub fn init(allocator: std.mem.Allocator) !View {
         var text_box = try wgt.TextBox(ui.Widget).init(allocator, message, .{ .border_style = null, .rounded_corners = false, .wrap_kind = .word });
         errdefer text_box.deinit(allocator);
-        return .{ .center = try ui.Center.init(allocator, .{ .text_box = text_box }) };
+        return .{ .center = try ui.widget.Center.init(allocator, .{ .text_box = text_box }) };
     }
 
     pub fn deinit(self: *View, allocator: std.mem.Allocator) void {

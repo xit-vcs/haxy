@@ -65,12 +65,12 @@ pub fn init(
 }
 
 pub const View = struct {
-    list: ui.FlowBox.Scroll,
+    list: ui.widget.FlowBox.Scroll,
     data: *const Self,
 
     pub fn init(allocator: std.mem.Allocator, data: *const Self, web_native: bool) !View {
         var self = blk: {
-            var list = try ui.FlowBox.Scroll.init(allocator, .{ .cell_height = 1 }, web_native);
+            var list = try ui.widget.FlowBox.Scroll.init(allocator, .{ .cell_height = 1 }, web_native);
             errdefer list.deinit(allocator);
 
             break :blk View{
@@ -87,7 +87,7 @@ pub const View = struct {
         // a leading "previous" row off the first window, one row per user, then
         // a trailing "next" row when more remain. each window row navigates to the
         // adjacent window (full reload on web, Nav rebuild on the TUI).
-        var items: std.ArrayList(ui.FlowBox.Item) = .empty;
+        var items: std.ArrayList(ui.widget.FlowBox.Item) = .empty;
         if (data.start > 0)
             try items.append(aa, .{ .text = "← previous", .link = try std.fmt.allocPrint(aa, "a:/users/start:{d}", .{data.start -| page_size}) });
         for (data.users) |user|

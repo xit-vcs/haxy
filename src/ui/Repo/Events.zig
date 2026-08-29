@@ -488,10 +488,10 @@ pub const View = struct {
             if (key == .arrow_left) {
                 root_focus.setFocus(self.listScroll().getFocus().id);
             } else if (inp.rowDelta(key, @intCast(self.detailBox().children.count()))) |delta| {
-                ui.moveRowFocus(self.detailBox(), self.detailScroll(), root_focus, delta);
+                ui.widget.moveRowFocus(self.detailBox(), self.detailScroll(), root_focus, delta);
             }
         } else if (inp.rowDelta(key, @intCast(self.listBox().children.count()))) |delta| {
-            ui.moveRowFocus(self.listBox(), self.listScroll(), root_focus, delta);
+            ui.widget.moveRowFocus(self.listBox(), self.listScroll(), root_focus, delta);
         } else switch (key) {
             .arrow_right => if (self.detailBox().children.count() > 0) root_focus.setFocus(self.detailScroll().getFocus().id),
             .enter => if (self.selectedEventIndex() != null) root_focus.setFocus(self.detailScroll().getFocus().id),

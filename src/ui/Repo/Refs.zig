@@ -283,7 +283,7 @@ pub const View = struct {
         // focus to the header.
         if (inp.rowDelta(key, self.columnRowCount())) |delta| {
             const scroll = self.activeScroll() orelse return;
-            ui.moveRowFocus(&scroll.child.box, scroll, root_focus, delta);
+            ui.widget.moveRowFocus(&scroll.child.box, scroll, root_focus, delta);
             return;
         }
         switch (key) {
