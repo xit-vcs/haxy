@@ -33,6 +33,16 @@
             position: relative;
           }
 
+          .ansi-art {
+            position: absolute;
+            top: 0;
+            pointer-events: none;
+          }
+
+          .grid-content {
+            position: relative;
+          }
+
           body:has(#grid .scroll:not([data-scroll-direction="horiz"])) {
             height: 100vh;
             overflow: hidden;

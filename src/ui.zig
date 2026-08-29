@@ -3128,12 +3128,13 @@ pub const AnsiBackground = struct {
             .max_size = constraint.max_size,
         }, root_focus);
 
-        if (self.session.data.enable_ansi) {
-            self.art.content = self.session.data.ansi_art;
-            if (self.child.getGrid()) |fg| {
-                self.grid = try artBehind(allocator, fg, &self.art, .top_right, self.session.is_terminal, root_focus);
-            }
-        }
+        if (!self.session.data.enable_ansi) return;
+        const foreground = self.child.getGrid() orelse return;
+        self.art.content = self.session.data.ansi_art;
+        try self.buildArt(allocator, foreground.size, root_focus);
+        if (!self.session.is_terminal) return;
+        const art_grid = self.art.getGrid() orelse return;
+        self.grid = try artBehind(allocator, foreground, art_grid);
     }
 
     pub fn input(self: *AnsiBackground, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
@@ -3157,9 +3158,6 @@ pub const AnsiBackground = struct {
         return self.child.getFocus();
     }
 
-    // which top corner the art hugs.
-    const ArtAnchor = enum { top_left, top_right };
-
     // a foreground cell counts as blank if it's empty or a bare space without styling
     fn cellIsBlank(cell: Grid.Cell) bool {
         if (cell.rune) |rune| {
@@ -3182,6 +3180,19 @@ pub const AnsiBackground = struct {
         };
     }
 
+    fn buildArt(self: *AnsiBackground, allocator: std.mem.Allocator, size: layout.Size, root_focus: *Focus) !void {
+        try self.art.build(allocator, .{
+            .min_size = .{ .width = null, .height = null },
+            .max_size = .{ .width = size.width, .height = size.height },
+        }, root_focus);
+        if (self.art.grid) |*grid| {
+            for (grid.cells.items) |*cell| {
+                cell.style.fg = dimColor(cell.style.fg);
+                cell.style.bg = dimColor(cell.style.bg);
+            }
+        }
+    }
+
     // terminals that don't support truecolor misparse a "38;2;r;g;b"/"48;2;…"
     // SGR as a list of plain SGR codes, so any channel value in 1..9 turns on
     // a text attribute (5/6 = blink, 7 = inverse, 8 = conceal, …).
@@ -3199,57 +3210,37 @@ pub const AnsiBackground = struct {
     }
 
     // composites ANSI art behind a foreground grid
-    fn artBehind(allocator: std.mem.Allocator, foreground: Grid, art: *AnsiArt, anchor: ArtAnchor, is_terminal: bool, root_focus: *Focus) !Grid {
-        art.clearGrid();
-        try art.build(allocator, .{
-            .min_size = .{ .width = null, .height = null },
-            .max_size = .{ .width = foreground.size.width, .height = foreground.size.height },
-        }, root_focus);
-
+    fn artBehind(allocator: std.mem.Allocator, foreground: Grid, art_grid: Grid) !Grid {
         var out = try Grid.initFromGrid(allocator, foreground, foreground.size, 0, 0);
         errdefer out.deinit();
 
-        if (art.getGrid()) |art_grid| {
-            const anchor_x = switch (anchor) {
-                .top_left => 0,
-                .top_right => foreground.size.width -| art_grid.size.width,
-            };
-            for (0..art_grid.size.height) |y| {
-                for (0..art_grid.size.width) |x| {
-                    const src = art_grid.cells.items[try art_grid.cells.at(.{ y, x })];
-                    if (src.rune == null) continue;
-                    const idx = out.cells.at(.{ y, anchor_x + x }) catch continue;
-                    const dst = &out.cells.items[idx];
-                    // composite the dimmed art behind every cell so it shows
-                    // through the whole UI: a blank cell becomes the art, while a
-                    // cell with a glyph keeps the glyph but takes the dimmed art as
-                    // its background (replacing whatever background it had, which
-                    // would otherwise obscure the art).
-                    if (cellIsBlank(dst.*)) {
-                        dst.* = src;
-                        dst.style.fg = sgrSafe(dimColor(dst.style.fg));
-                        dst.style.bg = sgrSafe(dimColor(dst.style.bg));
-                    } else {
-                        const background_maybe = sgrSafe(dimColor(src.style.bg orelse src.style.fg));
-                        dst.style.bg = background_maybe;
-                        // change the color of text overlaying ANSI art to ensure
-                        // it is readable. don't do this in the web UI, since we
-                        // have direct control of the theme there (also, inner
-                        // scroll panes allow text to move without a re-render
-                        // by the TUI, which would break this). also don't do this
-                        // if the text is explicitly styled.
-                        if (is_terminal and dst.style.fg == null) {
-                            if (background_maybe) |background| {
-                                // use near-black and near-white, which is easier on the eyes
-                                // while retaining high contrast
-                                const luminance = (@as(u32, background.r) * 299 +
-                                    @as(u32, background.g) * 587 +
-                                    @as(u32, background.b) * 114) / 1000;
-                                dst.style.fg = if (luminance >= 128)
-                                    .{ .r = 16, .g = 16, .b = 16 }
-                                else
-                                    .{ .r = 240, .g = 240, .b = 240 };
-                            }
+        const anchor_x = foreground.size.width -| art_grid.size.width;
+        for (0..art_grid.size.height) |y| {
+            for (0..art_grid.size.width) |x| {
+                const src = art_grid.cells.items[try art_grid.cells.at(.{ y, x })];
+                if (src.rune == null) continue;
+                const idx = try out.cells.at(.{ y, anchor_x + x });
+                const dst = &out.cells.items[idx];
+                // blank cells take the art; occupied cells take its background
+                if (cellIsBlank(dst.*)) {
+                    dst.* = src;
+                    dst.style.fg = sgrSafe(dst.style.fg);
+                    dst.style.bg = sgrSafe(dst.style.bg);
+                } else {
+                    const background_maybe = sgrSafe(src.style.bg orelse src.style.fg);
+                    dst.style.bg = background_maybe;
+                    // change unstyled text to contrast with the art behind it
+                    if (dst.style.fg == null) {
+                        if (background_maybe) |background| {
+                            // use near-black and near-white, which is easier on the eyes
+                            // while retaining high contrast
+                            const luminance = (@as(u32, background.r) * 299 +
+                                @as(u32, background.g) * 587 +
+                                @as(u32, background.b) * 114) / 1000;
+                            dst.style.fg = if (luminance >= 128)
+                                .{ .r = 16, .g = 16, .b = 16 }
+                            else
+                                .{ .r = 240, .g = 240, .b = 240 };
                         }
                     }
                 }

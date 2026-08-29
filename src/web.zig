@@ -1559,7 +1559,20 @@ pub fn generateHtml(allocator: std.mem.Allocator, root: *ui.Widget) ![]const u8 
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
 
+    switch (root.*) {
+        .background => |*background| {
+            if (background.art.getGrid()) |art| {
+                var position_buf: [64]u8 = undefined;
+                try out.appendSlice(allocator, try std.fmt.bufPrint(&position_buf, "<div class=\"ansi-art\" aria-hidden=\"true\" style=\"left:{d}ch\">", .{grid.size.width -| art.size.width}));
+                try renderPanel(allocator, &out, background.art.getFocus(), art);
+                try out.appendSlice(allocator, "</div>");
+            }
+        },
+        else => {},
+    }
+    try out.appendSlice(allocator, "<div class=\"grid-content\">");
     try renderPanel(allocator, &out, root.getFocus(), grid);
+    try out.appendSlice(allocator, "</div>");
     return try out.toOwnedSlice(allocator);
 }
 
