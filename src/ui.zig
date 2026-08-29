@@ -1379,9 +1379,9 @@ pub const Session = struct {
     // focus id -> the live TextInput, refreshed each frame by the views that own
     // inputs. web/wasm form handling looks widgets up here by focus id.
     text_inputs: std.AutoHashMapUnmanaged(usize, *wgt.TextInput(Widget)) = .empty,
-    // focus id -> the page-constant text the web overlay renders into an
-    // input initially, refreshed each frame alongside `text_inputs`. never
-    // the input's live content: the overlay html must not change as the
+    // focus id -> the page-constant text the web renderer puts in an input
+    // initially, refreshed each frame alongside `text_inputs`. never an
+    // editable input's live content: the overlay html must not change as the
     // user types, or the diff in _setOverlay would rebuild the element.
     input_values: std.AutoHashMapUnmanaged(usize, []const u8) = .empty,
     nav_back: bool = false, // set by input (escape) to request the native TUI pop a page; see Nav
@@ -2042,8 +2042,8 @@ pub fn initRoot(allocator: std.mem.Allocator, page: *const Page, session: *Sessi
     } else Widget{ .background = try AnsiBackground.init(allocator, page_widget, session) };
     errdefer root.deinit(allocator);
 
-    // input-owning views build their TextInputs in init — so reset the
-    // focus-id -> *TextInput map here
+    // input-owning views build their TextInputs in init, so reset their
+    // registrations here
     session.text_inputs.clearRetainingCapacity();
     session.input_values.clearRetainingCapacity();
 

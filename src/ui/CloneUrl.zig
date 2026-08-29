@@ -81,7 +81,6 @@ pub const View = struct {
 
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
         errdefer box.deinit(allocator);
-        box.getFocus().kind = .{ .custom = "form:" };
 
         for (protocols[0..protocol_count]) |protocol| {
             var label = try wgt.TextBox(ui.Widget).init(allocator, protocol.name, .{ .border_style = .hidden, .wrap_kind = .none });
@@ -93,6 +92,7 @@ pub const View = struct {
         var text_input = try wgt.TextInput(ui.Widget).init(allocator, .{
             .border_style = .single,
             .label = input_label,
+            .read_only = true,
             .render_content = session.is_terminal,
             .visible_width = max_text_len,
         });

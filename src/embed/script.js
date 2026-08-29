@@ -159,8 +159,11 @@ const importObject = {
             overlay.innerHTML = html;
         },
         _focusInput: function (id) {
-            const target = overlay.querySelector(`[data-focus-id="${id}"]`);
-            if (target && document.activeElement !== target) target.focus();
+            const target = overlay.querySelector(`[data-focus-id="${id}"]`) ||
+                grid.querySelector(`input[data-focus-id="${id}"]`);
+            if (!target) return;
+            if (document.activeElement !== target) target.focus();
+            if (target.readOnly) target.select();
         },
         _navigate: function (ptr, len) {
             // a real browser navigation to another top-level page (the wasm
@@ -214,14 +217,6 @@ function sendTextInputValue(focusId, value) {
     const ptr = wasmInstance.exports._alloc(bytes.length);
     new Uint8Array(wasmInstance.exports.memory.buffer, ptr, bytes.length).set(bytes);
     wasmInstance.exports._setTextInputValue(focusId, ptr, bytes.length);
-    wasmInstance.exports._tick(minRows(), maxCols());
-}
-
-function sendEnter(form) {
-    const btn = form.querySelector("button[type=submit][data-focus-id]");
-    if (!btn) return;
-    wasmInstance.exports._onMouseClick(Number(btn.dataset.focusId));
-    wasmInstance.exports._onKeyDown(13);
     wasmInstance.exports._tick(minRows(), maxCols());
 }
 
@@ -342,11 +337,6 @@ WebAssembly.instantiateStreaming(fetch("/haxy.wasm"), importObject).then(async (
         sendTextInputValue(Number(t.dataset.focusId), t.value);
     });
 
-    document.addEventListener("click", (event) => {
-        const t = event.target;
-        if (t && t.tagName === "INPUT" && t.readOnly) t.select();
-    });
-
     document.addEventListener("focusin", (event) => {
         const t = event.target;
         if (!t || !t.dataset || !t.dataset.focusId) return;
@@ -364,6 +354,10 @@ WebAssembly.instantiateStreaming(fetch("/haxy.wasm"), importObject).then(async (
     });
 
     grid.addEventListener("click", (event) => {
+        if (event.target.matches("input[readonly]")) {
+            wasmInstance.exports._tick(minRows(), maxCols());
+            return;
+        }
         const span = event.target.closest(".clickable");
         if (!span) return;
         // leave modified / non-left clicks (open-in-new-tab, etc.) to the browser

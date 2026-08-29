@@ -1494,7 +1494,7 @@ fn renderIndexHtml(
 
     const snapshot: ui.Snapshot = .{ .page = page, .session = session.data };
 
-    const content = try generateHtml(allocator, &root);
+    const content = try generateHtml(allocator, &root, &session);
     defer allocator.free(content);
     const overlay = try generateOverlay(allocator, &root, &session);
     defer allocator.free(overlay);
@@ -1553,7 +1553,7 @@ fn findEmbed(request_path: []const u8) ?Embed {
 // emits the TUI grid cells as static HTML. each web-native Scroll becomes its
 // own absolutely-positioned, natively-scrollable <div> holding its full content,
 // rendered recursively so nested scrolls work.
-pub fn generateHtml(allocator: std.mem.Allocator, root: *ui.Widget) ![]const u8 {
+pub fn generateHtml(allocator: std.mem.Allocator, root: *ui.Widget, session: *ui.Session) ![]const u8 {
     const grid = root.getGrid() orelse return error.MissingGrid;
 
     var out: std.ArrayList(u8) = .empty;
@@ -1564,14 +1564,14 @@ pub fn generateHtml(allocator: std.mem.Allocator, root: *ui.Widget) ![]const u8 
             if (background.art.getGrid()) |art| {
                 var position_buf: [64]u8 = undefined;
                 try out.appendSlice(allocator, try std.fmt.bufPrint(&position_buf, "<div class=\"ansi-art\" aria-hidden=\"true\" style=\"left:{d}ch\">", .{grid.size.width -| art.size.width}));
-                try renderPanel(allocator, &out, background.art.getFocus(), art);
+                try renderPanel(allocator, &out, background.art.getFocus(), art, session);
                 try out.appendSlice(allocator, "</div>");
             }
         },
         else => {},
     }
     try out.appendSlice(allocator, "<div class=\"grid-content\">");
-    try renderPanel(allocator, &out, root.getFocus(), grid);
+    try renderPanel(allocator, &out, root.getFocus(), grid, session);
     try out.appendSlice(allocator, "</div>");
     return try out.toOwnedSlice(allocator);
 }
@@ -1581,7 +1581,7 @@ pub fn generateHtml(allocator: std.mem.Allocator, root: *ui.Widget) ![]const u8 
 // Scroll becomes a nested, natively-scrollable div holding its full content.
 // emits the panel's grid cells as text, leaving holes where child scrolls sit,
 // then the child scroll divs over those holes.
-fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: *Focus, grid: Grid) !void {
+fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: *Focus, grid: Grid, session: *ui.Session) !void {
     // `direct` is this panel's scroll children, each drawn as an overlaid div.
     // `excluded` is every focus id that belongs to a scroll (the scroll nodes
     // plus their descendants, which the focus tree flattens into this panel's
@@ -1752,6 +1752,33 @@ fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: 
         try output.append(allocator, '\n');
     }
 
+    // read-only inputs have no live form state to preserve, so emit them in
+    // their panel and let a native scroll move and clip them with the grid.
+    var input_iter = focus.children.iterator();
+    while (input_iter.next()) |input_entry| {
+        const input_id = input_entry.key_ptr.*;
+        if (excluded.contains(input_id)) continue;
+        const child = input_entry.value_ptr.*;
+        switch (child.focus.kind) {
+            .text_input => {},
+            else => continue,
+        }
+        const text_input = session.text_inputs.get(input_id) orelse continue;
+        if (!text_input.options.read_only) continue;
+        const value = session.input_values.get(input_id) orelse continue;
+        const r = child.rect;
+        const inner_width = if (r.size.width > 2) r.size.width - 2 else 0;
+
+        try output.appendSlice(allocator, "<input type=\"text\" readonly data-focus-id=\"");
+        var id_buf: [32]u8 = undefined;
+        try output.appendSlice(allocator, try std.fmt.bufPrint(&id_buf, "{d}", .{input_id}));
+        try output.appendSlice(allocator, "\" value=\"");
+        try appendEscapedHtml(allocator, output, value);
+        try output.appendSlice(allocator, "\" style=\"left:");
+        var pos_buf: [64]u8 = undefined;
+        try output.appendSlice(allocator, try std.fmt.bufPrint(&pos_buf, "{d}ch;top:{d}em;width:{d}ch;height:1em\">", .{ r.x + 1, r.y + 1, inner_width }));
+    }
+
     // each child scroll becomes a natively-scrollable div positioned over its
     // viewport, holding its full content rendered recursively.
     for (direct.items) |id| {
@@ -1774,7 +1801,7 @@ fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: 
         // scrolling to its selected row on page load) reach the browser.
         var buf: [256]u8 = undefined;
         try output.appendSlice(allocator, try std.fmt.bufPrint(&buf, "<div class=\"scroll\" data-scroll-id=\"{d}-{d}\" data-scroll-direction=\"{s}\" data-scroll-x=\"{d}\" data-scroll-y=\"{d}\" style=\"left:{d}ch;top:{d}em;width:{d}ch;height:{d}em;{s}\">", .{ id, child.focus.version, @tagName(info.direction), info.offset_x, info.offset_y, r.x, r.y, r.size.width, r.size.height, overflow }));
-        try renderPanel(allocator, output, child.focus, info.content);
+        try renderPanel(allocator, output, child.focus, info.content, session);
         try output.appendSlice(allocator, "</div>");
     }
 }
@@ -1806,8 +1833,6 @@ pub fn generateOverlay(allocator: std.mem.Allocator, root: *ui.Widget, session: 
         try out.appendSlice(allocator, "<form action=\"");
         try appendEscapedHtml(allocator, &out, action_url);
         try out.appendSlice(allocator, "\" method=\"post\"");
-        // an empty action must not POST — block it and send the input to the TUI instead
-        if (action_url.len == 0) try out.appendSlice(allocator, " onsubmit=\"event.preventDefault();sendEnter(this);\"");
         try out.appendSlice(allocator, ">");
 
         // form.focus.children was populated by addChild, which flattens the
@@ -1822,13 +1847,14 @@ pub fn generateOverlay(allocator: std.mem.Allocator, root: *ui.Widget, session: 
             switch (root_child.focus.kind) {
                 .text_input, .text_input_password => {
                     const ti = session.text_inputs.get(inner_id) orelse continue;
+                    if (ti.options.read_only) continue; // rendered with the grid
                     const inner_left = r.x + 1;
                     const inner_top = r.y + 1;
                     const inner_width = if (r.size.width > 2) r.size.width - 2 else 0;
 
                     try out.appendSlice(allocator, "<input type=\"");
                     try out.appendSlice(allocator, if (root_child.focus.kind == .text_input_password) "password" else "text");
-                    try out.appendSlice(allocator, if (action_url.len == 0) "\" readonly data-focus-id=\"" else "\" data-focus-id=\"");
+                    try out.appendSlice(allocator, "\" data-focus-id=\"");
                     var id_buf: [32]u8 = undefined;
                     try out.appendSlice(allocator, try std.fmt.bufPrint(&id_buf, "{d}", .{inner_id}));
                     if (ti.options.name.len > 0) {
@@ -1851,6 +1877,7 @@ pub fn generateOverlay(allocator: std.mem.Allocator, root: *ui.Widget, session: 
                 },
                 .text_area => {
                     const ti = session.text_inputs.get(inner_id) orelse continue;
+                    if (ti.options.read_only) continue; // rendered with the grid
                     const inner_left = r.x + 1;
                     const inner_top = r.y + 1;
                     const inner_width = if (r.size.width > 2) r.size.width - 2 else 0;

@@ -73,12 +73,12 @@ fn tick(min_height: u32, max_width: u32) !void {
         _replaceState(url.ptr, @intCast(url.len));
     }
 
-    const html = try web.generateHtml(allocator, root_ptr);
+    const html = try web.generateHtml(allocator, root_ptr, &session);
     defer allocator.free(html);
     _setHtml(html.ptr, @intCast(html.len));
 
-    // emit the overlay (form + inputs + button) on every tick so the wasm
-    // layout drives positions, not just the server's initial render. JS
+    // emit the editable form overlay on every tick so the wasm layout drives
+    // positions, not just the server's initial render. JS
     // diffs the result against the previous overlay; an unchanged overlay
     // leaves the live <form> alone — crucial since wiping it mid-click
     // would detach the submit button before the browser can dispatch the
@@ -90,7 +90,7 @@ fn tick(min_height: u32, max_width: u32) !void {
     const root_focus = root_ptr.getFocus();
     if (root_focus.grandchild_id) |gid| {
         if (root_focus.children.get(gid)) |child| {
-            // browser-focus the focused overlay control (text input, submit button
+            // browser-focus the focused native control (text input, submit button
             // or file picker) so the browser handles typing, Enter-to-submit and
             // Enter-to-open-the-picker natively. without this the control never
             // gets focus and Enter falls through to the wasm.
