@@ -353,10 +353,6 @@ pub fn consume(
                     try commitEvents(.xit, repo_opts, state, ctx.io, ctx.allocator, ctx.ref, ctx.events, ctx.first_parent_oids);
                     if (!try consumeInTransaction(role, .xit, repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, ctx.ref)) return error.CancelTransaction;
                     try xit.undo.writeMessage(repo_opts, state, .{ .custom = "event" });
-
-                    // fsync the chunk store, so any chunks written by the
-                    // commits are durable before the transaction commits
-                    try ctx.core.chunk_store_file.sync(ctx.io);
                 }
             };
 
@@ -406,7 +402,6 @@ pub fn mergeEvents(
                     const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
                     if (!try mergeEventsInTransaction(.xit, repo_opts, state, ctx.io, ctx.allocator, ctx.remote_ref)) return error.CancelTransaction;
                     try xit.undo.writeMessage(repo_opts, state, .{ .custom = "event" });
-                    try ctx.core.chunk_store_file.sync(ctx.io);
                 }
             };
 
@@ -607,7 +602,6 @@ pub fn receivePackAndConsume(
                 try pch.detectMerged(repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, ctx.repo_root_path, updates.items.items, ctx.error_writer);
             }
             try xit.undo.writeMessage(repo_opts, state, .push);
-            try ctx.core.chunk_store_file.sync(ctx.io);
         }
     };
 

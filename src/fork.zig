@@ -99,24 +99,17 @@ pub fn create(
     {
         try target_repo.core.db_file.lock(io, .shared);
         defer target_repo.core.db_file.unlock(io);
-        try target_repo.core.chunk_store_file.lock(io, .shared);
-        defer target_repo.core.chunk_store_file.unlock(io);
 
-        // TODO: use reflinks here when the filesystem supports them
-        for ([_]struct { file: std.Io.File, name: []const u8 }{
-            .{ .file = target_repo.core.db_file, .name = "db" },
-            .{ .file = target_repo.core.chunk_store_file, .name = "chunks" },
-        }) |source| {
-            const destination = try fork_repo_dir.createFile(io, source.name, .{ .exclusive = true, .read = true });
-            defer destination.close(io);
-            var read_buffer: [64 * 1024]u8 = undefined;
-            var write_buffer: [64 * 1024]u8 = undefined;
-            var reader = source.file.reader(io, &read_buffer);
-            var writer = destination.writer(io, &write_buffer);
-            _ = try reader.interface.streamRemaining(&writer.interface);
-            try writer.interface.flush();
-            try destination.sync(io);
-        }
+        // TODO: use reflink here when the filesystem supports it
+        const destination = try fork_repo_dir.createFile(io, "db", .{ .exclusive = true, .read = true });
+        defer destination.close(io);
+        var read_buffer: [64 * 1024]u8 = undefined;
+        var write_buffer: [64 * 1024]u8 = undefined;
+        var reader = target_repo.core.db_file.reader(io, &read_buffer);
+        var writer = destination.writer(io, &write_buffer);
+        _ = try reader.interface.streamRemaining(&writer.interface);
+        try writer.interface.flush();
+        try destination.sync(io);
     }
 
     var fork_repo = try rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = fork_path, .require_repo_root = true });
@@ -376,7 +369,6 @@ pub fn receivePack(
                     if (!try evt.consumeInTransaction(.fork, .xit, repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, evt.events_ref)) return error.CancelTransaction;
                 }
                 try xit.undo.writeMessage(repo_opts, state, .push);
-                try ctx.core.chunk_store_file.sync(ctx.io);
             }
         };
 

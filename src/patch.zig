@@ -215,7 +215,6 @@ pub fn merge(
                 }
 
                 try xit.undo.writeMessage(repo_opts, state, .{ .custom = "merge patch" });
-                try ctx.core.chunk_store_file.sync(ctx.io);
             }
         };
 
