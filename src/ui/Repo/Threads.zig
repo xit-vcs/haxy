@@ -386,7 +386,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         // indices within a split (the horizontal box inside the stack).
         const list_index: usize = 0;
         const detail_index: usize = 1;
-        const list_max_width: usize = 40;
+        const list_max_width: usize = 35;
         const detail_min_width: usize = 40;
         // indices within the thread form.
         const title_field_index: usize = 0;

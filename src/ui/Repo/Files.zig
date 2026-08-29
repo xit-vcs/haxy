@@ -228,7 +228,7 @@ pub const View = struct {
     // indices within the detail pane frame (nav box above the content scroll).
     const detail_nav_index: usize = 0;
     const detail_scroll_index: usize = 1;
-    const list_max_width: usize = 40;
+    const list_max_width: usize = 35;
     const detail_min_width: usize = 40;
     // a list row's height: one text line inside its (hidden) border.
     const row_height: usize = 3;

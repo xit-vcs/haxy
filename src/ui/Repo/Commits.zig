@@ -420,7 +420,7 @@ pub const View = struct {
     // indices within the content box (the horizontal split).
     const list_index: usize = 0;
     const diff_index: usize = 1;
-    const list_max_width: usize = 40;
+    const list_max_width: usize = 35;
     const diff_min_width: usize = 40;
 
     pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !View {
