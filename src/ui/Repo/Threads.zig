@@ -1507,10 +1507,10 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             };
 
             if (has_drafts and entryDraft(entry)) {
-                if (self.data.target_branch.len != 0 and (self.session.data.clone_http_port != null or self.session.data.clone_ssh_port != null)) {
-                    var push = try ui.CloneUrl.View.initPush(allocator, self.session, self.data.identity, entry.id, self.data.target_branch);
+                if (self.data.target_branch.len != 0 and self.session.data.git_ssh_port != null) {
+                    var push = try ui.GitRemote.View.initPush(allocator, self.session, self.data.identity, entry.id, self.data.target_branch);
                     errdefer push.deinit(allocator);
-                    try inner.children.put(allocator, push.getFocus().id, .{ .widget = .{ .clone_url = push }, .rect = null, .min_size = null });
+                    try inner.children.put(allocator, push.getFocus().id, .{ .widget = .{ .git_remote = push }, .rect = null, .min_size = null });
                 }
                 inner.getFocus().child_id = inner.children.keys()[title_child_index];
                 const sc = self.detailScroll(index);
@@ -1695,15 +1695,15 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     self.tagsInput(index, child_index, tf, key, root_focus);
                     return;
                 },
-                .clone_url => |*clone_url| {
+                .git_remote => |*git_remote| {
                     switch (key) {
                         .arrow_up => _ = self.moveDetailVertical(index, root_focus, false),
                         .arrow_down => _ = self.moveDetailVertical(index, root_focus, true),
-                        .arrow_left => if (clone_url.selected == 0)
+                        .arrow_left => if (git_remote.selected == 0)
                             self.focusList(index, root_focus)
                         else
-                            try clone_url.input(allocator, key, root_focus),
-                        else => try clone_url.input(allocator, key, root_focus),
+                            try git_remote.input(allocator, key, root_focus),
+                        else => try git_remote.input(allocator, key, root_focus),
                     }
                     return;
                 },

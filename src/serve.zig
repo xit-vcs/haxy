@@ -89,7 +89,7 @@ pub fn run(
 
     // create ssh listener and its session state
 
-    const clone_http_port: ?u16 = if (http_maybe) |*http| http.port() else null;
+    const git_http_port: ?u16 = if (http_maybe) |*http| http.port() else null;
     var ssh_maybe: ?SshService = if (options.ssh_listen) |value| blk: {
         const address = try parseListenAddress(value);
         var listener = BoundListener{ .address = address, .server = try listen(io, address, .reuse) };
@@ -102,8 +102,8 @@ pub fn run(
                 .admin_repo_path = admin_repo_path,
                 .repo_root_path = repo_root_path,
                 .wui_port = wui_server.socket.address.getPort(),
-                .clone_http_port = clone_http_port,
-                .clone_ssh_port = ssh_port,
+                .git_http_port = git_http_port,
+                .git_ssh_port = ssh_port,
                 .err = err,
             },
         };
@@ -117,7 +117,7 @@ pub fn run(
 
     // run listeners, printing the ports actually bound
 
-    const clone_ssh_port: ?u16 = if (ssh_maybe) |*ssh| ssh.listener.port() else null;
+    const git_ssh_port: ?u16 = if (ssh_maybe) |*ssh| ssh.listener.port() else null;
 
     if (http_maybe) |*http| {
         try err.print("serving HTTP on {s}:{d}, repo root {s}\n", .{ http.address.host, http.port(), repo_root_path });
@@ -137,12 +137,12 @@ pub fn run(
     runWebListener(io, allocator, &wui_server, &tasks, .{ .remote = .{
         .admin_repo_path = admin_repo_path,
         .session_store = session_store,
-        .clone_http_port = clone_http_port,
-        .clone_ssh_port = clone_ssh_port,
+        .git_http_port = git_http_port,
+        .git_ssh_port = git_ssh_port,
     } }, err);
 
     if (@TypeOf(runnable) != void) {
-        try runnable.run(wui_server.socket.address.getPort(), clone_http_port, clone_ssh_port);
+        try runnable.run(wui_server.socket.address.getPort(), git_http_port, git_ssh_port);
     } else {
         try tasks.await(io);
     }

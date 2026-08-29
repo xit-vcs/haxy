@@ -916,8 +916,8 @@ pub fn main(init: std.process.Init) !void {
             pub fn run(self: @This(), web_port: u16, http_port: ?u16, ssh_port: ?u16) !void {
                 // launch the TUI; the footer points at whatever port was bound
                 self.session.web_port = web_port;
-                self.session.data.clone_http_port = http_port;
-                self.session.data.clone_ssh_port = ssh_port;
+                self.session.data.git_http_port = http_port;
+                self.session.data.git_ssh_port = ssh_port;
                 try hx.ui.run(self.io, self.allocator, self.session, self.repo);
             }
         };

@@ -21,7 +21,7 @@ pub const Repo = @import("./ui/Repo.zig");
 pub const Title = @import("./ui/Title.zig");
 pub const SubTitle = @import("./ui/SubTitle.zig");
 pub const Quit = @import("./ui/Quit.zig");
-pub const CloneUrl = @import("./ui/CloneUrl.zig");
+pub const GitRemote = @import("./ui/GitRemote.zig");
 pub const Unauthorized = @import("./ui/Unauthorized.zig");
 
 pub const clipped_bottom_label_max_len = 10 * 4;
@@ -1421,10 +1421,10 @@ pub const Session = struct {
         // the selected ANSI art. the server serializes one image for WASM so
         // the browser does not need the whole build-generated collection.
         ansi_art: []const u8 = "",
-        // the bound clone-service ports. absent in local mode, where clone urls
+        // the bound git-service ports. absent in local mode, where remote urls
         // are not shown.
-        clone_http_port: ?u16 = null,
-        clone_ssh_port: ?u16 = null,
+        git_http_port: ?u16 = null,
+        git_ssh_port: ?u16 = null,
         // true when this session views a single local repo. unlike `local`
         // (the host-side filesystem source) this travels in the snapshot, so
         // the wasm side also parses elided link urls and hides the multi-user
@@ -2104,7 +2104,7 @@ pub const Widget = union(enum) {
     repo_events_header: Repo.Events.Header.View,
     repo_events: Repo.Events.View,
     repo_comment: Repo.Comment.Item,
-    clone_url: CloneUrl.View,
+    git_remote: GitRemote.View,
     home_users: Home.Users.View,
     home_repos: Home.Repos.View,
     auth_tab: Home.Header.AuthTab.View,

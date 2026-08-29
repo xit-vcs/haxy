@@ -25,11 +25,11 @@ pub const View = struct {
         copyable_text: []const u8,
     };
 
-    pub fn init(allocator: std.mem.Allocator, session: *ui.Session, identity: []const u8) !View {
+    pub fn initClone(allocator: std.mem.Allocator, session: *ui.Session, identity: []const u8) !View {
         const aa = session.page_arena.allocator();
         var protocols: [2]Protocol = undefined;
         var protocol_count: usize = 0;
-        if (session.data.clone_http_port) |port| {
+        if (session.data.git_http_port) |port| {
             const url = try std.fmt.allocPrint(aa, "http://localhost:{d}/repo/{s}", .{ port, identity });
             protocols[protocol_count] = .{
                 .name = "http",
@@ -38,7 +38,7 @@ pub const View = struct {
             };
             protocol_count += 1;
         }
-        if (session.data.clone_ssh_port) |port| {
+        if (session.data.git_ssh_port) |port| {
             const url = try std.fmt.allocPrint(aa, "ssh://localhost:{d}/repo/{s}", .{ port, identity });
             protocols[protocol_count] = .{
                 .name = "ssh",
@@ -53,28 +53,19 @@ pub const View = struct {
     pub fn initPush(allocator: std.mem.Allocator, session: *ui.Session, identity: []const u8, id: []const u8, branch: []const u8) !View {
         const aa = session.page_arena.allocator();
         var protocols: [2]Protocol = undefined;
-        var protocol_count: usize = 0;
-        if (session.data.clone_http_port) |port| {
-            const url = try std.fmt.allocPrint(aa, "http://localhost:{d}/repo/{s}/patch:{s}/branch:{s}", .{ port, identity, id, branch });
-            const command = try std.fmt.allocPrint(aa, "git push {s} HEAD:patch", .{url});
-            protocols[protocol_count] = .{ .name = "http", .text = command, .copyable_text = command };
-            protocol_count += 1;
-        }
-        if (session.data.clone_ssh_port) |port| {
-            const url = try std.fmt.allocPrint(aa, "ssh://localhost:{d}/repo/{s}/patch:{s}/branch:{s}", .{ port, identity, id, branch });
-            const command = try std.fmt.allocPrint(aa, "git push {s} HEAD:patch", .{url});
-            protocols[protocol_count] = .{
-                .name = "ssh",
-                .text = command,
-                .copyable_text = if (builtin.mode == .Debug) try std.fmt.allocPrint(aa, "{s}{s}", .{ debug_ssh_prefix, command }) else command,
-            };
-            protocol_count += 1;
-        }
-        return initProtocols(allocator, session, protocols, protocol_count, " push ");
+        const port = session.data.git_ssh_port orelse return error.MissingGitPort;
+        const url = try std.fmt.allocPrint(aa, "ssh://localhost:{d}/repo/{s}/patch:{s}/branch:{s}", .{ port, identity, id, branch });
+        const command = try std.fmt.allocPrint(aa, "git push {s} HEAD:patch", .{url});
+        protocols[0] = .{
+            .name = "ssh",
+            .text = command,
+            .copyable_text = if (builtin.mode == .Debug) try std.fmt.allocPrint(aa, "{s}{s}", .{ debug_ssh_prefix, command }) else command,
+        };
+        return initProtocols(allocator, session, protocols, 1, " push ");
     }
 
     fn initProtocols(allocator: std.mem.Allocator, session: *ui.Session, protocols: [2]Protocol, protocol_count: usize, input_label: []const u8) !View {
-        if (protocol_count == 0) return error.MissingClonePort;
+        if (protocol_count == 0) return error.MissingGitPort;
 
         var max_text_len: usize = 0;
         for (protocols[0..protocol_count]) |protocol| max_text_len = @max(max_text_len, protocol.text.len);

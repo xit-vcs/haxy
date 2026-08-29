@@ -436,8 +436,8 @@ pub const View = struct {
                         switch (child.*) {
                             .repo_header => {
                                 if (stack.getSelected()) |selected_widget| switch (selected_widget.*) {
-                                    .repo_files => |*v| if (v.focusCloneUrl(root_focus)) return,
-                                    .repo_commits => |*v| if (v.focusCloneUrl(root_focus)) return,
+                                    .repo_files => |*v| if (v.focusGitRemote(root_focus)) return,
+                                    .repo_commits => |*v| if (v.focusGitRemote(root_focus)) return,
                                     else => {},
                                 };
                                 index = stack_index;
