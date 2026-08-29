@@ -44,6 +44,7 @@ pub const Host = union(enum) {
         session_store: SessionStore,
         git_http_port: ?u16,
         git_ssh_port: ?u16,
+        git_ssh_prefix: []const u8,
     },
     local: ui.RepoSource,
 };
@@ -247,9 +248,9 @@ fn handleRequest(
             },
         }
 
-        const git_http_port: ?u16, const git_ssh_port: ?u16 = switch (host) {
-            .remote => |remote| .{ remote.git_http_port, remote.git_ssh_port },
-            .local => .{ null, null },
+        const git_http_port: ?u16, const git_ssh_port: ?u16, const git_ssh_prefix: []const u8 = switch (host) {
+            .remote => |remote| .{ remote.git_http_port, remote.git_ssh_port, remote.git_ssh_prefix },
+            .local => .{ null, null, "" },
         };
         const html = renderIndexHtml(io, allocator, host, .{
             .user_id = user_id,
@@ -259,6 +260,7 @@ fn handleRequest(
             .is_local = host == .local,
             .git_http_port = git_http_port,
             .git_ssh_port = git_ssh_port,
+            .git_ssh_prefix = git_ssh_prefix,
         }) catch |err| switch (err) {
             error.NotFound => {
                 try request.respond("not found", .{

@@ -29,6 +29,7 @@ pub const SessionHandler = struct {
     wui_port: u16, // port the web UI is served on, shown in the TUI footer's url
     git_http_port: ?u16,
     git_ssh_port: ?u16,
+    git_ssh_prefix: []const u8,
     err: *std.Io.Writer,
 
     pub fn handleSession(self: *const SessionHandler, sess: *ssh.SessionCtx, request: ssh.Request) !void {
@@ -199,6 +200,7 @@ fn runTui(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh.PtySiz
     ui_session.web_port = handler.wui_port;
     ui_session.data.git_http_port = handler.git_http_port;
     ui_session.data.git_ssh_port = handler.git_ssh_port;
+    ui_session.data.git_ssh_prefix = handler.git_ssh_prefix;
     // let page builders open on-disk repos (sibling "repos" dir of the admin repo)
     ui_session.io = io;
     ui_session.repos_dir = try std.fs.path.join(session_arena.allocator(), &.{ std.fs.path.dirname(handler.admin_repo_path) orelse ".", "repos" });

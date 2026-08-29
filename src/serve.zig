@@ -13,6 +13,7 @@ pub const Options = struct {
     ssh_listen: ?[]const u8 = "127.0.0.1:8022",
     wui_listen: []const u8 = "127.0.0.1:8000",
     data_dir: []const u8 = ".",
+    git_ssh_prefix: []const u8 = "",
 };
 
 const ListenAddress = struct {
@@ -104,6 +105,7 @@ pub fn run(
                 .wui_port = wui_server.socket.address.getPort(),
                 .git_http_port = git_http_port,
                 .git_ssh_port = ssh_port,
+                .git_ssh_prefix = options.git_ssh_prefix,
                 .err = err,
             },
         };
@@ -139,6 +141,7 @@ pub fn run(
         .session_store = session_store,
         .git_http_port = git_http_port,
         .git_ssh_port = git_ssh_port,
+        .git_ssh_prefix = options.git_ssh_prefix,
     } }, err);
 
     if (@TypeOf(runnable) != void) {

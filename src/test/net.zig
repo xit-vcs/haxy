@@ -628,7 +628,11 @@ fn testPushFork(
         const moment = try evt.currentMoment(.{}, &draft);
         const patch = (try evt.Patch.readById(evt.EventDB(.sha1), .sha1, moment, &arena, &fork_id)) orelse return error.NotFound;
         try std.testing.expect(!patch.removed);
-        first_revision_id = try evt.parseEventId(&(patch.event.revision orelse return error.NotFound).id);
+        try std.testing.expectEqualStrings(&source_oid, &(try draft.readRef(io, fork.ref) orelse return error.NotFound));
+        const selected = patch.event.revision orelse return error.NotFound;
+        try std.testing.expectEqualStrings("refs/heads/master", selected.target_ref);
+        try std.testing.expectEqualStrings(&source_oid, selected.source_oid);
+        first_revision_id = try evt.parseEventId(&selected.id);
         const revision = (try evt.PatchRev.readById(evt.EventDB(.sha1), .sha1, moment, &arena, &first_revision_id)) orelse return error.NotFound;
         try std.testing.expectEqualStrings("refs/heads/master", revision.event.target_ref);
         try std.testing.expectEqualStrings(&source_oid, revision.event.source_oid);
@@ -643,6 +647,7 @@ fn testPushFork(
         defer admin.deinit(io, allocator);
         var target = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = target_path });
         defer target.deinit(io, allocator);
+        try target.addBranch(io, .{ .name = "feature" });
         try pch.post(.{}, io, allocator, &admin, &target, draft_path, .{
             .id = fork_id_hex,
             .user_id = user_id,
@@ -668,6 +673,10 @@ fn testPushFork(
         }});
     }
 
+    const feature_remote_url = try std.fmt.allocPrint(allocator, "git@localhost:admin/target/patch:{s}/branch:feature", .{&fork_id_hex});
+    defer allocator.free(feature_remote_url);
+    try client.addRemote(io, allocator, .{ .name = "patch-to-feature", .value = feature_remote_url });
+
     const second_source_oid = blk: {
         const file = try client.core.work_dir.createFile(io, "feature.txt", .{ .truncate = true });
         defer file.close(io);
@@ -675,7 +684,7 @@ fn testPushFork(
         try client.add(io, allocator, &.{"feature.txt"});
         break :blk try client.commit(io, allocator, .{ .message = "revise feature" });
     };
-    try client.push(io, allocator, "patch", "master:patch", false, .{ .wire = .{ .ssh = .{ .command = ssh_cmd } } });
+    try client.push(io, allocator, "patch-to-feature", "master:patch", false, .{ .wire = .{ .ssh = .{ .command = ssh_cmd } } });
 
     var second_revision_id: [evt.event_id_size]u8 = undefined;
     var second_patch_oid: [hash.hexLen(.sha1)]u8 = undefined;
@@ -692,6 +701,7 @@ fn testPushFork(
         @memcpy(&second_patch_oid, newest.record.patch_oid);
         try std.testing.expect(!std.mem.eql(u8, &first_revision_id, &second_revision_id));
         try std.testing.expectEqualStrings(&second_source_oid, newest.record.event.source_oid);
+        try std.testing.expectEqualStrings("refs/heads/feature", newest.record.event.target_ref);
         try std.testing.expectEqualStrings("edited feature", newest.record.event.message);
     }
     {
@@ -702,7 +712,10 @@ fn testPushFork(
         const moment = try evt.currentMoment(.{}, &target);
         const patch = (try evt.Patch.readById(evt.EventDB(.sha1), .sha1, moment, &arena, &fork_id)) orelse return error.NotFound;
         try std.testing.expectEqualStrings("edited feature", patch.event.title);
-        try std.testing.expectEqualStrings(&std.fmt.bytesToHex(second_revision_id, .lower), &(patch.event.revision orelse return error.NotFound).id);
+        const selected = patch.event.revision orelse return error.NotFound;
+        try std.testing.expectEqualStrings(&std.fmt.bytesToHex(second_revision_id, .lower), &selected.id);
+        try std.testing.expectEqualStrings(&second_source_oid, selected.source_oid);
+        try std.testing.expectEqualStrings("refs/heads/feature", selected.target_ref);
     }
 
     //
@@ -716,7 +729,7 @@ fn testPushFork(
         try client.add(io, allocator, &.{"feature.txt"});
         break :blk try client.commit(io, allocator, .{ .message = "rejected revision" });
     };
-    const extra_ref_rejected = if (client.push(io, allocator, "patch", "master:patch", false, .{
+    const extra_ref_rejected = if (client.push(io, allocator, "patch-to-feature", "master:patch", false, .{
         .refspecs = &.{"refs/heads/master:refs/heads/extra"},
         .wire = .{ .ssh = .{ .command = ssh_cmd } },
     })) |_| false else |_| true;
@@ -742,7 +755,7 @@ fn testPushFork(
         defer target.deinit(io, allocator);
         try evt.remove(.repo, .xit, .{}, io, allocator, &target, &fork_id, .patch, .{ .name = "admin", .email = "admin@example.test" });
     }
-    try client.push(io, allocator, "patch", "master:patch", false, .{ .wire = .{ .ssh = .{ .command = ssh_cmd } } });
+    try client.push(io, allocator, "patch-to-feature", "master:patch", false, .{ .wire = .{ .ssh = .{ .command = ssh_cmd } } });
     {
         var target = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = target_path });
         defer target.deinit(io, allocator);
@@ -773,7 +786,7 @@ fn testPushFork(
     }
     const merge_parents = [_][hash.hexLen(.sha1)]u8{ third_source_oid, second_source_oid };
     _ = try client.commit(io, allocator, .{ .message = "merge patch", .parent_oids = &merge_parents });
-    try client.push(io, allocator, "origin", "master:master", false, .{ .wire = .{ .ssh = .{ .command = ssh_cmd } } });
+    try client.push(io, allocator, "origin", "master:feature", false, .{ .wire = .{ .ssh = .{ .command = ssh_cmd } } });
     {
         var target = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = target_path });
         defer target.deinit(io, allocator);

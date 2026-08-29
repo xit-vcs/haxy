@@ -367,6 +367,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         // per-split state, indexed like the stack's split children: the thread the
         // pane shows and its focus ids.
         detailed_index: [view_count]?usize,
+        title_id: [view_count]?usize,
         description_id: [view_count]?usize,
         author_id: [view_count]?usize,
 
@@ -673,6 +674,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 .data = data,
                 .session = session,
                 .detailed_index = @splat(null),
+                .title_id = @splat(null),
                 .description_id = @splat(null),
                 .author_id = @splat(null),
             };
@@ -1091,6 +1093,12 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             try row.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = .{ .width = try xitui.width.displayWidth(label) + 2, .height = null } });
         }
 
+        fn addDetailGap(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget)) !void {
+            var spacer = try ui.Spacer.init(allocator);
+            errdefer spacer.deinit(allocator);
+            try box.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = .{ .width = null, .height = 1 }, .max_size = .{ .width = null, .height = 1 } });
+        }
+
         pub fn deinit(self: *This, allocator: std.mem.Allocator) void {
             self.box.deinit(allocator);
         }
@@ -1330,6 +1338,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             for (inner.children.values()) |*child| child.widget.deinit(allocator);
             inner.children.clearAndFree(allocator);
             inner.getFocus().child_id = null;
+            self.title_id[index] = null;
             self.author_id[index] = null;
 
             // the tool row; the description page shows none.
@@ -1408,6 +1417,63 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 }
             }
 
+            if (has_drafts and entryDraft(entry) and !description_page and comment_page == null) {
+                const aa = self.session.page_arena.allocator();
+                var fields: [2]ui.CopyableText.Choice = undefined;
+                var field_count: usize = 0;
+
+                if (entry.target_branch.len != 0) if (self.session.data.git_ssh_port) |port| {
+                    const url = try std.fmt.allocPrint(aa, "ssh://localhost:{d}/repo/{s}/patch:{s}/branch:{s}", .{ port, self.data.identity, entry.id, entry.target_branch });
+                    const push_command = try std.fmt.allocPrint(aa, "git push {s} HEAD:patch", .{url});
+                    const clone_name = try Data.cloneDirectoryName(aa, entry.record.event.title);
+                    const clone_command = if (clone_name.len == 0)
+                        try std.fmt.allocPrint(aa, "git clone {s}", .{url})
+                    else
+                        try std.fmt.allocPrint(aa, "git clone {s} {s}", .{ url, clone_name });
+                    const choices: [2]ui.CopyableText.Choice = .{
+                        .{
+                            .selector = "push",
+                            .text = push_command,
+                            .copyable_text = try std.fmt.allocPrint(aa, "{s}{s}", .{ self.session.data.git_ssh_prefix, push_command }),
+                            .label = " push to this patch from existing repo ",
+                        },
+                        .{
+                            .selector = "clone",
+                            .text = clone_command,
+                            .copyable_text = try std.fmt.allocPrint(aa, "{s}{s}", .{ self.session.data.git_ssh_prefix, clone_command }),
+                            .label = " clone this patch ",
+                        },
+                    };
+                    var copyable_text = try ui.CopyableText.View.init(allocator, self.session, &choices);
+                    errdefer copyable_text.deinit(allocator);
+                    try inner.children.put(allocator, copyable_text.getFocus().id, .{ .widget = .{ .copyable_text = copyable_text }, .rect = null, .min_size = null });
+                    try addDetailGap(allocator, inner);
+                };
+                if (entry.fork_oid.len != 0) {
+                    fields[field_count] = .{
+                        .text = entry.fork_oid,
+                        .label = if (entry.no_changes) " object id of this patch (no changes) " else " object id of this patch ",
+                    };
+                    field_count += 1;
+                }
+                if (entry.target_branch.len != 0) {
+                    fields[field_count] = .{
+                        .text = entry.target_branch,
+                        .label = " target branch this patch will go to ",
+                        .bottom_label = " (set by the url you push to above) ",
+                    };
+                    field_count += 1;
+                }
+
+                for (fields[0..field_count], 0..) |field, i| {
+                    var copyable_text = try ui.CopyableText.View.init(allocator, self.session, &.{field});
+                    errdefer copyable_text.deinit(allocator);
+                    try inner.children.put(allocator, copyable_text.getFocus().id, .{ .widget = .{ .copyable_text = copyable_text }, .rect = null, .min_size = null });
+                    if (i + 1 < field_count) try addDetailGap(allocator, inner);
+                }
+                if (entry.target_branch.len != 0) try addDetailGap(allocator, inner);
+            }
+
             if (comment_page) |page| {
                 var back_label_buf: ["← back to ".len + thread_name.len]u8 = undefined;
                 const back_label = try std.fmt.bufPrint(&back_label_buf, "← back to {s}", .{thread_name});
@@ -1442,14 +1508,16 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 tb.getFocus().focusable = true;
                 tb.getFocus().kind = .{ .custom = try listLink(self.session.page_arena, self.data.identity, entryStatus(entry), "", entry.id) };
                 try inner.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
+                self.title_id[index] = tb.getFocus().id;
             } else {
                 // the thread's title as a focusable word-wrapped text box.
-                {
+                self.title_id[index] = blk: {
                     var tb = try wgt.TextBox(ui.Widget).init(allocator, entry.record.event.title, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .word, .label = " title " });
                     errdefer tb.deinit(allocator);
                     tb.getFocus().focusable = true;
                     try inner.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
-                }
+                    break :blk tb.getFocus().id;
+                };
 
                 self.author_id[index] = blk: {
                     var tb = try ui.authorBox(allocator, self.session.page_arena, entry.author);
@@ -1507,12 +1575,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             };
 
             if (has_drafts and entryDraft(entry)) {
-                if (self.data.target_branch.len != 0 and self.session.data.git_ssh_port != null) {
-                    var push = try ui.GitRemote.View.initPush(allocator, self.session, self.data.identity, entry.id, self.data.target_branch);
-                    errdefer push.deinit(allocator);
-                    try inner.children.put(allocator, push.getFocus().id, .{ .widget = .{ .git_remote = push }, .rect = null, .min_size = null });
-                }
-                inner.getFocus().child_id = inner.children.keys()[title_child_index];
+                inner.getFocus().child_id = inner.children.keys()[0];
                 const sc = self.detailScroll(index);
                 sc.x = 0;
                 sc.y = 0;
@@ -1538,7 +1601,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             }
 
             // select the title by default
-            inner.getFocus().child_id = inner.children.keys()[title_child_index];
+            if (self.title_id[index]) |id| inner.getFocus().child_id = id;
 
             // reset the scroll to the top for the newly-shown thread: directly on the
             // terminal (the wasm offset), and via a version bump on the web (so the
@@ -1665,10 +1728,10 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             const child_id = inner.children.keys()[child_index];
             const child = &inner.children.values()[child_index].widget;
 
-            if (child_index == title_child_index) {
+            if (child_id == self.title_id[index]) {
                 switch (key) {
                     .arrow_left => self.focusList(index, root_focus),
-                    .arrow_up => self.focusToolRow(index, root_focus),
+                    .arrow_up => if (!self.moveDetailVertical(index, root_focus, false)) self.focusToolRow(index, root_focus),
                     .arrow_down => _ = self.moveDetailVertical(index, root_focus, true),
                     else => {},
                 }
@@ -1695,15 +1758,15 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     self.tagsInput(index, child_index, tf, key, root_focus);
                     return;
                 },
-                .git_remote => |*git_remote| {
+                .copyable_text => |*copyable_text| {
                     switch (key) {
-                        .arrow_up => _ = self.moveDetailVertical(index, root_focus, false),
+                        .arrow_up => if (!self.moveDetailVertical(index, root_focus, false)) self.focusToolRow(index, root_focus),
                         .arrow_down => _ = self.moveDetailVertical(index, root_focus, true),
-                        .arrow_left => if (git_remote.selected == 0)
+                        .arrow_left => if (copyable_text.selected == 0)
                             self.focusList(index, root_focus)
                         else
-                            try git_remote.input(allocator, key, root_focus),
-                        else => try git_remote.input(allocator, key, root_focus),
+                            try copyable_text.input(allocator, key, root_focus),
+                        else => try copyable_text.input(allocator, key, root_focus),
                     }
                     return;
                 },
@@ -2488,8 +2551,6 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 else => {},
             }
         }
-
-        const title_child_index: usize = 0;
 
         // the tool row's first child after the spacer that pushes it right
         const first_in_row_index: usize = 1;

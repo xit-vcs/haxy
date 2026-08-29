@@ -63,6 +63,8 @@ pub fn main(init: std.process.Init) !void {
 
     const cwd_path = try std.process.currentPathAlloc(io, allocator);
     defer allocator.free(cwd_path);
+    const key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "key" });
+    defer allocator.free(key_path);
 
     var cli = false;
     var serve_args: std.ArrayList([]const u8) = .empty;
@@ -78,6 +80,12 @@ pub fn main(init: std.process.Init) !void {
         }
     }
     var serve_options = try hx.command.parseServeOptions(allocator, serve_args.items);
+    const git_ssh_prefix = if (builtin.mode == .Debug)
+        try std.fmt.allocPrint(allocator, "GIT_SSH_COMMAND='ssh -i \"{s}\" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR' \\\r\n", .{key_path})
+    else
+        "";
+    defer if (git_ssh_prefix.len != 0) allocator.free(git_ssh_prefix);
+    serve_options.git_ssh_prefix = git_ssh_prefix;
 
     const server_path = if (std.mem.eql(u8, serve_options.data_dir, "."))
         try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "server" })
@@ -842,6 +850,7 @@ pub fn main(init: std.process.Init) !void {
         break :blk try ui.Session.init(&session_arena, &repo, .{ .user_id = &admin_user_id });
     };
     session.is_terminal = true;
+    session.data.git_ssh_prefix = git_ssh_prefix;
 
     // start the server
 
@@ -864,9 +873,6 @@ pub fn main(init: std.process.Init) !void {
         var stdout_writer = std.Io.File.stdout().writer(io, &.{});
         var stderr_writer = std.Io.File.stderr().writer(io, &.{});
         const run_opts = hx.main.RunOpts{ .out = &stdout_writer.interface, .err = &stderr_writer.interface };
-
-        const key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "key" });
-        defer allocator.free(key_path);
 
         const Runnable = struct {
             io: std.Io,

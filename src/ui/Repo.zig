@@ -229,12 +229,14 @@ pub fn init(
                         inline else => |*opened| {
                             // local mode: bring the event db up to date with the events branch
                             if (session.local != null) try evt.consume(.repo, repo_kind, opened.self_repo_opts, io, gpa, opened, evt.events_ref, &.{});
+                            const files_data = try Files.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, repo_identity.identity, requested_ref_or_oid, requested_ref_value, files_dir, files_line);
+                            const target_branch = if (files_data.ref_or_oid == .branch) files_data.ref_or_oid_value else "";
                             break :blk .{
-                                try Files.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, repo_identity.identity, requested_ref_or_oid, requested_ref_value, files_dir, files_line),
+                                files_data,
                                 try Commits.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, session.haxy_moment, repo_identity.identity, requested_ref_or_oid, requested_ref_value, commits_content),
                                 try Refs.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, repo_identity.identity, refs_kind, refs_from),
                                 try Issues.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, issues_tag, issues_selected, issues_comment, issues_comments_start, issues_theirs, issues_view),
-                                try Patches.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, session, repo_id_maybe, repo_identity.identity, patches_tag, patches_selected, patches_comment, patches_comments_start, patches_theirs, patches_view),
+                                try Patches.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, session, repo_id_maybe, repo_identity.identity, target_branch, patches_tag, patches_selected, patches_comment, patches_comments_start, patches_theirs, patches_view),
                                 try Discussions.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, discussions_tag, discussions_selected, discussions_comment, discussions_comments_start, discussions_view),
                                 try Events.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, events_view, events_kind, events_selected, session.local != null, session.data.sync_failure),
                             };
@@ -257,7 +259,6 @@ pub fn init(
     issues.repo_source = source;
     patches.repo_source = source;
     patches.repo_id = repo_id_maybe;
-    patches.target_branch = if (files.ref_or_oid == .branch) files.ref_or_oid_value else "";
     discussions.repo_source = source;
 
     return .{
@@ -436,8 +437,8 @@ pub const View = struct {
                         switch (child.*) {
                             .repo_header => {
                                 if (stack.getSelected()) |selected_widget| switch (selected_widget.*) {
-                                    .repo_files => |*v| if (v.focusGitRemote(root_focus)) return,
-                                    .repo_commits => |*v| if (v.focusGitRemote(root_focus)) return,
+                                    .repo_files => |*v| if (v.focusCloneUrl(root_focus)) return,
+                                    .repo_commits => |*v| if (v.focusCloneUrl(root_focus)) return,
                                     else => {},
                                 };
                                 index = stack_index;

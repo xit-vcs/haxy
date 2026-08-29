@@ -21,7 +21,7 @@ pub const Repo = @import("./ui/Repo.zig");
 pub const Title = @import("./ui/Title.zig");
 pub const SubTitle = @import("./ui/SubTitle.zig");
 pub const Quit = @import("./ui/Quit.zig");
-pub const GitRemote = @import("./ui/GitRemote.zig");
+pub const CopyableText = @import("./ui/CopyableText.zig");
 pub const Unauthorized = @import("./ui/Unauthorized.zig");
 
 pub const clipped_bottom_label_max_len = 10 * 4;
@@ -1425,6 +1425,7 @@ pub const Session = struct {
         // are not shown.
         git_http_port: ?u16 = null,
         git_ssh_port: ?u16 = null,
+        git_ssh_prefix: []const u8 = "",
         // true when this session views a single local repo. unlike `local`
         // (the host-side filesystem source) this travels in the snapshot, so
         // the wasm side also parses elided link urls and hides the multi-user
@@ -2104,7 +2105,7 @@ pub const Widget = union(enum) {
     repo_events_header: Repo.Events.Header.View,
     repo_events: Repo.Events.View,
     repo_comment: Repo.Comment.Item,
-    git_remote: GitRemote.View,
+    copyable_text: CopyableText.View,
     home_users: Home.Users.View,
     home_repos: Home.Repos.View,
     auth_tab: Home.Header.AuthTab.View,

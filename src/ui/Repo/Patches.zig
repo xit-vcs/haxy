@@ -5,6 +5,7 @@ const ui = @import("../../ui.zig");
 const xit = @import("xit");
 const rp = xit.repo;
 const hash = xit.hash;
+const rf = xit.ref;
 const diff3 = @import("../../diff3.zig");
 const Comment = @import("Comment.zig");
 const Attachment = @import("Attachment.zig");
@@ -37,6 +38,9 @@ pub const PatchWithId = struct {
     attachments: []const Attachment.WithId = &.{},
     draft: bool = false,
     revision_ready: bool = false,
+    fork_oid: []const u8 = "",
+    target_branch: []const u8 = "",
+    no_changes: bool = false,
 };
 
 pub const Entry = PatchWithId;
@@ -116,7 +120,6 @@ tags: []const []const u8,
 // (the web posts the new-patch form to the patch route instead).
 repo_source: ?ui.RepoSource = null,
 repo_id: ?[evt.event_id_size]u8 = null,
-target_branch: []const u8 = "",
 
 const Self = @This();
 
@@ -260,6 +263,7 @@ pub fn init(
     session: *ui.Session,
     repo_id_maybe: ?[evt.event_id_size]u8,
     identity: []const u8,
+    target_branch: []const u8,
     tag: []const u8,
     selected_id: []const u8,
     comment_id: []const u8,
@@ -277,7 +281,7 @@ pub fn init(
     const drafts_window = if (admin_moment) |admin|
         if (repo_id_maybe) |repo_id|
             if (session.data.user_id != null and session.repos_dir != null)
-                try loadDraftWindow(arena, session, admin, &repo_id, empty.selected_id)
+                try loadDraftWindow(repo_kind, repo_opts, arena, session, admin, &repo_id, empty.selected_id, repo, target_branch)
             else
                 Window.empty
         else
@@ -442,11 +446,15 @@ pub fn init(
 }
 
 fn loadDraftWindow(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
     arena: *std.heap.ArenaAllocator,
     session: *ui.Session,
     admin_moment: evt.AdminDB.HashMap(.read_only),
     repo_id: *const [evt.event_id_size]u8,
     selected_id: []const u8,
+    target_repo: *rp.Repo(repo_kind, repo_opts),
+    default_target_branch: []const u8,
 ) !Window {
     const user_id = session.data.user_id orelse return .empty;
     if (user_id.len != evt.event_id_size) return .empty;
@@ -498,20 +506,34 @@ fn loadDraftWindow(
         const path = try fork.forkPath(aa, repos_dir, &id_hex);
         var fork_repo = rp.Repo(.xit, .{}).open(io, arena.child_allocator, .{ .path = path, .require_repo_root = true }) catch continue;
         defer fork_repo.deinit(io, arena.child_allocator);
+        const fork_oid = (try fork_repo.readRef(io, fork.ref)) orelse continue;
         const moment = evt.currentMoment(.{}, &fork_repo) catch continue;
         const patch = (try evt.Patch.readById(evt.EventDB(.sha1), .sha1, moment, arena, &id)) orelse continue;
         var revision_ready = false;
+        var target_branch = default_target_branch;
         if (patch.event.revision) |revision| {
+            const target_ref = rf.Ref.initFromPath(revision.target_ref, null) orelse continue;
+            target_branch = switch (target_ref.kind) {
+                .head => target_ref.name,
+                else => continue,
+            };
             const revision_id = evt.parseEventId(&revision.id) catch continue;
             if (try evt.PatchRev.readById(evt.EventDB(.sha1), .sha1, moment, arena, &revision_id)) |record|
                 revision_ready = revision.matches(record);
         }
+        const target_oid = if (target_branch.len != 0)
+            try target_repo.readRef(io, .{ .kind = .head, .name = target_branch })
+        else
+            null;
         try items.append(aa, .{
             .id = try aa.dupe(u8, &id_hex),
             .record = patch,
             .author = try ui.Author.initFromEmail(admin_moment, arena, patch.author_email),
             .draft = true,
             .revision_ready = revision_ready,
+            .fork_oid = try aa.dupe(u8, &fork_oid),
+            .target_branch = try aa.dupe(u8, target_branch),
+            .no_changes = if (target_oid) |oid| std.mem.eql(u8, &oid, &fork_oid) else false,
         });
     }
     return .{
@@ -525,6 +547,32 @@ fn loadDraftWindow(
 pub const View = Threads.View(.patch, Self);
 
 pub const Header = Threads.Header;
+
+pub fn cloneDirectoryName(allocator: std.mem.Allocator, title: []const u8) ![]const u8 {
+    var name: [64]u8 = undefined;
+    var len: usize = 0;
+    var pending: ?u8 = null;
+
+    for (title) |char| {
+        if (std.ascii.isAlphanumeric(char)) {
+            const needed: usize = if (pending == null) 1 else 2;
+            if (len + needed > name.len) break;
+            if (pending) |value| {
+                name[len] = value;
+                len += 1;
+            }
+            name[len] = std.ascii.toLower(char);
+            len += 1;
+            pending = null;
+        } else if (char == ' ') {
+            if (len != 0) pending = '-';
+        } else if (char == '.') {
+            if (len != 0 and pending != '-') pending = '.';
+        }
+    }
+    if (len == 0) return "";
+    return allocator.dupe(u8, name[0..len]);
+}
 
 // tabs switching between the patches page's views
 pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *const Self) !Header {

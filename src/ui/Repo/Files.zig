@@ -579,7 +579,7 @@ pub const View = struct {
             }
             return;
         }
-        if (key == .arrow_up and self.contentAtTop() and self.header().focusGitRemote(root_focus)) return;
+        if (key == .arrow_up and self.contentAtTop() and self.header().focusCloneUrl(root_focus)) return;
         if (self.detailActive()) {
             try self.detailInput(key, root_focus);
         } else {
@@ -749,11 +749,11 @@ pub const View = struct {
     // only the clone-url row sits directly below the repository header.
     pub fn getSelectedIndex(self: *View) ?usize {
         if (self.headerActive()) return 0;
-        return if (self.header().hasGitRemote() or !self.contentAtTop()) 1 else 0;
+        return if (self.header().hasCloneUrl() or !self.contentAtTop()) 1 else 0;
     }
 
-    pub fn focusGitRemote(self: *View, root_focus: *Focus) bool {
-        return self.header().focusGitRemote(root_focus);
+    pub fn focusCloneUrl(self: *View, root_focus: *Focus) bool {
+        return self.header().focusCloneUrl(root_focus);
     }
 };
 
@@ -856,11 +856,11 @@ pub const Header = struct {
             errdefer box.deinit(allocator);
 
             if (!session.data.is_local and (session.data.git_http_port != null or session.data.git_ssh_port != null)) {
-                var git_remote = try ui.GitRemote.View.initClone(allocator, session, identity);
-                errdefer git_remote.deinit(allocator);
-                const min_width = git_remote.minWidth();
-                box.getFocus().child_id = git_remote.getFocus().id;
-                try box.children.put(allocator, git_remote.getFocus().id, .{ .widget = .{ .git_remote = git_remote }, .rect = null, .min_size = .{ .width = min_width, .height = 3 } });
+                var clone_url = try ui.CopyableText.View.initClone(allocator, session, identity);
+                errdefer clone_url.deinit(allocator);
+                const min_width = clone_url.minWidth();
+                box.getFocus().child_id = clone_url.getFocus().id;
+                try box.children.put(allocator, clone_url.getFocus().id, .{ .widget = .{ .copyable_text = clone_url }, .rect = null, .min_size = .{ .width = min_width, .height = 3 } });
             }
 
             var spacer = try ui.Spacer.init(allocator);
@@ -884,23 +884,23 @@ pub const Header = struct {
         }
 
         pub fn input(self: *Header.View, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
-            const git_remote = self.gitRemote() orelse return;
-            try git_remote.input(allocator, key, root_focus);
+            const clone_url = self.cloneUrl() orelse return;
+            try clone_url.input(allocator, key, root_focus);
         }
 
-        pub fn focusGitRemote(self: *Header.View, root_focus: *Focus) bool {
-            const git_remote = self.gitRemote() orelse return false;
-            root_focus.setFocus(git_remote.getFocus().id);
+        pub fn focusCloneUrl(self: *Header.View, root_focus: *Focus) bool {
+            const clone_url = self.cloneUrl() orelse return false;
+            root_focus.setFocus(clone_url.getFocus().id);
             return true;
         }
 
-        pub fn hasGitRemote(self: *Header.View) bool {
-            return self.gitRemote() != null;
+        pub fn hasCloneUrl(self: *Header.View) bool {
+            return self.cloneUrl() != null;
         }
 
-        fn gitRemote(self: *Header.View) ?*ui.GitRemote.View {
+        fn cloneUrl(self: *Header.View) ?*ui.CopyableText.View {
             for (self.box.children.values()) |*child| switch (child.widget) {
-                .git_remote => |*git_remote| return git_remote,
+                .copyable_text => |*copyable_text| return copyable_text,
                 else => {},
             };
             return null;
