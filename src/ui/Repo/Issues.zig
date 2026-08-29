@@ -113,6 +113,20 @@ const Self = @This();
 pub const Event = evt.Issue;
 pub const Status = evt.Issue.Status;
 pub const ViewKind = ui.RoutablePage.IssuesView;
+pub const thread_name = "issue";
+pub const header_widget_name = "repo_issues_header";
+
+pub fn listRoute(identity: []const u8, status: Status, tag: []const u8, selected: []const u8) ?ui.RoutablePage {
+    return ui.RoutablePage.repoIssuesRoute(identity, status, tag, selected);
+}
+
+pub fn conflictsRoute(identity: []const u8, selected: []const u8) ?ui.RoutablePage {
+    return ui.RoutablePage.repoIssuesConflictsRoute(identity, selected);
+}
+
+pub fn resolveRoute(identity: []const u8, selected: []const u8, picks: []const u8) ?ui.RoutablePage {
+    return ui.RoutablePage.repoIssuesResolveRoute(identity, selected, picks);
+}
 
 // `status`'s windowed listing.
 pub fn window(self: *const Self, status: evt.Issue.Status) *const Window {

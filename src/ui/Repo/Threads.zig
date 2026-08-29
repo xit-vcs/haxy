@@ -345,16 +345,11 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
     const Event = Data.Event;
     const Status = Data.Status;
     const has_status = @hasField(Event, "status");
-    const has_conflicts = Event.merge_policy == .field_conflicts;
-    const has_drafts = @hasField(Self, "drafts");
-    const FieldConflict = if (has_conflicts) Data.FieldConflict else void;
+    const supports_conflicts = Event.merge_policy == .field_conflicts;
+    const supports_drafts = @hasField(Self, "drafts");
+    const FieldConflict = if (supports_conflicts) Data.FieldConflict else void;
     const ViewKind = Data.ViewKind;
-    const thread_name = switch (kind) {
-        .issue => "issue",
-        .patch => "patch",
-        .discuss => "discussion",
-        else => @compileError("unsupported thread event kind"),
-    };
+    const thread_name = Data.thread_name;
 
     return struct {
         const This = @This();
@@ -382,8 +377,8 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         // the conflicts split; the tab and stack child exist only when the repo
         // has conflicted threads.
         const drafts_view_index: usize = form_view_index + 1;
-        const conflict_view_index: usize = drafts_view_index + @intFromBool(has_drafts);
-        const view_count: usize = conflict_view_index + @intFromBool(has_conflicts);
+        const conflict_view_index: usize = drafts_view_index + @intFromBool(supports_drafts);
+        const view_count: usize = conflict_view_index + @intFromBool(supports_conflicts);
         // indices within a split (the horizontal box inside the stack).
         const list_index: usize = 0;
         const detail_index: usize = 1;
@@ -418,7 +413,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         }
 
         fn entryConflicted(entry: Entry) bool {
-            return if (has_conflicts) entry.conflicted else false;
+            return if (supports_conflicts) entry.conflicted else false;
         }
 
         fn entryStatus(entry: Entry) Status {
@@ -426,7 +421,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         }
 
         fn entryDraft(entry: Entry) bool {
-            return if (has_drafts) entry.draft else false;
+            return if (supports_drafts) entry.draft else false;
         }
 
         const StatusChange = struct {
@@ -448,35 +443,19 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         }
 
         fn listRoute(identity: []const u8, status: Status, tag: []const u8, selected: []const u8) ?ui.RoutablePage {
-            return switch (kind) {
-                .issue => ui.RoutablePage.repoIssuesRoute(identity, status, tag, selected),
-                .patch => ui.RoutablePage.repoPatchesRoute(identity, status, tag, selected),
-                .discuss => ui.RoutablePage.repoDiscussionsRoute(identity, tag, selected),
-                else => @compileError("unsupported thread event kind"),
-            };
+            return Data.listRoute(identity, status, tag, selected);
         }
 
         fn draftsRoute(identity: []const u8) ?ui.RoutablePage {
-            return switch (kind) {
-                .patch => ui.RoutablePage.repoPatchesDraftsRoute(identity),
-                else => null,
-            };
+            return if (supports_drafts) Data.draftsRoute(identity) else null;
         }
 
         fn conflictsRoute(identity: []const u8, selected: []const u8) ?ui.RoutablePage {
-            return switch (kind) {
-                .issue => ui.RoutablePage.repoIssuesConflictsRoute(identity, selected),
-                .patch => ui.RoutablePage.repoPatchesConflictsRoute(identity, selected),
-                else => @compileError("thread event kind has no conflict route"),
-            };
+            return if (supports_conflicts) Data.conflictsRoute(identity, selected) else null;
         }
 
         fn resolveRoute(identity: []const u8, selected: []const u8, picks: []const u8) ?ui.RoutablePage {
-            return switch (kind) {
-                .issue => ui.RoutablePage.repoIssuesResolveRoute(identity, selected, picks),
-                .patch => ui.RoutablePage.repoPatchesResolveRoute(identity, selected, picks),
-                else => @compileError("thread event kind has no resolve route"),
-            };
+            return if (supports_conflicts) Data.resolveRoute(identity, selected, picks) else null;
         }
 
         fn listLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, status: Status, tag: []const u8, id: []const u8) ![]const u8 {
@@ -499,7 +478,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         }
 
         fn windowLink(page_arena: *std.heap.ArenaAllocator, data: *const Self, status_maybe: ?Status, drafts: bool, id: []const u8) ![]const u8 {
-            if (has_conflicts and status_maybe == null and !drafts) {
+            if (supports_conflicts and status_maybe == null and !drafts) {
                 const route = conflictsRoute(data.identity, id) orelse return error.RouteTooLong;
                 return std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{try route.toUrl(page_arena)});
             }
@@ -523,12 +502,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             {
                 var hdr = try Data.initHeader(allocator, session, data);
                 errdefer hdr.deinit(allocator);
-                switch (kind) {
-                    .issue => try outer.children.put(allocator, hdr.getFocus().id, .{ .widget = .{ .repo_issues_header = hdr }, .rect = null, .min_size = null }),
-                    .patch => try outer.children.put(allocator, hdr.getFocus().id, .{ .widget = .{ .repo_patches_header = hdr }, .rect = null, .min_size = null }),
-                    .discuss => try outer.children.put(allocator, hdr.getFocus().id, .{ .widget = .{ .repo_discussions_header = hdr }, .rect = null, .min_size = null }),
-                    else => @compileError("unsupported thread event kind"),
-                }
+                try outer.children.put(allocator, hdr.getFocus().id, .{ .widget = @unionInit(ui.Widget, Data.header_widget_name, hdr), .rect = null, .min_size = null });
             }
 
             // the stack enters `outer` before its children enter it, so an error
@@ -614,7 +588,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     var form = try initCommentForm(allocator, session, action, parent_author, parent_route orelse return error.RouteTooLong, initial_body);
                     errdefer form.deinit(allocator);
                     try stack.children.put(allocator, form.getFocus().id, .{ .box = form });
-                } else if (has_conflicts and data.view == .resolve) {
+                } else if (supports_conflicts and data.view == .resolve) {
                     // on the web the page grows to the form's height and the
                     // browser scrolls it; the terminal scrolls the form itself
                     var form_widget: ui.Widget = blk: {
@@ -648,7 +622,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 try stack.children.put(allocator, message.getFocus().id, .{ .unauthorized = message });
             }
 
-            if (has_drafts) {
+            if (supports_drafts) {
                 var split = try initSplit(allocator, session, data, null, true);
                 errdefer split.deinit(allocator);
                 try stack.children.put(allocator, split.getFocus().id, .{ .box = split });
@@ -657,7 +631,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             // the conflicts split; its tab exists only when the repo has
             // conflicts, so skip the child too to keep the stack 1:1 with the
             // tabs.
-            if (has_conflicts and data.conflicts.count > 0) {
+            if (supports_conflicts and data.conflicts.count > 0) {
                 var split = try initSplit(allocator, session, data, null, false);
                 errdefer split.deinit(allocator);
                 try stack.children.put(allocator, split.getFocus().id, .{ .box = split });
@@ -686,7 +660,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
             errdefer box.deinit(allocator);
 
-            const win = if (status_maybe) |status| data.window(status) else if (drafts and has_drafts) &data.drafts else if (has_conflicts) &data.conflicts else unreachable;
+            const win = if (status_maybe) |status| data.window(status) else if (drafts and supports_drafts) &data.drafts else if (supports_conflicts) &data.conflicts else unreachable;
 
             // the thread list (one focusable row per title), plus a "next" link that
             // reloads the page rooted at the following thread.
@@ -788,7 +762,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 try box.children.put(allocator, description.getFocus().id, .{ .widget = .{ .text_input = description }, .rect = null, .min_size = null });
             }
 
-            try addSubmitButtonLabeled(allocator, &box, if (kind == .patch and record == null) "submit draft" else "submit");
+            try addSubmitButtonLabeled(allocator, &box, if (supports_drafts and record == null) "submit draft" else "submit");
 
             box.getFocus().child_id = box.children.keys()[title_field_index];
             return box;
@@ -886,11 +860,13 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 try addLabel(allocator, &box, "tags conflict:");
                 try addFieldConflict(allocator, &box, session, data, "tags", fc);
             }
-            if (comptime kind == .patch) {
+            if (comptime @hasField(Data.Conflict, "status")) {
                 if (conflict.status) |*fc| {
                     try addLabel(allocator, &box, "status conflict:");
                     try addAtomicConflict(allocator, &box, session, data, "status", fc);
                 }
+            }
+            if (comptime @hasField(Data.Conflict, "revision")) {
                 if (conflict.revision) |*fc| {
                     try addLabel(allocator, &box, "revision conflict:");
                     try addAtomicConflict(allocator, &box, session, data, "revision", fc);
@@ -1093,23 +1069,12 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             try row.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = .{ .width = try xitui.width.displayWidth(label) + 2, .height = null } });
         }
 
-        fn addDetailGap(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget)) !void {
-            var spacer = try ui.Spacer.init(allocator);
-            errdefer spacer.deinit(allocator);
-            try box.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = .{ .width = null, .height = 1 }, .max_size = .{ .width = null, .height = 1 } });
-        }
-
         pub fn deinit(self: *This, allocator: std.mem.Allocator) void {
             self.box.deinit(allocator);
         }
 
         fn header(self: *This) *HeaderType {
-            return switch (kind) {
-                .issue => &self.box.children.values()[header_index].widget.repo_issues_header,
-                .patch => &self.box.children.values()[header_index].widget.repo_patches_header,
-                .discuss => &self.box.children.values()[header_index].widget.repo_discussions_header,
-                else => @compileError("unsupported thread event kind"),
-            };
+            return &@field(self.box.children.values()[header_index].widget, Data.header_widget_name);
         }
 
         fn viewStack(self: *This) *wgt.Stack(ui.Widget) {
@@ -1184,8 +1149,8 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         }
 
         fn window(self: *This, index: usize) *const Window {
-            if (has_conflicts and index == conflict_view_index) return &self.data.conflicts;
-            if (has_drafts and index == drafts_view_index) return &self.data.drafts;
+            if (supports_conflicts and index == conflict_view_index) return &self.data.conflicts;
+            if (supports_drafts and index == drafts_view_index) return &self.data.drafts;
             return self.data.window(splitStatus(index));
         }
 
@@ -1199,7 +1164,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         // new-thread form shows).
         fn selectedSplitIndex(self: *This) ?usize {
             const idx = self.stackSelectedIndex() orelse return null;
-            return if (idx < status_count or (has_drafts and idx == drafts_view_index) or idx == conflict_view_index) idx else null;
+            return if (idx < status_count or (supports_drafts and idx == drafts_view_index) or idx == conflict_view_index) idx else null;
         }
 
         fn detailActive(self: *This, index: usize) bool {
@@ -1314,7 +1279,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
 
                 // the resolve form's inputs prefill from the picked side, which
                 // is url state and so page-constant like the edit values above
-                if (has_conflicts and self.data.view == .resolve) {
+                if (supports_conflicts and self.data.view == .resolve) {
                     for (form.children.values()) |*child| switch (child.widget) {
                         .text_input => |*ti| if (self.resolvePrefill(ti.options.name)) |value| {
                             try self.session.input_values.put(inputs_arena, ti.getFocus().id, value);
@@ -1359,7 +1324,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     try row.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null });
                 }
 
-                if (has_drafts and entryDraft(entry)) {
+                if (supports_drafts and entryDraft(entry)) {
                     if (entry.revision_ready) {
                         const route = listRoute(self.data.identity, @enumFromInt(0), "", entry.id) orelse return error.RouteTooLong;
                         row.getFocus().kind = .{ .custom = try std.fmt.allocPrint(pa, "form:{s}/post", .{try route.toUrl(self.session.page_arena)}) };
@@ -1383,7 +1348,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     // a conflicted thread's only action is resolving it. the button
                     // stays visible logged out; the resolve page shows the
                     // unauthorized view then.
-                    if (has_conflicts and entryConflicted(entry)) {
+                    if (supports_conflicts and entryConflicted(entry)) {
                         const label = "resolve conflict";
                         const route = resolveRoute(self.data.identity, entry.id, "") orelse return error.RouteTooLong;
                         try addToolButton(allocator, row, label, try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}));
@@ -1417,61 +1382,8 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 }
             }
 
-            if (has_drafts and entryDraft(entry) and !description_page and comment_page == null) {
-                const aa = self.session.page_arena.allocator();
-                var fields: [2]ui.CopyableText.Choice = undefined;
-                var field_count: usize = 0;
-
-                if (entry.target_branch.len != 0) if (self.session.data.git_ssh_port) |port| {
-                    const url = try std.fmt.allocPrint(aa, "ssh://localhost:{d}/repo/{s}/patch:{s}/branch:{s}", .{ port, self.data.identity, entry.id, entry.target_branch });
-                    const push_command = try std.fmt.allocPrint(aa, "git push {s} HEAD:patch", .{url});
-                    const clone_name = try Data.cloneDirectoryName(aa, entry.record.event.title);
-                    const clone_command = if (clone_name.len == 0)
-                        try std.fmt.allocPrint(aa, "git clone {s}", .{url})
-                    else
-                        try std.fmt.allocPrint(aa, "git clone {s} {s}", .{ url, clone_name });
-                    const choices: [2]ui.CopyableText.Choice = .{
-                        .{
-                            .selector = "push",
-                            .text = push_command,
-                            .copyable_text = try std.fmt.allocPrint(aa, "{s}{s}", .{ self.session.data.git_ssh_prefix, push_command }),
-                            .label = " push to this patch from existing repo ",
-                        },
-                        .{
-                            .selector = "clone",
-                            .text = clone_command,
-                            .copyable_text = try std.fmt.allocPrint(aa, "{s}{s}", .{ self.session.data.git_ssh_prefix, clone_command }),
-                            .label = " clone this patch ",
-                        },
-                    };
-                    var copyable_text = try ui.CopyableText.View.init(allocator, self.session, &choices);
-                    errdefer copyable_text.deinit(allocator);
-                    try inner.children.put(allocator, copyable_text.getFocus().id, .{ .widget = .{ .copyable_text = copyable_text }, .rect = null, .min_size = null });
-                    try addDetailGap(allocator, inner);
-                };
-                if (entry.fork_oid.len != 0) {
-                    fields[field_count] = .{
-                        .text = entry.fork_oid,
-                        .label = if (entry.no_changes) " object id of this patch (no changes) " else " object id of this patch ",
-                    };
-                    field_count += 1;
-                }
-                if (entry.target_branch.len != 0) {
-                    fields[field_count] = .{
-                        .text = entry.target_branch,
-                        .label = " target branch this patch will go to ",
-                        .bottom_label = " (set by the url you push to above) ",
-                    };
-                    field_count += 1;
-                }
-
-                for (fields[0..field_count], 0..) |field, i| {
-                    var copyable_text = try ui.CopyableText.View.init(allocator, self.session, &.{field});
-                    errdefer copyable_text.deinit(allocator);
-                    try inner.children.put(allocator, copyable_text.getFocus().id, .{ .widget = .{ .copyable_text = copyable_text }, .rect = null, .min_size = null });
-                    if (i + 1 < field_count) try addDetailGap(allocator, inner);
-                }
-                if (entry.target_branch.len != 0) try addDetailGap(allocator, inner);
+            if (supports_drafts and entryDraft(entry) and !description_page and comment_page == null) {
+                try self.data.appendDraftDetails(allocator, inner, self.session, entry);
             }
 
             if (comment_page) |page| {
@@ -1574,7 +1486,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 break :blk tb.getFocus().id;
             };
 
-            if (has_drafts and entryDraft(entry)) {
+            if (supports_drafts and entryDraft(entry)) {
                 inner.getFocus().child_id = inner.children.keys()[0];
                 const sc = self.detailScroll(index);
                 sc.x = 0;
@@ -1642,7 +1554,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             if (self.formViewActive()) {
                 if (self.data.view == .remove) {
                     try self.removeFormInput(allocator, key, root_focus);
-                } else if (has_conflicts and self.data.view == .resolve) {
+                } else if (supports_conflicts and self.data.view == .resolve) {
                     try self.resolveInput(allocator, key, root_focus);
                 } else if (self.data.view == .new_comment or self.data.view == .edit_comment) {
                     try self.commentFormInput(allocator, key, root_focus);
@@ -1814,14 +1726,14 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         fn primaryAction(self: *This, allocator: std.mem.Allocator, index: usize) !void {
             const selected = self.detailed_index[index] orelse return;
             const entry = self.window(index).items[selected];
-            if (has_drafts and entryDraft(entry))
+            if (supports_drafts and entryDraft(entry))
                 try self.postDraft(allocator, index)
             else
                 try self.toggleStatus(allocator, index);
         }
 
         fn postDraft(self: *This, allocator: std.mem.Allocator, index: usize) !void {
-            if (!has_drafts or comptime wasm) return;
+            if (!supports_drafts or comptime wasm) return;
             const selected = self.detailed_index[index] orelse return;
             const entry = self.window(index).items[selected];
             if (!entryDraft(entry) or !entry.revision_ready) return;
@@ -2274,19 +2186,13 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     defer any_repo.deinit(io, allocator);
                     switch (any_repo) {
                         inline else => |*repo| {
-                            const change: Event.Update = if (comptime kind == .patch)
-                                .{ .resolve = .{
-                                    .title = title,
-                                    .tags = tags,
-                                    .hunks = hunks.items,
-                                    .theirs = self.data.theirs_picks,
-                                } }
-                            else
-                                .{ .resolve = .{
-                                    .title = title,
-                                    .tags = tags,
-                                    .hunks = hunks.items,
-                                } };
+                            var resolution: Event.Resolve = .{
+                                .title = title,
+                                .tags = tags,
+                                .hunks = hunks.items,
+                            };
+                            if (comptime @hasField(Event.Resolve, "theirs")) resolution.theirs = self.data.theirs_picks;
+                            const change = Event.Update{ .resolve = resolution };
                             Event.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &id_bytes, change, author) catch |err| switch (err) {
                                 // leave the form up for correction
                                 error.InvalidFields => return,
@@ -2378,7 +2284,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
 
             if (!Event.fieldsValid(title, tags)) return;
 
-            if (comptime kind == .patch) {
+            if (comptime supports_drafts) {
                 const event_id_hex = try Data.createDraft(self.data, self.session, allocator, title, tags, description);
                 title_input.clear(allocator);
                 tags_input.clear(allocator);

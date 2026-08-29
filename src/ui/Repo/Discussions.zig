@@ -59,6 +59,12 @@ const Self = @This();
 pub const Event = evt.Discussion;
 pub const Status = enum { recent };
 pub const ViewKind = ui.RoutablePage.DiscussionsView;
+pub const thread_name = "discussion";
+pub const header_widget_name = "repo_discussions_header";
+
+pub fn listRoute(identity: []const u8, _: Status, tag: []const u8, selected: []const u8) ?ui.RoutablePage {
+    return ui.RoutablePage.repoDiscussionsRoute(identity, tag, selected);
+}
 
 pub fn selectedThread(self: *const Self) ?*const DiscussionWithId {
     if (self.selected_id.len == 0) return null;

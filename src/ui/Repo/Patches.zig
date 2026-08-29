@@ -6,6 +6,8 @@ const xit = @import("xit");
 const rp = xit.repo;
 const hash = xit.hash;
 const rf = xit.ref;
+const xitui = xit.xitui;
+const wgt = xitui.widget;
 const diff3 = @import("../../diff3.zig");
 const Comment = @import("Comment.zig");
 const Attachment = @import("Attachment.zig");
@@ -126,6 +128,24 @@ const Self = @This();
 pub const Event = evt.Patch;
 pub const Status = evt.Patch.Status;
 pub const ViewKind = ui.RoutablePage.PatchesView;
+pub const thread_name = "patch";
+pub const header_widget_name = "repo_patches_header";
+
+pub fn listRoute(identity: []const u8, status: Status, tag: []const u8, selected: []const u8) ?ui.RoutablePage {
+    return ui.RoutablePage.repoPatchesRoute(identity, status, tag, selected);
+}
+
+pub fn draftsRoute(identity: []const u8) ?ui.RoutablePage {
+    return ui.RoutablePage.repoPatchesDraftsRoute(identity);
+}
+
+pub fn conflictsRoute(identity: []const u8, selected: []const u8) ?ui.RoutablePage {
+    return ui.RoutablePage.repoPatchesConflictsRoute(identity, selected);
+}
+
+pub fn resolveRoute(identity: []const u8, selected: []const u8, picks: []const u8) ?ui.RoutablePage {
+    return ui.RoutablePage.repoPatchesResolveRoute(identity, selected, picks);
+}
 
 pub fn createDraft(
     data: *const Self,
@@ -547,7 +567,70 @@ pub const View = Threads.View(.patch, Self);
 
 pub const Header = Threads.Header;
 
-pub fn cloneDirectoryName(allocator: std.mem.Allocator, title: []const u8) ![]const u8 {
+pub fn appendDraftDetails(self: *const Self, allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), session: *ui.Session, entry: Entry) !void {
+    const aa = session.page_arena.allocator();
+    var fields: [2]ui.CopyableText.Choice = undefined;
+    var field_count: usize = 0;
+
+    if (entry.target_branch.len != 0) if (session.data.git_ssh_port) |port| {
+        const url = try std.fmt.allocPrint(aa, "ssh://localhost:{d}/repo/{s}/patch:{s}/branch:{s}", .{ port, self.identity, entry.id, entry.target_branch });
+        const push_command = try std.fmt.allocPrint(aa, "git push {s} HEAD:patch", .{url});
+        const clone_name = try cloneDirectoryName(aa, entry.record.event.title);
+        const clone_command = if (clone_name.len == 0)
+            try std.fmt.allocPrint(aa, "git clone {s}", .{url})
+        else
+            try std.fmt.allocPrint(aa, "git clone {s} {s}", .{ url, clone_name });
+        const choices: [2]ui.CopyableText.Choice = .{
+            .{
+                .selector = "push",
+                .text = push_command,
+                .copyable_text = try std.fmt.allocPrint(aa, "{s}{s}", .{ session.data.git_ssh_prefix, push_command }),
+                .label = " push to this patch from existing repo ",
+            },
+            .{
+                .selector = "clone",
+                .text = clone_command,
+                .copyable_text = try std.fmt.allocPrint(aa, "{s}{s}", .{ session.data.git_ssh_prefix, clone_command }),
+                .label = " clone this patch ",
+            },
+        };
+        var copyable_text = try ui.CopyableText.View.init(allocator, session, &choices);
+        errdefer copyable_text.deinit(allocator);
+        try box.children.put(allocator, copyable_text.getFocus().id, .{ .widget = .{ .copyable_text = copyable_text }, .rect = null, .min_size = null });
+        try addDetailGap(allocator, box);
+    };
+    if (entry.fork_oid.len != 0) {
+        fields[field_count] = .{
+            .text = entry.fork_oid,
+            .label = if (entry.no_changes) " object id of this patch (no changes) " else " object id of this patch ",
+        };
+        field_count += 1;
+    }
+    if (entry.target_branch.len != 0) {
+        fields[field_count] = .{
+            .text = entry.target_branch,
+            .label = " target branch this patch will go to ",
+            .bottom_label = " (set by the url you push to above) ",
+        };
+        field_count += 1;
+    }
+
+    for (fields[0..field_count], 0..) |field, i| {
+        var copyable_text = try ui.CopyableText.View.init(allocator, session, &.{field});
+        errdefer copyable_text.deinit(allocator);
+        try box.children.put(allocator, copyable_text.getFocus().id, .{ .widget = .{ .copyable_text = copyable_text }, .rect = null, .min_size = null });
+        if (i + 1 < field_count) try addDetailGap(allocator, box);
+    }
+    if (entry.target_branch.len != 0) try addDetailGap(allocator, box);
+}
+
+fn addDetailGap(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget)) !void {
+    var spacer = try ui.Spacer.init(allocator);
+    errdefer spacer.deinit(allocator);
+    try box.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = .{ .width = null, .height = 1 }, .max_size = .{ .width = null, .height = 1 } });
+}
+
+fn cloneDirectoryName(allocator: std.mem.Allocator, title: []const u8) ![]const u8 {
     var name: [64]u8 = undefined;
     var len: usize = 0;
     var pending: ?u8 = null;
