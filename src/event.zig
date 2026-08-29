@@ -534,7 +534,7 @@ pub fn commitEvents(
             switch (entry) {
                 .blob => |blob| {
                     var oid_bytes = [_]u8{0} ** hash.byteLen(repo_opts.hash);
-                    try obj.writeObject(repo_kind, repo_opts, state, io, blob.reader, .{ .kind = .blob, .size = blob.size }, &oid_bytes);
+                    try obj.writeObject(repo_kind, repo_opts, state, io, allocator, blob.reader, .{ .kind = .blob, .size = blob.size }, &oid_bytes);
                     try tree.addBlobEntry(.{ .content = .{ .unix_permission = 0o644, .object_type = .regular_file } }, blob.name, &oid_bytes);
                 },
                 .tree => |nested| {
