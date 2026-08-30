@@ -15,13 +15,13 @@ pub fn init() Self {
 }
 
 pub const View = struct {
-    text_box: wgt.TextBox(ui.Widget),
+    text_box: wgt.TextBox,
     session: *ui.Session,
     // backs the bottom label, which borrows it
     bottom_label_buf: [ui.clipped_bottom_label_max_len]u8,
 
     pub fn init(allocator: std.mem.Allocator, session: *ui.Session) !View {
-        var text_box = try wgt.TextBox(ui.Widget).init(allocator, "login", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+        var text_box = try wgt.TextBox.init(allocator, "login", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
         errdefer text_box.deinit(allocator);
         text_box.getFocus().focusable = true;
         text_box.getFocus().kind = .{ .custom = "ai:/auth" };

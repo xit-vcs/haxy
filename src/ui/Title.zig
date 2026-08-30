@@ -24,10 +24,10 @@ pub fn width(self: Self) !usize {
 }
 
 pub const View = struct {
-    text_box: wgt.TextBox(ui.Widget),
+    text_box: wgt.TextBox,
 
     pub fn init(allocator: std.mem.Allocator, data: *const Self) !View {
-        var text_box = try wgt.TextBox(ui.Widget).init(allocator, data.content, .{ .border_style = null, .wrap_kind = .none });
+        var text_box = try wgt.TextBox.init(allocator, data.content, .{ .border_style = null, .wrap_kind = .none });
         errdefer text_box.deinit(allocator);
         return .{ .text_box = text_box };
     }

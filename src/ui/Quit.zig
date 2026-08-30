@@ -31,7 +31,7 @@ pub const View = struct {
         errdefer box.deinit(allocator);
 
         {
-            var prompt = try wgt.Text(ui.Widget).init(allocator, "are you sure?");
+            var prompt = try wgt.Text.init(allocator, "are you sure?");
             errdefer prompt.deinit(allocator);
             try box.children.put(allocator, prompt.getFocus().id, .{
                 .widget = .{ .text = prompt },
@@ -42,7 +42,7 @@ pub const View = struct {
 
         var button_id: usize = undefined;
         {
-            var button = try wgt.TextBox(ui.Widget).init(allocator, "quit", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            var button = try wgt.TextBox.init(allocator, "quit", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer button.deinit(allocator);
             button.getFocus().focusable = true;
             button_id = button.getFocus().id;

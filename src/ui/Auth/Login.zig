@@ -45,7 +45,7 @@ pub const View = struct {
         var nav_ids: [3]usize = undefined;
 
         {
-            var username = try wgt.TextInput(ui.Widget).init(allocator, .{ .label = " username ", .name = "username", .rounded_corners = true, .render_content = session.is_terminal });
+            var username = try wgt.TextInput.init(allocator, .{ .label = " username ", .name = "username", .rounded_corners = true, .render_content = session.is_terminal });
             errdefer username.deinit(allocator);
             username.getFocus().focusable = true;
             nav_ids[username_index] = username.getFocus().id;
@@ -57,7 +57,7 @@ pub const View = struct {
         }
 
         {
-            var password = try wgt.TextInput(ui.Widget).init(allocator, .{ .label = " password ", .password = true, .name = "password", .rounded_corners = true, .render_content = session.is_terminal });
+            var password = try wgt.TextInput.init(allocator, .{ .label = " password ", .password = true, .name = "password", .rounded_corners = true, .render_content = session.is_terminal });
             errdefer password.deinit(allocator);
             password.getFocus().focusable = true;
             nav_ids[password_index] = password.getFocus().id;
@@ -69,7 +69,7 @@ pub const View = struct {
         }
 
         {
-            var button = try wgt.TextBox(ui.Widget).init(allocator, "login", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            var button = try wgt.TextBox.init(allocator, "login", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer button.deinit(allocator);
             button.getFocus().focusable = true;
             // the renderer distinguishes plain clickables from buttons that

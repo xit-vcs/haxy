@@ -387,8 +387,8 @@ fn trimIncompleteCodepoint(bytes: []const u8) []const u8 {
 
 // a focusable, word-wrapping box holding a commit message. `bottom_label`
 // marks a message the page only shows part of ("" when it's whole).
-fn messageBox(allocator: std.mem.Allocator, message: []const u8, bottom_label: []const u8) !wgt.TextBox(ui.Widget) {
-    var tb = try wgt.TextBox(ui.Widget).init(allocator, message, .{
+fn messageBox(allocator: std.mem.Allocator, message: []const u8, bottom_label: []const u8) !wgt.TextBox {
+    var tb = try wgt.TextBox.init(allocator, message, .{
         .border_style = .single,
         .rounded_corners = true,
         .wrap_kind = .word,
@@ -499,7 +499,7 @@ pub const View = struct {
     }
 
     fn addRow(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8, link: []const u8) !void {
-        var row = try wgt.TextBox(ui.Widget).init(allocator, label, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .word });
+        var row = try wgt.TextBox.init(allocator, label, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .word });
         errdefer row.deinit(allocator);
         row.getFocus().focusable = true;
         if (link.len != 0) row.getFocus().kind = .{ .custom = link };
@@ -512,7 +512,7 @@ pub const View = struct {
     fn addHunkBox(self: *View, allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), lines: []const []const u8) !void {
         if (lines.len == 0) return;
         const text = try std.mem.join(self.session.page_arena.allocator(), "\n", lines);
-        var tb = try wgt.TextBox(ui.Widget).init(allocator, text, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+        var tb = try wgt.TextBox.init(allocator, text, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
         errdefer tb.deinit(allocator);
         tb.getFocus().focusable = true;
         try box.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
@@ -523,7 +523,7 @@ pub const View = struct {
     // there.
     fn addPathBox(self: *View, allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), path: []const u8, oid: []const u8) !void {
         const link = try commitsLink(self.session.page_arena, self.data.identity, oid, 0, path);
-        var tb = try wgt.TextBox(ui.Widget).init(allocator, path, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+        var tb = try wgt.TextBox.init(allocator, path, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
         errdefer tb.deinit(allocator);
         tb.getFocus().focusable = true;
         tb.getFocus().kind = .{ .custom = link };
@@ -535,7 +535,7 @@ pub const View = struct {
     // "a:" link) reloads the page on the adjacent window — same on TUI and web.
     fn addNavLink(self: *View, allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8, oid: []const u8, target_start: usize, path: []const u8) !void {
         const link = try commitsLink(self.session.page_arena, self.data.identity, oid, target_start, path);
-        var tb = try wgt.TextBox(ui.Widget).init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+        var tb = try wgt.TextBox.init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
         errdefer tb.deinit(allocator);
         tb.getFocus().focusable = true;
         tb.getFocus().kind = .{ .custom = link };
@@ -546,7 +546,7 @@ pub const View = struct {
     // this commit's tree, so its files are always viewable as of this object.
     fn addViewFilesLink(self: *View, allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), oid: []const u8) !void {
         const link = try filesObjectLink(self.session.page_arena, self.data.identity, oid);
-        var tb = try wgt.TextBox(ui.Widget).init(allocator, "view files at this commit", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+        var tb = try wgt.TextBox.init(allocator, "view files at this commit", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
         errdefer tb.deinit(allocator);
         tb.getFocus().focusable = true;
         tb.getFocus().kind = .{ .custom = link };
@@ -703,7 +703,7 @@ pub const View = struct {
             .diff => |d| {
                 if (d.path.len != 0) {
                     // the file's path, then a row returning to this commit's unfiltered diff.
-                    var label = try wgt.TextBox(ui.Widget).init(allocator, d.path, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+                    var label = try wgt.TextBox.init(allocator, d.path, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
                     errdefer label.deinit(allocator);
                     label.getFocus().focusable = true;
                     try inner.children.put(allocator, label.getFocus().id, .{ .widget = .{ .text_box = label }, .rect = null, .min_size = null });
@@ -1019,7 +1019,7 @@ pub const Header = struct {
             errdefer spacer.deinit(allocator);
             try box.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null });
 
-            var text_box = try wgt.TextBox(ui.Widget).init(allocator, data.content, .{ .border_style = .hidden, .wrap_kind = .none });
+            var text_box = try wgt.TextBox.init(allocator, data.content, .{ .border_style = .hidden, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
             try box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null, .flex = .shrink });
 

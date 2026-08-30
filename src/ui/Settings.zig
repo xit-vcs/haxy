@@ -35,7 +35,7 @@ pub const View = struct {
             box.getFocus().kind = .{ .custom = "form:ansi" };
 
             {
-                var button = try wgt.TextBox(ui.Widget).init(allocator, ansiLabel(session), .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+                var button = try wgt.TextBox.init(allocator, ansiLabel(session), .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
                 errdefer button.deinit(allocator);
                 // the renderer distinguishes plain clickables from buttons that
                 // should POST to a server route by this kind.

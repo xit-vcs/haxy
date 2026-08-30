@@ -1674,7 +1674,7 @@ fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: 
         var open_tag: ?CellTag = null;
         var first = true;
         for (0..grid.size.width) |x| {
-            const cell = grid.cells.items[try grid.cells.at(.{ y, x })];
+            const cell = (try grid.cell(x, y)).*;
             // a cell covered by a child scroll's viewport is drawn by that scroll's
             // own div, so blank its glyph and make it non-clickable here — but keep
             // its background, so the backdrop still shows through the scroll's
@@ -1736,15 +1736,18 @@ fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: 
             } else if (cell.continuation) {
                 // the wide rune to the left was emitted 2ch wide, covering this column
             } else if (cell.rune) |rune| {
+                var encoded: [4]u8 = undefined;
+                const encoded_len = try std.unicode.utf8Encode(rune, &encoded);
+                const rune_text = encoded[0..encoded_len];
                 // a double-width rune is pinned inside a 2ch span so the
                 // fallback glyph's advance width can't shift the rest of the row
-                const wide = x + 1 < grid.size.width and grid.cells.items[try grid.cells.at(.{ y, x + 1 })].continuation;
+                const wide = x + 1 < grid.size.width and (try grid.cell(x + 1, y)).continuation;
                 if (wide) {
                     try output.appendSlice(allocator, "<span class=\"w2\">");
-                    try appendEscapedHtml(allocator, output, rune);
+                    try appendEscapedHtml(allocator, output, rune_text);
                     try output.appendSlice(allocator, "</span>");
                 } else {
-                    try appendEscapedHtml(allocator, output, rune);
+                    try appendEscapedHtml(allocator, output, rune_text);
                 }
             } else {
                 try appendEscapedHtml(allocator, output, " ");

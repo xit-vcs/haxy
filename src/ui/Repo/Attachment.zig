@@ -54,7 +54,7 @@ pub fn appendRows(
         var row = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
         errdefer row.deinit(allocator);
 
-        var tb = try wgt.TextBox(ui.Widget).init(allocator, entry.name, .{
+        var tb = try wgt.TextBox.init(allocator, entry.name, .{
             .border_style = .single,
             .rounded_corners = true,
             .wrap_kind = .none,
@@ -67,7 +67,7 @@ pub fn appendRows(
 
         if (session.data.is_local or session.data.user_id != null) {
             row.getFocus().kind = .{ .custom = try std.fmt.allocPrint(pa, "form:{s}/attachment:{s}/remove", .{ parent_url, &entry.id }) };
-            var remove = try wgt.TextBox(ui.Widget).init(allocator, "✕", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            var remove = try wgt.TextBox.init(allocator, "✕", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer remove.deinit(allocator);
             remove.getFocus().focusable = true;
             remove.getFocus().kind = .{ .custom = "submit" };

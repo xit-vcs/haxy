@@ -3,7 +3,6 @@ const xit = @import("xit");
 const rp = xit.repo;
 const xitui = xit.xitui;
 const StreamTerminal = xitui.stream_terminal.StreamTerminal;
-const Grid = xitui.grid.Grid;
 const Size = xitui.layout.Size;
 const ui = @import("./ui.zig");
 const ssh = @import("./serve_ssh_protocol.zig");
@@ -222,16 +221,8 @@ fn runTui(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh.PtySiz
     var terminal_maybe: ?StreamTerminal = try StreamTerminal.init(allocator, &session_writer.interface, terminal_size);
     defer if (terminal_maybe) |*terminal| terminal.deinit();
 
-    var last_size = Size{ .width = 0, .height = 0 };
-    var last_grid = try Grid.init(allocator, last_size);
-    defer last_grid.deinit();
-
     // initial render — user sees the page immediately
-    try nav.root.build(allocator, .{
-        .min_size = .{ .width = null, .height = null },
-        .max_size = .{ .width = last_size.width, .height = last_size.height },
-    }, nav.root.getFocus());
-    if (terminal_maybe) |*terminal| _ = try terminal.render(&nav.root, &last_grid, &last_size);
+    if (terminal_maybe) |*terminal| _ = try terminal.render(&nav.root);
 
     // event loop. nextEvent blocks until something interesting arrives;
     // for each event, rebuild the widget tree and re-render so the user
@@ -262,7 +253,6 @@ fn runTui(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh.PtySiz
                     defer allocator.free(payload);
                     if (std.mem.indexOfAny(u8, payload, "\r\n") == null) continue;
                     terminal_maybe = try StreamTerminal.init(allocator, &session_writer.interface, terminal_size);
-                    last_size = .{ .width = 0, .height = 0 };
                 },
                 .resize => |sz| {
                     terminal_size = .{ .width = sz.width_cells, .height = sz.height_cells };
@@ -300,9 +290,9 @@ fn runTui(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh.PtySiz
 
         try nav.root.build(allocator, .{
             .min_size = .{ .width = null, .height = null },
-            .max_size = .{ .width = last_size.width, .height = last_size.height },
+            .max_size = .{ .width = terminal_size.width, .height = terminal_size.height },
         }, nav.root.getFocus());
-        if (terminal_maybe) |*terminal| _ = try terminal.render(&nav.root, &last_grid, &last_size);
+        if (terminal_maybe) |*terminal| _ = try terminal.render(&nav.root);
     }
 }
 

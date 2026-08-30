@@ -349,7 +349,7 @@ pub const View = struct {
     }
 
     fn addRow(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8, link: []const u8) !void {
-        var row = try wgt.TextBox(ui.Widget).init(allocator, label, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .none });
+        var row = try wgt.TextBox.init(allocator, label, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .none });
         errdefer row.deinit(allocator);
         row.getFocus().focusable = true;
         if (link.len != 0) row.getFocus().kind = .{ .custom = link };
@@ -362,7 +362,7 @@ pub const View = struct {
     // the box follow it, like addRow.
     fn addContentBox(self: *View, allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), text: []const u8, link: []const u8) !void {
         _ = self;
-        var tb = try wgt.TextBox(ui.Widget).init(allocator, text, .{ .border_style = null, .wrap_kind = .none });
+        var tb = try wgt.TextBox.init(allocator, text, .{ .border_style = null, .wrap_kind = .none });
         errdefer tb.deinit(allocator);
         tb.getFocus().focusable = true;
         if (link.len != 0) tb.getFocus().kind = .{ .custom = link };
@@ -563,7 +563,7 @@ pub const View = struct {
         const path = try childDir(page_arena.allocator(), self.data.dir, entry.name);
         const route = ui.RoutablePage.repoFilesRoute(self.data.identity, self.data.ref_or_oid, self.data.ref_or_oid_value, path, target_start) orelse return error.RouteTooLong;
         const link = try std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{try route.toUrl(page_arena)});
-        var tb = try wgt.TextBox(ui.Widget).init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+        var tb = try wgt.TextBox.init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
         errdefer tb.deinit(allocator);
         tb.getFocus().focusable = true;
         tb.getFocus().kind = .{ .custom = link };
@@ -867,7 +867,7 @@ pub const Header = struct {
             errdefer spacer.deinit(allocator);
             try box.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null });
 
-            var text_box = try wgt.TextBox(ui.Widget).init(allocator, data.content, .{ .border_style = .hidden, .wrap_kind = .none });
+            var text_box = try wgt.TextBox.init(allocator, data.content, .{ .border_style = .hidden, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
             try box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null, .flex = .shrink });
 

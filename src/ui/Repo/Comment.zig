@@ -179,7 +179,7 @@ pub const Item = struct {
                     .unknown => "",
                     .email, .user_name => |text| text,
                 } else "";
-                var parent = try wgt.TextBox(ui.Widget).init(allocator, parent_text, .{
+                var parent = try wgt.TextBox.init(allocator, parent_text, .{
                     .border_style = .single,
                     .rounded_corners = true,
                     .wrap_kind = .none,
@@ -203,12 +203,12 @@ pub const Item = struct {
         }
 
         const body_text = if (entry.comment.removed) "(removed)" else entry.comment.event.body;
-        var body_box = try wgt.TextBox(ui.Widget).init(allocator, body_text, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .word });
+        var body_box = try wgt.TextBox.init(allocator, body_text, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .word });
         errdefer body_box.deinit(allocator);
         body_box.getFocus().focusable = true;
         try box.children.put(allocator, body_box.getFocus().id, .{ .widget = .{ .text_box = body_box }, .rect = null, .min_size = null });
 
-        var gap = try wgt.Text(ui.Widget).init(allocator, "");
+        var gap = try wgt.Text.init(allocator, "");
         errdefer gap.deinit(allocator);
         try box.children.put(allocator, gap.getFocus().id, .{ .widget = .{ .text = gap }, .rect = null, .min_size = null });
 
@@ -221,7 +221,7 @@ pub const Item = struct {
         return &self.box.children.values()[metadata_index].widget.box;
     }
 
-    fn body(self: *Item) *wgt.TextBox(ui.Widget) {
+    fn body(self: *Item) *wgt.TextBox {
         return &self.box.children.values()[body_index].widget.text_box;
     }
 
@@ -291,7 +291,7 @@ pub fn appendComment(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), ses
 pub fn appendCount(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), count: usize, singular: []const u8, plural: []const u8) !void {
     var text_buf: [64]u8 = undefined;
     const text = try std.fmt.bufPrint(&text_buf, "{d} {s}", .{ count, if (count == 1) singular else plural });
-    var count_box = try wgt.TextBox(ui.Widget).init(allocator, text, .{ .border_style = .hidden, .wrap_kind = .none });
+    var count_box = try wgt.TextBox.init(allocator, text, .{ .border_style = .hidden, .wrap_kind = .none });
     errdefer count_box.deinit(allocator);
     try box.children.put(allocator, count_box.getFocus().id, .{ .widget = .{ .text_box = count_box }, .rect = null, .min_size = null });
 }
@@ -339,8 +339,8 @@ fn removeRoute(kind: evt.EventKind, identity: []const u8, thread_id: []const u8,
     return ui.RoutablePage.repoThreadRemoveRoute(kind, identity, thread_id, comment_id);
 }
 
-pub fn linkBox(allocator: std.mem.Allocator, session: *ui.Session, text: []const u8, route: ui.RoutablePage) !wgt.TextBox(ui.Widget) {
-    var box = try wgt.TextBox(ui.Widget).init(allocator, text, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+pub fn linkBox(allocator: std.mem.Allocator, session: *ui.Session, text: []const u8, route: ui.RoutablePage) !wgt.TextBox {
+    var box = try wgt.TextBox.init(allocator, text, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
     errdefer box.deinit(allocator);
     box.getFocus().focusable = true;
     box.getFocus().kind = .{ .custom = try std.fmt.allocPrint(session.page_arena.allocator(), "a:{s}", .{try route.toUrl(session.page_arena)}) };

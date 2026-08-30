@@ -12,10 +12,10 @@ const inp = @import("input.zig");
 pub const thread = @import("widget/thread.zig");
 
 pub const Widget = union(enum) {
-    text: wgt.Text(Widget),
+    text: wgt.Text,
     box: wgt.Box(Widget),
-    text_box: wgt.TextBox(Widget),
-    text_input: wgt.TextInput(Widget),
+    text_box: wgt.TextBox,
+    text_input: wgt.TextInput,
     scroll: wgt.Scroll(Widget),
     stack: wgt.Stack(Widget),
     flow_box: FlowBox,
@@ -112,7 +112,7 @@ pub fn moveRowFocus(box: *wgt.Box(Widget), scroll: *wgt.Scroll(Widget), root_foc
 pub const FlowBox = struct {
     focus: *Focus,
     grid: ?Grid,
-    text_boxes: std.ArrayList(wgt.TextBox(Widget)),
+    text_boxes: std.ArrayList(wgt.TextBox),
     // backs each link item's `.custom` focus kind (e.g. "a:/user/foo"). reset
     // wholesale on each setItems so there's no per-string ownership to track.
     arena: std.heap.ArenaAllocator,
@@ -170,7 +170,7 @@ pub const FlowBox = struct {
         self.focus.child_id = null;
 
         for (items) |item| {
-            var text_box = try wgt.TextBox(Widget).init(allocator, item.text, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .word });
+            var text_box = try wgt.TextBox.init(allocator, item.text, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .word });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().focusable = true;
 
@@ -267,7 +267,7 @@ pub const FlowBox = struct {
 
     pub fn indexOfFocusId(self: FlowBox, focus_id: usize) ?usize {
         for (self.text_boxes.items, 0..) |tb, i| {
-            if (tb.box.focus.id == focus_id) return i;
+            if (tb.focus.id == focus_id) return i;
         }
         return null;
     }
@@ -385,7 +385,7 @@ pub const FlowBox = struct {
 pub const TagFlow = struct {
     focus: *Focus,
     grid: ?Grid,
-    text_boxes: std.ArrayList(wgt.TextBox(Widget)),
+    text_boxes: std.ArrayList(wgt.TextBox),
     // last build's item rects (content space), for vertical navigation and
     // scroll-into-view.
     rects: std.ArrayList(layout.IRect),
@@ -429,7 +429,7 @@ pub const TagFlow = struct {
         self.focus.child_id = null;
 
         for (items) |item| {
-            var text_box = try wgt.TextBox(Widget).init(allocator, item.text, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            var text_box = try wgt.TextBox.init(allocator, item.text, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().focusable = true;
 
@@ -519,7 +519,7 @@ pub const TagFlow = struct {
 
     pub fn indexOfFocusId(self: TagFlow, focus_id: usize) ?usize {
         for (self.text_boxes.items, 0..) |tb, i| {
-            if (tb.box.focus.id == focus_id) return i;
+            if (tb.focus.id == focus_id) return i;
         }
         return null;
     }
@@ -643,10 +643,11 @@ pub const Footer = struct {
         errdefer grid.deinit();
         var utf8 = (std.unicode.Utf8View.init(text) catch return).iterator();
         var i: usize = 0;
-        while (utf8.nextCodepointSlice()) |ch| {
-            if (i == width) break;
-            grid.cells.items[try grid.cells.at(.{ 0, i })].rune = ch;
-            i += 1;
+        while (utf8.nextCodepoint()) |ch| {
+            const rune_width = xitui.width.cellWidth(ch);
+            if (i + rune_width > width) break;
+            try grid.setRune(i, 0, ch);
+            i += rune_width;
         }
         self.url_width = i;
         self.grid = grid;
@@ -691,13 +692,13 @@ pub const SectionLabel = struct {
         errdefer box.deinit(allocator);
 
         {
-            var gap = try wgt.Text(Widget).init(allocator, "  ");
+            var gap = try wgt.Text.init(allocator, "  ");
             errdefer gap.deinit(allocator);
             try box.children.put(allocator, gap.getFocus().id, .{ .widget = .{ .text = gap }, .rect = null, .min_size = null });
         }
 
         {
-            var tb = try wgt.TextBox(Widget).init(allocator, content, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            var tb = try wgt.TextBox.init(allocator, content, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer tb.deinit(allocator);
             tb.getFocus().focusable = true;
             try box.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
@@ -749,13 +750,13 @@ pub const SubmitButton = struct {
         errdefer box.deinit(allocator);
 
         {
-            var gap = try wgt.Text(Widget).init(allocator, "  ");
+            var gap = try wgt.Text.init(allocator, "  ");
             errdefer gap.deinit(allocator);
             try box.children.put(allocator, gap.getFocus().id, .{ .widget = .{ .text = gap }, .rect = null, .min_size = null });
         }
 
         {
-            var button = try wgt.TextBox(Widget).init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            var button = try wgt.TextBox.init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer button.deinit(allocator);
             button.getFocus().focusable = true;
             // the renderer distinguishes plain clickables from buttons that
@@ -941,15 +942,19 @@ pub const AnsiArt = struct {
                 const len = std.unicode.utf8ByteSequenceLength(byte) catch 1;
                 const end = @min(content.len, i + len);
                 const rune = content[i..end];
+                const codepoint = std.unicode.utf8Decode(rune) catch '�';
                 // a foreground color does not make a space visible. only an
                 // effective background makes it opaque; foreground state often
                 // remains active through the padding at the end of a row.
                 const effective_background = if (style.inverted) style.fg else style.bg;
                 const transparent = end - i == 1 and rune[0] == ' ' and effective_background == null;
                 try row.append(allocator, .{
-                    .rune = if (transparent) null else rune,
+                    .rune = if (transparent) null else codepoint,
                     .style = style,
                 });
+                if (!transparent and xitui.width.cellWidth(codepoint) == 2) {
+                    try row.append(allocator, .{ .rune = null, .style = style, .continuation = true });
+                }
                 i = end;
             }
         }
@@ -973,7 +978,9 @@ pub const AnsiArt = struct {
         for (rows.items[0..clamped_h], 0..) |r, y| {
             const n = @min(r.items.len, clamped_w);
             for (r.items[0..n], 0..) |cell, x| {
-                grid.cells.items[try grid.cells.at(.{ y, x })] = cell;
+                if (cell.continuation) continue;
+                (try grid.cell(x, y)).style = cell.style;
+                try grid.setRune(x, y, cell.rune);
             }
         }
         self.grid = grid;
@@ -1106,8 +1113,9 @@ pub const AnsiBackground = struct {
 
     // a foreground cell counts as blank if it's empty or a bare space without styling
     fn cellIsBlank(cell: Grid.Cell) bool {
+        if (cell.continuation) return false;
         if (cell.rune) |rune| {
-            return std.mem.eql(u8, rune, " ") and
+            return rune == ' ' and
                 cell.style.fg == null and cell.style.bg == null and !cell.style.inverted;
         }
         return true;
@@ -1132,7 +1140,7 @@ pub const AnsiBackground = struct {
             .max_size = .{ .width = size.width, .height = size.height },
         }, root_focus);
         if (self.art.grid) |*grid| {
-            for (grid.cells.items) |*cell| {
+            for (grid.cells) |*cell| {
                 cell.style.fg = dimColor(cell.style.fg);
                 cell.style.bg = dimColor(cell.style.bg);
             }
@@ -1155,6 +1163,25 @@ pub const AnsiBackground = struct {
         return .{ .r = snap(c.r), .g = snap(c.g), .b = snap(c.b) };
     }
 
+    fn applyArtBackground(dst: *Grid.Cell, src: Grid.Cell) void {
+        const background_maybe = sgrSafe(src.style.bg orelse src.style.fg);
+        dst.style.bg = background_maybe;
+        // change unstyled text to contrast with the art behind it
+        if (dst.style.fg == null) {
+            if (background_maybe) |background| {
+                // use near-black and near-white, which is easier on the eyes
+                // while retaining high contrast
+                const luminance = (@as(u32, background.r) * 299 +
+                    @as(u32, background.g) * 587 +
+                    @as(u32, background.b) * 114) / 1000;
+                dst.style.fg = if (luminance >= 128)
+                    .{ .r = 16, .g = 16, .b = 16 }
+                else
+                    .{ .r = 240, .g = 240, .b = 240 };
+            }
+        }
+    }
+
     // composites ANSI art behind a foreground grid
     fn artBehind(allocator: std.mem.Allocator, foreground: Grid, art_grid: Grid) !Grid {
         var out = try Grid.initFromGrid(allocator, foreground, foreground.size, 0, 0);
@@ -1163,32 +1190,20 @@ pub const AnsiBackground = struct {
         const anchor_x = foreground.size.width -| art_grid.size.width;
         for (0..art_grid.size.height) |y| {
             for (0..art_grid.size.width) |x| {
-                const src = art_grid.cells.items[try art_grid.cells.at(.{ y, x })];
+                const src = (try art_grid.cell(x, y)).*;
                 if (src.rune == null) continue;
-                const idx = try out.cells.at(.{ y, anchor_x + x });
-                const dst = &out.cells.items[idx];
+                const dst = try out.cell(anchor_x + x, y);
+                const wide = x + 1 < art_grid.size.width and (try art_grid.cell(x + 1, y)).continuation;
+                const next_dst = if (wide) try out.cell(anchor_x + x + 1, y) else null;
                 // blank cells take the art; occupied cells take its background
-                if (cellIsBlank(dst.*)) {
-                    dst.* = src;
+                if (cellIsBlank(dst.*) and (next_dst == null or cellIsBlank(next_dst.?.*))) {
+                    dst.style = src.style;
                     dst.style.fg = sgrSafe(dst.style.fg);
                     dst.style.bg = sgrSafe(dst.style.bg);
+                    try out.setRune(anchor_x + x, y, src.rune);
                 } else {
-                    const background_maybe = sgrSafe(src.style.bg orelse src.style.fg);
-                    dst.style.bg = background_maybe;
-                    // change unstyled text to contrast with the art behind it
-                    if (dst.style.fg == null) {
-                        if (background_maybe) |background| {
-                            // use near-black and near-white, which is easier on the eyes
-                            // while retaining high contrast
-                            const luminance = (@as(u32, background.r) * 299 +
-                                @as(u32, background.g) * 587 +
-                                @as(u32, background.b) * 114) / 1000;
-                            dst.style.fg = if (luminance >= 128)
-                                .{ .r = 16, .g = 16, .b = 16 }
-                            else
-                                .{ .r = 240, .g = 240, .b = 240 };
-                        }
-                    }
+                    applyArtBackground(dst, src);
+                    if (next_dst) |next| applyArtBackground(next, src);
                 }
             }
         }
@@ -1220,13 +1235,13 @@ pub const CopyableText = struct {
         errdefer box.deinit(allocator);
 
         if (choices.len > 1) for (choices) |choice| {
-            var selector_box = try wgt.TextBox(Widget).init(allocator, choice.selector, .{ .border_style = .hidden, .wrap_kind = .none });
+            var selector_box = try wgt.TextBox.init(allocator, choice.selector, .{ .border_style = .hidden, .wrap_kind = .none });
             errdefer selector_box.deinit(allocator);
             selector_box.getFocus().focusable = true;
             try box.children.put(allocator, selector_box.getFocus().id, .{ .widget = .{ .text_box = selector_box }, .rect = null, .min_size = .{ .width = choice.selector.len + 2, .height = 3 } });
         };
 
-        var text_input = try wgt.TextInput(Widget).init(allocator, .{
+        var text_input = try wgt.TextInput.init(allocator, .{
             .border_style = .single,
             .label = choices[0].label,
             .bottom_label = choices[0].bottom_label,
@@ -1350,11 +1365,11 @@ pub const CopyableText = struct {
         self.session.host_request = .{ .show_copyable_text = choice.copyable_text orelse choice.text };
     }
 
-    fn textInput(self: *CopyableText) *wgt.TextInput(Widget) {
+    fn textInput(self: *CopyableText) *wgt.TextInput {
         return &self.box.children.values()[if (self.choices.len > 1) self.choices.len else 0].widget.text_input;
     }
 
-    fn selector(self: *CopyableText, index: usize) *wgt.TextBox(Widget) {
+    fn selector(self: *CopyableText, index: usize) *wgt.TextBox {
         return &self.box.children.values()[index].widget.text_box;
     }
 

@@ -171,7 +171,7 @@ pub const View = struct {
             var header_box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
             errdefer header_box.deinit(allocator);
             {
-                var space = try wgt.Text(ui.Widget).init(allocator, " ");
+                var space = try wgt.Text.init(allocator, " ");
                 errdefer space.deinit(allocator);
                 try header_box.children.put(allocator, space.getFocus().id, .{ .widget = .{ .text = space }, .rect = null, .min_size = null });
             }
@@ -221,7 +221,7 @@ pub const View = struct {
     // a focusable row in a column. `link`, when present, is the row's `a:`
     // navigation kind (the window-navigation rows); ref names pass null.
     fn addRow(allocator: std.mem.Allocator, col: *wgt.Box(ui.Widget), label: []const u8, link: ?[]const u8) !void {
-        var row = try wgt.TextBox(ui.Widget).init(allocator, label, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .none });
+        var row = try wgt.TextBox.init(allocator, label, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .none });
         errdefer row.deinit(allocator);
         row.getFocus().focusable = true;
         if (link) |l| row.getFocus().kind = .{ .custom = l };

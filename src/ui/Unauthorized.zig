@@ -29,7 +29,7 @@ pub const View = struct {
     ;
 
     pub fn init(allocator: std.mem.Allocator) !View {
-        var text_box = try wgt.TextBox(ui.Widget).init(allocator, message, .{ .border_style = null, .rounded_corners = false, .wrap_kind = .word });
+        var text_box = try wgt.TextBox.init(allocator, message, .{ .border_style = null, .rounded_corners = false, .wrap_kind = .word });
         errdefer text_box.deinit(allocator);
         return .{ .center = try ui.widget.Center.init(allocator, .{ .text_box = text_box }) };
     }

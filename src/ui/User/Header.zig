@@ -53,7 +53,7 @@ pub const View = struct {
 
         // spacer
         {
-            var text = try wgt.Text(ui.Widget).init(allocator, " ");
+            var text = try wgt.Text.init(allocator, " ");
             errdefer text.deinit(allocator);
             try box.children.put(allocator, text.getFocus().id, .{
                 .widget = .{ .text = text },
@@ -90,7 +90,7 @@ pub const View = struct {
 
         // repos tab
         {
-            var text_box = try wgt.TextBox(ui.Widget).init(allocator, "repos", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            var text_box = try wgt.TextBox.init(allocator, "repos", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().focusable = true;
             text_box.getFocus().kind = .{ .custom = repos_link };
@@ -105,7 +105,7 @@ pub const View = struct {
 
         // forks tab
         {
-            var text_box = try wgt.TextBox(ui.Widget).init(allocator, "forks", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            var text_box = try wgt.TextBox.init(allocator, "forks", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().focusable = true;
             text_box.getFocus().kind = .{ .custom = forks_link };
@@ -132,7 +132,7 @@ pub const View = struct {
 
         // settings tab. settings are account preferences, so it needs a login.
         if (session.data.user_id != null) {
-            var text_box = try wgt.TextBox(ui.Widget).init(allocator, "settings", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            var text_box = try wgt.TextBox.init(allocator, "settings", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().focusable = true;
             text_box.getFocus().kind = .{ .custom = settings_link };
@@ -162,7 +162,7 @@ pub const View = struct {
 
         // quit tab
         if (session.is_terminal) {
-            var text_box = try wgt.TextBox(ui.Widget).init(allocator, ui.Quit.tab_label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            var text_box = try wgt.TextBox.init(allocator, ui.Quit.tab_label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().focusable = true;
             text_box.getFocus().kind = .{ .custom = ui.Quit.tab_kind };
@@ -193,7 +193,7 @@ pub const View = struct {
         // only the selected tab shows its border
         const box = &self.scroll.child.box;
         for (box.children.keys(), box.children.values()) |id, *child| {
-            const tb: ?*wgt.TextBox(ui.Widget) = switch (child.widget) {
+            const tb: ?*wgt.TextBox = switch (child.widget) {
                 .text_box => |*x| x,
                 .auth_tab => |*at| blk: {
                     // the label tracks login state per frame, so the width must too

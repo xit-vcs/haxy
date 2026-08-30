@@ -1379,7 +1379,7 @@ pub const Session = struct {
     pending: std.ArrayList(Action) = .empty, // actions queued by widgets this frame
     // focus id -> the live TextInput, refreshed each frame by the views that own
     // inputs. web/wasm form handling looks widgets up here by focus id.
-    text_inputs: std.AutoHashMapUnmanaged(usize, *wgt.TextInput(Widget)) = .empty,
+    text_inputs: std.AutoHashMapUnmanaged(usize, *wgt.TextInput) = .empty,
     // focus id -> the page-constant text the web renderer puts in an input
     // initially, refreshed each frame alongside `text_inputs`. never an
     // editable input's live content: the overlay html must not change as the
@@ -1557,12 +1557,8 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, session: *Session, repo_may
     term.setActive(&terminal);
     defer term.setActive(null);
 
-    var last_size = layout.Size{ .width = 0, .height = 0 };
-    var last_grid = try Grid.init(allocator, last_size);
-    defer last_grid.deinit();
-
     while (!terminal.shouldQuit()) {
-        const grid_changed = try terminal.render(&nav.root, &last_grid, &last_size);
+        const grid_changed = try terminal.render(&nav.root);
 
         // process any inputs.
         //
@@ -1596,14 +1592,13 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, session: *Session, repo_may
                     terminal = try term.Terminal.init(io, allocator);
                     terminal_live = true;
                     term.setActive(&terminal);
-                    last_size = .{ .width = 0, .height = 0 };
                 },
                 .sync_events => {
                     try nav.root.build(allocator, .{
                         .min_size = .{ .width = null, .height = null },
-                        .max_size = .{ .width = last_size.width, .height = last_size.height },
+                        .max_size = .{ .width = terminal.size.width, .height = terminal.size.height },
                     }, nav.root.getFocus());
-                    _ = try terminal.render(&nav.root, &last_grid, &last_size);
+                    _ = try terminal.render(&nav.root);
                     try Repo.Events.performSync(allocator, session);
                 },
             }
@@ -1627,7 +1622,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, session: *Session, repo_may
 
         try nav.root.build(allocator, .{
             .min_size = .{ .width = null, .height = null },
-            .max_size = .{ .width = last_size.width, .height = last_size.height },
+            .max_size = .{ .width = terminal.size.width, .height = terminal.size.height },
         }, nav.root.getFocus());
     }
 }
@@ -1845,12 +1840,12 @@ pub fn userLink(page_arena: *std.heap.ArenaAllocator, name: []const u8) ![]const
 
 // a focusable " author " box showing `author`, linking to their user page
 // when it is a known user
-pub fn authorBox(allocator: std.mem.Allocator, page_arena: *std.heap.ArenaAllocator, author: Author) !wgt.TextBox(Widget) {
+pub fn authorBox(allocator: std.mem.Allocator, page_arena: *std.heap.ArenaAllocator, author: Author) !wgt.TextBox {
     const text = switch (author) {
         .unknown => "",
         .email, .user_name => |t| t,
     };
-    var tb = try wgt.TextBox(Widget).init(allocator, text, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none, .label = " author " });
+    var tb = try wgt.TextBox.init(allocator, text, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none, .label = " author " });
     errdefer tb.deinit(allocator);
     tb.getFocus().focusable = true;
     switch (author) {
