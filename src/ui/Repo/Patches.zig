@@ -597,10 +597,10 @@ pub fn appendDraftDetails(self: *const Self, allocator: std.mem.Allocator, box: 
         var copyable_text = try ui.widget.CopyableText.init(allocator, session, &choices);
         errdefer copyable_text.deinit(allocator);
         try box.children.put(allocator, copyable_text.getFocus().id, .{ .widget = .{ .copyable_text = copyable_text }, .rect = null, .min_size = null });
-        try addDetailGap(allocator, box);
     };
     if (entry.fork_oid.len != 0) {
         fields[field_count] = .{
+            .selector = "from",
             .text = entry.fork_oid,
             .label = if (entry.no_changes) " object id of this patch (no changes) " else " object id of this patch ",
         };
@@ -608,6 +608,7 @@ pub fn appendDraftDetails(self: *const Self, allocator: std.mem.Allocator, box: 
     }
     if (entry.target_branch.len != 0) {
         fields[field_count] = .{
+            .selector = "to",
             .text = entry.target_branch,
             .label = " target branch this patch will go to ",
             .bottom_label = " (set by the url you push to above) ",
@@ -615,19 +616,15 @@ pub fn appendDraftDetails(self: *const Self, allocator: std.mem.Allocator, box: 
         field_count += 1;
     }
 
-    for (fields[0..field_count], 0..) |field, i| {
-        var copyable_text = try ui.widget.CopyableText.init(allocator, session, &.{field});
+    if (field_count > 0) {
+        var copyable_text = try ui.widget.CopyableText.init(allocator, session, fields[0..field_count]);
         errdefer copyable_text.deinit(allocator);
         try box.children.put(allocator, copyable_text.getFocus().id, .{ .widget = .{ .copyable_text = copyable_text }, .rect = null, .min_size = null });
-        if (i + 1 < field_count) try addDetailGap(allocator, box);
-    }
-    if (entry.target_branch.len != 0) try addDetailGap(allocator, box);
-}
 
-fn addDetailGap(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget)) !void {
-    var spacer = try ui.widget.Spacer.init(allocator);
-    errdefer spacer.deinit(allocator);
-    try box.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = .{ .width = null, .height = 1 }, .max_size = .{ .width = null, .height = 1 } });
+        var spacer = try ui.widget.Spacer.init(allocator);
+        errdefer spacer.deinit(allocator);
+        try box.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = .{ .width = null, .height = 1 }, .max_size = .{ .width = null, .height = 1 } });
+    }
 }
 
 fn cloneDirectoryName(allocator: std.mem.Allocator, title: []const u8) ![]const u8 {
