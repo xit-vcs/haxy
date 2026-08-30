@@ -1012,7 +1012,7 @@ pub const Header = struct {
                 errdefer clone_url.deinit(allocator);
                 const min_width = clone_url.minWidth();
                 box.getFocus().child_id = clone_url.getFocus().id;
-                try box.children.put(allocator, clone_url.getFocus().id, .{ .widget = .{ .copyable_text = clone_url }, .rect = null, .min_size = .{ .width = min_width, .height = 3 } });
+                try box.children.put(allocator, clone_url.getFocus().id, .{ .widget = .{ .copyable_text = clone_url }, .rect = null, .min_size = .{ .width = min_width, .height = 3 }, .max_size = .{ .width = min_width, .height = 3 } });
             }
 
             var spacer = try ui.widget.Spacer.init(allocator);
