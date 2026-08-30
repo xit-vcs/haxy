@@ -716,8 +716,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     var frame = try wgt.Box(Widget).init(allocator, .{ .border_style = .hidden, .direction = .vert });
                     errdefer frame.deinit(allocator);
                     // the tool row sits above the scroll (populateDetail fills
-                    // it per thread) so it can't scroll out from under the web
-                    // overlay <form>, whose position doesn't track pane scrolling.
+                    // it per thread).
                     {
                         var row = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
                         errdefer row.deinit(allocator);
@@ -740,7 +739,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
 
         // a thread form: title/tags/description inputs and a submit button,
         // prefilled from `record` when given. its form: subtree makes the web
-        // overlay wrap them in a <form> POSTing to `action`'s route.
+        // renderer POST them to `action`'s route.
         fn initThreadForm(allocator: std.mem.Allocator, session: *ui.Session, action: []const u8, record: ?*const Event.Record) !wgt.Box(Widget) {
             var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });
             errdefer box.deinit(allocator);
@@ -848,7 +847,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
 
         // the conflict resolve form. the "use this" links are navigations that
         // flip the url's theirs: pick, reloading the prefills; one submit
-        // settles every conflict. the form: subtree makes the web overlay POST
+        // settles every conflict. the form: subtree makes the web renderer POST
         // to the resolve route.
         fn initResolveForm(allocator: std.mem.Allocator, session: *ui.Session, data: *const Self) !wgt.Box(Widget) {
             const aa = session.page_arena.allocator();
@@ -1031,34 +1030,6 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             }
             const route = resolveRoute(data.identity, data.selected_id, picks.items) orelse return error.RouteTooLong;
             return std.fmt.allocPrint(aa, "a:{s}", .{try route.toUrl(session.page_arena)});
-        }
-
-        // the resolve form's page-constant initial value for the input `name`:
-        // the picked side of its conflicted field or hunk
-        fn resolvePrefill(self: *This, name: []const u8) ?[]const u8 {
-            const conflict = if (self.data.conflict) |*c| c else return null;
-            const theirs = self.data.theirsPicked(name);
-            if (std.mem.eql(u8, name, "title")) {
-                const fc = if (conflict.title) |*f| f else return null;
-                return if (theirs) fc.theirs.text else fc.ours.text;
-            }
-            if (std.mem.eql(u8, name, "tags")) {
-                const fc = if (conflict.tags) |*f| f else return null;
-                return if (theirs) fc.theirs.text else fc.ours.text;
-            }
-            if (std.mem.startsWith(u8, name, "d")) {
-                const desc = if (conflict.description) |*d| d else return null;
-                const hunk_index = std.fmt.parseInt(usize, name[1..], 10) catch return null;
-                var seen: usize = 0;
-                for (desc.chunks) |chunk| switch (chunk) {
-                    .conflict => |hunk| {
-                        if (seen == hunk_index) return (if (theirs) hunk.theirs else hunk.ours) orelse "";
-                        seen += 1;
-                    },
-                    else => {},
-                };
-            }
-            return null;
         }
 
         fn addRow(allocator: std.mem.Allocator, box: *wgt.Box(Widget), text: []const u8, bottom_label: []const u8, link: []const u8) !void {
@@ -1265,36 +1236,6 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     .text_input => |*ti| try self.session.text_inputs.put(inputs_arena, ti.getFocus().id, ti),
                     else => {},
                 };
-
-                // on an edit page, register the thread's content as the inputs'
-                // page-constant initial values, which the web overlay renders
-                // into them.
-                if (self.data.view == .edit) {
-                    if (self.data.selectedThread()) |entry| {
-                        const fields = form.children.values();
-                        try self.session.input_values.put(inputs_arena, fields[title_field_index].widget.text_input.getFocus().id, entry.record.event.title);
-                        try self.session.input_values.put(inputs_arena, fields[tags_field_index].widget.text_input.getFocus().id, entry.record.event.tags);
-                        try self.session.input_values.put(inputs_arena, fields[description_field_index].widget.text_input.getFocus().id, entry.record.event.description);
-                    }
-                }
-
-                if (self.data.view == .edit_comment) {
-                    if (self.data.comment_page) |page| {
-                        const body = &form.children.values()[comment_body_field_index].widget.text_input;
-                        try self.session.input_values.put(inputs_arena, body.getFocus().id, page.selected.comment.event.body);
-                    }
-                }
-
-                // the resolve form's inputs prefill from the picked side, which
-                // is url state and so page-constant like the edit values above
-                if (supports_conflicts and self.data.view == .resolve) {
-                    for (form.children.values()) |*child| switch (child.widget) {
-                        .text_input => |*ti| if (self.resolvePrefill(ti.options.name)) |value| {
-                            try self.session.input_values.put(inputs_arena, ti.getFocus().id, value);
-                        },
-                        else => {},
-                    };
-                }
             }
 
             try self.box.build(allocator, constraint, root_focus);

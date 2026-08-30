@@ -1,20 +1,12 @@
 const grid = document.getElementById("grid");
-const overlay = document.getElementById("overlay");
 const pageJson = document.getElementById("page-data").textContent;
 
 let wasmInstance;
 const decoder = new TextDecoder();
 const encoder = new TextEncoder();
-let currentHtml = "";
-// each scroll div's wasm-side offset (in cells) as of the last render, keyed by
-// scroll id. when a new render's offset differs, the wasm moved the scroll on
-// purpose and its offset is applied; otherwise the browser position (the user's
-// scrolling) is preserved.
-const wasmOffsets = {};
-// seeded from the server-rendered overlay so the first wasm tick can no-op
-// when its layout happens to match the server's. otherwise the first tick
-// always rebuilds and any pre-load focus state is lost.
-let currentOverlay = overlay.innerHTML;
+// seed the render snapshot from the server html. if wasm produces the same
+// first frame, the live DOM does not need even a reconciliation pass.
+let currentHtml = grid.innerHTML;
 
 const MIN_COLS = 30;
 
@@ -53,10 +45,17 @@ function readWasmString(ptr, len) {
     return decoder.decode(new Uint8Array(memory.buffer, ptr, len));
 }
 
+function focusElements(id) {
+    // a native control is the authoritative geometry for its widget. the cell
+    // layer also contains spans with this id, but those are only its backdrop.
+    const control = grid.querySelector(`[data-key="control:${id}"]`);
+    return control ? [control] : Array.from(grid.querySelectorAll(`[data-focus-id="${id}"]`));
+}
+
 function focusedNativeScroll() {
     const id = grid.dataset.focusId;
     if (!id) return null;
-    const focused = grid.querySelectorAll(`[data-focus-id="${id}"]`);
+    const focused = focusElements(id);
     if (focused.length === 0) return null;
     const container = focused[0].closest(".scroll");
     return container ? { focused, container } : null;
@@ -95,6 +94,102 @@ function pageFocusedScroll(down) {
     return true;
 }
 
+// stateful controls, scroll panels, and form owners are keyed. everything
+// unkeyed is replaced wholesale, including each panel's cell layer.
+function nodeKey(node) {
+    if (node.nodeType !== Node.ELEMENT_NODE) return null;
+    return node.dataset.key || null;
+}
+
+function nodesMatch(current, desired) {
+    if (nodeKey(current) !== nodeKey(desired) || current.tagName !== desired.tagName) return false;
+    return current.tagName !== "INPUT" || current.type === desired.type;
+}
+
+function syncAttributes(current, desired) {
+    const preserveValue = desired.hasAttribute("data-preserve-value");
+    for (const attr of Array.from(current.attributes)) {
+        if (!desired.hasAttribute(attr.name)) current.removeAttribute(attr.name);
+    }
+    for (const attr of Array.from(desired.attributes)) {
+        // updating the default value of a dirty input is usually harmless, but
+        // avoiding it entirely gives browsers no opportunity to disturb the
+        // live value, selection, undo stack, or an open file picker.
+        if (preserveValue && attr.name === "value") continue;
+        if (current.getAttribute(attr.name) !== attr.value) current.setAttribute(attr.name, attr.value);
+    }
+
+    if (current.tagName === "INPUT" && !preserveValue && current.type !== "file" && current.value !== desired.value) {
+        current.value = desired.value;
+    }
+}
+
+function patchNode(current, desired) {
+    syncAttributes(current, desired);
+    if (current.tagName === "TEXTAREA") {
+        if (!desired.hasAttribute("data-preserve-value")) {
+            if (current.value !== desired.value) current.value = desired.value;
+            if (current.defaultValue !== desired.defaultValue) current.defaultValue = desired.defaultValue;
+        }
+        return;
+    }
+
+    patchChildren(current, desired);
+}
+
+function patchChildren(current, desired) {
+    const keyed = new Map();
+    for (const child of Array.from(current.childNodes)) {
+        const key = nodeKey(child);
+        if (key) keyed.set(key, child);
+    }
+
+    let cursor = current.firstChild;
+    for (const wanted of Array.from(desired.childNodes)) {
+        const key = nodeKey(wanted);
+        if (!key) {
+            const replacement = wanted.cloneNode(true);
+            if (cursor && !nodeKey(cursor)) {
+                const next = cursor.nextSibling;
+                current.replaceChild(replacement, cursor);
+                cursor = next;
+            } else {
+                current.insertBefore(replacement, cursor);
+            }
+            continue;
+        }
+
+        let found = keyed.get(key);
+        if (found && !nodesMatch(found, wanted)) found = null;
+        if (!found) {
+            found = wanted.cloneNode(true);
+            current.insertBefore(found, cursor);
+        } else {
+            keyed.delete(key);
+            while (cursor && cursor !== found && !nodeKey(cursor)) {
+                const next = cursor.nextSibling;
+                cursor.remove();
+                cursor = next;
+            }
+            if (found !== cursor) current.insertBefore(found, cursor);
+            patchNode(found, wanted);
+        }
+        cursor = found.nextSibling;
+    }
+
+    while (cursor) {
+        const next = cursor.nextSibling;
+        cursor.remove();
+        cursor = next;
+    }
+}
+
+function patchHtml(container, html) {
+    const template = document.createElement("template");
+    template.innerHTML = html;
+    patchChildren(container, template.content);
+}
+
 const importObject = {
     env: {
         _consoleLog: function (ptr, len) {
@@ -104,24 +199,26 @@ const importObject = {
             const html = readWasmString(ptr, len);
             if (html === currentHtml) return;
             currentHtml = html;
-            // each web-native Scroll renders as a .scroll div; replacing
-            // innerHTML recreates them and would reset their scroll position
-            // every tick, so snapshot scrollTop/Left by their stable id and
-            // restore it after the swap. (mouse-wheel scrolling happens with no
-            // tick, so it isn't affected.)
-            const positions = {};
-            for (const el of grid.querySelectorAll(".scroll[data-scroll-id]")) {
-                positions[el.dataset.scrollId] = { top: el.scrollTop, left: el.scrollLeft };
+            // snapshot browser and wasm scroll state before reconciling. a stable
+            // scroll with the same version and wasm offset keeps its browser
+            // position; new content or an intentional wasm move uses the offset.
+            const scrolls = new Map();
+            for (const el of grid.querySelectorAll(".scroll[data-key]")) {
+                scrolls.set(el.dataset.key, {
+                    id: el.dataset.scrollId,
+                    offsetTop: Number(el.dataset.scrollY || 0),
+                    offsetLeft: Number(el.dataset.scrollX || 0),
+                    top: el.scrollTop,
+                    left: el.scrollLeft,
+                });
             }
-            grid.innerHTML = html;
-            for (const el of grid.querySelectorAll(".scroll[data-scroll-id]")) {
-                const id = el.dataset.scrollId;
+            patchHtml(grid, html);
+            for (const el of grid.querySelectorAll(".scroll[data-key]")) {
                 const offset = { top: Number(el.dataset.scrollY || 0), left: Number(el.dataset.scrollX || 0) };
-                const prev = wasmOffsets[id];
-                const p = positions[id];
-                if (p && prev && prev.top === offset.top && prev.left === offset.left) {
-                    el.scrollTop = p.top;
-                    el.scrollLeft = p.left;
+                const previous = scrolls.get(el.dataset.key);
+                if (previous && previous.id === el.dataset.scrollId && previous.offsetTop === offset.top && previous.offsetLeft === offset.left) {
+                    el.scrollTop = previous.top;
+                    el.scrollLeft = previous.left;
                 } else {
                     // the wasm's offset changed (or this div is new — a fresh
                     // page load or a bumped content version): apply it,
@@ -130,7 +227,6 @@ const importObject = {
                     el.scrollTop = offset.top * cellHeight;
                     el.scrollLeft = offset.left * cellWidth;
                 }
-                wasmOffsets[id] = offset;
             }
         },
         _replaceState: function (ptr, len) {
@@ -142,25 +238,8 @@ const importObject = {
                 history.replaceState({}, "", url);
             }
         },
-        _setOverlay: function (ptr, len) {
-            const html = readWasmString(ptr, len);
-            // diff against the previous overlay HTML; an unchanged overlay
-            // means no layout/structure has shifted (typing alone doesn't
-            // produce a diff because we deliberately omit the `value`
-            // attribute on inputs — the browser tracks that). skipping the
-            // innerHTML assignment keeps the live <form> alive across the
-            // mousedown→focusin→tick→click sequence, which is what lets
-            // the very first click on the submit button actually submit.
-            if (html === currentOverlay) return;
-            // the initial wasm render can finish while a native picker is open.
-            // keep its input connected so its change event reaches document.
-            if (overlay.contains(document.activeElement) && document.activeElement.type === "file") return;
-            currentOverlay = html;
-            overlay.innerHTML = html;
-        },
         _focusInput: function (id) {
-            const target = overlay.querySelector(`[data-focus-id="${id}"]`) ||
-                grid.querySelector(`input[data-focus-id="${id}"]`);
+            const target = grid.querySelector(`[data-key="control:${id}"]`);
             if (!target) return;
             if (document.activeElement !== target) target.focus();
             if (target.readOnly) target.select();
@@ -175,7 +254,7 @@ const importObject = {
             // bring the focused widget into view within its own .scroll div. it's
             // several spans (one per row) sharing this id, in top-to-bottom order,
             // so the first gives its top/left edge and the last its bottom.
-            const els = grid.querySelectorAll(`[data-focus-id="${id}"]`);
+            const els = focusElements(id);
             if (els.length === 0) return;
             const container = els[0].closest(".scroll");
             if (!container) return;
@@ -314,23 +393,8 @@ WebAssembly.instantiateStreaming(fetch("/haxy.wasm"), importObject).then(async (
         wasmInstance.exports._tick(minRows(), maxCols());
     });
 
-    // submit on mousedown rather than waiting for click: the focusin this
-    // same mousedown fires ticks the wasm, and a resulting overlay rebuild
-    // would detach the button before its click could land. the form is
-    // guaranteed live at mousedown time.
-    document.addEventListener("mousedown", (event) => {
-        if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-        const btn = event.target.closest ? event.target.closest("button[type=submit][data-focus-id]") : null;
-        if (!btn || !btn.form) return;
-        // empty-action forms are handled by their onsubmit on the click path
-        if (!btn.form.getAttribute("action")) return;
-        // if the button survives to receive the click, don't submit twice
-        btn.addEventListener("click", (e) => e.preventDefault(), { once: true });
-        btn.form.requestSubmit(btn);
-    });
-
-    // listeners on document (not #grid) since the form lives outside #grid;
-    // input/focus events from form elements still bubble up to document.
+    // delegated listeners survive cell-layer replacement. the controls
+    // themselves are retained inside #grid.
     document.addEventListener("input", (event) => {
         const t = event.target;
         if (!t || (t.tagName !== "INPUT" && t.tagName !== "TEXTAREA") || !t.dataset.focusId) return;
@@ -342,15 +406,9 @@ WebAssembly.instantiateStreaming(fetch("/haxy.wasm"), importObject).then(async (
         if (!t || !t.dataset || !t.dataset.focusId) return;
         // sync the wasm focus to wherever the browser moved focus
         wasmInstance.exports._setFocus(Number(t.dataset.focusId));
-        // a click's mousedown fires this focusin before the click event. ticking
-        // here would rebuild #grid and destroy the node before its click lands,
-        // swallowing the navigation and forcing a second click — so don't
-        // re-render for a grid element. a file input is also skipped because a
-        // changed overlay would replace it between mousedown and click, before
-        // the browser opens its picker.
-        if (!grid.contains(t) && !(t.tagName === "INPUT" && t.type === "file")) {
-            wasmInstance.exports._tick(minRows(), maxCols());
-        }
+        // keyed controls survive a redraw before click. cell links live in the
+        // replaceable backdrop, so their click handler redraws after activation.
+        if (nodeKey(t)?.startsWith("control:")) wasmInstance.exports._tick(minRows(), maxCols());
     });
 
     grid.addEventListener("click", (event) => {

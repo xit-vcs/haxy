@@ -27,7 +27,7 @@ pub const View = struct {
     pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !View {
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .rounded_corners = true, .direction = .vert });
         errdefer box.deinit(allocator);
-        // marks this subtree as an HTML form scope for the web overlay
+        // marks this subtree as an HTML form scope for the web renderer
         box.getFocus().kind = .{ .custom = "form:logout" };
 
         {

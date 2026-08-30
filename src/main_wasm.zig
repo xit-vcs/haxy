@@ -56,7 +56,7 @@ fn tick(min_height: u32, max_width: u32) !void {
     // min == max height fills it exactly, and each Scroll clips to its
     // viewport while handing its full content to a native-scrollable element.
     // a full-height page instead grows to its content and the browser scrolls
-    // the whole page, which the overlay's absolute positions track.
+    // the whole page.
     const max_height: ?u32 = if (session.data.current_page.fullHeight()) null else min_height;
     try root_ptr.build(allocator, .{
         .min_size = .{ .width = null, .height = min_height },
@@ -76,16 +76,6 @@ fn tick(min_height: u32, max_width: u32) !void {
     const html = try web.generateHtml(allocator, root_ptr, &session);
     defer allocator.free(html);
     _setHtml(html.ptr, @intCast(html.len));
-
-    // emit the editable form overlay on every tick so the wasm layout drives
-    // positions, not just the server's initial render. JS
-    // diffs the result against the previous overlay; an unchanged overlay
-    // leaves the live <form> alone — crucial since wiping it mid-click
-    // would detach the submit button before the browser can dispatch the
-    // form submission.
-    const overlay = try web.generateOverlay(allocator, root_ptr, &session);
-    defer allocator.free(overlay);
-    _setOverlay(overlay.ptr, @intCast(overlay.len));
 
     const root_focus = root_ptr.getFocus();
     if (root_focus.grandchild_id) |gid| {
@@ -180,7 +170,6 @@ fn consoleLog(arg: []const u8) void {
 
 extern fn _consoleLog(arg: [*]const u8, len: u32) void;
 extern fn _setHtml(arg: [*]const u8, len: u32) void;
-extern fn _setOverlay(arg: [*]const u8, len: u32) void;
 extern fn _replaceState(arg: [*]const u8, len: u32) void;
 extern fn _focusInput(focus_id: u32) void;
 extern fn _navigate(arg: [*]const u8, len: u32) void;
@@ -235,7 +224,7 @@ export fn _setFocus(focus_id: u32) void {
     };
 }
 
-// js calls this when the value of an overlay <input> changes; we replace
+// js calls this when the value of a native <input> changes; we replace
 // the matching TextInput's content with the supplied utf-8 bytes.
 export fn _setTextInputValue(focus_id: u32, value_ptr: [*]const u8, value_len: u32) void {
     setTextInputValue(focus_id, value_ptr[0..value_len]) catch |err| {

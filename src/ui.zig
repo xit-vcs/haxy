@@ -1380,11 +1380,6 @@ pub const Session = struct {
     // focus id -> the live TextInput, refreshed each frame by the views that own
     // inputs. web/wasm form handling looks widgets up here by focus id.
     text_inputs: std.AutoHashMapUnmanaged(usize, *wgt.TextInput) = .empty,
-    // focus id -> the page-constant text the web renderer puts in an input
-    // initially, refreshed each frame alongside `text_inputs`. never an
-    // editable input's live content: the overlay html must not change as the
-    // user types, or the diff in _setOverlay would rebuild the element.
-    input_values: std.AutoHashMapUnmanaged(usize, []const u8) = .empty,
     nav_back: bool = false, // set by input (escape) to request the native TUI pop a page; see Nav
     refresh_requested: bool = false, // set by input (ctrl+r)
     // a requested forward navigation. set this (via navigate) to move to a new
@@ -1737,7 +1732,7 @@ pub fn inPageTabLink(session: *Session, route: RoutablePage, selected: bool) ![]
     return std.fmt.allocPrint(session.page_arena.allocator(), "{s}{s}", .{ in_page_link_prefix, try target.toUrl(session.page_arena) });
 }
 
-// a button the web overlay covers with a file picker that posts the chosen
+// a button the web renderer covers with a file picker that posts the chosen
 // file to the url after the prefix
 pub const file_input_prefix = "file:";
 
@@ -2042,7 +2037,6 @@ pub fn initRoot(allocator: std.mem.Allocator, page: *const Page, session: *Sessi
     // input-owning views build their TextInputs in init, so reset their
     // registrations here
     session.text_inputs.clearRetainingCapacity();
-    session.input_values.clearRetainingCapacity();
 
     try root.build(allocator, .{
         .min_size = .{ .width = null, .height = 40 },

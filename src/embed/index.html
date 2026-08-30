@@ -103,7 +103,7 @@
           }
 
           /* the TUI cells under the button render the border + label;
-             the overlay button stays transparent so they show through
+             the native button stays transparent so they show through
              and just owns the click + form-submit behavior. */
           .page button {
             background: transparent;
@@ -125,7 +125,6 @@
     <body>
       <div class="page">
         <div id="grid">{{{ HAXY_HTML }}}</div>
-        <div id="overlay">{{{ HAXY_OVERLAY }}}</div>
       </div>
       <script id="page-data" type="application/json">{{{ HAXY_JSON }}}</script>
       <script src="/script.js"></script>

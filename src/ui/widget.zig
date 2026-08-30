@@ -736,7 +736,7 @@ pub const SectionLabel = struct {
     }
 };
 
-// a submit button, indented past its form's content. the web overlay POSTs
+// a submit button, indented past its form's content. the web form POSTs
 // the button's form; terminal hosts detect presses through `buttonId`.
 pub const SubmitButton = struct {
     box: wgt.Box(Widget),
@@ -1329,7 +1329,6 @@ pub const CopyableText = struct {
             const aa = self.session.arena.allocator();
             const id = self.textInput().getFocus().id;
             try self.session.text_inputs.put(aa, id, self.textInput());
-            try self.session.input_values.put(aa, id, self.choices[self.selected].text);
         }
     }
 

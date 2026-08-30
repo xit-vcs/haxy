@@ -1498,8 +1498,6 @@ fn renderIndexHtml(
 
     const content = try generateHtml(allocator, &root, &session);
     defer allocator.free(content);
-    const overlay = try generateOverlay(allocator, &root, &session);
-    defer allocator.free(overlay);
 
     // serialize the snapshot so the wasm side can parse it back without making
     // a second request. it's embedded raw in a <script type="application/json">
@@ -1525,7 +1523,6 @@ fn renderIndexHtml(
         var cursor: usize = 0;
         for (&[_]struct { needle: []const u8, replacement: []const u8 }{
             .{ .needle = "{{{ HAXY_HTML }}}", .replacement = content },
-            .{ .needle = "{{{ HAXY_OVERLAY }}}", .replacement = overlay },
             .{ .needle = "{{{ HAXY_JSON }}}", .replacement = json_escaped.items },
         }) |sub| {
             const idx = std.mem.indexOfPos(u8, template, cursor, sub.needle) orelse return error.MissingTemplateToken;
@@ -1557,6 +1554,7 @@ fn findEmbed(request_path: []const u8) ?Embed {
 // rendered recursively so nested scrolls work.
 pub fn generateHtml(allocator: std.mem.Allocator, root: *ui.Widget, session: *ui.Session) ![]const u8 {
     const grid = root.getGrid() orelse return error.MissingGrid;
+    const root_focus = root.getFocus();
 
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
@@ -1566,15 +1564,16 @@ pub fn generateHtml(allocator: std.mem.Allocator, root: *ui.Widget, session: *ui
             if (background.art.getGrid()) |art| {
                 var position_buf: [64]u8 = undefined;
                 try out.appendSlice(allocator, try std.fmt.bufPrint(&position_buf, "<div class=\"ansi-art\" aria-hidden=\"true\" style=\"left:{d}ch\">", .{grid.size.width -| art.size.width}));
-                try renderPanel(allocator, &out, background.art.getFocus(), art, session);
+                try renderPanel(allocator, &out, background.art.getFocus(), art, session, root_focus);
                 try out.appendSlice(allocator, "</div>");
             }
         },
         else => {},
     }
-    try out.appendSlice(allocator, "<div class=\"grid-content\">");
-    try renderPanel(allocator, &out, root.getFocus(), grid, session);
+    try out.appendSlice(allocator, "<div class=\"grid-content\" data-key=\"panel:root\">");
+    try renderPanel(allocator, &out, root_focus, grid, session, root_focus);
     try out.appendSlice(allocator, "</div>");
+    try renderForms(allocator, &out, root_focus);
     return try out.toOwnedSlice(allocator);
 }
 
@@ -1583,7 +1582,7 @@ pub fn generateHtml(allocator: std.mem.Allocator, root: *ui.Widget, session: *ui
 // Scroll becomes a nested, natively-scrollable div holding its full content.
 // emits the panel's grid cells as text, leaving holes where child scrolls sit,
 // then the child scroll divs over those holes.
-fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: *Focus, grid: Grid, session: *ui.Session) !void {
+fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: *Focus, grid: Grid, session: *ui.Session, root_focus: *Focus) !void {
     // `direct` is this panel's scroll children, each drawn as an overlaid div.
     // `excluded` is every focus id that belongs to a scroll (the scroll nodes
     // plus their descendants, which the focus tree flattens into this panel's
@@ -1663,6 +1662,10 @@ fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: 
             };
         }
     };
+
+    // the cells are the volatile part of a panel. js replaces this one subtree
+    // wholesale while retaining the panel's native controls and scroll shells.
+    try output.appendSlice(allocator, "<div class=\"grid-cells\">");
 
     // emit this panel's grid as rows of text, coalescing adjacent cells that
     // share a focus id and colors into one tag (a clickable span, a link, or a
@@ -1756,33 +1759,12 @@ fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: 
         if (open_tag) |t| try output.appendSlice(allocator, t.closeTag());
         try output.append(allocator, '\n');
     }
+    try output.appendSlice(allocator, "</div>");
 
-    // read-only inputs have no live form state to preserve, so emit them in
-    // their panel and let a native scroll move and clip them with the grid.
-    var input_iter = focus.children.iterator();
-    while (input_iter.next()) |input_entry| {
-        const input_id = input_entry.key_ptr.*;
-        if (excluded.contains(input_id)) continue;
-        const child = input_entry.value_ptr.*;
-        switch (child.focus.kind) {
-            .text_input => {},
-            else => continue,
-        }
-        const text_input = session.text_inputs.get(input_id) orelse continue;
-        if (!text_input.options.read_only) continue;
-        const value = session.input_values.get(input_id) orelse continue;
-        const r = child.rect;
-        const inner_width = if (r.size.width > 2) r.size.width - 2 else 0;
-
-        try output.appendSlice(allocator, "<input type=\"text\" readonly data-focus-id=\"");
-        var id_buf: [32]u8 = undefined;
-        try output.appendSlice(allocator, try std.fmt.bufPrint(&id_buf, "{d}", .{input_id}));
-        try output.appendSlice(allocator, "\" value=\"");
-        try appendEscapedHtml(allocator, output, value);
-        try output.appendSlice(allocator, "\" style=\"left:");
-        var pos_buf: [64]u8 = undefined;
-        try output.appendSlice(allocator, try std.fmt.bufPrint(&pos_buf, "{d}ch;top:{d}em;width:{d}ch;height:1em\">", .{ r.x + 1, r.y + 1, inner_width }));
-    }
+    // native controls live in their panel, beside the replaceable cells. their
+    // stable keys let JS update layout without recreating their DOM nodes, and
+    // being actual descendants of a scroll gives them native movement/clipping.
+    try renderPanelControls(allocator, output, focus, session, root_focus, &excluded);
 
     // each child scroll becomes a natively-scrollable div positioned over its
     // viewport, holding its full content rendered recursively.
@@ -1805,158 +1787,147 @@ fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: 
         // preserved position, letting a wasm-side scrollToRect (the files list
         // scrolling to its selected row on page load) reach the browser.
         var buf: [256]u8 = undefined;
-        try output.appendSlice(allocator, try std.fmt.bufPrint(&buf, "<div class=\"scroll\" data-scroll-id=\"{d}-{d}\" data-scroll-direction=\"{s}\" data-scroll-x=\"{d}\" data-scroll-y=\"{d}\" style=\"left:{d}ch;top:{d}em;width:{d}ch;height:{d}em;{s}\">", .{ id, child.focus.version, @tagName(info.direction), info.offset_x, info.offset_y, r.x, r.y, r.size.width, r.size.height, overflow }));
-        try renderPanel(allocator, output, child.focus, info.content, session);
+        try output.appendSlice(allocator, try std.fmt.bufPrint(&buf, "<div class=\"scroll\" data-key=\"scroll:{d}\" data-scroll-id=\"{d}-{d}\" data-scroll-direction=\"{s}\" data-scroll-x=\"{d}\" data-scroll-y=\"{d}\" style=\"left:{d}ch;top:{d}em;width:{d}ch;height:{d}em;{s}\">", .{ id, id, child.focus.version, @tagName(info.direction), info.offset_x, info.offset_y, r.x, r.y, r.size.width, r.size.height, overflow }));
+        try renderPanel(allocator, output, child.focus, info.content, session, root_focus);
         try output.appendSlice(allocator, "</div>");
     }
 }
 
-// emits the form overlay — one <form> per "form:<url>" focus subtree in the
-// widget tree, each wrapping the text inputs and submit button inside it,
-// positioned absolutely over the matching grid cells.
-pub fn generateOverlay(allocator: std.mem.Allocator, root: *ui.Widget, session: *ui.Session) ![]const u8 {
-    const root_focus = root.getFocus();
+const form_prefix = "form:";
+const form_id_prefix = "haxy-form-";
 
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
+fn formAction(focus: *const Focus) ?[]const u8 {
+    return switch (focus.kind) {
+        .custom => |custom| if (std.mem.startsWith(u8, custom, form_prefix)) custom[form_prefix.len..] else null,
+        else => null,
+    };
+}
 
-    const form_prefix = "form:";
+// find the form ancestor of a flattened focus-tree child. html's `form`
+// attribute then associates the control with that form without requiring the
+// form and control to share a DOM parent.
+fn formOwner(root_focus: *Focus, focus_id: usize) ?usize {
+    var id = focus_id;
+    while (root_focus.children.get(id)) |child| {
+        const parent_id = child.parent_id;
+        if (parent_id == root_focus.id) return if (formAction(root_focus) != null) root_focus.id else null;
+        const parent = root_focus.children.get(parent_id) orelse return null;
+        if (formAction(parent.focus) != null) return parent_id;
+        id = parent_id;
+    }
+    return null;
+}
 
-    // Focus.children is an AutoArrayHashMap that preserves insertion order,
-    // which matches the order widgets were added in code
+fn appendFormAttribute(allocator: std.mem.Allocator, output: *std.ArrayList(u8), root_focus: *Focus, focus_id: usize) !void {
+    const form_id = formOwner(root_focus, focus_id) orelse return;
+    var buf: [64]u8 = undefined;
+    try output.appendSlice(allocator, try std.fmt.bufPrint(&buf, " form=\"" ++ form_id_prefix ++ "{d}\"", .{form_id}));
+}
+
+fn renderPanelControls(
+    allocator: std.mem.Allocator,
+    output: *std.ArrayList(u8),
+    focus: *Focus,
+    session: *ui.Session,
+    root_focus: *Focus,
+    excluded: *const std.AutoHashMapUnmanaged(usize, void),
+) !void {
+    var iter = focus.children.iterator();
+    while (iter.next()) |entry| {
+        const id = entry.key_ptr.*;
+        if (excluded.contains(id)) continue;
+        const child = entry.value_ptr.*;
+        const r = child.rect;
+
+        switch (child.focus.kind) {
+            .text_input, .text_input_password, .text_area => {
+                const ti = session.text_inputs.get(id) orelse continue;
+
+                const inner_left = r.x + 1;
+                const inner_top = r.y + 1;
+                const inner_width = if (r.size.width > 2) r.size.width - 2 else 0;
+                const preserve = !ti.options.read_only;
+
+                if (child.focus.kind == .text_area) {
+                    const value = try ti.text(allocator);
+                    defer allocator.free(value);
+                    var id_buf: [128]u8 = undefined;
+                    try output.appendSlice(allocator, try std.fmt.bufPrint(&id_buf, "<textarea data-key=\"control:{d}\" data-focus-id=\"{d}\"", .{ id, id }));
+                    if (preserve) try output.appendSlice(allocator, " data-preserve-value") else try output.appendSlice(allocator, " readonly");
+                    try appendFormAttribute(allocator, output, root_focus, id);
+                    if (ti.options.name.len > 0) {
+                        try output.appendSlice(allocator, " name=\"");
+                        try appendEscapedHtml(allocator, output, ti.options.name);
+                        try output.append(allocator, '"');
+                    }
+                    const inner_height = if (r.size.height > 2) r.size.height - 2 else 0;
+                    var pos_buf: [128]u8 = undefined;
+                    try output.appendSlice(allocator, try std.fmt.bufPrint(&pos_buf, " style=\"left:{d}ch;top:{d}em;width:{d}ch;height:{d}em\">\n", .{ inner_left, inner_top, inner_width, inner_height }));
+                    try appendEscapedHtml(allocator, output, value);
+                    try output.appendSlice(allocator, "</textarea>");
+                    continue;
+                }
+
+                var id_buf: [160]u8 = undefined;
+                try output.appendSlice(allocator, try std.fmt.bufPrint(&id_buf, "<input type=\"{s}\" data-key=\"control:{d}\" data-focus-id=\"{d}\"", .{ if (child.focus.kind == .text_input_password) "password" else "text", id, id }));
+                if (preserve) try output.appendSlice(allocator, " data-preserve-value") else try output.appendSlice(allocator, " readonly");
+                try appendFormAttribute(allocator, output, root_focus, id);
+                if (ti.options.name.len > 0) {
+                    try output.appendSlice(allocator, " name=\"");
+                    try appendEscapedHtml(allocator, output, ti.options.name);
+                    try output.append(allocator, '"');
+                }
+                if (child.focus.kind != .text_input_password) {
+                    const value = try ti.text(allocator);
+                    defer allocator.free(value);
+                    try output.appendSlice(allocator, " value=\"");
+                    try appendEscapedHtml(allocator, output, value);
+                    try output.append(allocator, '"');
+                }
+                var pos_buf: [96]u8 = undefined;
+                try output.appendSlice(allocator, try std.fmt.bufPrint(&pos_buf, " style=\"left:{d}ch;top:{d}em;width:{d}ch;height:1em\">", .{ inner_left, inner_top, inner_width }));
+            },
+            .custom => |custom| {
+                if (std.mem.eql(u8, custom, "submit") or std.mem.startsWith(u8, custom, ui.submit_action_prefix)) {
+                    if (formOwner(root_focus, id) == null) continue;
+                    var id_buf: [128]u8 = undefined;
+                    try output.appendSlice(allocator, try std.fmt.bufPrint(&id_buf, "<button type=\"submit\" data-key=\"control:{d}\" data-focus-id=\"{d}\"", .{ id, id }));
+                    try appendFormAttribute(allocator, output, root_focus, id);
+                    if (std.mem.startsWith(u8, custom, ui.submit_action_prefix)) {
+                        try output.appendSlice(allocator, " formaction=\"");
+                        try appendEscapedHtml(allocator, output, custom[ui.submit_action_prefix.len..]);
+                        try output.append(allocator, '"');
+                    }
+                    var pos_buf: [128]u8 = undefined;
+                    try output.appendSlice(allocator, try std.fmt.bufPrint(&pos_buf, " style=\"left:{d}ch;top:{d}em;width:{d}ch;height:{d}em\"></button>", .{ r.x, r.y, r.size.width, r.size.height }));
+                } else if (std.mem.startsWith(u8, custom, ui.file_input_prefix)) {
+                    try output.appendSlice(allocator, "<input type=\"file\" data-preserve-value data-action=\"");
+                    try appendEscapedHtml(allocator, output, custom[ui.file_input_prefix.len..]);
+                    var id_buf: [128]u8 = undefined;
+                    try output.appendSlice(allocator, try std.fmt.bufPrint(&id_buf, "\" data-key=\"control:{d}\" data-focus-id=\"{d}\" style=\"opacity:0;left:{d}ch;top:{d}em;width:{d}ch;height:{d}em\">", .{ id, id, r.x, r.y, r.size.width, r.size.height }));
+                }
+            },
+            else => {},
+        }
+    }
+}
+
+// emit hidden form owners beside the rendered panels. their controls point
+// back here with the standard HTML `form` attribute.
+fn renderForms(allocator: std.mem.Allocator, output: *std.ArrayList(u8), root_focus: *Focus) !void {
+    // the focus child map preserves insertion order, which matches the order
+    // widgets were added in code
     var iter = root_focus.children.iterator();
     while (iter.next()) |entry| {
         const child = entry.value_ptr.*;
-        const action_url = switch (child.focus.kind) {
-            .custom => |custom| if (std.mem.startsWith(u8, custom, form_prefix))
-                custom[form_prefix.len..]
-            else
-                continue,
-            else => continue,
-        };
+        const action_url = formAction(child.focus) orelse continue;
 
-        try out.appendSlice(allocator, "<form action=\"");
-        try appendEscapedHtml(allocator, &out, action_url);
-        try out.appendSlice(allocator, "\" method=\"post\"");
-        try out.appendSlice(allocator, ">");
-
-        // form.focus.children was populated by addChild, which flattens the
-        // whole subtree into one map — so descendants (inputs + the submit
-        // button) all appear here. positions on form.focus are relative to
-        // the form, so we look up absolute rects via root_focus for layout.
-        var inner_iter = child.focus.children.iterator();
-        while (inner_iter.next()) |inner_entry| {
-            const inner_id = inner_entry.key_ptr.*;
-            const root_child = root_focus.children.get(inner_id) orelse continue;
-            const r = root_child.rect;
-            switch (root_child.focus.kind) {
-                .text_input, .text_input_password => {
-                    const ti = session.text_inputs.get(inner_id) orelse continue;
-                    if (ti.options.read_only) continue; // rendered with the grid
-                    const inner_left = r.x + 1;
-                    const inner_top = r.y + 1;
-                    const inner_width = if (r.size.width > 2) r.size.width - 2 else 0;
-
-                    try out.appendSlice(allocator, "<input type=\"");
-                    try out.appendSlice(allocator, if (root_child.focus.kind == .text_input_password) "password" else "text");
-                    try out.appendSlice(allocator, "\" data-focus-id=\"");
-                    var id_buf: [32]u8 = undefined;
-                    try out.appendSlice(allocator, try std.fmt.bufPrint(&id_buf, "{d}", .{inner_id}));
-                    if (ti.options.name.len > 0) {
-                        try out.appendSlice(allocator, "\" name=\"");
-                        try appendEscapedHtml(allocator, &out, ti.options.name);
-                    }
-                    // never the live content as the `value`: the browser tracks user
-                    // input natively, and including the wasm-side value here would make
-                    // the overlay HTML differ on every keystroke — that would trip the
-                    // diff in _setOverlay and rebuild the <input>, eating the user's
-                    // caret. a page-constant initial value is safe.
-                    if (session.input_values.get(inner_id)) |value| {
-                        try out.appendSlice(allocator, "\" value=\"");
-                        try appendEscapedHtml(allocator, &out, value);
-                    }
-                    try out.appendSlice(allocator, "\" style=\"left:");
-                    var pos_buf: [64]u8 = undefined;
-                    try out.appendSlice(allocator, try std.fmt.bufPrint(&pos_buf, "{d}ch;top:{d}em;width:{d}ch;height:1em", .{ inner_left, inner_top, inner_width }));
-                    try out.appendSlice(allocator, "\">");
-                },
-                .text_area => {
-                    const ti = session.text_inputs.get(inner_id) orelse continue;
-                    if (ti.options.read_only) continue; // rendered with the grid
-                    const inner_left = r.x + 1;
-                    const inner_top = r.y + 1;
-                    const inner_width = if (r.size.width > 2) r.size.width - 2 else 0;
-                    const inner_height = if (r.size.height > 2) r.size.height - 2 else 0;
-
-                    try out.appendSlice(allocator, "<textarea data-focus-id=\"");
-                    var id_buf: [32]u8 = undefined;
-                    try out.appendSlice(allocator, try std.fmt.bufPrint(&id_buf, "{d}", .{inner_id}));
-                    if (ti.options.name.len > 0) {
-                        try out.appendSlice(allocator, "\" name=\"");
-                        try appendEscapedHtml(allocator, &out, ti.options.name);
-                    }
-                    // like the input above, only a page-constant initial value
-                    // inside: the browser tracks the live value and the
-                    // overlay diff must stay stable across keystrokes
-                    try out.appendSlice(allocator, "\" style=\"left:");
-                    var pos_buf: [128]u8 = undefined;
-                    try out.appendSlice(allocator, try std.fmt.bufPrint(&pos_buf, "{d}ch;top:{d}em;width:{d}ch;height:{d}em", .{ inner_left, inner_top, inner_width, inner_height }));
-                    // textarea discards the first newline immediately following
-                    // its start tag, so add one of our own so text that begins
-                    // with a newline doesn't lose it
-                    try out.appendSlice(allocator, "\">\n");
-                    if (session.input_values.get(inner_id)) |value| try appendEscapedHtml(allocator, &out, value);
-                    try out.appendSlice(allocator, "</textarea>");
-                },
-                .custom => |custom| {
-                    if (std.mem.eql(u8, "submit", custom) or std.mem.startsWith(u8, custom, ui.submit_action_prefix)) {
-                        try out.appendSlice(allocator, "<button type=\"submit\" data-focus-id=\"");
-                        var id_buf: [32]u8 = undefined;
-                        try out.appendSlice(allocator, try std.fmt.bufPrint(&id_buf, "{d}", .{inner_id}));
-                        if (std.mem.startsWith(u8, custom, ui.submit_action_prefix)) {
-                            try out.appendSlice(allocator, "\" formaction=\"");
-                            try appendEscapedHtml(allocator, &out, custom[ui.submit_action_prefix.len..]);
-                        }
-                        try out.appendSlice(allocator, "\" style=\"left:");
-                        var pos_buf: [128]u8 = undefined;
-                        try out.appendSlice(allocator, try std.fmt.bufPrint(&pos_buf, "{d}ch;top:{d}em;width:{d}ch;height:{d}em", .{ r.x, r.y, r.size.width, r.size.height }));
-                        try out.appendSlice(allocator, "\"></button>");
-                    }
-                },
-                else => {},
-            }
-        }
-
-        try out.appendSlice(allocator, "</form>");
+        try output.appendSlice(allocator, "<form hidden data-key=\"form:");
+        var id_buf: [96]u8 = undefined;
+        try output.appendSlice(allocator, try std.fmt.bufPrint(&id_buf, "{d}\" id=\"" ++ form_id_prefix ++ "{d}\" action=\"", .{ entry.key_ptr.*, entry.key_ptr.* }));
+        try appendEscapedHtml(allocator, output, action_url);
+        try output.appendSlice(allocator, "\" method=\"post\"></form>");
     }
-
-    // a file picker isn't part of a form: it posts its file straight to the url
-    // in its marker. it sits transparent over the button the tui drew, so
-    // clicking that button opens the browser's own dialog.
-    var file_iter = root_focus.children.iterator();
-    while (file_iter.next()) |entry| {
-        const child = entry.value_ptr.*;
-        const action_url = switch (child.focus.kind) {
-            .custom => |custom| if (std.mem.startsWith(u8, custom, ui.file_input_prefix))
-                custom[ui.file_input_prefix.len..]
-            else
-                continue,
-            else => continue,
-        };
-        const r = child.rect;
-
-        try out.appendSlice(allocator, "<input type=\"file\" data-action=\"");
-        try appendEscapedHtml(allocator, &out, action_url);
-        try out.appendSlice(allocator, "\" data-focus-id=\"");
-        var id_buf: [32]u8 = undefined;
-        try out.appendSlice(allocator, try std.fmt.bufPrint(&id_buf, "{d}", .{entry.key_ptr.*}));
-        try out.appendSlice(allocator, "\" style=\"opacity:0;left:");
-        var pos_buf: [128]u8 = undefined;
-        try out.appendSlice(allocator, try std.fmt.bufPrint(&pos_buf, "{d}ch;top:{d}em;width:{d}ch;height:{d}em", .{ r.x, r.y, r.size.width, r.size.height }));
-        try out.appendSlice(allocator, "\">");
-    }
-
-    return try out.toOwnedSlice(allocator);
 }
 
 fn colorEql(a: ?Grid.Color, b: ?Grid.Color) bool {
