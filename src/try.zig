@@ -983,22 +983,6 @@ fn addNextTag(repo: *rp.Repo(.xit, .{}), io: std.Io, allocator: std.mem.Allocato
     n.* += 1;
 }
 
-const PatchRevisionFixture = struct {
-    id: [evt.event_id_size]u8,
-    oid: [hash.hexLen(.sha1)]u8,
-    tree_oid: [hash.hexLen(.sha1)]u8,
-    timestamp: u64,
-
-    fn event(self: *const PatchRevisionFixture, title: []const u8) evt.PatchRev {
-        return .{
-            .base_oid = &self.oid,
-            .source_oid = &self.oid,
-            .target_ref = "refs/heads/master",
-            .message = title,
-        };
-    }
-};
-
 fn commitTree(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -1021,31 +1005,53 @@ fn seedPatchRevision(
     repos_path: []const u8,
     patch_id: *const [evt.event_id_size]u8,
     title: []const u8,
+    author: evt.CommitAuthor,
     timestamp: u64,
     random: std.Random,
-) !PatchRevisionFixture {
+) !void {
     const patch_hex = std.fmt.bytesToHex(patch_id.*, .lower);
     const fork_path = try fork.forkPath(allocator, repos_path, &patch_hex);
     defer allocator.free(fork_path);
     var fork_repo = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = fork_path, .require_repo_root = true });
     defer fork_repo.deinit(io, allocator);
 
-    const source_oid = (try fork_repo.readRef(io, fork.ref)) orelse return error.NotFound;
-    var fixture = PatchRevisionFixture{
-        .id = evt.EventWithId.randomId(random),
-        .oid = source_oid,
-        .tree_oid = try commitTree(io, allocator, &fork_repo, &source_oid),
-        .timestamp = timestamp,
+    const base_oid = (try fork_repo.readRef(io, fork.ref)) orelse return error.NotFound;
+    const base_tree_oid = try commitTree(io, allocator, &fork_repo, &base_oid);
+    var source_oid = base_oid;
+    var fork_dir = try std.Io.Dir.cwd().openDir(io, fork_path, .{});
+    defer fork_dir.close(io);
+    var writer = std.Io.Writer.Allocating.init(allocator);
+    defer writer.deinit();
+    for (0..3) |i| {
+        writer.clearRetainingCapacity();
+        for (0..i + 1) |line| try writer.writer.print("{s}: part {d}\n", .{ title, line + 1 });
+        {
+            const file = try fork_dir.createFile(io, "patch.txt", .{});
+            defer file.close(io);
+            try file.writeStreamingAll(io, writer.written());
+        }
+        try fork_repo.add(io, allocator, &.{"patch.txt"});
+        writer.clearRetainingCapacity();
+        try writer.writer.print("{s} ({d}/3)", .{ title, i + 1 });
+        source_oid = try fork_repo.commit(io, allocator, .{ .message = writer.written(), .timestamp = timestamp + i });
+    }
+    const revision_id = evt.EventWithId.randomId(random);
+    const head_tree_oid = try commitTree(io, allocator, &fork_repo, &source_oid);
+    const revision: evt.PatchRev = .{
+        .base_oid = &base_oid,
+        .source_oid = &source_oid,
+        .target_ref = "refs/heads/master",
+        .message = title,
     };
-    const revision = fixture.event(title);
+    const revision_timestamp = timestamp + 3;
     const tree_entries = [_]evt.EventTreeEntry{
-        .{ .tree = .{ .name = "base", .oid = &fixture.tree_oid } },
-        .{ .tree = .{ .name = "head", .oid = &fixture.tree_oid } },
+        .{ .tree = .{ .name = "base", .oid = &base_tree_oid } },
+        .{ .tree = .{ .name = "head", .oid = &head_tree_oid } },
     };
     try evt.consume(.fork, .xit, .{}, io, allocator, &fork_repo, evt.events_ref, &.{.{
-        .id = std.fmt.bytesToHex(fixture.id, .lower),
-        .timestamp = timestamp,
-        .author = .{ .name = "admin", .email = "admin@example.test" },
+        .id = std.fmt.bytesToHex(revision_id, .lower),
+        .timestamp = revision_timestamp,
+        .author = author,
         .tree_entries = &tree_entries,
         .event = .{ .patchrev = revision },
     }});
@@ -1053,17 +1059,16 @@ fn seedPatchRevision(
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const moment = try evt.currentMoment(.{}, &fork_repo);
-    const revision_record = (try evt.PatchRev.readById(evt.EventDB(.sha1), .sha1, moment, &arena, &fixture.id)) orelse return error.NotFound;
+    const revision_record = (try evt.PatchRev.readById(evt.EventDB(.sha1), .sha1, moment, &arena, &revision_id)) orelse return error.NotFound;
     const patch_record = (try evt.Patch.readById(evt.EventDB(.sha1), .sha1, moment, &arena, patch_id)) orelse return error.NotFound;
     var patch = patch_record.event;
-    patch.revision = evt.Patch.Revision.fromRecord(fixture.id, revision_record);
+    patch.revision = evt.Patch.Revision.fromRecord(revision_id, revision_record);
     try evt.consume(.fork, .xit, .{}, io, allocator, &fork_repo, evt.events_ref, &.{.{
         .id = patch_hex,
-        .timestamp = timestamp + 1,
-        .author = .{ .name = "admin", .email = "admin@example.test" },
+        .timestamp = revision_timestamp + 1,
+        .author = author,
         .event = .{ .patch = patch },
     }});
-    return fixture;
 }
 
 fn seedPatches(
@@ -1116,8 +1121,10 @@ fn seedPatches(
 
     const repos_path = try std.fs.path.join(allocator, &.{ server_path, "repos" });
     defer allocator.free(repos_path);
+    const patch_author = evt.CommitAuthor{ .name = "admin", .email = "admin@example.test" };
     var patch_ids: [patch_data.len][evt.event_id_size]u8 = undefined;
     for (patch_data, 0..) |patch, i| {
+        const timestamp: u64 = @intCast(500 + i * 10);
         patch_ids[i] = evt.EventWithId.randomId(random);
         const patch_hex = std.fmt.bytesToHex(patch_ids[i], .lower);
         const path = try fork.create(.{}, io, allocator, repos_path, admin_repo, .{
@@ -1127,48 +1134,33 @@ fn seedPatches(
             .title = patch.title,
             .description = patch.description,
             .tags = patch.tags,
-            .author = .{ .name = "admin", .email = "admin@example.test" },
-            .timestamp = @intCast(500 + i * 10),
+            .author = patch_author,
+            .timestamp = timestamp,
         });
         allocator.free(path);
-        const status = patch.status orelse continue;
 
-        const revision = try seedPatchRevision(io, allocator, repos_path, &patch_ids[i], patch.title, @intCast(502 + i * 10), random);
+        try seedPatchRevision(io, allocator, repos_path, &patch_ids[i], patch.title, patch_author, timestamp + 1, random);
+        const status = patch.status orelse continue;
         const fork_path = try fork.forkPath(allocator, repos_path, &patch_hex);
         defer allocator.free(fork_path);
         try pch.publish(.{}, io, allocator, admin_repo, target_repo, fork_path, .{
             .id = patch_hex,
             .user_id = user_id.*,
             .repo_id = repo_id.*,
-            .author = .{ .name = "admin", .email = "admin@example.test" },
-            .timestamp = @intCast(505 + i * 10),
+            .author = patch_author,
+            .timestamp = timestamp + 6,
         });
 
         if (status == .merged) {
-            const event = revision.event(patch.title);
-            const tree_entries = [_]evt.EventTreeEntry{
-                .{ .tree = .{ .name = "base", .oid = &revision.tree_oid } },
-                .{ .tree = .{ .name = "head", .oid = &revision.tree_oid } },
-            };
-            try evt.consume(.repo, .xit, .{}, io, allocator, target_repo, evt.events_ref, &.{.{
-                .id = std.fmt.bytesToHex(revision.id, .lower),
-                .timestamp = revision.timestamp,
-                .author = .{ .name = "admin", .email = "admin@example.test" },
-                .tree_entries = &tree_entries,
-                .event = .{ .patchrev = event },
-            }});
-        }
-        if (status != .open) {
-            try evt.Patch.update(.xit, .{}, io, allocator, target_repo, &patch_ids[i], .{ .status = status }, .{
-                .name = "admin",
-                .email = "admin@example.test",
+            try pch.merge(.{}, io, allocator, repos_path, target_repo, .{
+                .id = patch_hex,
+                .revision = .source,
+                .author = patch_author,
+                .timestamp = timestamp + 7,
             });
-        }
-        if (status == .merged) {
-            try fork.remove(io, allocator, repos_path, admin_repo, &patch_hex, user_id, .{
-                .name = "admin",
-                .email = "admin@example.test",
-            });
+            try fork.remove(io, allocator, repos_path, admin_repo, &patch_hex, user_id, patch_author);
+        } else if (status != .open) {
+            try evt.Patch.update(.xit, .{}, io, allocator, target_repo, &patch_ids[i], .{ .status = status }, patch_author);
         }
     }
 

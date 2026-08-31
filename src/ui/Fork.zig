@@ -55,6 +55,11 @@ pub fn init(arena: *std.heap.ArenaAllocator, session: *ui.Session, route: ui.Rou
     const fork_moment = try evt.currentMoment(.{}, &fork_repo);
     const retained_patch = (try evt.Patch.readById(evt.EventDB(.sha1), .sha1, fork_moment, arena, &id)) orelse return error.NotFound;
     const fork_oid = (try fork_repo.readRef(io, fork.ref)) orelse return error.NotFound;
+    var commits_base_oid = fork_oid;
+    if (try evt.PatchRev.readNewest(evt.EventDB(.sha1), .sha1, fork_moment, arena)) |revision| {
+        if (revision.record.event.base_oid.len != commits_base_oid.len) return error.NotFound;
+        @memcpy(&commits_base_oid, revision.record.event.base_oid);
+    }
 
     const target_id_hex = std.fmt.bytesToHex(target_id, .lower);
     const target_path = try std.fs.path.join(aa, &.{ repos_dir, &target_id_hex });
@@ -132,7 +137,7 @@ pub fn init(arena: *std.heap.ArenaAllocator, session: *ui.Session, route: ui.Rou
         .target_branch = target_branch,
     } };
     const files = try Files.init(.xit, .{}, arena, &fork_repo, io, arena.child_allocator, location, requested_ref, requested_value, files_path, files_line);
-    const commits = try Commits.init(.xit, .{}, arena, &fork_repo, io, arena.child_allocator, haxy_moment, location, requested_ref, requested_value, commits_content);
+    const commits = try Commits.init(.xit, .{}, arena, &fork_repo, io, arena.child_allocator, haxy_moment, location, requested_ref, requested_value, commits_content, commits_base_oid);
 
     return .{
         .header = try Header.init(arena, target_record.event.name, owner.event.name, &id_hex, requested_value),

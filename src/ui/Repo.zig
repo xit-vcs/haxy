@@ -234,7 +234,7 @@ pub fn init(
                             const target_branch = if (files_data.ref_or_oid == .branch) files_data.ref_or_oid_value else "";
                             break :blk .{
                                 files_data,
-                                try Commits.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, session.haxy_moment, location, requested_ref_or_oid, requested_ref_value, commits_content),
+                                try Commits.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, session.haxy_moment, location, requested_ref_or_oid, requested_ref_value, commits_content, null),
                                 try Refs.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, repo_identity.identity, refs_kind, refs_from),
                                 try Issues.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, issues_tag, issues_selected, issues_comment, issues_comments_start, issues_theirs, issues_view),
                                 try Patches.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, session, repo_id_maybe, repo_identity.identity, target_branch, patches_tag, patches_selected, patches_comment, patches_comments_start, patches_theirs, patches_view),

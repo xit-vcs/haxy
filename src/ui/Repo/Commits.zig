@@ -89,6 +89,7 @@ pub fn init(
     requested_ref_or_oid: ?ui.RoutablePage.RefOrOid,
     requested_value: []const u8,
     content: ui.RoutablePage.RepoCommitsRoute.Content,
+    base_oid_maybe: ?[xit.hash.hexLen(repo_opts.hash)]u8,
 ) !Self {
     const aa = arena.allocator();
     const hex_len = ui.ResolvedRefOrOid(repo_kind, repo_opts).hex_len;
@@ -125,6 +126,8 @@ pub fn init(
     {
         var iter = repo.log(io, gpa, start_oids) catch return emptyResult(aa, location, resolved.ref_or_oid, resolved.value, content);
         defer iter.deinit();
+        // omit the base and its ancestors
+        if (base_oid_maybe) |base_oid| try iter.exclude(&base_oid);
         while (try iter.next(gpa)) |commit_object| {
             defer commit_object.deinit();
             if (count == page_size) {
