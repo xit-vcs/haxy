@@ -210,6 +210,20 @@ pub fn postDraft(data: *const Self, session: *ui.Session, allocator: std.mem.All
     });
 }
 
+pub fn removeDraft(session: *ui.Session, allocator: std.mem.Allocator, id: *const [evt.event_id_size]u8) !void {
+    const io = session.io orelse return error.NotFound;
+    const repos_dir = session.repos_dir orelse return error.NotFound;
+    const admin_repo = session.admin_repo orelse return error.NotFound;
+    const user_id_slice = session.data.user_id orelse return error.NotFound;
+    if (user_id_slice.len != evt.event_id_size) return error.NotFound;
+    const author = (try session.eventAuthor()) orelse return error.NotFound;
+
+    var user_id: [evt.event_id_size]u8 = undefined;
+    @memcpy(&user_id, user_id_slice);
+    const id_hex = std.fmt.bytesToHex(id.*, .lower);
+    try fork.remove(io, allocator, repos_dir, admin_repo, &id_hex, &user_id, author);
+}
+
 // `status`'s windowed listing.
 pub fn window(self: *const Self, status: evt.Patch.Status) *const Window {
     return switch (status) {
@@ -316,7 +330,7 @@ pub fn init(
         }
     };
     empty.drafts = drafts_window;
-    if (draft_selected) empty.view = .drafts;
+    if (draft_selected and view != .remove) empty.view = .drafts;
 
     // an explicitly named posted patch that doesn't exist is a bad url
     // (NotFound -> 404); drafts, tags, and bare routes can use the empty fallback.

@@ -1117,6 +1117,39 @@ fn handleRemove(
     const request_repo = (try requestRepoSource(io, allocator, host, parts.repo_base)) orelse return respondRemoveNotFound(request);
     defer request_repo.deinit(allocator);
     const source = request_repo.source;
+
+    if (parts.kind == .patch) switch (host) {
+        .remote => |remote| {
+            const token = getCookieValue(request, cookie_name) orelse return respondLoginRequired(request);
+            var user_id: [evt.event_id_size]u8 = undefined;
+            if (!remote.session_store.lookup(token, &user_id)) return respondLoginRequired(request);
+
+            var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = remote.admin_repo_path });
+            defer admin_repo.deinit(io, allocator);
+            const moment = try evt.currentMoment(evt.admin_repo_opts, &admin_repo);
+            const record = try evt.Fork.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, &author_arena, &parts.id);
+            if (record) |fork_record| {
+                const repo_id = evt.parseEventId(std.fs.path.basename(source.path)) catch return respondRemoveNotFound(request);
+                if (!fork_record.removed and fork_record.event.stage == .draft and std.mem.eql(u8, fork_record.event.repo_id, &repo_id)) {
+                    const id = std.fmt.bytesToHex(parts.id, .lower);
+                    const repos_dir = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(remote.admin_repo_path) orelse ".", "repos" });
+                    defer allocator.free(repos_dir);
+                    try fork.remove(io, allocator, repos_dir, &admin_repo, &id, &user_id, author);
+
+                    const location = try std.fmt.allocPrint(allocator, "{s}/patches/drafts", .{parts.repo_base});
+                    defer allocator.free(location);
+                    try request.respond("", .{
+                        .status = .see_other,
+                        .keep_alive = false,
+                        .extra_headers = &.{.{ .name = "location", .value = location }},
+                    });
+                    return;
+                }
+            }
+        },
+        .local => {},
+    };
+
     switch (source.repo_kind) {
         inline else => |repo_kind| {
             var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, source.localInitOpts());

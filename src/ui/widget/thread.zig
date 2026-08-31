@@ -1279,6 +1279,10 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                         row.getFocus().kind = .{ .custom = try std.fmt.allocPrint(pa, "form:{s}/post", .{try route.toUrl(self.session.page_arena)}) };
                         try addToolButton(allocator, row, "post", "submit");
                     }
+                    if (self.session.data.user_id != null) {
+                        const route = ui.RoutablePage.repoThreadRemoveRoute(kind, self.data.identity, entry.id, "") orelse return error.RouteTooLong;
+                        try addToolButton(allocator, row, "✕", try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}));
+                    }
                     if (row.children.count() > first_in_row_index)
                         row.getFocus().child_id = row.children.keys()[first_in_row_index];
                 } else {
@@ -2333,6 +2337,17 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
 
         fn removeEvent(self: *This, allocator: std.mem.Allocator, event_kind: evt.EventKind, id: [evt.event_id_size]u8) !void {
             if (comptime wasm) return;
+
+            if (comptime supports_drafts) {
+                const selected = self.data.selectedThread() orelse return;
+                if (event_kind == kind and entryDraft(selected.*)) {
+                    try Data.removeDraft(self.session, allocator, &id);
+                    const route = draftsRoute(self.data.identity) orelse return;
+                    try self.session.navigate(route);
+                    return;
+                }
+            }
+
             const io = self.session.io orelse return;
             const src = self.data.repo_source orelse return;
             const author = (try self.session.eventAuthor()) orelse return;

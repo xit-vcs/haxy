@@ -429,7 +429,7 @@ pub fn receivePack(
     }
 }
 
-// delete first so a failed tombstone can be retried safely
+// tombstone first so a missing fork never remains visible
 pub fn remove(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -445,9 +445,9 @@ pub fn remove(
     const moment = try evt.currentMoment(evt.admin_repo_opts, admin_repo);
     const record = (try evt.Fork.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, &arena, &fork_id)) orelse return error.InvalidPatchDraft;
     if (!std.mem.eql(u8, record.event.user_id, user_id)) return error.InvalidPatchDraft;
+    if (!record.removed) try evt.remove(.admin, .xit, evt.admin_repo_opts, io, allocator, admin_repo, &fork_id, .fork, author);
 
     const path = try forkPath(allocator, repo_root_path, id);
     defer allocator.free(path);
     try std.Io.Dir.cwd().deleteTree(io, path);
-    if (!record.removed) try evt.remove(.admin, .xit, evt.admin_repo_opts, io, allocator, admin_repo, &fork_id, .fork, author);
 }
