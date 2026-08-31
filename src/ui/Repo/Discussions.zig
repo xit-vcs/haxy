@@ -263,6 +263,8 @@ fn loadWindow(
     };
 }
 pub const View = thread.View(.discuss, Self);
+pub const Detail = thread.Detail(.discuss, Self);
+pub const detail_widget_name = "repo_discussion_detail";
 
 pub const Header = thread.Header;
 

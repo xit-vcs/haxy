@@ -348,6 +348,8 @@ pub fn init(
 }
 
 pub const View = thread.View(.issue, Self);
+pub const Detail = thread.Detail(.issue, Self);
+pub const detail_widget_name = "repo_issue_detail";
 
 pub const Header = thread.Header;
 

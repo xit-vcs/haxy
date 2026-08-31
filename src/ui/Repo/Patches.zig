@@ -672,6 +672,8 @@ pub fn loadDraftEntry(
 }
 
 pub const View = thread.View(.patch, Self);
+pub const Detail = thread.Detail(.patch, Self);
+pub const detail_widget_name = "repo_patch_detail";
 
 pub const Header = thread.Header;
 

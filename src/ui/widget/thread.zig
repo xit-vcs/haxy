@@ -345,6 +345,859 @@ pub const Header = struct {
     }
 };
 
+// the selected thread's scrollable contents, shared by repo and fork views
+pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
+    const Entry = Data.Entry;
+    const Event = Data.Event;
+    const Status = Data.Status;
+    const has_status = @hasField(Event, "status");
+    const supports_conflicts = Event.merge_policy == .field_conflicts;
+    const supports_drafts = @hasField(Data, "drafts");
+    const supports_forks = @hasField(Entry, "fork_exists");
+    return struct {
+        const This = @This();
+        const thread_name = Data.thread_name;
+
+        pub const Exit = enum { none, list, header };
+        pub const Options = struct { actions: bool = true };
+
+        scroll: wgt.Scroll(Widget),
+        data: *const Data,
+        session: *ui.Session,
+        entry: ?Entry,
+        title_id: ?usize,
+        description_id: ?usize,
+        author_id: ?usize,
+        actions: bool,
+        exit: Exit,
+
+        const tool_row_index: usize = 0;
+
+        pub fn init(allocator: std.mem.Allocator, data: *const Data, session: *ui.Session, entry: ?Entry, options: Options) !This {
+            var content = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });
+            errdefer content.deinit(allocator);
+            var detail_scroll = try wgt.Scroll(Widget).init(allocator, .{ .box = content }, .{ .direction = .vert, .web_native = !session.is_terminal, .fill = true });
+            errdefer detail_scroll.deinit(allocator);
+
+            var self: This = .{
+                .scroll = detail_scroll,
+                .data = data,
+                .session = session,
+                .entry = null,
+                .title_id = null,
+                .description_id = null,
+                .author_id = null,
+                .actions = options.actions,
+                .exit = .none,
+            };
+            if (entry) |value| try self.setEntry(allocator, value);
+            return self;
+        }
+
+        pub fn deinit(self: *This, allocator: std.mem.Allocator) void {
+            self.scroll.deinit(allocator);
+        }
+
+        pub fn build(self: *This, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
+            self.clearGrid();
+            try self.scroll.build(allocator, constraint, root_focus);
+        }
+
+        pub fn input(self: *This, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
+            _ = try self.inputWithExit(allocator, key, root_focus);
+        }
+
+        pub fn clearGrid(self: *This) void {
+            self.scroll.clearGrid();
+        }
+
+        pub fn getGrid(self: This) ?Grid {
+            return self.scroll.getGrid();
+        }
+
+        pub fn getFocus(self: *This) *Focus {
+            return self.scroll.getFocus();
+        }
+
+        fn inner(self: *This) *wgt.Box(Widget) {
+            return &self.scroll.child.box;
+        }
+
+        fn toolRow(self: *This) *wgt.Box(Widget) {
+            return &self.inner().children.values()[tool_row_index].widget.box;
+        }
+
+        fn entryConflicted(entry: Entry) bool {
+            return if (supports_conflicts) entry.conflicted else false;
+        }
+
+        fn entryStatus(entry: Entry) Status {
+            return if (has_status) entry.record.event.status else @enumFromInt(0);
+        }
+
+        fn entryDraft(entry: Entry) bool {
+            return if (supports_drafts) entry.draft else false;
+        }
+
+        fn entryHasFork(entry: Entry) bool {
+            return if (supports_forks) entry.fork_exists else false;
+        }
+
+        const StatusChange = struct {
+            action: []const u8,
+            status: Status,
+        };
+
+        fn statusChange(status: Status) ?StatusChange {
+            const name = @tagName(status);
+            if (std.mem.eql(u8, name, "open")) return .{
+                .action = "close",
+                .status = std.meta.stringToEnum(Status, "closed") orelse return null,
+            };
+            if (std.mem.eql(u8, name, "closed")) return .{
+                .action = "open",
+                .status = std.meta.stringToEnum(Status, "open") orelse return null,
+            };
+            return null;
+        }
+
+        fn listRoute(identity: []const u8, status: Status, tag: []const u8, selected: []const u8) ?ui.RoutablePage {
+            return Data.listRoute(identity, status, tag, selected);
+        }
+
+        fn draftsRoute(identity: []const u8) ?ui.RoutablePage {
+            return if (supports_drafts) Data.draftsRoute(identity) else null;
+        }
+
+        fn forkRoute(identity: []const u8, id: []const u8) ?ui.RoutablePage {
+            return if (supports_forks) Data.forkRoute(identity, id) else null;
+        }
+
+        fn resolveRoute(identity: []const u8, selected: []const u8, picks: []const u8) ?ui.RoutablePage {
+            return if (supports_conflicts) Data.resolveRoute(identity, selected, picks) else null;
+        }
+
+        fn listLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, status: Status, tag: []const u8, id: []const u8) ![]const u8 {
+            const route = listRoute(identity, status, tag, id) orelse return error.RouteTooLong;
+            return std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{try route.toUrl(page_arena)});
+        }
+
+        fn tagLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, status: Status, tag: []const u8) ![]const u8 {
+            const encoded = try ui.urlEncodeRef(page_arena.allocator(), tag);
+            return listLink(page_arena, identity, status, encoded, "");
+        }
+
+        fn addToolButton(allocator: std.mem.Allocator, row: *wgt.Box(Widget), label: []const u8, action: []const u8) !void {
+            var button = try wgt.TextBox.init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            errdefer button.deinit(allocator);
+            button.getFocus().focusable = true;
+            button.getFocus().kind = .{ .custom = action };
+            try row.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = .{ .width = try xitui.width.displayWidth(label) + 2, .height = null } });
+        }
+
+        pub fn setEntry(self: *This, allocator: std.mem.Allocator, entry: Entry) !void {
+            const inner_box = self.inner();
+            const description_page = self.data.description_page and std.mem.eql(u8, entry.id, self.data.selected_id);
+            const comment_page = if (std.mem.eql(u8, entry.id, self.data.selected_id)) self.data.comment_page else null;
+
+            for (inner_box.children.values()) |*child| child.widget.deinit(allocator);
+            inner_box.children.clearAndFree(allocator);
+            inner_box.getFocus().child_id = null;
+            self.entry = entry;
+            self.title_id = null;
+            self.author_id = null;
+
+            {
+                var row = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
+                errdefer row.deinit(allocator);
+                try inner_box.children.put(allocator, row.getFocus().id, .{ .widget = .{ .box = row }, .rect = null, .min_size = null });
+            }
+            if (self.actions and !description_page and comment_page == null) {
+                const row = self.toolRow();
+                const pa = self.session.page_arena.allocator();
+
+                if (entryHasFork(entry) and self.session.data.current_page.parent() != .fork) {
+                    const route = forkRoute(self.data.identity, entry.id) orelse return error.RouteTooLong;
+                    try addToolButton(allocator, row, "view fork", try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}));
+                }
+
+                {
+                    var spacer = try Spacer.init(allocator);
+                    errdefer spacer.deinit(allocator);
+                    try row.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null });
+                }
+
+                if (supports_drafts and entryDraft(entry)) {
+                    if (entry.revision_ready) {
+                        const route = listRoute(self.data.identity, @enumFromInt(0), "", entry.id) orelse return error.RouteTooLong;
+                        row.getFocus().kind = .{ .custom = try std.fmt.allocPrint(pa, "form:{s}/publish", .{try route.toUrl(self.session.page_arena)}) };
+                        try addToolButton(allocator, row, "publish", "submit");
+                    }
+                    if (self.session.data.user_id != null) {
+                        const edit_route = ui.RoutablePage.repoThreadEditRoute(kind, self.data.identity, entry.id) orelse return error.RouteTooLong;
+                        try addToolButton(allocator, row, "edit", try std.fmt.allocPrint(pa, "a:{s}", .{try edit_route.toUrl(self.session.page_arena)}));
+                        const remove_route = ui.RoutablePage.repoThreadRemoveRoute(kind, self.data.identity, entry.id, "") orelse return error.RouteTooLong;
+                        try addToolButton(allocator, row, "✕", try std.fmt.allocPrint(pa, "a:{s}", .{try remove_route.toUrl(self.session.page_arena)}));
+                    }
+                } else {
+                    if (!self.session.is_terminal and !entryConflicted(entry) and (self.session.data.is_local or self.session.data.user_id != null)) {
+                        const label = "add attachment";
+                        const action = if (self.data.identity.len == 0)
+                            try std.fmt.allocPrint(pa, "{s}/{s}:{s}/attach", .{ ui.file_input_prefix, @tagName(kind), entry.id })
+                        else
+                            try std.fmt.allocPrint(pa, "{s}/repo/{s}/{s}:{s}/attach", .{ ui.file_input_prefix, self.data.identity, @tagName(kind), entry.id });
+                        try addToolButton(allocator, row, label, action);
+                    }
+
+                    if (supports_conflicts and entryConflicted(entry)) {
+                        const route = resolveRoute(self.data.identity, entry.id, "") orelse return error.RouteTooLong;
+                        try addToolButton(allocator, row, "resolve conflict", try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}));
+                    } else {
+                        if (has_status and (self.session.data.is_local or self.session.data.user_id != null)) {
+                            if (statusChange(entryStatus(entry))) |change| {
+                                const route = ui.RoutablePage.repoThreadCommentsRoute(kind, self.data.identity, entry.id, 0) orelse return error.RouteTooLong;
+                                row.getFocus().kind = .{ .custom = try std.fmt.allocPrint(pa, "form:{s}/{s}", .{ try route.toUrl(self.session.page_arena), change.action }) };
+                                try addToolButton(allocator, row, change.action, "submit");
+                            }
+                        }
+
+                        const route = ui.RoutablePage.repoThreadEditRoute(kind, self.data.identity, entry.id) orelse return error.RouteTooLong;
+                        try addToolButton(allocator, row, "edit", try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}));
+                    }
+
+                    if (self.session.data.is_local or self.session.data.user_id != null) {
+                        const route = ui.RoutablePage.repoThreadRemoveRoute(kind, self.data.identity, entry.id, "") orelse return error.RouteTooLong;
+                        try addToolButton(allocator, row, "✕", try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}));
+                    }
+                }
+
+                for (row.children.keys(), row.children.values()) |id, *child| {
+                    if (!child.widget.getFocus().focusable) continue;
+                    row.getFocus().child_id = id;
+                    break;
+                }
+            }
+
+            if (supports_drafts and !description_page and comment_page == null)
+                try self.data.appendDetails(allocator, inner_box, self.session, entry);
+
+            if (comment_page) |comment_view| {
+                var back_label_buf: ["← back to ".len + thread_name.len]u8 = undefined;
+                const back_label = try std.fmt.bufPrint(&back_label_buf, "← back to {s}", .{thread_name});
+                var back = try Comment.linkBox(allocator, self.session, back_label, ui.RoutablePage.repoThreadCommentsRoute(kind, self.data.identity, entry.id, 0) orelse return error.RouteTooLong);
+                errdefer back.deinit(allocator);
+                try inner_box.children.put(allocator, back.getFocus().id, .{ .widget = .{ .text_box = back }, .rect = null, .min_size = null });
+
+                try Comment.appendComment(allocator, inner_box, self.session, self.data.identity, kind, comment_view.selected);
+                try Comment.appendCount(allocator, inner_box, comment_view.replies.count, "reply", "replies");
+                for (comment_view.replies.comments) |comment| try Comment.appendComment(allocator, inner_box, self.session, self.data.identity, kind, comment);
+                try Comment.appendWindowNav(allocator, inner_box, self.session, self.data.identity, kind, &comment_view.selected.comment.event.thread_id, &comment_view.selected.id, comment_view.replies);
+
+                var spacer = try Spacer.init(allocator);
+                errdefer spacer.deinit(allocator);
+                try inner_box.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null });
+
+                inner_box.getFocus().child_id = inner_box.children.keys()[tool_row_index + 1];
+                self.resetScroll();
+                return;
+            }
+
+            if (description_page) {
+                var back_label_buf: ["← back to ".len + thread_name.len]u8 = undefined;
+                const back_label = try std.fmt.bufPrint(&back_label_buf, "← back to {s}", .{thread_name});
+                var text_box = try wgt.TextBox.init(allocator, back_label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+                errdefer text_box.deinit(allocator);
+                text_box.getFocus().focusable = true;
+                text_box.getFocus().kind = .{ .custom = try listLink(self.session.page_arena, self.data.identity, entryStatus(entry), "", entry.id) };
+                try inner_box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
+                self.title_id = text_box.getFocus().id;
+            } else {
+                var title = try wgt.TextBox.init(allocator, entry.record.event.title, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .word, .label = " title " });
+                errdefer title.deinit(allocator);
+                title.getFocus().focusable = true;
+                try inner_box.children.put(allocator, title.getFocus().id, .{ .widget = .{ .text_box = title }, .rect = null, .min_size = null });
+                self.title_id = title.getFocus().id;
+
+                var author = try ui.authorBox(allocator, self.session.page_arena, entry.author);
+                errdefer author.deinit(allocator);
+                try inner_box.children.put(allocator, author.getFocus().id, .{ .widget = .{ .text_box = author }, .rect = null, .min_size = null });
+                self.author_id = author.getFocus().id;
+
+                var items: std.ArrayList(TagFlow.Item) = .empty;
+                defer items.deinit(allocator);
+                var tag_iter = Event.tagIterator(entry.record.event.tags);
+                while (tag_iter.next()) |tag| {
+                    if (tag.len == 0) continue;
+                    try items.append(allocator, .{ .text = tag, .link = try tagLink(self.session.page_arena, self.data.identity, entryStatus(entry), tag) });
+                }
+                if (items.items.len > 0) {
+                    var tags = try TagFlow.init(allocator);
+                    errdefer tags.deinit(allocator);
+                    try tags.setItems(allocator, items.items);
+                    try inner_box.children.put(allocator, tags.getFocus().id, .{ .widget = .{ .tag_flow = tags }, .rect = null, .min_size = null });
+                }
+            }
+
+            const whole = entry.record.event.description;
+            const cut_short = !description_page and whole.len > Data.max_description_size;
+            const shown = if (cut_short)
+                std.mem.trimEnd(u8, whole[0 .. std.mem.lastIndexOfScalar(u8, whole[0..Data.max_description_size], '\n') orelse 0], " \t\r\n")
+            else if (whole.len == 0)
+                "(no description)"
+            else
+                whole;
+            var description = try wgt.TextBox.init(allocator, shown, .{
+                .border_style = .single,
+                .rounded_corners = true,
+                .wrap_kind = .word,
+                .label = " description ",
+                .bottom_label = if (cut_short) " click or press enter to see more " else "",
+            });
+            errdefer description.deinit(allocator);
+            description.getFocus().focusable = true;
+            if (cut_short) {
+                const route = ui.RoutablePage.repoThreadDescriptionRoute(kind, self.data.identity, entry.id) orelse return error.RouteTooLong;
+                description.getFocus().kind = .{ .custom = try std.fmt.allocPrint(self.session.page_arena.allocator(), "a:{s}", .{try route.toUrl(self.session.page_arena)}) };
+            }
+            try inner_box.children.put(allocator, description.getFocus().id, .{ .widget = .{ .text_box = description }, .rect = null, .min_size = null });
+            self.description_id = description.getFocus().id;
+
+            if (!supports_drafts or !entryDraft(entry)) {
+                const parent_route = ui.RoutablePage.repoThreadCommentsRoute(kind, self.data.identity, entry.id, 0) orelse return error.RouteTooLong;
+                try Attachment.appendRows(allocator, inner_box, self.session, self.data.identity, try parent_route.toUrl(self.session.page_arena), entry.attachments);
+
+                if (!description_page) {
+                    var reply = try Comment.linkBox(allocator, self.session, "new comment", ui.RoutablePage.repoThreadCommentNewRoute(kind, self.data.identity, entry.id, "") orelse return error.RouteTooLong);
+                    errdefer reply.deinit(allocator);
+                    try inner_box.children.put(allocator, reply.getFocus().id, .{ .widget = .{ .text_box = reply }, .rect = null, .min_size = null });
+
+                    try Comment.appendCount(allocator, inner_box, entry.comments.count, "comment", "comments");
+                    for (entry.comments.comments) |comment| try Comment.appendComment(allocator, inner_box, self.session, self.data.identity, kind, comment);
+                    try Comment.appendWindowNav(allocator, inner_box, self.session, self.data.identity, kind, entry.id, null, entry.comments);
+
+                    var spacer = try Spacer.init(allocator);
+                    errdefer spacer.deinit(allocator);
+                    try inner_box.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null });
+                }
+            }
+
+            _ = self.focusFirst(null);
+            self.resetScroll();
+        }
+
+        fn resetScroll(self: *This) void {
+            const detail_scroll = &self.scroll;
+            detail_scroll.x = 0;
+            detail_scroll.y = 0;
+            detail_scroll.getFocus().version +%= 1;
+        }
+
+        pub fn inputWithExit(self: *This, allocator: std.mem.Allocator, raw_key: Key, root_focus: *Focus) !Exit {
+            self.exit = .none;
+            const key: Key = if (raw_key == .mouse and raw_key.mouse.action == .scroll)
+                (if (raw_key.mouse.action.scroll == .up) .arrow_up else .arrow_down)
+            else
+                raw_key;
+
+            switch (key) {
+                .page_up => self.pageDetail(root_focus, -10),
+                .page_down => self.pageDetail(root_focus, 10),
+                .home => self.jump(root_focus, false),
+                .end => self.jump(root_focus, true),
+                else => {
+                    const entry = self.entry orelse return self.exit;
+                    if (self.data.comment_page != null and std.mem.eql(u8, entry.id, self.data.selected_id)) {
+                        self.commentInput(key, root_focus);
+                    } else if (self.toolRowFocused(root_focus)) {
+                        try self.toolRowInput(allocator, key, root_focus);
+                    } else {
+                        try self.childInput(allocator, key, root_focus);
+                    }
+                },
+            }
+            return self.exit;
+        }
+
+        fn childInput(self: *This, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
+            const child_index = self.focusedChild(root_focus) orelse return;
+            const inner_box = self.inner();
+            const child_id = inner_box.children.keys()[child_index];
+            const child = &inner_box.children.values()[child_index].widget;
+
+            if (child_id == self.title_id) {
+                switch (key) {
+                    .arrow_left => self.exit = .list,
+                    .arrow_up => if (!self.moveVertical(root_focus, false)) self.focusToolRow(root_focus),
+                    .arrow_down => _ = self.moveVertical(root_focus, true),
+                    else => {},
+                }
+                return;
+            }
+            if (child_id == self.author_id) {
+                switch (key) {
+                    .arrow_left => self.exit = .list,
+                    .arrow_up => _ = self.moveVertical(root_focus, false),
+                    .arrow_down => _ = self.moveVertical(root_focus, true),
+                    else => {},
+                }
+                return;
+            }
+            if (child_id == self.description_id) {
+                self.descriptionInput(key, root_focus);
+                return;
+            }
+
+            switch (child.*) {
+                .tag_flow => |*tags| self.tagsInput(child_index, tags, key, root_focus),
+                .copyable_text => |*copyable| switch (key) {
+                    .arrow_up => if (!self.moveVertical(root_focus, false)) self.focusToolRow(root_focus),
+                    .arrow_down => _ = self.moveVertical(root_focus, true),
+                    .arrow_left => if (copyable.selected == 0) {
+                        self.exit = .list;
+                    } else try copyable.input(allocator, key, root_focus),
+                    else => try copyable.input(allocator, key, root_focus),
+                },
+                .box => |*row| if (Attachment.removeId(row)) |attachment_id| {
+                    const remove_id = row.children.keys()[1];
+                    switch (key) {
+                        .arrow_left => if (!self.moveHorizontal(root_focus, false)) {
+                            self.exit = .list;
+                        },
+                        .arrow_right => _ = self.moveHorizontal(root_focus, true),
+                        .arrow_up => _ = self.moveVertical(root_focus, false),
+                        .arrow_down => _ = self.moveVertical(root_focus, true),
+                        .enter => if (row.getFocus().child_id == remove_id) try self.removeEvent(allocator, .attach, attachment_id),
+                        .mouse => |mouse| if (inp.leftClickOn(root_focus, remove_id, mouse)) try self.removeEvent(allocator, .attach, attachment_id),
+                        else => {},
+                    }
+                } else self.commentInput(key, root_focus),
+                else => self.commentInput(key, root_focus),
+            }
+        }
+
+        fn toolRowInput(self: *This, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
+            const row = self.toolRow();
+            const child_id = row.getFocus().child_id orelse return;
+            const cur = row.children.getIndex(child_id) orelse return;
+            const on_primary = switch (row.children.values()[cur].widget.getFocus().kind) {
+                .custom => |action| std.mem.eql(u8, action, "submit"),
+                else => false,
+            };
+            switch (key) {
+                .arrow_left => {
+                    var previous = cur;
+                    while (previous > 0) {
+                        previous -= 1;
+                        if (!row.children.values()[previous].widget.getFocus().focusable) continue;
+                        root_focus.setFocus(row.children.keys()[previous]);
+                        return;
+                    }
+                    self.exit = .list;
+                },
+                .arrow_right => {
+                    var next = cur + 1;
+                    while (next < row.children.count()) : (next += 1) {
+                        if (!row.children.values()[next].widget.getFocus().focusable) continue;
+                        root_focus.setFocus(row.children.keys()[next]);
+                        return;
+                    }
+                },
+                .arrow_up => self.exit = .header,
+                .arrow_down => _ = self.moveVertical(root_focus, true),
+                .enter => if (on_primary) try self.primaryAction(allocator),
+                .mouse => |mouse| if (on_primary and inp.leftClickOn(root_focus, child_id, mouse)) try self.primaryAction(allocator),
+                else => {},
+            }
+        }
+
+        fn primaryAction(self: *This, allocator: std.mem.Allocator) !void {
+            const entry = self.entry orelse return;
+            if (supports_drafts and entryDraft(entry))
+                try self.publishDraft(allocator)
+            else
+                try self.toggleStatus(allocator);
+        }
+
+        fn publishDraft(self: *This, allocator: std.mem.Allocator) !void {
+            if (!supports_drafts or comptime wasm) return;
+            const entry = self.entry orelse return;
+            if (!entryDraft(entry) or !entry.revision_ready) return;
+            try self.data.publishDraft(self.session, allocator, entry.id);
+            const route = listRoute(self.data.identity, @enumFromInt(0), "", entry.id) orelse return;
+            try self.session.navigate(route);
+        }
+
+        fn descriptionInput(self: *This, key: Key, root_focus: *Focus) void {
+            const detail_scroll = &self.scroll;
+            switch (key) {
+                .arrow_left => self.exit = .list,
+                .arrow_up => {
+                    if (!self.session.is_terminal) {
+                        _ = self.moveVertical(root_focus, false);
+                        return;
+                    }
+                    if (self.focusAdjacentVisible(root_focus, false)) return;
+                    const before = detail_scroll.y;
+                    detail_scroll.y -= 1;
+                    detail_scroll.clampToContent();
+                    if (detail_scroll.y == before) _ = self.moveVertical(root_focus, false);
+                },
+                .arrow_down => {
+                    if (!self.session.is_terminal) {
+                        _ = self.moveVertical(root_focus, true);
+                        return;
+                    }
+                    if (self.focusAdjacentVisible(root_focus, true)) return;
+                    const before = detail_scroll.y;
+                    detail_scroll.y += 1;
+                    detail_scroll.clampToContent();
+                    if (detail_scroll.y == before) _ = self.moveVertical(root_focus, true);
+                },
+                else => {},
+            }
+        }
+
+        fn commentInput(self: *This, key: Key, root_focus: *Focus) void {
+            switch (key) {
+                .arrow_left => if (!self.moveHorizontal(root_focus, false)) {
+                    self.exit = .list;
+                },
+                .arrow_right => _ = self.moveHorizontal(root_focus, true),
+                .arrow_up => _ = self.moveVertical(root_focus, false),
+                .arrow_down => _ = self.moveVertical(root_focus, true),
+                else => {},
+            }
+        }
+
+        fn pageDetail(self: *This, root_focus: *Focus, delta: isize) void {
+            if (!self.session.is_terminal) return;
+            const detail_scroll = &self.scroll;
+            detail_scroll.y += delta;
+            detail_scroll.clampToContent();
+            self.focusVisible(root_focus, delta > 0);
+        }
+
+        fn jump(self: *This, root_focus: *Focus, to_end: bool) void {
+            if (self.session.is_terminal) {
+                const detail_scroll = &self.scroll;
+                detail_scroll.y = if (to_end) std.math.maxInt(isize) else 0;
+                detail_scroll.clampToContent();
+                self.focusVisible(root_focus, to_end);
+            } else {
+                const focus = self.inner().getFocus();
+                var chosen: ?usize = null;
+                for (focus.children.keys(), focus.children.values()) |id, child| {
+                    if (!child.focus.focusable) continue;
+                    chosen = id;
+                    if (!to_end) break;
+                }
+                if (chosen) |id| root_focus.setFocus(id);
+            }
+        }
+
+        fn rectVisible(self: *This, rect: layout.IRect) bool {
+            const detail_scroll = &self.scroll;
+            const viewport = detail_scroll.grid orelse return false;
+            const top = detail_scroll.y;
+            const bottom = top + @as(isize, @intCast(viewport.size.height - detail_scroll.bar_h));
+            return rect.y + @as(isize, @intCast(rect.size.height)) > top and rect.y < bottom;
+        }
+
+        fn focusVisible(self: *This, root_focus: *Focus, last: bool) void {
+            const inner_box = self.inner();
+            var offset: usize = 0;
+            while (offset < inner_box.children.count()) : (offset += 1) {
+                const child_index = if (last) inner_box.children.count() - 1 - offset else offset;
+                if (self.focusVisibleChild(child_index, root_focus, last)) return;
+            }
+        }
+
+        fn focusVisibleChild(self: *This, child_index: usize, root_focus: *Focus, last: bool) bool {
+            const inner_box = self.inner();
+            const child = &inner_box.children.values()[child_index];
+            const child_rect = child.rect orelse return false;
+            var chosen: ?usize = null;
+            if (child.widget.getFocus().focusable and self.rectVisible(child_rect)) {
+                const id = inner_box.children.keys()[child_index];
+                chosen = id;
+                if (!last) {
+                    root_focus.setFocus(id);
+                    return true;
+                }
+            }
+
+            for (child.widget.getFocus().children.keys(), child.widget.getFocus().children.values()) |id, focus_child| {
+                if (!focus_child.focus.focusable) continue;
+                const rect: layout.IRect = .{
+                    .x = child_rect.x + @as(isize, @intCast(focus_child.rect.x)),
+                    .y = child_rect.y + @as(isize, @intCast(focus_child.rect.y)),
+                    .size = focus_child.rect.size,
+                };
+                if (!self.rectVisible(rect)) continue;
+                chosen = id;
+                if (!last) break;
+            }
+            if (chosen) |id| {
+                root_focus.setFocus(id);
+                return true;
+            }
+            return false;
+        }
+
+        fn focusAdjacentVisible(self: *This, root_focus: *Focus, down: bool) bool {
+            const inner_box = self.inner();
+            var next = self.focusedChild(root_focus) orelse return false;
+            while (true) {
+                if (down) {
+                    next += 1;
+                    if (next >= inner_box.children.count()) return false;
+                } else {
+                    if (next == 0) return false;
+                    next -= 1;
+                }
+                if (self.focusVisibleChild(next, root_focus, !down)) {
+                    self.focusChild(next, !down, root_focus);
+                    return true;
+                }
+            }
+        }
+
+        fn focusedChild(self: *This, root_focus: *Focus) ?usize {
+            const inner_box = self.inner();
+            var id = root_focus.grandchild_id orelse return null;
+            while (inner_box.getFocus().children.get(id)) |child| {
+                if (child.parent_id == inner_box.getFocus().id) return inner_box.children.getIndex(id);
+                id = child.parent_id;
+            }
+            return null;
+        }
+
+        fn childFocusable(self: *This, child_index: usize) bool {
+            const focus = self.inner().children.values()[child_index].widget.getFocus();
+            if (focus.focusable) return true;
+            for (focus.children.values()) |item| {
+                if (item.focus.focusable) return true;
+            }
+            return false;
+        }
+
+        fn focusChild(self: *This, child_index: usize, last: bool, root_focus: *Focus) void {
+            const inner_box = self.inner();
+            const child = &inner_box.children.values()[child_index];
+            var target = inner_box.children.keys()[child_index];
+            var rect = child.rect orelse return;
+            switch (child.widget) {
+                .repo_comment => |*comment| {
+                    if (comment.rowRect(last)) |row_rect| {
+                        rect.x += row_rect.x;
+                        rect.y += row_rect.y;
+                        rect.size = row_rect.size;
+                    }
+                    if (last) comment.focusBody(root_focus) else comment.focusMetadata(root_focus);
+                },
+                .box => |*box| if (box.children.count() > 0) {
+                    target = if (child_index == tool_row_index)
+                        box.getFocus().child_id orelse return
+                    else
+                        box.children.keys()[if (last) box.children.count() - 1 else 0];
+                    root_focus.setFocus(target);
+                },
+                else => root_focus.setFocus(target),
+            }
+            const detail_scroll = &self.scroll;
+            if (detail_scroll.grid) |viewport| {
+                const viewport_height = viewport.size.height - detail_scroll.bar_h;
+                if (rect.size.height > viewport_height) {
+                    const bottom_aligned = rect.y + @as(isize, @intCast(rect.size.height - viewport_height));
+                    detail_scroll.y = std.math.clamp(detail_scroll.y, rect.y, bottom_aligned);
+                    detail_scroll.clampToContent();
+                    return;
+                }
+            }
+            detail_scroll.scrollToRect(rect);
+        }
+
+        fn moveVertical(self: *This, root_focus: *Focus, down: bool) bool {
+            const inner_box = self.inner();
+            const current = self.focusedChild(root_focus) orelse return false;
+            if (inner_box.children.values()[current].widget == .repo_comment) {
+                const comment = &inner_box.children.values()[current].widget.repo_comment;
+                if (down and !comment.bodyFocused()) {
+                    self.focusChild(current, true, root_focus);
+                    return true;
+                }
+                if (!down and comment.bodyFocused()) {
+                    self.focusChild(current, false, root_focus);
+                    return true;
+                }
+            }
+
+            var next = current;
+            while (true) {
+                if (down) {
+                    next += 1;
+                    if (next >= inner_box.children.count()) return false;
+                } else {
+                    if (next == 0) return false;
+                    next -= 1;
+                }
+                if (!self.childFocusable(next)) continue;
+                self.focusChild(next, !down, root_focus);
+                return true;
+            }
+        }
+
+        fn moveHorizontal(self: *This, root_focus: *Focus, right: bool) bool {
+            const inner_box = self.inner();
+            const current = self.focusedChild(root_focus) orelse return false;
+            const child = &inner_box.children.values()[current];
+            if (child.widget == .repo_comment) {
+                const moved = child.widget.repo_comment.moveHorizontal(root_focus, right);
+                if (moved) if (child.rect) |rect| self.scroll.scrollToRect(rect);
+                return moved;
+            }
+            const row = switch (child.widget) {
+                .box => |*box| box,
+                else => return false,
+            };
+            const selected = row.getFocus().child_id orelse return false;
+            const selected_index = row.children.getIndex(selected) orelse return false;
+            const target = if (right) selected_index + 1 else selected_index -| 1;
+            if (target == selected_index or target >= row.children.count()) return false;
+            root_focus.setFocus(row.children.keys()[target]);
+            if (child.rect) |rect| self.scroll.scrollToRect(rect);
+            return true;
+        }
+
+        fn tagsInput(self: *This, child_index: usize, tags: *TagFlow, key: Key, root_focus: *Focus) void {
+            const child_id = tags.focus.child_id orelse return;
+            const cur = tags.indexOfFocusId(child_id) orelse return;
+            const count = tags.text_boxes.items.len;
+            switch (key) {
+                .arrow_left => if (cur > 0) self.focusTag(child_index, tags, root_focus, cur - 1) else {
+                    self.exit = .list;
+                },
+                .arrow_right => if (cur + 1 < count) self.focusTag(child_index, tags, root_focus, cur + 1),
+                .arrow_up => if (tags.rowStep(cur, false)) |index| {
+                    self.focusTag(child_index, tags, root_focus, index);
+                } else {
+                    _ = self.moveVertical(root_focus, false);
+                },
+                .arrow_down => if (tags.rowStep(cur, true)) |index| {
+                    self.focusTag(child_index, tags, root_focus, index);
+                } else {
+                    _ = self.moveVertical(root_focus, true);
+                },
+                .home => self.focusTag(child_index, tags, root_focus, 0),
+                .end => self.focusTag(child_index, tags, root_focus, count - 1),
+                else => {},
+            }
+        }
+
+        fn focusTag(self: *This, child_index: usize, tags: *TagFlow, root_focus: *Focus, item: usize) void {
+            root_focus.setFocus(tags.text_boxes.items[item].getFocus().id);
+            if (self.session.is_terminal and item < tags.rects.items.len) {
+                if (self.inner().children.values()[child_index].rect) |flow_rect| {
+                    var rect = tags.rects.items[item];
+                    rect.x += flow_rect.x;
+                    rect.y += flow_rect.y;
+                    self.scroll.scrollToRect(rect);
+                }
+            }
+        }
+
+        fn toolRowFocused(self: *This, root_focus: *Focus) bool {
+            return self.focusedChild(root_focus) == tool_row_index;
+        }
+
+        fn focusToolRow(self: *This, root_focus: *Focus) void {
+            const child_id = self.toolRow().getFocus().child_id orelse {
+                self.exit = .header;
+                return;
+            };
+            root_focus.setFocus(child_id);
+            if (self.inner().children.values()[tool_row_index].rect) |rect| self.scroll.scrollToRect(rect);
+        }
+
+        pub fn focusFirst(self: *This, root_focus: ?*Focus) bool {
+            const inner_box = self.inner();
+            for (tool_row_index + 1..inner_box.children.count()) |child_index| {
+                if (!self.childFocusable(child_index)) continue;
+                if (root_focus) |focus|
+                    self.focusChild(child_index, false, focus)
+                else
+                    inner_box.getFocus().child_id = inner_box.children.keys()[child_index];
+                return true;
+            }
+            return false;
+        }
+
+        pub fn atTop(self: *This, root_focus: *Focus) bool {
+            const focused = self.focusedChild(root_focus) orelse return false;
+            for (0..self.inner().children.count()) |child_index| {
+                if (!self.childFocusable(child_index)) continue;
+                return focused == child_index;
+            }
+            return false;
+        }
+
+        fn removeEvent(self: *This, allocator: std.mem.Allocator, event_kind: evt.EventKind, id: [evt.event_id_size]u8) !void {
+            if (comptime wasm) return;
+
+            if (comptime supports_drafts) {
+                const entry = self.entry orelse return;
+                if (event_kind == kind and entryDraft(entry)) {
+                    try Data.removeDraft(self.session, allocator, &id);
+                    const route = draftsRoute(self.data.identity) orelse return;
+                    try self.session.navigate(route);
+                    return;
+                }
+            }
+
+            const io = self.session.io orelse return;
+            const source = self.data.repo_source orelse return;
+            const author = (try self.session.eventAuthor()) orelse return;
+
+            switch (source.repo_kind) {
+                inline else => |repo_kind| {
+                    var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, source.localInitOpts());
+                    defer any_repo.deinit(io, allocator);
+                    switch (any_repo) {
+                        inline else => |*repo| try evt.remove(.repo, repo_kind, repo.self_repo_opts, io, allocator, repo, &id, event_kind, author),
+                    }
+                },
+            }
+
+            const id_hex = std.fmt.bytesToHex(id, .lower);
+            const route = ui.RoutablePage.repoEventsRoute(self.data.identity, .removed, event_kind, &id_hex) orelse return;
+            try self.session.navigate(route);
+        }
+
+        fn toggleStatus(self: *This, allocator: std.mem.Allocator) !void {
+            if (comptime (!has_status or wasm)) return;
+            const entry = self.entry orelse return;
+            const io = self.session.io orelse return;
+            const source = self.data.repo_source orelse return;
+            const author = (try self.session.eventAuthor()) orelse return;
+            const status = (statusChange(entryStatus(entry)) orelse return).status;
+            const id = try evt.parseEventId(entry.id);
+
+            switch (source.repo_kind) {
+                inline else => |repo_kind| {
+                    var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, source.localInitOpts());
+                    defer any_repo.deinit(io, allocator);
+                    switch (any_repo) {
+                        inline else => |*repo| try Event.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &id, .{ .status = status }, author),
+                    }
+                },
+            }
+
+            const route = listRoute(self.data.identity, status, "", entry.id) orelse return;
+            try self.session.navigate(route);
+        }
+    };
+}
+
 pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
     const Self = Data;
     const HeaderType = Data.Header;
@@ -355,10 +1208,10 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
     const has_status = @hasField(Event, "status");
     const supports_conflicts = Event.merge_policy == .field_conflicts;
     const supports_drafts = @hasField(Self, "drafts");
-    const supports_forks = @hasField(Entry, "fork_exists");
     const FieldConflict = if (supports_conflicts) Data.FieldConflict else void;
     const ViewKind = Data.ViewKind;
     const thread_name = Data.thread_name;
+    const DetailType = Data.Detail;
 
     return struct {
         const This = @This();
@@ -368,13 +1221,6 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         box: wgt.Box(Widget), // vert: [header_index] = tabs, [stack_index] = stack
         data: *const Self,
         session: *ui.Session,
-        // per-split state, indexed like the stack's split children: the thread the
-        // pane shows and its focus ids.
-        detailed_index: [view_count]?usize,
-        title_id: [view_count]?usize,
-        description_id: [view_count]?usize,
-        author_id: [view_count]?usize,
-        detail_only: bool,
 
         const header_index: usize = 0;
         const stack_index: usize = 1;
@@ -434,38 +1280,12 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             return if (supports_drafts) entry.draft else false;
         }
 
-        fn entryHasFork(entry: Entry) bool {
-            return if (supports_forks) entry.fork_exists else false;
-        }
-
-        const StatusChange = struct {
-            action: []const u8,
-            status: Status,
-        };
-
-        fn statusChange(status: Status) ?StatusChange {
-            const name = @tagName(status);
-            if (std.mem.eql(u8, name, "open")) return .{
-                .action = "close",
-                .status = std.meta.stringToEnum(Status, "closed") orelse return null,
-            };
-            if (std.mem.eql(u8, name, "closed")) return .{
-                .action = "open",
-                .status = std.meta.stringToEnum(Status, "open") orelse return null,
-            };
-            return null;
-        }
-
         fn listRoute(identity: []const u8, status: Status, tag: []const u8, selected: []const u8) ?ui.RoutablePage {
             return Data.listRoute(identity, status, tag, selected);
         }
 
         fn draftsRoute(identity: []const u8) ?ui.RoutablePage {
             return if (supports_drafts) Data.draftsRoute(identity) else null;
-        }
-
-        fn forkRoute(identity: []const u8, id: []const u8) ?ui.RoutablePage {
-            return if (supports_forks) Data.forkRoute(identity, id) else null;
         }
 
         fn conflictsRoute(identity: []const u8, selected: []const u8) ?ui.RoutablePage {
@@ -665,24 +1485,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 .box = outer,
                 .data = data,
                 .session = session,
-                .detailed_index = @splat(null),
-                .title_id = @splat(null),
-                .description_id = @splat(null),
-                .author_id = @splat(null),
-                .detail_only = false,
             };
-        }
-
-        // build the selected thread's existing detail pane without its list or
-        // thread-page header, for pages that provide their own surrounding UI.
-        pub fn initDetail(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !This {
-            var self = try init(allocator, data, session);
-            errdefer self.deinit(allocator);
-            self.detail_only = true;
-            self.box.getFocus().child_id = self.box.children.keys()[stack_index];
-            const index = self.selectedSplitIndex() orelse return error.NotFound;
-            self.resultsBox(index).getFocus().child_id = self.resultsBox(index).children.keys()[detail_index];
-            return self;
         }
 
         // the master-detail split showing `status`'s window, or the conflicts
@@ -725,27 +1528,15 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 try box.children.put(allocator, list_scroll.getFocus().id, .{ .widget = .{ .scroll = list_scroll }, .rect = null, .min_size = .{ .width = list_max_width, .height = null }, .max_size = .{ .width = list_max_width, .height = null } });
             }
 
-            // the detail pane — a frame around its scrollable contents
+            // frame the detail pane inside the master-detail split
             {
-                var detail_outer = blk: {
-                    var detail_scroll = blk2: {
-                        var detail_inner = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });
-                        errdefer detail_inner.deinit(allocator);
-                        // fill the pane (content top-left, scroll bar pinned to the
-                        // edge) rather than shrinking to the description.
-                        break :blk2 try wgt.Scroll(Widget).init(allocator, .{ .box = detail_inner }, .{ .direction = .vert, .web_native = !session.is_terminal, .fill = true });
-                    };
-                    errdefer detail_scroll.deinit(allocator);
-                    var frame = try wgt.Box(Widget).init(allocator, .{ .border_style = .hidden, .direction = .vert });
-                    errdefer frame.deinit(allocator);
-                    // the frame's selected child is its scroll, so the focus chain
-                    // reaches the detail contents.
-                    frame.getFocus().child_id = detail_scroll.getFocus().id;
-                    try frame.children.put(allocator, detail_scroll.getFocus().id, .{ .widget = .{ .scroll = detail_scroll }, .rect = null, .min_size = null });
-                    break :blk frame;
-                };
-                errdefer detail_outer.deinit(allocator);
-                try box.children.put(allocator, detail_outer.getFocus().id, .{ .widget = .{ .box = detail_outer }, .rect = null, .min_size = .{ .width = detail_min_width, .height = null } });
+                var frame = try wgt.Box(Widget).init(allocator, .{ .border_style = .hidden, .direction = .vert });
+                errdefer frame.deinit(allocator);
+                var detail_view = try DetailType.init(allocator, data, session, null, .{});
+                errdefer detail_view.deinit(allocator);
+                frame.getFocus().child_id = detail_view.getFocus().id;
+                try frame.children.put(allocator, detail_view.getFocus().id, .{ .widget = @unionInit(Widget, Data.detail_widget_name, detail_view), .rect = null, .min_size = null });
+                try box.children.put(allocator, frame.getFocus().id, .{ .widget = .{ .box = frame }, .rect = null, .min_size = .{ .width = detail_min_width, .height = null } });
             }
 
             box.getFocus().child_id = box.children.keys()[list_index];
@@ -1055,14 +1846,6 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             try box.children.put(allocator, row.getFocus().id, .{ .widget = .{ .text_box = row }, .rect = null, .min_size = null, .max_size = .{ .width = null, .height = 5 } });
         }
 
-        fn addToolButton(allocator: std.mem.Allocator, row: *wgt.Box(Widget), label: []const u8, action: []const u8) !void {
-            var button = try wgt.TextBox.init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
-            errdefer button.deinit(allocator);
-            button.getFocus().focusable = true;
-            button.getFocus().kind = .{ .custom = action };
-            try row.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = .{ .width = try xitui.width.displayWidth(label) + 2, .height = null } });
-        }
-
         pub fn deinit(self: *This, allocator: std.mem.Allocator) void {
             self.box.deinit(allocator);
         }
@@ -1122,24 +1905,9 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             return &self.listScroll(index).child.box;
         }
 
-        // the tool row is the first child inside the detail scroll.
-        const tool_row_index: usize = 0;
-        const detail_scroll_index: usize = 0;
-
-        fn detailOuter(self: *This, index: usize) *wgt.Box(Widget) {
-            return &self.resultsBox(index).children.values()[detail_index].widget.box;
-        }
-
-        fn toolRow(self: *This, index: usize) *wgt.Box(Widget) {
-            return &self.detailInner(index).children.values()[tool_row_index].widget.box;
-        }
-
-        fn detailScroll(self: *This, index: usize) *wgt.Scroll(Widget) {
-            return &self.detailOuter(index).children.values()[detail_scroll_index].widget.scroll;
-        }
-
-        fn detailInner(self: *This, index: usize) *wgt.Box(Widget) {
-            return &self.detailScroll(index).child.box;
+        fn detail(self: *This, index: usize) *DetailType {
+            const frame = &self.resultsBox(index).children.values()[detail_index].widget.box;
+            return &@field(frame.children.values()[0].widget, Data.detail_widget_name);
         }
 
         fn window(self: *This, index: usize) *const Window {
@@ -1206,10 +1974,10 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             if (self.selectedSplitIndex()) |i| {
                 // swap the detail pane to the selected thread when it changes.
                 if (self.selectedThreadIndex(i)) |selected| {
-                    const changed = if (self.detailed_index[i]) |current| current != selected else true;
+                    const entry = self.window(i).items[selected];
+                    const changed = if (self.detail(i).entry) |current| !std.mem.eql(u8, current.id, entry.id) else true;
                     if (changed) {
-                        try self.populateDetail(allocator, i, selected);
-                        self.detailed_index[i] = selected;
+                        try self.detail(i).setEntry(allocator, entry);
                     }
                 }
 
@@ -1223,30 +1991,20 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     }
                 }
 
-                // the pane's selected child shows the selection border: the
-                // description directly, the tags via the flow's selected item.
                 // cap the list at list_max_width only while the detail pane fits
                 // beside it. the box drops the detail when the width can't hold
                 // both minimums, so when it's that narrow we lift the cap and let
                 // the list fill the whole width.
-                if (self.detail_only) {
-                    self.box.children.values()[header_index].min_size = .{ .width = null, .height = 0 };
-                    self.box.children.values()[header_index].max_size = .{ .width = null, .height = 0 };
-                    self.resultsBox(i).children.values()[list_index].min_size = .{ .width = 0, .height = null };
-                    self.resultsBox(i).children.values()[list_index].max_size = .{ .width = 0, .height = null };
-                    self.resultsBox(i).children.values()[detail_index].min_size = .{ .width = constraint.max_size.width, .height = null };
-                } else {
-                    const both_panes_fit = if (constraint.max_size.width) |w| w >= list_max_width + detail_min_width else true;
-                    self.resultsBox(i).children.values()[list_index].max_size = if (both_panes_fit) .{ .width = list_max_width, .height = null } else null;
+                const both_panes_fit = if (constraint.max_size.width) |w| w >= list_max_width + detail_min_width else true;
+                self.resultsBox(i).children.values()[list_index].max_size = if (both_panes_fit) .{ .width = list_max_width, .height = null } else null;
 
-                    // stretch the detail pane across the rest of the width so it fills
-                    // the area rather than shrinking to its content; its scroll fills
-                    // the pane.
-                    if (constraint.max_size.width) |w| {
-                        self.resultsBox(i).children.values()[detail_index].min_size = .{ .width = if (both_panes_fit) w - list_max_width else w, .height = null };
-                    } else {
-                        self.resultsBox(i).children.values()[detail_index].min_size = .{ .width = detail_min_width, .height = null };
-                    }
+                // stretch the detail pane across the rest of the width so it fills
+                // the area rather than shrinking to its content; its scroll fills
+                // the pane.
+                if (constraint.max_size.width) |w| {
+                    self.resultsBox(i).children.values()[detail_index].min_size = .{ .width = if (both_panes_fit) w - list_max_width else w, .height = null };
+                } else {
+                    self.resultsBox(i).children.values()[detail_index].min_size = .{ .width = detail_min_width, .height = null };
                 }
             }
 
@@ -1262,244 +2020,6 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             }
 
             try self.box.build(allocator, constraint, root_focus);
-        }
-
-        fn populateDetail(self: *This, allocator: std.mem.Allocator, index: usize, sel: usize) !void {
-            const entry = self.window(index).items[sel];
-            const inner = self.detailInner(index);
-            // the /description page replaces its thread's detail with a back link
-            // and the whole description; other threads keep their normal detail.
-            const description_page = self.data.description_page and std.mem.eql(u8, entry.id, self.data.selected_id);
-            const comment_page = if (std.mem.eql(u8, entry.id, self.data.selected_id)) self.data.comment_page else null;
-
-            for (inner.children.values()) |*child| child.widget.deinit(allocator);
-            inner.children.clearAndFree(allocator);
-            inner.getFocus().child_id = null;
-            self.title_id[index] = null;
-            self.author_id[index] = null;
-
-            // the tool row is part of the scroll; the description and comment
-            // pages leave it empty.
-            {
-                var row = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
-                errdefer row.deinit(allocator);
-                try inner.children.put(allocator, row.getFocus().id, .{ .widget = .{ .box = row }, .rect = null, .min_size = null });
-            }
-            if (!description_page and comment_page == null) {
-                const row = self.toolRow(index);
-                const pa = self.session.page_arena.allocator();
-
-                if (entryHasFork(entry) and self.session.data.current_page.parent() != .fork) {
-                    const route = forkRoute(self.data.identity, entry.id) orelse return error.RouteTooLong;
-                    try addToolButton(allocator, row, "view fork", try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}));
-                }
-
-                {
-                    var spacer = try Spacer.init(allocator);
-                    errdefer spacer.deinit(allocator);
-                    try row.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null });
-                }
-
-                if (supports_drafts and entryDraft(entry)) {
-                    if (entry.revision_ready) {
-                        const route = listRoute(self.data.identity, @enumFromInt(0), "", entry.id) orelse return error.RouteTooLong;
-                        row.getFocus().kind = .{ .custom = try std.fmt.allocPrint(pa, "form:{s}/publish", .{try route.toUrl(self.session.page_arena)}) };
-                        try addToolButton(allocator, row, "publish", "submit");
-                    }
-                    if (self.session.data.user_id != null) {
-                        const edit_route = ui.RoutablePage.repoThreadEditRoute(kind, self.data.identity, entry.id) orelse return error.RouteTooLong;
-                        try addToolButton(allocator, row, "edit", try std.fmt.allocPrint(pa, "a:{s}", .{try edit_route.toUrl(self.session.page_arena)}));
-                        const remove_route = ui.RoutablePage.repoThreadRemoveRoute(kind, self.data.identity, entry.id, "") orelse return error.RouteTooLong;
-                        try addToolButton(allocator, row, "✕", try std.fmt.allocPrint(pa, "a:{s}", .{try remove_route.toUrl(self.session.page_arena)}));
-                    }
-                } else {
-                    // a terminal has no file picker, so attaching is web only. the
-                    // renderer covers this button with a file input, so clicking it
-                    // opens the browser's own picker and posts what it chose.
-                    if (!self.session.is_terminal and !entryConflicted(entry) and (self.session.data.is_local or self.session.data.user_id != null)) {
-                        const label = "add attachment";
-                        const action = if (self.data.identity.len == 0)
-                            try std.fmt.allocPrint(pa, "{s}/{s}:{s}/attach", .{ ui.file_input_prefix, @tagName(kind), entry.id })
-                        else
-                            try std.fmt.allocPrint(pa, "{s}/repo/{s}/{s}:{s}/attach", .{ ui.file_input_prefix, self.data.identity, @tagName(kind), entry.id });
-                        try addToolButton(allocator, row, label, action);
-                    }
-
-                    // a conflicted thread's only action is resolving it. the button
-                    // stays visible logged out; the resolve page shows the
-                    // unauthorized view then.
-                    if (supports_conflicts and entryConflicted(entry)) {
-                        const label = "resolve conflict";
-                        const route = resolveRoute(self.data.identity, entry.id, "") orelse return error.RouteTooLong;
-                        try addToolButton(allocator, row, label, try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}));
-                    } else {
-                        // a logged-out session can't flip the status, so it gets no
-                        // open/close button
-                        if (has_status and (self.session.data.is_local or self.session.data.user_id != null)) {
-                            if (statusChange(entryStatus(entry))) |change| {
-                                const route = ui.RoutablePage.repoThreadCommentsRoute(kind, self.data.identity, entry.id, 0) orelse return error.RouteTooLong;
-                                row.getFocus().kind = .{ .custom = try std.fmt.allocPrint(pa, "form:{s}/{s}", .{ try route.toUrl(self.session.page_arena), change.action }) };
-                                try addToolButton(allocator, row, change.action, "submit");
-                            }
-                        }
-
-                        // the edit button links to the thread's edit page.
-                        {
-                            const route = ui.RoutablePage.repoThreadEditRoute(kind, self.data.identity, entry.id) orelse return error.RouteTooLong;
-                            try addToolButton(allocator, row, "edit", try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}));
-                        }
-                    }
-
-                    if (self.session.data.is_local or self.session.data.user_id != null) {
-                        const route = ui.RoutablePage.repoThreadRemoveRoute(kind, self.data.identity, entry.id, "") orelse return error.RouteTooLong;
-                        try addToolButton(allocator, row, "✕", try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}));
-                    }
-                }
-
-                for (row.children.keys(), row.children.values()) |id, *child| {
-                    if (!child.widget.getFocus().focusable) continue;
-                    row.getFocus().child_id = id;
-                    break;
-                }
-            }
-
-            if (supports_drafts and !description_page and comment_page == null) {
-                try self.data.appendDetails(allocator, inner, self.session, entry);
-            }
-
-            if (comment_page) |page| {
-                var back_label_buf: ["← back to ".len + thread_name.len]u8 = undefined;
-                const back_label = try std.fmt.bufPrint(&back_label_buf, "← back to {s}", .{thread_name});
-                var back = try Comment.linkBox(allocator, self.session, back_label, ui.RoutablePage.repoThreadCommentsRoute(kind, self.data.identity, entry.id, 0) orelse return error.RouteTooLong);
-                errdefer back.deinit(allocator);
-                try inner.children.put(allocator, back.getFocus().id, .{ .widget = .{ .text_box = back }, .rect = null, .min_size = null });
-
-                try Comment.appendComment(allocator, inner, self.session, self.data.identity, kind, page.selected);
-                try Comment.appendCount(allocator, inner, page.replies.count, "reply", "replies");
-                for (page.replies.comments) |comment| try Comment.appendComment(allocator, inner, self.session, self.data.identity, kind, comment);
-                try Comment.appendWindowNav(allocator, inner, self.session, self.data.identity, kind, &page.selected.comment.event.thread_id, &page.selected.id, page.replies);
-
-                var spacer = try Spacer.init(allocator);
-                errdefer spacer.deinit(allocator);
-                try inner.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null });
-
-                inner.getFocus().child_id = inner.children.keys()[tool_row_index + 1];
-                const sc = self.detailScroll(index);
-                sc.x = 0;
-                sc.y = 0;
-                sc.getFocus().version +%= 1;
-                return;
-            }
-
-            if (description_page) {
-                // the back link, in the title slot so the pane's input handling
-                // applies to it unchanged.
-                var back_label_buf: ["← back to ".len + thread_name.len]u8 = undefined;
-                const back_label = try std.fmt.bufPrint(&back_label_buf, "← back to {s}", .{thread_name});
-                var tb = try wgt.TextBox.init(allocator, back_label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
-                errdefer tb.deinit(allocator);
-                tb.getFocus().focusable = true;
-                tb.getFocus().kind = .{ .custom = try listLink(self.session.page_arena, self.data.identity, entryStatus(entry), "", entry.id) };
-                try inner.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
-                self.title_id[index] = tb.getFocus().id;
-            } else {
-                // the thread's title as a focusable word-wrapped text box.
-                self.title_id[index] = blk: {
-                    var tb = try wgt.TextBox.init(allocator, entry.record.event.title, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .word, .label = " title " });
-                    errdefer tb.deinit(allocator);
-                    tb.getFocus().focusable = true;
-                    try inner.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
-                    break :blk tb.getFocus().id;
-                };
-
-                self.author_id[index] = blk: {
-                    var tb = try ui.authorBox(allocator, self.session.page_arena, entry.author);
-                    errdefer tb.deinit(allocator);
-                    try inner.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
-                    break :blk tb.getFocus().id;
-                };
-
-                // the thread's tags, each linking to this status's list filtered to
-                // that tag.
-                {
-                    var items: std.ArrayList(TagFlow.Item) = .empty;
-                    defer items.deinit(allocator);
-                    var tag_iter = Event.tagIterator(entry.record.event.tags);
-                    while (tag_iter.next()) |tag| {
-                        if (tag.len == 0) continue;
-                        try items.append(allocator, .{ .text = tag, .link = try tagLink(self.session.page_arena, self.data.identity, entryStatus(entry), tag) });
-                    }
-                    if (items.items.len > 0) {
-                        var tf = try TagFlow.init(allocator);
-                        errdefer tf.deinit(allocator);
-                        try tf.setItems(allocator, items.items);
-                        try inner.children.put(allocator, tf.getFocus().id, .{ .widget = .{ .tag_flow = tf }, .rect = null, .min_size = null });
-                    }
-                }
-            }
-
-            // the description as a focusable word-wrapped text box. past the limit
-            // it's cut at the last whole line and links to the /description page,
-            // which shows the whole thing.
-            self.description_id[index] = blk: {
-                const whole = entry.record.event.description;
-                const cut_short = !description_page and whole.len > Data.max_description_size;
-                const shown = if (cut_short)
-                    std.mem.trimEnd(u8, whole[0 .. std.mem.lastIndexOfScalar(u8, whole[0..Data.max_description_size], '\n') orelse 0], " \t\r\n")
-                else if (whole.len == 0)
-                    "(no description)"
-                else
-                    whole;
-                var tb = try wgt.TextBox.init(allocator, shown, .{
-                    .border_style = .single,
-                    .rounded_corners = true,
-                    .wrap_kind = .word,
-                    .label = " description ",
-                    .bottom_label = if (cut_short) " click or press enter to see more " else "",
-                });
-                errdefer tb.deinit(allocator);
-                tb.getFocus().focusable = true;
-                if (cut_short) {
-                    const route = ui.RoutablePage.repoThreadDescriptionRoute(kind, self.data.identity, entry.id) orelse return error.RouteTooLong;
-                    tb.getFocus().kind = .{ .custom = try std.fmt.allocPrint(self.session.page_arena.allocator(), "a:{s}", .{try route.toUrl(self.session.page_arena)}) };
-                }
-                try inner.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
-                break :blk tb.getFocus().id;
-            };
-
-            if (!supports_drafts or !entryDraft(entry)) {
-                const parent_route = ui.RoutablePage.repoThreadCommentsRoute(kind, self.data.identity, entry.id, 0) orelse return error.RouteTooLong;
-                try Attachment.appendRows(allocator, inner, self.session, self.data.identity, try parent_route.toUrl(self.session.page_arena), entry.attachments);
-
-                if (!description_page) {
-                    var reply = try Comment.linkBox(allocator, self.session, "new comment", ui.RoutablePage.repoThreadCommentNewRoute(kind, self.data.identity, entry.id, "") orelse return error.RouteTooLong);
-                    errdefer reply.deinit(allocator);
-                    try inner.children.put(allocator, reply.getFocus().id, .{ .widget = .{ .text_box = reply }, .rect = null, .min_size = null });
-
-                    try Comment.appendCount(allocator, inner, entry.comments.count, "comment", "comments");
-                    for (entry.comments.comments) |comment| try Comment.appendComment(allocator, inner, self.session, self.data.identity, kind, comment);
-                    try Comment.appendWindowNav(allocator, inner, self.session, self.data.identity, kind, entry.id, null, entry.comments);
-
-                    var spacer = try Spacer.init(allocator);
-                    errdefer spacer.deinit(allocator);
-                    try inner.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null });
-                }
-            }
-
-            // select the first focusable widget below the tool row
-            for (tool_row_index + 1..inner.children.count()) |child_index| {
-                if (!self.detailChildFocusable(index, child_index)) continue;
-                inner.getFocus().child_id = inner.children.keys()[child_index];
-                break;
-            }
-
-            // reset the scroll to the top for the newly-shown thread: directly on the
-            // terminal (the wasm offset), and via a version bump on the web (so the
-            // renderer's scroll id changes and JS drops the preserved position).
-            const sc = self.detailScroll(index);
-            sc.x = 0;
-            sc.y = 0;
-            sc.getFocus().version +%= 1;
         }
 
         pub fn input(self: *This, allocator: std.mem.Allocator, raw_key: Key, root_focus: *Focus) !void {
@@ -1543,7 +2063,11 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             }
             const i = self.selectedSplitIndex() orelse return;
             if (self.detailActive(i)) {
-                try self.detailInput(allocator, i, key, root_focus);
+                switch (try self.detail(i).inputWithExit(allocator, key, root_focus)) {
+                    .none => {},
+                    .list => self.focusList(i, root_focus),
+                    .header => self.focusHeader(root_focus),
+                }
             } else {
                 self.listInput(i, key, root_focus);
             }
@@ -1579,415 +2103,11 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 return;
             }
             switch (key) {
-                .enter, .arrow_right => _ = self.focusDetail(root_focus),
+                .enter, .arrow_right => _ = self.detail(index).focusFirst(root_focus),
                 else => {},
             }
         }
 
-        fn detailInput(self: *This, allocator: std.mem.Allocator, index: usize, key: Key, root_focus: *Focus) !void {
-            switch (key) {
-                .page_up => {
-                    self.pageDetail(index, root_focus, -10);
-                    return;
-                },
-                .page_down => {
-                    self.pageDetail(index, root_focus, 10);
-                    return;
-                },
-                .home => {
-                    self.jumpDetail(index, root_focus, false);
-                    return;
-                },
-                .end => {
-                    self.jumpDetail(index, root_focus, true);
-                    return;
-                },
-                else => {},
-            }
-            if (self.data.comment_page != null and std.mem.eql(u8, self.window(index).items[self.detailed_index[index] orelse return].id, self.data.selected_id)) {
-                self.commentInput(index, key, root_focus);
-                return;
-            }
-            if (self.toolRowFocused(index, root_focus)) {
-                try self.toolRowInput(allocator, index, key, root_focus);
-                return;
-            }
-
-            const child_index = self.focusedDetailChild(index, root_focus) orelse return;
-            const inner = self.detailInner(index);
-            const child_id = inner.children.keys()[child_index];
-            const child = &inner.children.values()[child_index].widget;
-
-            if (child_id == self.title_id[index]) {
-                switch (key) {
-                    .arrow_left => self.focusList(index, root_focus),
-                    .arrow_up => if (!self.moveDetailVertical(index, root_focus, false)) self.focusToolRow(index, root_focus),
-                    .arrow_down => _ = self.moveDetailVertical(index, root_focus, true),
-                    else => {},
-                }
-                return;
-            }
-            if (child_id == self.author_id[index]) {
-                // the author's a: link is followed by the host; arrows cross to
-                // neighboring widgets.
-                switch (key) {
-                    .arrow_left => self.focusList(index, root_focus),
-                    .arrow_up => _ = self.moveDetailVertical(index, root_focus, false),
-                    .arrow_down => _ = self.moveDetailVertical(index, root_focus, true),
-                    else => {},
-                }
-                return;
-            }
-            if (child_id == self.description_id[index]) {
-                self.descriptionInput(index, key, root_focus);
-                return;
-            }
-
-            switch (child.*) {
-                .tag_flow => |*tf| {
-                    self.tagsInput(index, child_index, tf, key, root_focus);
-                    return;
-                },
-                .copyable_text => |*copyable| {
-                    switch (key) {
-                        .arrow_up => if (!self.moveDetailVertical(index, root_focus, false)) self.focusToolRow(index, root_focus),
-                        .arrow_down => _ = self.moveDetailVertical(index, root_focus, true),
-                        .arrow_left => if (copyable.selected == 0)
-                            self.focusList(index, root_focus)
-                        else
-                            try copyable.input(allocator, key, root_focus),
-                        else => try copyable.input(allocator, key, root_focus),
-                    }
-                    return;
-                },
-                .box => |*row| if (Attachment.removeId(row)) |attachment_id| {
-                    const remove_id = row.children.keys()[1];
-                    switch (key) {
-                        .arrow_left => if (!self.moveCommentHorizontal(index, root_focus, false)) self.focusList(index, root_focus),
-                        .arrow_right => _ = self.moveCommentHorizontal(index, root_focus, true),
-                        .arrow_up => _ = self.moveDetailVertical(index, root_focus, false),
-                        .arrow_down => _ = self.moveDetailVertical(index, root_focus, true),
-                        .enter => if (row.getFocus().child_id == remove_id) try self.removeEvent(allocator, .attach, attachment_id),
-                        .mouse => |mouse| if (inp.leftClickOn(root_focus, remove_id, mouse)) try self.removeEvent(allocator, .attach, attachment_id),
-                        else => {},
-                    }
-                    return;
-                },
-                else => {},
-            }
-            self.commentInput(index, key, root_focus);
-        }
-
-        // enter or a click runs the primary action; links are handled by the host
-        fn toolRowInput(self: *This, allocator: std.mem.Allocator, index: usize, key: Key, root_focus: *Focus) !void {
-            const row = self.toolRow(index);
-            const cur = if (row.getFocus().child_id) |cid| row.children.getIndex(cid) orelse return else return;
-            const child_id = row.children.keys()[cur];
-            const on_primary = switch (row.children.values()[cur].widget.getFocus().kind) {
-                .custom => |action| std.mem.eql(u8, action, "submit"),
-                else => false,
-            };
-            switch (key) {
-                .arrow_left => {
-                    var previous = cur;
-                    while (previous > 0) {
-                        previous -= 1;
-                        if (!row.children.values()[previous].widget.getFocus().focusable) continue;
-                        root_focus.setFocus(row.children.keys()[previous]);
-                        return;
-                    }
-                    self.focusList(index, root_focus);
-                },
-                .arrow_right => {
-                    var next = cur + 1;
-                    while (next < row.children.count()) : (next += 1) {
-                        if (!row.children.values()[next].widget.getFocus().focusable) continue;
-                        root_focus.setFocus(row.children.keys()[next]);
-                        return;
-                    }
-                },
-                .arrow_up => self.focusHeader(root_focus),
-                .arrow_down => _ = self.moveDetailVertical(index, root_focus, true),
-                .enter => if (on_primary) try self.primaryAction(allocator, index),
-                .mouse => |mouse| if (on_primary and inp.leftClickOn(root_focus, child_id, mouse)) try self.primaryAction(allocator, index),
-                else => {},
-            }
-        }
-
-        fn primaryAction(self: *This, allocator: std.mem.Allocator, index: usize) !void {
-            const selected = self.detailed_index[index] orelse return;
-            const entry = self.window(index).items[selected];
-            if (supports_drafts and entryDraft(entry))
-                try self.publishDraft(allocator, index)
-            else
-                try self.toggleStatus(allocator, index);
-        }
-
-        fn publishDraft(self: *This, allocator: std.mem.Allocator, index: usize) !void {
-            if (!supports_drafts or comptime wasm) return;
-            const selected = self.detailed_index[index] orelse return;
-            const entry = self.window(index).items[selected];
-            if (!entryDraft(entry) or !entry.revision_ready) return;
-            try self.data.publishDraft(self.session, allocator, entry.id);
-            const route = listRoute(self.data.identity, @enumFromInt(0), "", entry.id) orelse return;
-            try self.session.navigate(route);
-        }
-
-        fn descriptionInput(self: *This, index: usize, key: Key, root_focus: *Focus) void {
-            const sc = self.detailScroll(index);
-            switch (key) {
-                .arrow_left => return self.focusList(index, root_focus),
-                // the terminal moves through the description one line at a time;
-                // the web lets focus changes drive its native scroll.
-                .arrow_up => {
-                    if (!self.session.is_terminal) {
-                        _ = self.moveDetailVertical(index, root_focus, false);
-                        return;
-                    }
-                    if (self.focusAdjacentVisible(index, root_focus, false)) return;
-                    const before = sc.y;
-                    sc.y -= 1;
-                    sc.clampToContent();
-                    if (sc.y == before) _ = self.moveDetailVertical(index, root_focus, false);
-                    return;
-                },
-                .arrow_down => {
-                    if (!self.session.is_terminal) {
-                        _ = self.moveDetailVertical(index, root_focus, true);
-                        return;
-                    }
-                    if (self.focusAdjacentVisible(index, root_focus, true)) return;
-                    const before = sc.y;
-                    sc.y += 1;
-                    sc.clampToContent();
-                    if (sc.y == before) _ = self.moveDetailVertical(index, root_focus, true);
-                    return;
-                },
-                else => return,
-            }
-        }
-
-        fn commentInput(self: *This, index: usize, key: Key, root_focus: *Focus) void {
-            switch (key) {
-                .arrow_left => if (!self.moveCommentHorizontal(index, root_focus, false)) return self.focusList(index, root_focus),
-                .arrow_right => _ = self.moveCommentHorizontal(index, root_focus, true),
-                .arrow_up => _ = self.moveDetailVertical(index, root_focus, false),
-                .arrow_down => _ = self.moveDetailVertical(index, root_focus, true),
-                else => return,
-            }
-        }
-
-        // page the detail scroll, then focus the first or last visible widget.
-        fn pageDetail(self: *This, index: usize, root_focus: *Focus, delta: isize) void {
-            if (!self.session.is_terminal) return;
-            const sc = self.detailScroll(index);
-            sc.y += delta;
-            sc.clampToContent();
-            self.focusVisible(index, root_focus, delta > 0);
-        }
-
-        // jump to the detail's first or last focusable widget. the terminal pins
-        // its synthetic scroll too; the browser scrolls to the new focus itself.
-        fn jumpDetail(self: *This, index: usize, root_focus: *Focus, to_end: bool) void {
-            if (self.session.is_terminal) {
-                const sc = self.detailScroll(index);
-                sc.y = if (to_end) std.math.maxInt(isize) else 0;
-                sc.clampToContent();
-                self.focusVisible(index, root_focus, to_end);
-            } else {
-                self.focusDetailEdge(index, root_focus, to_end);
-            }
-        }
-
-        fn focusDetailEdge(self: *This, index: usize, root_focus: *Focus, last: bool) void {
-            const focus = self.detailInner(index).getFocus();
-            var chosen: ?usize = null;
-            for (focus.children.keys(), focus.children.values()) |id, child| {
-                if (!child.focus.focusable) continue;
-                chosen = id;
-                if (!last) break;
-            }
-            if (chosen) |id| root_focus.setFocus(id);
-        }
-
-        fn detailRectVisible(self: *This, index: usize, rect: layout.IRect) bool {
-            const sc = self.detailScroll(index);
-            const viewport = sc.grid orelse return false;
-            const top = sc.y;
-            const bottom = top + @as(isize, @intCast(viewport.size.height - sc.bar_h));
-            return rect.y + @as(isize, @intCast(rect.size.height)) > top and rect.y < bottom;
-        }
-
-        // focus the top- or bottom-most focusable widget intersecting the viewport.
-        fn focusVisible(self: *This, index: usize, root_focus: *Focus, last: bool) void {
-            const inner = self.detailInner(index);
-            var offset: usize = 0;
-            while (offset < inner.children.count()) : (offset += 1) {
-                const child_index = if (last) inner.children.count() - 1 - offset else offset;
-                if (self.focusVisibleChild(index, child_index, root_focus, last)) return;
-            }
-        }
-
-        fn focusVisibleChild(self: *This, index: usize, child_index: usize, root_focus: *Focus, last: bool) bool {
-            const child = &self.detailInner(index).children.values()[child_index];
-            const child_rect = child.rect orelse return false;
-            var chosen: ?usize = null;
-            if (child.widget.getFocus().focusable and self.detailRectVisible(index, child_rect)) {
-                const id = self.detailInner(index).children.keys()[child_index];
-                chosen = id;
-                if (!last) {
-                    root_focus.setFocus(id);
-                    return true;
-                }
-            }
-
-            for (child.widget.getFocus().children.keys(), child.widget.getFocus().children.values()) |id, focus_child| {
-                if (!focus_child.focus.focusable) continue;
-                const rect: layout.IRect = .{
-                    .x = child_rect.x + @as(isize, @intCast(focus_child.rect.x)),
-                    .y = child_rect.y + @as(isize, @intCast(focus_child.rect.y)),
-                    .size = focus_child.rect.size,
-                };
-                if (!self.detailRectVisible(index, rect)) continue;
-                chosen = id;
-                if (!last) break;
-            }
-            if (chosen) |id| {
-                root_focus.setFocus(id);
-                return true;
-            }
-            return false;
-        }
-
-        fn focusAdjacentVisible(self: *This, index: usize, root_focus: *Focus, down: bool) bool {
-            const inner = self.detailInner(index);
-            var next = self.focusedDetailChild(index, root_focus) orelse return false;
-            while (true) {
-                if (down) {
-                    next += 1;
-                    if (next >= inner.children.count()) return false;
-                } else {
-                    if (next == 0) return false;
-                    next -= 1;
-                }
-                if (self.focusVisibleChild(index, next, root_focus, !down)) {
-                    self.focusDetailChild(index, next, !down, root_focus);
-                    return true;
-                }
-            }
-        }
-
-        fn focusedDetailChild(self: *This, index: usize, root_focus: *Focus) ?usize {
-            const inner = self.detailInner(index);
-            var id = root_focus.grandchild_id orelse return null;
-            while (inner.getFocus().children.get(id)) |child| {
-                if (child.parent_id == inner.getFocus().id) return inner.children.getIndex(id);
-                id = child.parent_id;
-            }
-            return null;
-        }
-
-        fn detailChildFocusable(self: *This, index: usize, child_index: usize) bool {
-            const child = &self.detailInner(index).children.values()[child_index].widget;
-            const focus = child.getFocus();
-            if (focus.focusable) return true;
-            for (focus.children.values()) |item| {
-                if (item.focus.focusable) return true;
-            }
-            return false;
-        }
-
-        fn focusDetailChild(self: *This, index: usize, child_index: usize, last: bool, root_focus: *Focus) void {
-            const inner = self.detailInner(index);
-            const child = &inner.children.values()[child_index];
-            var target = inner.children.keys()[child_index];
-            var rect = child.rect orelse return;
-            switch (child.widget) {
-                .repo_comment => |*comment| {
-                    if (comment.rowRect(last)) |row_rect| {
-                        rect.x += row_rect.x;
-                        rect.y += row_rect.y;
-                        rect.size = row_rect.size;
-                    }
-                    if (last) comment.focusBody(root_focus) else comment.focusMetadata(root_focus);
-                },
-                .box => |*box| if (box.children.count() > 0) {
-                    target = if (child_index == tool_row_index)
-                        box.getFocus().child_id orelse return
-                    else
-                        box.children.keys()[if (last) box.children.count() - 1 else 0];
-                    root_focus.setFocus(target);
-                },
-                else => root_focus.setFocus(target),
-            }
-            const sc = self.detailScroll(index);
-            if (sc.grid) |viewport| {
-                const viewport_height = viewport.size.height - sc.bar_h;
-                if (rect.size.height > viewport_height) {
-                    const bottom_aligned = rect.y + @as(isize, @intCast(rect.size.height - viewport_height));
-                    sc.y = std.math.clamp(sc.y, rect.y, bottom_aligned);
-                    sc.clampToContent();
-                    return;
-                }
-            }
-            sc.scrollToRect(rect);
-        }
-
-        fn moveDetailVertical(self: *This, index: usize, root_focus: *Focus, down: bool) bool {
-            const inner = self.detailInner(index);
-            const current = self.focusedDetailChild(index, root_focus) orelse return false;
-            if (inner.children.values()[current].widget == .repo_comment) {
-                const comment = &inner.children.values()[current].widget.repo_comment;
-                if (down and !comment.bodyFocused()) {
-                    self.focusDetailChild(index, current, true, root_focus);
-                    return true;
-                }
-                if (!down and comment.bodyFocused()) {
-                    self.focusDetailChild(index, current, false, root_focus);
-                    return true;
-                }
-            }
-
-            var next = current;
-            while (true) {
-                if (down) {
-                    next += 1;
-                    if (next >= inner.children.count()) return false;
-                } else {
-                    if (next == 0) return false;
-                    next -= 1;
-                }
-                if (!self.detailChildFocusable(index, next)) continue;
-                self.focusDetailChild(index, next, !down, root_focus);
-                return true;
-            }
-        }
-
-        fn moveCommentHorizontal(self: *This, index: usize, root_focus: *Focus, right: bool) bool {
-            const inner = self.detailInner(index);
-            const current = self.focusedDetailChild(index, root_focus) orelse return false;
-            const child = &inner.children.values()[current];
-            if (child.widget == .repo_comment) {
-                const moved = child.widget.repo_comment.moveHorizontal(root_focus, right);
-                if (moved) if (child.rect) |rect| self.detailScroll(index).scrollToRect(rect);
-                return moved;
-            }
-            const row = switch (child.widget) {
-                .box => |*box| box,
-                else => return false,
-            };
-            const selected = row.getFocus().child_id orelse return false;
-            const selected_index = row.children.getIndex(selected) orelse return false;
-            const target = if (right) selected_index + 1 else selected_index -| 1;
-            if (target == selected_index or target >= row.children.count()) return false;
-            root_focus.setFocus(row.children.keys()[target]);
-            if (child.rect) |rect| self.detailScroll(index).scrollToRect(rect);
-            return true;
-        }
-
-        // up/down (and tab/shift+tab) move between a form's fields; up from the
-        // title crosses into the header tabs. the multiline description keeps
-        // enter and any up/down that has a row to move to.
         fn formInput(self: *This, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
             const form = self.threadForm() orelse return;
             const cid = form.getFocus().child_id orelse return;
@@ -2417,108 +2537,13 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             try self.session.navigate(route);
         }
 
-        // flip the shown thread's status by re-emitting its event, then reload the
-        // page rooted at the thread so the view reflects the change. this is the
-        // terminal path; the web posts the button's form to the status route.
-        fn toggleStatus(self: *This, allocator: std.mem.Allocator, index: usize) !void {
-            if (comptime !has_status) return;
-            if (comptime wasm) return;
-            const io = self.session.io orelse return;
-            const src = self.data.repo_source orelse return;
-            const sel = self.detailed_index[index] orelse return;
-            const entry = self.window(index).items[sel];
-            const author = (try self.session.eventAuthor()) orelse return;
-
-            const status = (statusChange(entryStatus(entry)) orelse return).status;
-
-            const id_bytes = try evt.parseEventId(entry.id);
-
-            switch (src.repo_kind) {
-                inline else => |repo_kind| {
-                    var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, src.localInitOpts());
-                    defer any_repo.deinit(io, allocator);
-                    switch (any_repo) {
-                        inline else => |*repo| try Event.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &id_bytes, .{ .status = status }, author),
-                    }
-                },
-            }
-
-            const route = listRoute(self.data.identity, status, "", entry.id) orelse return;
-            try self.session.navigate(route);
-        }
-
-        // arrow keys move the tag selection; at the flow's edges focus crosses to
-        // the neighboring widgets.
-        fn tagsInput(self: *This, index: usize, child_index: usize, tf: *TagFlow, key: Key, root_focus: *Focus) void {
-            const cid = tf.focus.child_id orelse return;
-            const cur = tf.indexOfFocusId(cid) orelse return;
-            const count = tf.text_boxes.items.len;
-            switch (key) {
-                .arrow_left => if (cur > 0) self.focusTag(index, child_index, tf, root_focus, cur - 1) else self.focusList(index, root_focus),
-                .arrow_right => if (cur + 1 < count) self.focusTag(index, child_index, tf, root_focus, cur + 1),
-                .arrow_up => if (tf.rowStep(cur, false)) |i| {
-                    self.focusTag(index, child_index, tf, root_focus, i);
-                } else {
-                    _ = self.moveDetailVertical(index, root_focus, false);
-                },
-                .arrow_down => if (tf.rowStep(cur, true)) |i| {
-                    self.focusTag(index, child_index, tf, root_focus, i);
-                } else {
-                    _ = self.moveDetailVertical(index, root_focus, true);
-                },
-                .home => self.focusTag(index, child_index, tf, root_focus, 0),
-                .end => self.focusTag(index, child_index, tf, root_focus, count - 1),
-                else => {},
-            }
-        }
-
-        fn toolRowFocused(self: *This, index: usize, root_focus: *Focus) bool {
-            return self.focusedDetailChild(index, root_focus) == tool_row_index;
-        }
-
-        fn focusTag(self: *This, index: usize, child_index: usize, tf: *TagFlow, root_focus: *Focus, item: usize) void {
-            root_focus.setFocus(tf.text_boxes.items[item].getFocus().id);
-            // keep the tag visible on the terminal: its rect offset by the flow's
-            // position in the pane.
-            if (self.session.is_terminal and item < tf.rects.items.len) {
-                if (self.detailInner(index).children.values()[child_index].rect) |flow_rect| {
-                    var rect = tf.rects.items[item];
-                    rect.x += flow_rect.x;
-                    rect.y += flow_rect.y;
-                    self.detailScroll(index).scrollToRect(rect);
-                }
-            }
-        }
-
-        // return to the tool row's last-focused button (the header when the
-        // description page shows no row).
-        fn focusToolRow(self: *This, index: usize, root_focus: *Focus) void {
-            const cid = self.toolRow(index).getFocus().child_id orelse return self.focusHeader(root_focus);
-            root_focus.setFocus(cid);
-            if (self.detailInner(index).children.values()[tool_row_index].rect) |rect|
-                self.detailScroll(index).scrollToRect(rect);
-        }
-
-        // enter the detail at its first focusable widget below the tool row.
-        pub fn focusDetail(self: *This, root_focus: *Focus) bool {
-            const index = self.selectedSplitIndex() orelse return false;
-            for (tool_row_index + 1..self.detailInner(index).children.count()) |child_index| {
-                if (!self.detailChildFocusable(index, child_index)) continue;
-                self.focusDetailChild(index, child_index, false, root_focus);
-                return true;
-            }
-            return false;
-        }
-
         // return to the list.
         fn focusList(self: *This, index: usize, root_focus: *Focus) void {
-            if (self.detail_only) return;
             root_focus.setFocus(self.listScroll(index).getFocus().id);
         }
 
         // cross to the header tabs above the stack.
         fn focusHeader(self: *This, root_focus: *Focus) void {
-            if (self.detail_only) return;
             root_focus.setFocus(self.box.children.keys()[header_index]);
         }
 
@@ -2532,17 +2557,6 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
 
         pub fn getFocus(self: *This) *Focus {
             return self.box.getFocus();
-        }
-
-        pub fn atTop(self: *This, root_focus: *Focus) bool {
-            if (!self.detail_only) return self.getSelectedIndex() == 0;
-            const index = self.selectedSplitIndex() orelse return false;
-            const focused = self.focusedDetailChild(index, root_focus) orelse return false;
-            for (0..self.detailInner(index).children.count()) |child_index| {
-                if (!self.detailChildFocusable(index, child_index)) continue;
-                return focused == child_index;
-            }
-            return false;
         }
 
         // for the parent's "scroll up at the top jumps to the header" check: at the

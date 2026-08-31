@@ -162,15 +162,10 @@ pub const View = struct {
         {
             var stack = try wgt.Stack(ui.Widget).init(allocator);
             errdefer stack.deinit(allocator);
-            if (data.patch.repo_source == null) {
-                var fallback = try initFallback(allocator, &data.patch, session);
-                errdefer fallback.deinit(allocator);
-                try stack.children.put(allocator, fallback.getFocus().id, .{ .scroll = fallback });
-            } else {
-                var patch_view = try Patches.View.initDetail(allocator, &data.patch, session);
-                errdefer patch_view.deinit(allocator);
-                try stack.children.put(allocator, patch_view.getFocus().id, .{ .repo_patches = patch_view });
-            }
+            const selected = data.patch.selectedThread() orelse return error.NotFound;
+            var patch_detail = try Patches.Detail.init(allocator, &data.patch, session, selected.*, .{ .actions = data.patch.repo_source != null });
+            errdefer patch_detail.deinit(allocator);
+            try stack.children.put(allocator, patch_detail.getFocus().id, .{ .repo_patch_detail = patch_detail });
             {
                 var files = try Files.View.init(allocator, &data.files, session);
                 errdefer files.deinit(allocator);
@@ -202,34 +197,6 @@ pub const View = struct {
         return .{ .box = box };
     }
 
-    fn initFallback(allocator: std.mem.Allocator, data: *const Patches, session: *ui.Session) !wgt.Scroll(ui.Widget) {
-        const entry = data.selectedThread() orelse return error.NotFound;
-        var content = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert });
-        errdefer content.deinit(allocator);
-        {
-            var text_box = try wgt.TextBox.init(allocator, entry.record.event.title, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .word, .label = " title " });
-            errdefer text_box.deinit(allocator);
-            text_box.getFocus().focusable = true;
-            try content.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
-        }
-        {
-            var author = try ui.authorBox(allocator, session.page_arena, entry.author);
-            errdefer author.deinit(allocator);
-            try content.children.put(allocator, author.getFocus().id, .{ .widget = .{ .text_box = author }, .rect = null, .min_size = null });
-        }
-        inline for (.{
-            .{ entry.record.event.tags, " tags " },
-            .{ entry.record.event.description, " description " },
-        }) |field| {
-            var text_box = try wgt.TextBox.init(allocator, field[0], .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .word, .label = field[1] });
-            errdefer text_box.deinit(allocator);
-            text_box.getFocus().focusable = true;
-            try content.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
-        }
-        content.getFocus().child_id = content.children.keys()[0];
-        return wgt.Scroll(ui.Widget).init(allocator, .{ .box = content }, .{ .direction = .vert, .web_native = !session.is_terminal, .fill = true });
-    }
-
     pub fn deinit(self: *View, allocator: std.mem.Allocator) void {
         self.box.deinit(allocator);
     }
@@ -253,13 +220,12 @@ pub const View = struct {
                 .fork_header => try child.input(allocator, key, root_focus),
                 .stack => if (stack.getSelected()) |selected| {
                     const at_top = switch (selected.*) {
-                        .repo_patches => |*view| view.atTop(root_focus),
+                        .repo_patch_detail => |*view| view.atTop(root_focus),
                         .repo_files => |*view| view.getSelectedIndex() == 0,
                         .repo_commits => |*view| view.getSelectedIndex() == 0,
                         .home_settings => |*view| view.getSelectedIndex() == 0,
                         .home_auth => |*view| view.getSelectedIndex() == 0,
                         .quit => |*view| view.getSelectedIndex() == 0,
-                        .scroll => |*scroll| scroll.y == 0,
                         else => false,
                     };
                     if (at_top) next_index = header_index else try child.input(allocator, key, root_focus);
@@ -269,7 +235,7 @@ pub const View = struct {
             .down => switch (child.*) {
                 .fork_header => {
                     if (stack.getSelected()) |selected| switch (selected.*) {
-                        .repo_patches => |*view| if (view.focusDetail(root_focus)) return,
+                        .repo_patch_detail => |*view| if (view.focusFirst(root_focus)) return,
                         .repo_files => |*view| if (view.focusCloneUrl(root_focus)) return,
                         .repo_commits => |*view| if (view.focusCloneUrl(root_focus)) return,
                         else => {},
