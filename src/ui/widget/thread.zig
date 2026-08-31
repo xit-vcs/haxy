@@ -1363,8 +1363,8 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 }
             }
 
-            if (supports_drafts and entryDraft(entry) and !description_page and comment_page == null) {
-                try self.data.appendDraftDetails(allocator, inner, self.session, entry);
+            if (supports_drafts and !description_page and comment_page == null) {
+                try self.data.appendDetails(allocator, inner, self.session, entry);
             }
 
             if (comment_page) |page| {
@@ -1467,34 +1467,31 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 break :blk tb.getFocus().id;
             };
 
-            if (supports_drafts and entryDraft(entry)) {
-                inner.getFocus().child_id = inner.children.keys()[tool_row_index + 1];
-                const sc = self.detailScroll(index);
-                sc.x = 0;
-                sc.y = 0;
-                sc.getFocus().version +%= 1;
-                return;
+            if (!supports_drafts or !entryDraft(entry)) {
+                const parent_route = ui.RoutablePage.repoThreadCommentsRoute(kind, self.data.identity, entry.id, 0) orelse return error.RouteTooLong;
+                try Attachment.appendRows(allocator, inner, self.session, self.data.identity, try parent_route.toUrl(self.session.page_arena), entry.attachments);
+
+                if (!description_page) {
+                    var reply = try Comment.linkBox(allocator, self.session, "new comment", ui.RoutablePage.repoThreadCommentNewRoute(kind, self.data.identity, entry.id, "") orelse return error.RouteTooLong);
+                    errdefer reply.deinit(allocator);
+                    try inner.children.put(allocator, reply.getFocus().id, .{ .widget = .{ .text_box = reply }, .rect = null, .min_size = null });
+
+                    try Comment.appendCount(allocator, inner, entry.comments.count, "comment", "comments");
+                    for (entry.comments.comments) |comment| try Comment.appendComment(allocator, inner, self.session, self.data.identity, kind, comment);
+                    try Comment.appendWindowNav(allocator, inner, self.session, self.data.identity, kind, entry.id, null, entry.comments);
+
+                    var spacer = try Spacer.init(allocator);
+                    errdefer spacer.deinit(allocator);
+                    try inner.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null });
+                }
             }
 
-            const parent_route = ui.RoutablePage.repoThreadCommentsRoute(kind, self.data.identity, entry.id, 0) orelse return error.RouteTooLong;
-            try Attachment.appendRows(allocator, inner, self.session, self.data.identity, try parent_route.toUrl(self.session.page_arena), entry.attachments);
-
-            if (!description_page) {
-                var reply = try Comment.linkBox(allocator, self.session, "new comment", ui.RoutablePage.repoThreadCommentNewRoute(kind, self.data.identity, entry.id, "") orelse return error.RouteTooLong);
-                errdefer reply.deinit(allocator);
-                try inner.children.put(allocator, reply.getFocus().id, .{ .widget = .{ .text_box = reply }, .rect = null, .min_size = null });
-
-                try Comment.appendCount(allocator, inner, entry.comments.count, "comment", "comments");
-                for (entry.comments.comments) |comment| try Comment.appendComment(allocator, inner, self.session, self.data.identity, kind, comment);
-                try Comment.appendWindowNav(allocator, inner, self.session, self.data.identity, kind, entry.id, null, entry.comments);
-
-                var spacer = try Spacer.init(allocator);
-                errdefer spacer.deinit(allocator);
-                try inner.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null });
+            // select the first focusable widget below the tool row
+            for (tool_row_index + 1..inner.children.count()) |child_index| {
+                if (!self.detailChildFocusable(index, child_index)) continue;
+                inner.getFocus().child_id = inner.children.keys()[child_index];
+                break;
             }
-
-            // select the title by default
-            if (self.title_id[index]) |id| inner.getFocus().child_id = id;
 
             // reset the scroll to the top for the newly-shown thread: directly on the
             // terminal (the wasm offset), and via a version bump on the web (so the
@@ -1582,7 +1579,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 return;
             }
             switch (key) {
-                .enter, .arrow_right => self.focusDetail(index, root_focus),
+                .enter, .arrow_right => _ = self.focusDetail(root_focus),
                 else => {},
             }
         }
@@ -2502,10 +2499,15 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 self.detailScroll(index).scrollToRect(rect);
         }
 
-        // enter the detail pane. an empty pane can't be entered.
-        fn focusDetail(self: *This, index: usize, root_focus: *Focus) void {
-            if (self.detailInner(index).children.count() == 0) return;
-            root_focus.setFocus(self.detailOuter(index).getFocus().id);
+        // enter the detail at its first focusable widget below the tool row.
+        pub fn focusDetail(self: *This, root_focus: *Focus) bool {
+            const index = self.selectedSplitIndex() orelse return false;
+            for (tool_row_index + 1..self.detailInner(index).children.count()) |child_index| {
+                if (!self.detailChildFocusable(index, child_index)) continue;
+                self.focusDetailChild(index, child_index, false, root_focus);
+                return true;
+            }
+            return false;
         }
 
         // return to the list.

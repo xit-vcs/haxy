@@ -497,10 +497,10 @@ pub fn init(
     var closed_window = try thread.loadWindow(Self, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_patch, closed_set, closed_root, conflict_set, empty.selected_id, thread_comments_start);
     var merged_window = try thread.loadWindow(Self, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_patch, merged_set, merged_root, conflict_set, empty.selected_id, thread_comments_start);
     var conflicts_window = try thread.loadWindow(Self, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_patch, conflict_set, conflicts_root, conflict_set, empty.selected_id, thread_comments_start);
-    try setForkAvailability(arena, admin_moment, &open_window);
-    try setForkAvailability(arena, admin_moment, &closed_window);
-    try setForkAvailability(arena, admin_moment, &merged_window);
-    try setForkAvailability(arena, admin_moment, &conflicts_window);
+    try setForkDetails(repo_kind, repo_opts, io, arena, admin_moment, repo, &open_window);
+    try setForkDetails(repo_kind, repo_opts, io, arena, admin_moment, repo, &closed_window);
+    try setForkDetails(repo_kind, repo_opts, io, arena, admin_moment, repo, &merged_window);
+    try setForkDetails(repo_kind, repo_opts, io, arena, admin_moment, repo, &conflicts_window);
     if (view == .conflicts and conflicts_window.count > 0) resolved_view = .conflicts;
 
     const comment_page = if (empty.comment_id.len == 0)
@@ -530,14 +530,30 @@ pub fn init(
     };
 }
 
-fn setForkAvailability(arena: *std.heap.ArenaAllocator, admin_moment: ?evt.AdminDB.HashMap(.read_only), target: *Window) !void {
-    const moment = admin_moment orelse return;
+fn setForkDetails(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    io: std.Io,
+    arena: *std.heap.ArenaAllocator,
+    admin_moment: ?evt.AdminDB.HashMap(.read_only),
+    repo: *rp.Repo(repo_kind, repo_opts),
+    target: *Window,
+) !void {
     if (target.items.len == 0) return;
     const items = try arena.allocator().dupe(PatchWithId, target.items);
     for (items) |*item| {
-        const id = try evt.parseEventId(item.id);
-        const record = try evt.Fork.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, &id);
-        item.fork_exists = if (record) |value| !value.removed else false;
+        if (admin_moment) |moment| {
+            const id = try evt.parseEventId(item.id);
+            const record = try evt.Fork.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, &id);
+            item.fork_exists = if (record) |value| !value.removed else false;
+        }
+        const revision = item.record.event.revision orelse continue;
+        const target_branch = revision.targetBranch() orelse continue;
+        item.fork_oid = revision.source_oid;
+        item.target_branch = target_branch;
+        if (item.record.event.status == .merged) continue;
+        const target_oid = try repo.readRef(io, .{ .kind = .head, .name = target_branch });
+        item.no_changes = if (target_oid) |oid| std.mem.eql(u8, &oid, revision.source_oid) else false;
     }
     target.items = items;
 }
@@ -659,12 +675,12 @@ pub const View = thread.View(.patch, Self);
 
 pub const Header = thread.Header;
 
-pub fn appendDraftDetails(self: *const Self, allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), session: *ui.Session, entry: Entry) !void {
+pub fn appendDetails(self: *const Self, allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), session: *ui.Session, entry: Entry) !void {
     const aa = session.page_arena.allocator();
     var fields: [2]ui.widget.CopyableText.Choice = undefined;
     var field_count: usize = 0;
 
-    if (entry.target_branch.len != 0) if (session.data.git_ssh_port) |port| {
+    if (entry.record.event.status != .merged and entry.fork_exists and entry.target_branch.len != 0) if (session.data.git_ssh_port) |port| {
         const url = try std.fmt.allocPrint(aa, "ssh://localhost:{d}/repo/{s}/patch:{s}/branch:{s}", .{ port, self.identity, entry.id, entry.target_branch });
         const push_command = try std.fmt.allocPrint(aa, "git push {s} HEAD:patch", .{url});
         const clone_name = try cloneDirectoryName(aa, entry.record.event.title);
@@ -702,8 +718,8 @@ pub fn appendDraftDetails(self: *const Self, allocator: std.mem.Allocator, box: 
         fields[field_count] = .{
             .selector = "to",
             .text = entry.target_branch,
-            .label = " target branch this patch will go to ",
-            .bottom_label = " (set by the url you push to above) ",
+            .label = if (entry.record.event.status == .merged) " target branch this patch was merged into " else " target branch this patch will go to ",
+            .bottom_label = if (entry.record.event.status == .merged) "" else " (set by the url you push to above) ",
         };
         field_count += 1;
     }
@@ -712,10 +728,6 @@ pub fn appendDraftDetails(self: *const Self, allocator: std.mem.Allocator, box: 
         var copyable_text = try ui.widget.CopyableText.init(allocator, session, fields[0..field_count]);
         errdefer copyable_text.deinit(allocator);
         try box.children.put(allocator, copyable_text.getFocus().id, .{ .widget = .{ .copyable_text = copyable_text }, .rect = null, .min_size = null });
-
-        var spacer = try ui.widget.Spacer.init(allocator);
-        errdefer spacer.deinit(allocator);
-        try box.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = .{ .width = null, .height = 1 }, .max_size = .{ .width = null, .height = 1 } });
     }
 }
 

@@ -269,6 +269,7 @@ pub const View = struct {
             .down => switch (child.*) {
                 .fork_header => {
                     if (stack.getSelected()) |selected| switch (selected.*) {
+                        .repo_patches => |*view| if (view.focusDetail(root_focus)) return,
                         .repo_files => |*view| if (view.focusCloneUrl(root_focus)) return,
                         .repo_commits => |*view| if (view.focusCloneUrl(root_focus)) return,
                         else => {},
