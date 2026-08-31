@@ -702,7 +702,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 try box.children.put(allocator, list_scroll.getFocus().id, .{ .widget = .{ .scroll = list_scroll }, .rect = null, .min_size = .{ .width = list_max_width, .height = null }, .max_size = .{ .width = list_max_width, .height = null } });
             }
 
-            // the detail pane — a frame around a scroll of the description
+            // the detail pane — a frame around its scrollable contents
             {
                 var detail_outer = blk: {
                     var detail_scroll = blk2: {
@@ -715,16 +715,8 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     errdefer detail_scroll.deinit(allocator);
                     var frame = try wgt.Box(Widget).init(allocator, .{ .border_style = .hidden, .direction = .vert });
                     errdefer frame.deinit(allocator);
-                    // the tool row sits above the scroll (populateDetail fills
-                    // it per thread).
-                    {
-                        var row = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
-                        errdefer row.deinit(allocator);
-                        try frame.children.put(allocator, row.getFocus().id, .{ .widget = .{ .box = row }, .rect = null, .min_size = null });
-                    }
                     // the frame's selected child is its scroll, so the focus chain
-                    // reaches the description (populateDetail points the scroll's
-                    // inner box at it), letting focus recovery descend into the pane.
+                    // reaches the detail contents.
                     frame.getFocus().child_id = detail_scroll.getFocus().id;
                     try frame.children.put(allocator, detail_scroll.getFocus().id, .{ .widget = .{ .scroll = detail_scroll }, .rect = null, .min_size = null });
                     break :blk frame;
@@ -1107,16 +1099,16 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             return &self.listScroll(index).child.box;
         }
 
-        // the detail frame's children: the tool row above the scroll pane.
+        // the tool row is the first child inside the detail scroll.
         const tool_row_index: usize = 0;
-        const detail_scroll_index: usize = 1;
+        const detail_scroll_index: usize = 0;
 
         fn detailOuter(self: *This, index: usize) *wgt.Box(Widget) {
             return &self.resultsBox(index).children.values()[detail_index].widget.box;
         }
 
         fn toolRow(self: *This, index: usize) *wgt.Box(Widget) {
-            return &self.detailOuter(index).children.values()[tool_row_index].widget.box;
+            return &self.detailInner(index).children.values()[tool_row_index].widget.box;
         }
 
         fn detailScroll(self: *This, index: usize) *wgt.Scroll(Widget) {
@@ -1255,13 +1247,12 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             self.title_id[index] = null;
             self.author_id[index] = null;
 
-            // the tool row; the description page shows none.
+            // the tool row is part of the scroll; the description and comment
+            // pages leave it empty.
             {
-                const row = self.toolRow(index);
-                for (row.children.values()) |*child| child.widget.deinit(allocator);
-                row.children.clearAndFree(allocator);
-                row.getFocus().child_id = null;
-                row.getFocus().kind = .container;
+                var row = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
+                errdefer row.deinit(allocator);
+                try inner.children.put(allocator, row.getFocus().id, .{ .widget = .{ .box = row }, .rect = null, .min_size = null });
             }
             if (!description_page and comment_page == null) {
                 const row = self.toolRow(index);
@@ -1355,7 +1346,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 errdefer spacer.deinit(allocator);
                 try inner.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null });
 
-                inner.getFocus().child_id = inner.children.keys()[0];
+                inner.getFocus().child_id = inner.children.keys()[tool_row_index + 1];
                 const sc = self.detailScroll(index);
                 sc.x = 0;
                 sc.y = 0;
@@ -1440,7 +1431,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             };
 
             if (supports_drafts and entryDraft(entry)) {
-                inner.getFocus().child_id = inner.children.keys()[0];
+                inner.getFocus().child_id = inner.children.keys()[tool_row_index + 1];
                 const sc = self.detailScroll(index);
                 sc.x = 0;
                 sc.y = 0;
@@ -1583,7 +1574,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 self.commentInput(index, key, root_focus);
                 return;
             }
-            if (self.toolRowFocused(index)) {
+            if (self.toolRowFocused(index, root_focus)) {
                 try self.toolRowInput(allocator, index, key, root_focus);
                 return;
             }
@@ -1666,10 +1657,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 .arrow_left => if (cur > first_in_row_index) root_focus.setFocus(row.children.keys()[cur - 1]) else self.focusList(index, root_focus),
                 .arrow_right => if (cur + 1 < row.children.count()) root_focus.setFocus(row.children.keys()[cur + 1]),
                 .arrow_up => self.focusHeader(root_focus),
-                .arrow_down => {
-                    self.focusDetailEdge(index, root_focus, false);
-                    self.detailScroll(index).y = 0;
-                },
+                .arrow_down => _ = self.moveDetailVertical(index, root_focus, true),
                 .enter => if (on_primary) try self.primaryAction(allocator, index),
                 .mouse => |mouse| if (on_primary and inp.leftClickOn(root_focus, child_id, mouse)) try self.primaryAction(allocator, index),
                 else => {},
@@ -1874,7 +1862,10 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     if (last) comment.focusBody(root_focus) else comment.focusMetadata(root_focus);
                 },
                 .box => |*box| if (box.children.count() > 0) {
-                    target = box.children.keys()[if (last) box.children.count() - 1 else 0];
+                    target = if (child_index == tool_row_index)
+                        box.getFocus().child_id orelse return
+                    else
+                        box.children.keys()[if (last) box.children.count() - 1 else 0];
                     root_focus.setFocus(target);
                 },
                 else => root_focus.setFocus(target),
@@ -2425,10 +2416,8 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         // the tool row's first child after the spacer that pushes it right
         const first_in_row_index: usize = 1;
 
-        fn toolRowFocused(self: *This, index: usize) bool {
-            const outer = self.detailOuter(index);
-            const cid = outer.getFocus().child_id orelse return false;
-            return outer.children.getIndex(cid) == tool_row_index;
+        fn toolRowFocused(self: *This, index: usize, root_focus: *Focus) bool {
+            return self.focusedDetailChild(index, root_focus) == tool_row_index;
         }
 
         fn focusTag(self: *This, index: usize, child_index: usize, tf: *TagFlow, root_focus: *Focus, item: usize) void {
@@ -2450,6 +2439,8 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         fn focusToolRow(self: *This, index: usize, root_focus: *Focus) void {
             const cid = self.toolRow(index).getFocus().child_id orelse return self.focusHeader(root_focus);
             root_focus.setFocus(cid);
+            if (self.detailInner(index).children.values()[tool_row_index].rect) |rect|
+                self.detailScroll(index).scrollToRect(rect);
         }
 
         // enter the detail pane. an empty pane can't be entered.
