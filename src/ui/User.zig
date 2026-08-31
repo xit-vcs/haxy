@@ -21,6 +21,7 @@ pub const Quit = @import("./Quit.zig");
 pub const page_size = 20; // how many repos one window of the repos tab shows
 
 pub const ForkItem = struct {
+    id: []const u8,
     target: []const u8,
     title: []const u8,
 };
@@ -117,6 +118,7 @@ pub fn init(
                 var order_key: [@sizeOf(u64) + evt.event_id_size]u8 = undefined;
                 _ = try kv.key_cursor.readBytes(&order_key);
                 const fork_id = order_key[@sizeOf(u64)..];
+                const fork_id_hex = std.fmt.bytesToHex(fork_id.*, .lower);
                 const record = (try evt.Fork.readById(DB, hash_kind, haxy_moment, arena, fork_id)) orelse continue;
 
                 const repo_cursor = try repo_records.getCursor(hash.hashInt(hash_kind, record.event.repo_id)) orelse continue;
@@ -126,8 +128,7 @@ pub fn init(
 
                 var title: []const u8 = "(unavailable)";
                 if (session.io) |io| if (session.repos_dir) |repos_dir| {
-                    const id_hex = std.fmt.bytesToHex(fork_id.*, .lower);
-                    const path = try fork.forkPath(arena.allocator(), repos_dir, &id_hex);
+                    const path = try fork.forkPath(arena.allocator(), repos_dir, &fork_id_hex);
                     if (rp.Repo(.xit, .{}).open(io, arena.child_allocator, .{ .path = path, .require_repo_root = true })) |opened| {
                         var fork_repo = opened;
                         defer fork_repo.deinit(io, arena.child_allocator);
@@ -136,7 +137,11 @@ pub fn init(
                         } else |_| {}
                     } else |_| {}
                 };
-                try forks.append(arena.allocator(), .{ .target = target, .title = title });
+                try forks.append(arena.allocator(), .{
+                    .id = try arena.allocator().dupe(u8, &fork_id_hex),
+                    .target = target,
+                    .title = title,
+                });
             }
             forks_next_start = if (end < count) end else null;
         }
@@ -219,8 +224,13 @@ pub const View = struct {
                 var items: std.ArrayList(ui.widget.FlowBox.Item) = .empty;
                 if (data.forks_start > 0)
                     try items.append(aa, .{ .text = "← previous", .link = try std.fmt.allocPrint(aa, "a:/user/{s}/forks/start:{d}", .{ data.user.name, data.forks_start -| page_size }) });
-                for (data.forks) |fork_item|
-                    try items.append(aa, .{ .text = try std.fmt.allocPrint(aa, "{s}\n{s}", .{ fork_item.target, fork_item.title }), .link = "" });
+                for (data.forks) |fork_item| {
+                    const route = ui.RoutablePage.forkPatchRoute(fork_item.target, fork_item.id) orelse return error.RouteTooLong;
+                    try items.append(aa, .{
+                        .text = try std.fmt.allocPrint(aa, "{s}\n{s}", .{ fork_item.target, fork_item.title }),
+                        .link = try std.fmt.allocPrint(aa, "a:{s}", .{try route.toUrl(session.page_arena)}),
+                    });
+                }
                 if (data.forks_next_start) |next_start|
                     try items.append(aa, .{ .text = "next →", .link = try std.fmt.allocPrint(aa, "a:/user/{s}/forks/start:{d}", .{ data.user.name, next_start }) });
                 try list.setItems(allocator, items.items);

@@ -29,6 +29,7 @@ pub const Widget = union(enum) {
     home: ui.Home.View,
     user: ui.User.View,
     repo: ui.Repo.View,
+    fork: ui.Fork.View,
     quit: ui.Quit.View,
     unauthorized: ui.Unauthorized.View,
     title: ui.Title.View,
@@ -36,6 +37,7 @@ pub const Widget = union(enum) {
     home_header: ui.Home.Header.View,
     user_header: ui.User.Header.View,
     repo_header: ui.Repo.Header.View,
+    fork_header: ui.Fork.Header.View,
     repo_files_header: ui.Repo.Files.Header.View,
     repo_commits_header: ui.Repo.Commits.Header.View,
     repo_issues_header: ui.Repo.Issues.Header,
@@ -1258,32 +1260,45 @@ pub const CopyableText = struct {
         return .{ .box = box, .session = session, .choices = owned_choices };
     }
 
-    pub fn initClone(allocator: std.mem.Allocator, session: *ui.Session, identity: []const u8) !CopyableText {
+    pub fn initClone(allocator: std.mem.Allocator, session: *ui.Session, location: ui.RoutablePage.RepoLocation) !?CopyableText {
         const aa = session.page_arena.allocator();
         var choices: [2]Choice = undefined;
         var count: usize = 0;
-        if (session.data.git_http_port) |port| {
-            const url = try std.fmt.allocPrint(aa, "http://localhost:{d}/repo/{s}", .{ port, identity });
-            choices[count] = .{
-                .selector = "http",
-                .text = url,
-                .copyable_text = try std.fmt.allocPrint(aa, "git clone {s}", .{url}),
-                .label = " clone ",
-            };
-            count += 1;
+        switch (location) {
+            .repo => |identity| {
+                if (session.data.git_http_port) |port| {
+                    const url = try std.fmt.allocPrint(aa, "http://localhost:{d}/repo/{s}", .{ port, identity });
+                    choices[count] = .{
+                        .selector = "http",
+                        .text = url,
+                        .copyable_text = try std.fmt.allocPrint(aa, "git clone {s}", .{url}),
+                        .label = " clone ",
+                    };
+                    count += 1;
+                }
+                if (session.data.git_ssh_port) |port| {
+                    const url = try std.fmt.allocPrint(aa, "ssh://localhost:{d}/repo/{s}", .{ port, identity });
+                    choices[count] = .{
+                        .selector = "ssh",
+                        .text = url,
+                        .copyable_text = try std.fmt.allocPrint(aa, "{s}git clone {s}", .{ session.data.git_ssh_prefix, url }),
+                        .label = " clone ",
+                    };
+                    count += 1;
+                }
+            },
+            .fork => |f| if (f.target_branch.len != 0) if (session.data.git_ssh_port) |port| {
+                const url = try std.fmt.allocPrint(aa, "ssh://localhost:{d}/repo/{s}/patch:{s}/branch:{s}", .{ port, f.identity, f.id, try ui.urlEncodeRef(aa, f.target_branch) });
+                choices[count] = .{
+                    .text = url,
+                    .copyable_text = try std.fmt.allocPrint(aa, "{s}git clone {s}", .{ session.data.git_ssh_prefix, url }),
+                    .label = " clone ",
+                };
+                count += 1;
+            },
         }
-        if (session.data.git_ssh_port) |port| {
-            const url = try std.fmt.allocPrint(aa, "ssh://localhost:{d}/repo/{s}", .{ port, identity });
-            choices[count] = .{
-                .selector = "ssh",
-                .text = url,
-                .copyable_text = try std.fmt.allocPrint(aa, "{s}git clone {s}", .{ session.data.git_ssh_prefix, url }),
-                .label = " clone ",
-            };
-            count += 1;
-        }
-        if (count == 0) return error.MissingGitPort;
-        return init(allocator, session, choices[0..count]);
+        if (count == 0) return null;
+        return @as(?CopyableText, try init(allocator, session, choices[0..count]));
     }
 
     pub fn minWidth(self: *const CopyableText) usize {

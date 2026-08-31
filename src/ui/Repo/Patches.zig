@@ -5,7 +5,6 @@ const ui = @import("../../ui.zig");
 const xit = @import("xit");
 const rp = xit.repo;
 const hash = xit.hash;
-const rf = xit.ref;
 const xitui = xit.xitui;
 const wgt = xitui.widget;
 const diff3 = @import("../../diff3.zig");
@@ -43,6 +42,7 @@ pub const PatchWithId = struct {
     fork_oid: []const u8 = "",
     target_branch: []const u8 = "",
     no_changes: bool = false,
+    fork_exists: bool = false,
 };
 
 pub const Entry = PatchWithId;
@@ -133,6 +133,10 @@ pub const header_widget_name = "repo_patches_header";
 
 pub fn listRoute(identity: []const u8, status: Status, tag: []const u8, selected: []const u8) ?ui.RoutablePage {
     return ui.RoutablePage.repoPatchesRoute(identity, status, tag, selected);
+}
+
+pub fn forkRoute(identity: []const u8, id: []const u8) ?ui.RoutablePage {
+    return ui.RoutablePage.forkPatchRoute(identity, id);
 }
 
 pub fn draftsRoute(identity: []const u8) ?ui.RoutablePage {
@@ -303,6 +307,27 @@ pub fn emptyResult(aa: std.mem.Allocator, identity: []const u8, tag: []const u8,
     };
 }
 
+pub fn detailResult(aa: std.mem.Allocator, identity: []const u8, entry: PatchWithId) !Self {
+    var result = try emptyResult(aa, identity, "", entry.id, "", 0, "", .open);
+    const items = try aa.dupe(PatchWithId, &.{entry});
+    const detail_window = Window{ .items = items, .prev_id = null, .next_id = null, .count = 1 };
+    if (entry.draft) {
+        result.drafts = detail_window;
+        result.view = .drafts;
+    } else switch (entry.record.event.status) {
+        .open => result.open = detail_window,
+        .closed => {
+            result.closed = detail_window;
+            result.view = .closed;
+        },
+        .merged => {
+            result.merged = detail_window;
+            result.view = .merged;
+        },
+    }
+    return result;
+}
+
 // read one window per status of an opened repo's patches (filtered to `tag`
 // when set), ordered by creation (newest first). the window of the patch
 // `selected_id` names starts at it ("" = the beginning). a git repo reads the
@@ -468,10 +493,14 @@ pub fn init(
         }
     }
     const thread_comments_start = if (empty.comment_id.len == 0) comments_start else 0;
-    const open_window = try thread.loadWindow(Self, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_patch, open_set, open_root, conflict_set, empty.selected_id, thread_comments_start);
-    const closed_window = try thread.loadWindow(Self, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_patch, closed_set, closed_root, conflict_set, empty.selected_id, thread_comments_start);
-    const merged_window = try thread.loadWindow(Self, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_patch, merged_set, merged_root, conflict_set, empty.selected_id, thread_comments_start);
-    const conflicts_window = try thread.loadWindow(Self, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_patch, conflict_set, conflicts_root, conflict_set, empty.selected_id, thread_comments_start);
+    var open_window = try thread.loadWindow(Self, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_patch, open_set, open_root, conflict_set, empty.selected_id, thread_comments_start);
+    var closed_window = try thread.loadWindow(Self, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_patch, closed_set, closed_root, conflict_set, empty.selected_id, thread_comments_start);
+    var merged_window = try thread.loadWindow(Self, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_patch, merged_set, merged_root, conflict_set, empty.selected_id, thread_comments_start);
+    var conflicts_window = try thread.loadWindow(Self, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_patch, conflict_set, conflicts_root, conflict_set, empty.selected_id, thread_comments_start);
+    try setForkAvailability(arena, admin_moment, &open_window);
+    try setForkAvailability(arena, admin_moment, &closed_window);
+    try setForkAvailability(arena, admin_moment, &merged_window);
+    try setForkAvailability(arena, admin_moment, &conflicts_window);
     if (view == .conflicts and conflicts_window.count > 0) resolved_view = .conflicts;
 
     const comment_page = if (empty.comment_id.len == 0)
@@ -499,6 +528,18 @@ pub fn init(
         .description_page = empty.description_page,
         .tags = tags,
     };
+}
+
+fn setForkAvailability(arena: *std.heap.ArenaAllocator, admin_moment: ?evt.AdminDB.HashMap(.read_only), target: *Window) !void {
+    const moment = admin_moment orelse return;
+    if (target.items.len == 0) return;
+    const items = try arena.allocator().dupe(PatchWithId, target.items);
+    for (items) |*item| {
+        const id = try evt.parseEventId(item.id);
+        const record = try evt.Fork.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, &id);
+        item.fork_exists = if (record) |value| !value.removed else false;
+    }
+    target.items = items;
 }
 
 fn loadDraftWindow(
@@ -562,41 +603,55 @@ fn loadDraftWindow(
         const path = try fork.forkPath(aa, repos_dir, &id_hex);
         var fork_repo = rp.Repo(.xit, .{}).open(io, arena.child_allocator, .{ .path = path, .require_repo_root = true }) catch continue;
         defer fork_repo.deinit(io, arena.child_allocator);
-        const fork_oid = (try fork_repo.readRef(io, fork.ref)) orelse continue;
-        const moment = evt.currentMoment(.{}, &fork_repo) catch continue;
-        const patch = (try evt.Patch.readById(evt.EventDB(.sha1), .sha1, moment, arena, &id)) orelse continue;
-        var revision_ready = false;
-        var target_branch = default_target_branch;
-        if (patch.event.revision) |revision| {
-            const target_ref = rf.Ref.initFromPath(revision.target_ref, null) orelse continue;
-            target_branch = switch (target_ref.kind) {
-                .head => target_ref.name,
-                else => continue,
-            };
-            const revision_id = evt.parseEventId(&revision.id) catch continue;
-            if (try evt.PatchRev.readById(evt.EventDB(.sha1), .sha1, moment, arena, &revision_id)) |record|
-                revision_ready = revision.matches(record);
-        }
-        const target_oid = if (target_branch.len != 0)
-            try target_repo.readRef(io, .{ .kind = .head, .name = target_branch })
-        else
-            null;
-        try items.append(aa, .{
-            .id = try aa.dupe(u8, &id_hex),
-            .record = patch,
-            .author = try ui.Author.initFromEmail(admin_moment, arena, patch.author_email),
-            .draft = true,
-            .revision_ready = revision_ready,
-            .fork_oid = try aa.dupe(u8, &fork_oid),
-            .target_branch = try aa.dupe(u8, target_branch),
-            .no_changes = if (target_oid) |oid| std.mem.eql(u8, &oid, &fork_oid) else false,
-        });
+        const entry = (try loadDraftEntry(repo_kind, repo_opts, arena, io, admin_moment, &fork_repo, target_repo, id, default_target_branch)) orelse continue;
+        try items.append(aa, entry);
     }
     return .{
         .items = items.items,
         .prev_id = prev_id,
         .next_id = next_id,
         .count = @intCast(try set.count()),
+    };
+}
+
+pub fn loadDraftEntry(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    arena: *std.heap.ArenaAllocator,
+    io: std.Io,
+    admin_moment: ?evt.AdminDB.HashMap(.read_only),
+    fork_repo: *rp.Repo(.xit, .{}),
+    target_repo: *rp.Repo(repo_kind, repo_opts),
+    id: [evt.event_id_size]u8,
+    default_target_branch: []const u8,
+) !?PatchWithId {
+    const aa = arena.allocator();
+    const id_hex = std.fmt.bytesToHex(id, .lower);
+    const fork_oid = (try fork_repo.readRef(io, fork.ref)) orelse return null;
+    const moment = evt.currentMoment(.{}, fork_repo) catch return null;
+    const patch = (try evt.Patch.readById(evt.EventDB(.sha1), .sha1, moment, arena, &id)) orelse return null;
+    var revision_ready = false;
+    var target_branch = default_target_branch;
+    if (patch.event.revision) |revision| {
+        target_branch = revision.targetBranch() orelse return null;
+        const revision_id = evt.parseEventId(&revision.id) catch return null;
+        if (try evt.PatchRev.readById(evt.EventDB(.sha1), .sha1, moment, arena, &revision_id)) |record|
+            revision_ready = revision.matches(record);
+    }
+    const target_oid = if (target_branch.len != 0)
+        try target_repo.readRef(io, .{ .kind = .head, .name = target_branch })
+    else
+        null;
+    return .{
+        .id = try aa.dupe(u8, &id_hex),
+        .record = patch,
+        .author = try ui.Author.initFromEmail(admin_moment, arena, patch.author_email),
+        .draft = true,
+        .revision_ready = revision_ready,
+        .fork_oid = try aa.dupe(u8, &fork_oid),
+        .target_branch = try aa.dupe(u8, target_branch),
+        .no_changes = if (target_oid) |oid| std.mem.eql(u8, &oid, &fork_oid) else false,
+        .fork_exists = true,
     };
 }
 

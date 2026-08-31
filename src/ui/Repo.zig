@@ -51,6 +51,7 @@ pub fn init(
     // local mode); files and commits carry their remaining fields directly.
     const name_str = route.repoIdentity() orelse return error.UnexpectedRoute;
     const repo_identity = ui.RoutablePage.RepoIdentity.parse(name_str) orelse return error.NotFound;
+    const location = ui.RoutablePage.RepoLocation{ .repo = repo_identity.identity };
     // the files and commits tabs share one ref/oid: whichever the incoming route
     // names (it rides on the route's target tab), or the default branch when
     // neither tab is targeted. building both views at it keeps switching tabs
@@ -229,11 +230,11 @@ pub fn init(
                         inline else => |*opened| {
                             // local mode: bring the event db up to date with the events branch
                             if (session.local != null) try evt.consume(.repo, repo_kind, opened.self_repo_opts, io, gpa, opened, evt.events_ref, &.{});
-                            const files_data = try Files.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, repo_identity.identity, requested_ref_or_oid, requested_ref_value, files_dir, files_line);
+                            const files_data = try Files.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, location, requested_ref_or_oid, requested_ref_value, files_dir, files_line);
                             const target_branch = if (files_data.ref_or_oid == .branch) files_data.ref_or_oid_value else "";
                             break :blk .{
                                 files_data,
-                                try Commits.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, session.haxy_moment, repo_identity.identity, requested_ref_or_oid, requested_ref_value, commits_content),
+                                try Commits.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, session.haxy_moment, location, requested_ref_or_oid, requested_ref_value, commits_content),
                                 try Refs.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, repo_identity.identity, refs_kind, refs_from),
                                 try Issues.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, issues_tag, issues_selected, issues_comment, issues_comments_start, issues_theirs, issues_view),
                                 try Patches.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, session, repo_id_maybe, repo_identity.identity, target_branch, patches_tag, patches_selected, patches_comment, patches_comments_start, patches_theirs, patches_view),
@@ -247,8 +248,8 @@ pub fn init(
         }
         const aa = arena.allocator();
         break :blk .{
-            try Files.emptyResult(aa, repo_identity.identity, requested_ref_or_oid orelse .branch, requested_ref_value, files_dir),
-            try Commits.emptyResult(aa, repo_identity.identity, requested_ref_or_oid orelse .branch, requested_ref_value, commits_content),
+            try Files.emptyResult(aa, location, requested_ref_or_oid orelse .branch, requested_ref_value, files_dir),
+            try Commits.emptyResult(aa, location, requested_ref_or_oid orelse .branch, requested_ref_value, commits_content),
             try Refs.emptyResult(arena, repo_identity.identity, refs_kind, refs_from),
             try Issues.emptyResult(aa, repo_identity.identity, issues_tag, issues_selected, issues_comment, issues_comments_start, issues_theirs, issues_view),
             try Patches.emptyResult(aa, repo_identity.identity, patches_tag, patches_selected, patches_comment, patches_comments_start, patches_theirs, patches_view),
@@ -264,7 +265,7 @@ pub fn init(
     return .{
         // files and commits resolve the same ref, so either's serves the header,
         // which points both tabs at it.
-        .header = try Header.init(arena, repo.event.name, owner_name, files.ref_or_oid, files.ref_or_oid_value, issues_tag, patches_tag, discussions_tag),
+        .header = try Header.init(arena, repo.event.name, owner_name, files.ref_or_oid, files.ref_or_oid_value, issues.tag, patches.tag, discussions.tag),
         .repo = repo,
         .files = files,
         .commits = commits,

@@ -355,6 +355,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
     const has_status = @hasField(Event, "status");
     const supports_conflicts = Event.merge_policy == .field_conflicts;
     const supports_drafts = @hasField(Self, "drafts");
+    const supports_forks = @hasField(Entry, "fork_exists");
     const FieldConflict = if (supports_conflicts) Data.FieldConflict else void;
     const ViewKind = Data.ViewKind;
     const thread_name = Data.thread_name;
@@ -373,6 +374,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         title_id: [view_count]?usize,
         description_id: [view_count]?usize,
         author_id: [view_count]?usize,
+        detail_only: bool,
 
         const header_index: usize = 0;
         const stack_index: usize = 1;
@@ -432,6 +434,10 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             return if (supports_drafts) entry.draft else false;
         }
 
+        fn entryHasFork(entry: Entry) bool {
+            return if (supports_forks) entry.fork_exists else false;
+        }
+
         const StatusChange = struct {
             action: []const u8,
             status: Status,
@@ -456,6 +462,10 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
 
         fn draftsRoute(identity: []const u8) ?ui.RoutablePage {
             return if (supports_drafts) Data.draftsRoute(identity) else null;
+        }
+
+        fn forkRoute(identity: []const u8, id: []const u8) ?ui.RoutablePage {
+            return if (supports_forks) Data.forkRoute(identity, id) else null;
         }
 
         fn conflictsRoute(identity: []const u8, selected: []const u8) ?ui.RoutablePage {
@@ -659,7 +669,20 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 .title_id = @splat(null),
                 .description_id = @splat(null),
                 .author_id = @splat(null),
+                .detail_only = false,
             };
+        }
+
+        // build the selected thread's existing detail pane without its list or
+        // thread-page header, for pages that provide their own surrounding UI.
+        pub fn initDetail(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !This {
+            var self = try init(allocator, data, session);
+            errdefer self.deinit(allocator);
+            self.detail_only = true;
+            self.box.getFocus().child_id = self.box.children.keys()[stack_index];
+            const index = self.selectedSplitIndex() orelse return error.NotFound;
+            self.resultsBox(index).getFocus().child_id = self.resultsBox(index).children.keys()[detail_index];
+            return self;
         }
 
         // the master-detail split showing `status`'s window, or the conflicts
@@ -1206,16 +1229,24 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 // beside it. the box drops the detail when the width can't hold
                 // both minimums, so when it's that narrow we lift the cap and let
                 // the list fill the whole width.
-                const both_panes_fit = if (constraint.max_size.width) |w| w >= list_max_width + detail_min_width else true;
-                self.resultsBox(i).children.values()[list_index].max_size = if (both_panes_fit) .{ .width = list_max_width, .height = null } else null;
-
-                // stretch the detail pane across the rest of the width so it fills
-                // the area rather than shrinking to its content; its scroll fills
-                // the pane.
-                if (constraint.max_size.width) |w| {
-                    self.resultsBox(i).children.values()[detail_index].min_size = .{ .width = if (both_panes_fit) w - list_max_width else w, .height = null };
+                if (self.detail_only) {
+                    self.box.children.values()[header_index].min_size = .{ .width = null, .height = 0 };
+                    self.box.children.values()[header_index].max_size = .{ .width = null, .height = 0 };
+                    self.resultsBox(i).children.values()[list_index].min_size = .{ .width = 0, .height = null };
+                    self.resultsBox(i).children.values()[list_index].max_size = .{ .width = 0, .height = null };
+                    self.resultsBox(i).children.values()[detail_index].min_size = .{ .width = constraint.max_size.width, .height = null };
                 } else {
-                    self.resultsBox(i).children.values()[detail_index].min_size = .{ .width = detail_min_width, .height = null };
+                    const both_panes_fit = if (constraint.max_size.width) |w| w >= list_max_width + detail_min_width else true;
+                    self.resultsBox(i).children.values()[list_index].max_size = if (both_panes_fit) .{ .width = list_max_width, .height = null } else null;
+
+                    // stretch the detail pane across the rest of the width so it fills
+                    // the area rather than shrinking to its content; its scroll fills
+                    // the pane.
+                    if (constraint.max_size.width) |w| {
+                        self.resultsBox(i).children.values()[detail_index].min_size = .{ .width = if (both_panes_fit) w - list_max_width else w, .height = null };
+                    } else {
+                        self.resultsBox(i).children.values()[detail_index].min_size = .{ .width = detail_min_width, .height = null };
+                    }
                 }
             }
 
@@ -1258,6 +1289,11 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 const row = self.toolRow(index);
                 const pa = self.session.page_arena.allocator();
 
+                if (entryHasFork(entry) and self.session.data.current_page.parent() != .fork) {
+                    const route = forkRoute(self.data.identity, entry.id) orelse return error.RouteTooLong;
+                    try addToolButton(allocator, row, "view fork", try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}));
+                }
+
                 {
                     var spacer = try Spacer.init(allocator);
                     errdefer spacer.deinit(allocator);
@@ -1276,8 +1312,6 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                         const remove_route = ui.RoutablePage.repoThreadRemoveRoute(kind, self.data.identity, entry.id, "") orelse return error.RouteTooLong;
                         try addToolButton(allocator, row, "✕", try std.fmt.allocPrint(pa, "a:{s}", .{try remove_route.toUrl(self.session.page_arena)}));
                     }
-                    if (row.children.count() > first_in_row_index)
-                        row.getFocus().child_id = row.children.keys()[first_in_row_index];
                 } else {
                     // a terminal has no file picker, so attaching is web only. the
                     // renderer covers this button with a file input, so clicking it
@@ -1320,11 +1354,12 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                         const route = ui.RoutablePage.repoThreadRemoveRoute(kind, self.data.identity, entry.id, "") orelse return error.RouteTooLong;
                         try addToolButton(allocator, row, "✕", try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}));
                     }
+                }
 
-                    // the leftmost button: the attachment button when the session has
-                    // one, else the resolve button on a conflicted thread, the
-                    // open/close button when present, the edit button otherwise
-                    row.getFocus().child_id = row.children.keys()[first_in_row_index];
+                for (row.children.keys(), row.children.values()) |id, *child| {
+                    if (!child.widget.getFocus().focusable) continue;
+                    row.getFocus().child_id = id;
+                    break;
                 }
             }
 
@@ -1656,8 +1691,24 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 else => false,
             };
             switch (key) {
-                .arrow_left => if (cur > first_in_row_index) root_focus.setFocus(row.children.keys()[cur - 1]) else self.focusList(index, root_focus),
-                .arrow_right => if (cur + 1 < row.children.count()) root_focus.setFocus(row.children.keys()[cur + 1]),
+                .arrow_left => {
+                    var previous = cur;
+                    while (previous > 0) {
+                        previous -= 1;
+                        if (!row.children.values()[previous].widget.getFocus().focusable) continue;
+                        root_focus.setFocus(row.children.keys()[previous]);
+                        return;
+                    }
+                    self.focusList(index, root_focus);
+                },
+                .arrow_right => {
+                    var next = cur + 1;
+                    while (next < row.children.count()) : (next += 1) {
+                        if (!row.children.values()[next].widget.getFocus().focusable) continue;
+                        root_focus.setFocus(row.children.keys()[next]);
+                        return;
+                    }
+                },
                 .arrow_up => self.focusHeader(root_focus),
                 .arrow_down => _ = self.moveDetailVertical(index, root_focus, true),
                 .enter => if (on_primary) try self.primaryAction(allocator, index),
@@ -2424,9 +2475,6 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             }
         }
 
-        // the tool row's first child after the spacer that pushes it right
-        const first_in_row_index: usize = 1;
-
         fn toolRowFocused(self: *This, index: usize, root_focus: *Focus) bool {
             return self.focusedDetailChild(index, root_focus) == tool_row_index;
         }
@@ -2462,11 +2510,13 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
 
         // return to the list.
         fn focusList(self: *This, index: usize, root_focus: *Focus) void {
+            if (self.detail_only) return;
             root_focus.setFocus(self.listScroll(index).getFocus().id);
         }
 
         // cross to the header tabs above the stack.
         fn focusHeader(self: *This, root_focus: *Focus) void {
+            if (self.detail_only) return;
             root_focus.setFocus(self.box.children.keys()[header_index]);
         }
 
@@ -2480,6 +2530,17 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
 
         pub fn getFocus(self: *This) *Focus {
             return self.box.getFocus();
+        }
+
+        pub fn atTop(self: *This, root_focus: *Focus) bool {
+            if (!self.detail_only) return self.getSelectedIndex() == 0;
+            const index = self.selectedSplitIndex() orelse return false;
+            const focused = self.focusedDetailChild(index, root_focus) orelse return false;
+            for (0..self.detailInner(index).children.count()) |child_index| {
+                if (!self.detailChildFocusable(index, child_index)) continue;
+                return focused == child_index;
+            }
+            return false;
         }
 
         // for the parent's "scroll up at the top jumps to the header" check: at the

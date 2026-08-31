@@ -17,7 +17,7 @@ test "commits list next row is a cross-page link" {
     const next_oid = "2222222222222222222222222222222222222222";
 
     const data = Commits{
-        .identity = identity,
+        .location = .{ .repo = identity },
         .ref_or_oid = .object,
         .ref_or_oid_value = oid0,
         .commits = &.{

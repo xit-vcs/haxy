@@ -176,3 +176,16 @@ pub fn readByOwnerAndName(
     const repo_map = try DB.HashMap(.read_only).init(repo_cursor);
     return .{ .repo = try evt.read(Record, DB, hash_kind, arena, repo_map), .event_id = repo_id };
 }
+
+pub fn readById(
+    comptime DB: type,
+    comptime hash_kind: hash.HashKind,
+    haxy_moment: DB.HashMap(.read_only),
+    arena: *std.heap.ArenaAllocator,
+    id: []const u8,
+) !?Record {
+    const records_cursor = try haxy_moment.getCursor(hash.hashInt(hash_kind, record_map_key)) orelse return null;
+    const records = try DB.HashMap(.read_only).init(records_cursor);
+    const record_cursor = try records.getCursor(hash.hashInt(hash_kind, id)) orelse return null;
+    return try evt.read(Record, DB, hash_kind, arena, try DB.HashMap(.read_only).init(record_cursor));
+}

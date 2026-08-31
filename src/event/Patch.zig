@@ -4,6 +4,7 @@ const diff3 = @import("../diff3.zig");
 const xit = @import("xit");
 const rp = xit.repo;
 const hash = xit.hash;
+const rf = xit.ref;
 
 title: []const u8,
 description: []const u8,
@@ -32,6 +33,14 @@ pub const Revision = struct {
             std.mem.eql(u8, record.patch_oid, self.squash_oid) and
             std.mem.eql(u8, record.event.source_oid, self.source_oid) and
             std.mem.eql(u8, record.event.target_ref, self.target_ref);
+    }
+
+    pub fn targetBranch(self: Revision) ?[]const u8 {
+        const target_ref = rf.Ref.initFromPath(self.target_ref, null) orelse return null;
+        return switch (target_ref.kind) {
+            .head => target_ref.name,
+            else => null,
+        };
     }
 };
 

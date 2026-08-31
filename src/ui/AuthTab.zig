@@ -8,12 +8,6 @@ const Key = xitui.input.Key;
 const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
 
-const Self = @This();
-
-pub fn init() Self {
-    return .{};
-}
-
 pub const View = struct {
     text_box: wgt.TextBox,
     session: *ui.Session,

@@ -1161,6 +1161,12 @@ fn seedPatches(
                 .email = "admin@example.test",
             });
         }
+        if (status == .merged) {
+            try fork.remove(io, allocator, repos_path, admin_repo, &patch_hex, user_id, .{
+                .name = "admin",
+                .email = "admin@example.test",
+            });
+        }
     }
 
     // seed a small comment tree on the newest patch

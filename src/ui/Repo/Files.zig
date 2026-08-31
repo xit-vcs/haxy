@@ -40,8 +40,8 @@ pub const Entry = struct {
     loaded: bool = false,
 };
 
-// "owner/name", so the view can build /repo/owner/name/files/... links.
-identity: []const u8,
+// where links and clone commands for this repository are rooted.
+location: ui.RoutablePage.RepoLocation,
 // the resolved ref this listing is read at (the default branch when the route
 // didn't name one), so the view's directory links stay pinned to it.
 ref_or_oid: ui.RoutablePage.RefOrOid,
@@ -69,7 +69,7 @@ pub fn init(
     repo: *rp.Repo(repo_kind, repo_opts),
     io: std.Io,
     gpa: std.mem.Allocator,
-    identity: []const u8,
+    location: ui.RoutablePage.RepoLocation,
     requested_ref_or_oid: ?ui.RoutablePage.RefOrOid,
     requested_value: []const u8,
     path: []const u8,
@@ -82,18 +82,18 @@ pub fn init(
     // bad url (NotFound -> 404); the default-branch path falls through to empty.
     const resolved = (try ui.ResolvedRefOrOid(repo_kind, repo_opts).init(repo, io, aa, requested_ref_or_oid, requested_value)) orelse {
         if (requested_ref_or_oid != null) return error.NotFound;
-        return emptyResult(aa, identity, .branch, requested_value, path);
+        return emptyResult(aa, location, .branch, requested_value, path);
     };
 
     // read just the viewed directory of that commit's tree. building the
     // read-only state mirrors what repo.status does internally, but for an
     // arbitrary commit rather than HEAD. a path that doesn't exist in the tree
     // is a bad url (404).
-    var moment = repo.core.latestMoment() catch return emptyResult(aa, identity, resolved.ref_or_oid, resolved.value, path);
+    var moment = repo.core.latestMoment() catch return emptyResult(aa, location, resolved.ref_or_oid, resolved.value, path);
     const state = rp.Repo(repo_kind, repo_opts).State(.read_only){ .core = &repo.core, .extra = .{ .moment = &moment } };
     var tree_dir = tr.TreeDir(repo_kind, repo_opts).init(state, io, gpa, &resolved.oid, path) catch |err| switch (err) {
         error.TreeEntryNotFound => return error.NotFound,
-        else => return emptyResult(aa, identity, resolved.ref_or_oid, resolved.value, path),
+        else => return emptyResult(aa, location, resolved.ref_or_oid, resolved.value, path),
     };
     defer tree_dir.deinit();
 
@@ -145,7 +145,7 @@ pub fn init(
     }
 
     return .{
-        .identity = try aa.dupe(u8, identity),
+        .location = try location.dupe(aa),
         .ref_or_oid = resolved.ref_or_oid,
         .ref_or_oid_value = resolved.value,
         .dir = try aa.dupe(u8, dir),
@@ -199,9 +199,9 @@ fn readFileContent(
 }
 
 // an empty listing pinned to a ref, for the wasm / no-repo / unresolved paths.
-pub fn emptyResult(aa: std.mem.Allocator, identity: []const u8, ref_or_oid: ui.RoutablePage.RefOrOid, ref_or_oid_value: []const u8, dir: []const u8) !Self {
+pub fn emptyResult(aa: std.mem.Allocator, location: ui.RoutablePage.RepoLocation, ref_or_oid: ui.RoutablePage.RefOrOid, ref_or_oid_value: []const u8, dir: []const u8) !Self {
     return .{
-        .identity = try aa.dupe(u8, identity),
+        .location = try location.dupe(aa),
         .ref_or_oid = ref_or_oid,
         .ref_or_oid_value = try aa.dupe(u8, ref_or_oid_value),
         .dir = try aa.dupe(u8, dir),
@@ -239,7 +239,7 @@ pub const View = struct {
 
         // the ref banner at the top.
         {
-            var header_view = try Header.View.init(allocator, &data.header, session, data.identity);
+            var header_view = try Header.View.init(allocator, &data.header, session, data.location);
             errdefer header_view.deinit(allocator);
             try outer.children.put(allocator, header_view.getFocus().id, .{ .widget = .{ .repo_files_header = header_view }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
         }
@@ -561,7 +561,7 @@ pub const View = struct {
     fn addNavLink(self: *View, allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8, entry: Entry, target_start: usize) !void {
         const page_arena = self.session.page_arena;
         const path = try childDir(page_arena.allocator(), self.data.dir, entry.name);
-        const route = ui.RoutablePage.repoFilesRoute(self.data.identity, self.data.ref_or_oid, self.data.ref_or_oid_value, path, target_start) orelse return error.RouteTooLong;
+        const route = self.data.location.filesRoute(self.data.ref_or_oid, self.data.ref_or_oid_value, path, target_start) orelse return error.RouteTooLong;
         const link = try std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{try route.toUrl(page_arena)});
         var tb = try wgt.TextBox.init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
         errdefer tb.deinit(allocator);
@@ -804,7 +804,7 @@ fn selectedFileIndex(data: *const Self) ?usize {
 // an "a:" link to the files route at `path`, pinned to the listing's ref, so
 // following it navigates to that directory's listing.
 fn dirLink(page_arena: *std.heap.ArenaAllocator, data: *const Self, path: []const u8) ![]const u8 {
-    const route = ui.RoutablePage.repoFilesRoute(data.identity, data.ref_or_oid, data.ref_or_oid_value, path, 0) orelse return error.RouteTooLong;
+    const route = data.location.filesRoute(data.ref_or_oid, data.ref_or_oid_value, path, 0) orelse return error.RouteTooLong;
     return std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{try route.toUrl(page_arena)});
 }
 
@@ -813,7 +813,7 @@ fn dirLink(page_arena: *std.heap.ArenaAllocator, data: *const Self, path: []cons
 // contents); an unloaded file gets an "a:" link, so activating it reloads the
 // page with that file selected and its content read.
 fn fileLink(page_arena: *std.heap.ArenaAllocator, data: *const Self, path: []const u8, loaded: bool, line: usize) ![]const u8 {
-    const route = ui.RoutablePage.repoFilesRoute(data.identity, data.ref_or_oid, data.ref_or_oid_value, path, line) orelse return error.RouteTooLong;
+    const route = data.location.filesRoute(data.ref_or_oid, data.ref_or_oid_value, path, line) orelse return error.RouteTooLong;
     const prefix = if (loaded) "ai:" else "a:";
     return std.fmt.allocPrint(page_arena.allocator(), "{s}{s}", .{ prefix, try route.toUrl(page_arena) });
 }
@@ -851,16 +851,18 @@ pub const Header = struct {
         box: wgt.Box(ui.Widget),
         data: *const Header,
 
-        pub fn init(allocator: std.mem.Allocator, data: *const Header, session: *ui.Session, identity: []const u8) !Header.View {
+        pub fn init(allocator: std.mem.Allocator, data: *const Header, session: *ui.Session, location: ui.RoutablePage.RepoLocation) !Header.View {
             var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
             errdefer box.deinit(allocator);
 
-            if (!session.data.is_local and (session.data.git_http_port != null or session.data.git_ssh_port != null)) {
-                var clone_url = try ui.widget.CopyableText.initClone(allocator, session, identity);
-                errdefer clone_url.deinit(allocator);
-                const min_width = clone_url.minWidth();
-                box.getFocus().child_id = clone_url.getFocus().id;
-                try box.children.put(allocator, clone_url.getFocus().id, .{ .widget = .{ .copyable_text = clone_url }, .rect = null, .min_size = .{ .width = min_width, .height = 3 }, .max_size = .{ .width = min_width, .height = 3 } });
+            if (!session.data.is_local) {
+                if (try ui.widget.CopyableText.initClone(allocator, session, location)) |value| {
+                    var clone_url = value;
+                    errdefer clone_url.deinit(allocator);
+                    const min_width = clone_url.minWidth();
+                    box.getFocus().child_id = clone_url.getFocus().id;
+                    try box.children.put(allocator, clone_url.getFocus().id, .{ .widget = .{ .copyable_text = clone_url }, .rect = null, .min_size = .{ .width = min_width, .height = 3 }, .max_size = .{ .width = min_width, .height = 3 } });
+                }
             }
 
             var spacer = try ui.widget.Spacer.init(allocator);

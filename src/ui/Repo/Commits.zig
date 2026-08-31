@@ -46,8 +46,8 @@ pub const Commit = struct {
     has_more: bool,
 };
 
-// "owner/name", so the view can build /repo/owner/name/commits/... links.
-identity: []const u8,
+// where links and clone commands for this repository are rooted.
+location: ui.RoutablePage.RepoLocation,
 // the resolved ref/oid this log walks from (the default branch when the route
 // didn't name one), so the page can canonicalize its url to it.
 ref_or_oid: ui.RoutablePage.RefOrOid,
@@ -88,7 +88,7 @@ pub fn init(
     // the admin db's moment, for resolving author emails to user names (null
     // in local mode, which has no users)
     admin_moment: ?evt.AdminDB.HashMap(.read_only),
-    identity: []const u8,
+    location: ui.RoutablePage.RepoLocation,
     requested_ref_or_oid: ?ui.RoutablePage.RefOrOid,
     requested_value: []const u8,
     content: ui.RoutablePage.RepoCommitsRoute.Content,
@@ -113,7 +113,7 @@ pub fn init(
     // (NotFound -> 404); the default-branch path falls through to empty.
     const resolved = (try ui.ResolvedRefOrOid(repo_kind, repo_opts).init(repo, io, aa, requested_ref_or_oid, requested_value)) orelse {
         if (requested_ref_or_oid != null) return error.NotFound;
-        return emptyResult(aa, identity, .branch, requested_value, content);
+        return emptyResult(aa, location, .branch, requested_value, content);
     };
     var start_arr = [1][hex_len]u8{resolved.oid};
     const start_oids: []const [hex_len]u8 = start_arr[0..1];
@@ -126,7 +126,7 @@ pub fn init(
     var count: usize = 0;
     var next_start: ?[]const u8 = null;
     {
-        var iter = repo.log(io, gpa, start_oids) catch return emptyResult(aa, identity, resolved.ref_or_oid, resolved.value, content);
+        var iter = repo.log(io, gpa, start_oids) catch return emptyResult(aa, location, resolved.ref_or_oid, resolved.value, content);
         defer iter.deinit();
         while (try iter.next(gpa)) |commit_object| {
             defer commit_object.deinit();
@@ -172,7 +172,7 @@ pub fn init(
     }
 
     return .{
-        .identity = try aa.dupe(u8, identity),
+        .location = try location.dupe(aa),
         .ref_or_oid = resolved.ref_or_oid,
         .ref_or_oid_value = resolved.value,
         .commits = try aa.dupe(Commit, buf[0..count]),
@@ -183,9 +183,9 @@ pub fn init(
 }
 
 // an empty listing pinned to a ref, for the wasm / no-repo / unresolved paths.
-pub fn emptyResult(aa: std.mem.Allocator, identity: []const u8, ref_or_oid: ui.RoutablePage.RefOrOid, value: []const u8, content: ui.RoutablePage.RepoCommitsRoute.Content) !Self {
+pub fn emptyResult(aa: std.mem.Allocator, location: ui.RoutablePage.RepoLocation, ref_or_oid: ui.RoutablePage.RefOrOid, value: []const u8, content: ui.RoutablePage.RepoCommitsRoute.Content) !Self {
     return .{
-        .identity = try aa.dupe(u8, identity),
+        .location = try location.dupe(aa),
         .ref_or_oid = ref_or_oid,
         .ref_or_oid_value = try aa.dupe(u8, value),
         .commits = &.{},
@@ -429,7 +429,7 @@ pub const View = struct {
 
         // the ref banner at the top.
         {
-            var header_view = try Header.View.init(allocator, &data.header, session, data.identity);
+            var header_view = try Header.View.init(allocator, &data.header, session, data.location);
             errdefer header_view.deinit(allocator);
             try outer.children.put(allocator, header_view.getFocus().id, .{ .widget = .{ .repo_commits_header = header_view }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
         }
@@ -447,10 +447,10 @@ pub const View = struct {
                     // js off (the browser follows it, rooting the list there);
                     // with wasm the click just selects it and swaps the diff pane.
                     const content = if (index == 0) data.content else Content{ .diff = .{} };
-                    try addRow(allocator, &list_box, firstLine(commit.message), try commitRowLink(session.page_arena, data.identity, commit, content));
+                    try addRow(allocator, &list_box, firstLine(commit.message), try commitRowLink(session.page_arena, data.location, commit, content));
                 }
                 if (data.next_start) |next| {
-                    try addRow(allocator, &list_box, "next →", try commitsLink(session.page_arena, data.identity, next, 0, ""));
+                    try addRow(allocator, &list_box, "next →", try commitsLink(session.page_arena, data.location, next, 0, ""));
                 }
                 if (list_box.children.count() > 0) list_box.getFocus().child_id = list_box.children.keys()[0];
                 break :blk try wgt.Scroll(ui.Widget).init(allocator, .{ .box = list_box }, .{ .direction = .vert, .web_native = !session.is_terminal, .fill = true });
@@ -522,7 +522,7 @@ pub const View = struct {
     // links to this page filtered to that file, so activating it navigates
     // there.
     fn addPathBox(self: *View, allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), path: []const u8, oid: []const u8) !void {
-        const link = try commitsLink(self.session.page_arena, self.data.identity, oid, 0, path);
+        const link = try commitsLink(self.session.page_arena, self.data.location, oid, 0, path);
         var tb = try wgt.TextBox.init(allocator, path, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
         errdefer tb.deinit(allocator);
         tb.getFocus().focusable = true;
@@ -534,7 +534,7 @@ pub const View = struct {
     // commit's route at `target_start`, so activating it (the host follows the
     // "a:" link) reloads the page on the adjacent window — same on TUI and web.
     fn addNavLink(self: *View, allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8, oid: []const u8, target_start: usize, path: []const u8) !void {
-        const link = try commitsLink(self.session.page_arena, self.data.identity, oid, target_start, path);
+        const link = try commitsLink(self.session.page_arena, self.data.location, oid, target_start, path);
         var tb = try wgt.TextBox.init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
         errdefer tb.deinit(allocator);
         tb.getFocus().focusable = true;
@@ -545,7 +545,7 @@ pub const View = struct {
     // a focusable row for the top of the diff pane linking to the files tab at
     // this commit's tree, so its files are always viewable as of this object.
     fn addViewFilesLink(self: *View, allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), oid: []const u8) !void {
-        const link = try filesObjectLink(self.session.page_arena, self.data.identity, oid);
+        const link = try filesObjectLink(self.session.page_arena, self.data.location, oid);
         var tb = try wgt.TextBox.init(allocator, "view files at this commit", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
         errdefer tb.deinit(allocator);
         tb.getFocus().focusable = true;
@@ -565,7 +565,7 @@ pub const View = struct {
         const cut_short = commit.message_truncated and kind == .preview;
         var tb = try messageBox(allocator, commit.message, if (cut_short) " click or press enter to see more " else "");
         errdefer tb.deinit(allocator);
-        if (cut_short) tb.getFocus().kind = .{ .custom = try messageLink(self.session.page_arena, self.data.identity, commit.oid) };
+        if (cut_short) tb.getFocus().kind = .{ .custom = try messageLink(self.session.page_arena, self.data.location, commit.oid) };
         try box.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
     }
 
@@ -770,7 +770,7 @@ pub const View = struct {
             .enter => if (self.selectedCommitIndex() != null)
                 try self.focusDiff(root_focus)
             else if (self.data.next_start) |next| {
-                if (ui.RoutablePage.repoCommitsRoute(self.data.identity, .object, next, 0, "")) |route|
+                if (self.data.location.commitsRoute(.object, next, 0, "")) |route|
                     try self.session.navigate(route);
             },
             .arrow_right => try self.focusDiff(root_focus),
@@ -953,36 +953,36 @@ pub const View = struct {
 };
 
 // the "a:" navigation link for the commits page walking from commit `oid` within
-// `identity`, windowing the selected commit's diff from hunk `start`, filtered
+// `location`, windowing the selected commit's diff from hunk `start`, filtered
 // to `path` ("" = every file).
-fn commitsLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, oid: []const u8, start: usize, path: []const u8) ![]const u8 {
-    const route = ui.RoutablePage.repoCommitsRoute(identity, .object, oid, start, path) orelse return error.RouteTooLong;
+fn commitsLink(page_arena: *std.heap.ArenaAllocator, location: ui.RoutablePage.RepoLocation, oid: []const u8, start: usize, path: []const u8) ![]const u8 {
+    const route = location.commitsRoute(.object, oid, start, path) orelse return error.RouteTooLong;
     const url = try route.toUrl(page_arena);
     return std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{url});
 }
 
 // the "a:" link to the files tab at commit `oid` (an object ref), at its root
-// directory, within `identity` ("owner/name").
-fn filesObjectLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, oid: []const u8) ![]const u8 {
-    const route = ui.RoutablePage.repoFilesRoute(identity, .object, oid, "", 0) orelse return error.RouteTooLong;
+// directory, within `location`.
+fn filesObjectLink(page_arena: *std.heap.ArenaAllocator, location: ui.RoutablePage.RepoLocation, oid: []const u8) ![]const u8 {
+    const route = location.filesRoute(.object, oid, "", 0) orelse return error.RouteTooLong;
     const url = try route.toUrl(page_arena);
     return std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{url});
 }
 
 // the in-page "ai:" anchor for selecting a commit with its current pane content
 // and window. the href is only followed with js off.
-fn commitRowLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, commit: Commit, content: Content) ![]const u8 {
+fn commitRowLink(page_arena: *std.heap.ArenaAllocator, location: ui.RoutablePage.RepoLocation, commit: Commit, content: Content) ![]const u8 {
     const route = (switch (content) {
-        .message => ui.RoutablePage.repoCommitMessageRoute(identity, .object, commit.oid),
-        .diff => |diff| ui.RoutablePage.repoCommitsRoute(identity, .object, commit.oid, commit.window_start, diff.path),
+        .message => location.commitMessageRoute(.object, commit.oid),
+        .diff => |diff| location.commitsRoute(.object, commit.oid, commit.window_start, diff.path),
     }) orelse return error.RouteTooLong;
     const url = try route.toUrl(page_arena);
     return std.fmt.allocPrint(page_arena.allocator(), "ai:{s}", .{url});
 }
 
 // the "a:" link to the page showing `oid`'s message on its own.
-fn messageLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, oid: []const u8) ![]const u8 {
-    const route = ui.RoutablePage.repoCommitMessageRoute(identity, .object, oid) orelse return error.RouteTooLong;
+fn messageLink(page_arena: *std.heap.ArenaAllocator, location: ui.RoutablePage.RepoLocation, oid: []const u8) ![]const u8 {
+    const route = location.commitMessageRoute(.object, oid) orelse return error.RouteTooLong;
     const url = try route.toUrl(page_arena);
     return std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{url});
 }
@@ -1003,16 +1003,18 @@ pub const Header = struct {
         box: wgt.Box(ui.Widget),
         data: *const Header,
 
-        pub fn init(allocator: std.mem.Allocator, data: *const Header, session: *ui.Session, identity: []const u8) !Header.View {
+        pub fn init(allocator: std.mem.Allocator, data: *const Header, session: *ui.Session, location: ui.RoutablePage.RepoLocation) !Header.View {
             var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
             errdefer box.deinit(allocator);
 
-            if (!session.data.is_local and (session.data.git_http_port != null or session.data.git_ssh_port != null)) {
-                var clone_url = try ui.widget.CopyableText.initClone(allocator, session, identity);
-                errdefer clone_url.deinit(allocator);
-                const min_width = clone_url.minWidth();
-                box.getFocus().child_id = clone_url.getFocus().id;
-                try box.children.put(allocator, clone_url.getFocus().id, .{ .widget = .{ .copyable_text = clone_url }, .rect = null, .min_size = .{ .width = min_width, .height = 3 }, .max_size = .{ .width = min_width, .height = 3 } });
+            if (!session.data.is_local) {
+                if (try ui.widget.CopyableText.initClone(allocator, session, location)) |value| {
+                    var clone_url = value;
+                    errdefer clone_url.deinit(allocator);
+                    const min_width = clone_url.minWidth();
+                    box.getFocus().child_id = clone_url.getFocus().id;
+                    try box.children.put(allocator, clone_url.getFocus().id, .{ .widget = .{ .copyable_text = clone_url }, .rect = null, .min_size = .{ .width = min_width, .height = 3 }, .max_size = .{ .width = min_width, .height = 3 } });
+                }
             }
 
             var spacer = try ui.widget.Spacer.init(allocator);

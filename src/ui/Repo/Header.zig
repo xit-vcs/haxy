@@ -18,7 +18,6 @@ const Array = ui.RoutablePage.Array(ui.RoutablePage.repo_route_max_len);
 name: []const u8,
 owner_name: []const u8,
 title: ui.Title,
-auth_tab: AuthTab,
 // the ref/oid this page is viewing, so the files and commits tabs both link to
 // it (switching tabs keeps the same ref). the value is url-encoded.
 ref_or_oid: RefOrOid,
@@ -36,7 +35,6 @@ pub fn init(arena: *std.heap.ArenaAllocator, name: []const u8, owner_name: []con
         .name = name,
         .owner_name = owner_name,
         .title = try ui.Title.init(arena, name),
-        .auth_tab = AuthTab.init(),
         .ref_or_oid = ref_or_oid,
         .ref_or_oid_value = ref_or_oid_value,
         .issues_tag = issues_tag,
@@ -47,7 +45,6 @@ pub fn init(arena: *std.heap.ArenaAllocator, name: []const u8, owner_name: []con
 
 pub const View = struct {
     scroll: wgt.Scroll(ui.Widget),
-    data: *const Self,
     tab_ids: std.AutoArrayHashMapUnmanaged(usize, void),
     tabs_id: usize,
     first_group_width: usize,
@@ -338,7 +335,6 @@ pub const View = struct {
 
         return .{
             .scroll = try wgt.Scroll(ui.Widget).init(allocator, .{ .box = box }, .{ .direction = .horiz, .show_bar = false, .web_native = !session.is_terminal }),
-            .data = data,
             .tab_ids = tab_ids,
             .tabs_id = tabs_id,
             .first_group_width = first_group_width,

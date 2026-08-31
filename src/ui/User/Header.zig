@@ -13,7 +13,6 @@ pub const AuthTab = @import("./../AuthTab.zig");
 
 name: []const u8,
 title: ui.Title,
-auth_tab: AuthTab,
 
 const Self = @This();
 
@@ -21,7 +20,6 @@ pub fn init(arena: *std.heap.ArenaAllocator, name: []const u8) !Self {
     return .{
         .name = name,
         .title = try ui.Title.init(arena, name),
-        .auth_tab = AuthTab.init(),
     };
 }
 
