@@ -17,6 +17,17 @@ pub const PublishInput = struct {
     timestamp: u64,
 };
 
+pub const EditDraftInput = struct {
+    id: [evt.event_id_size * 2]u8,
+    user_id: [evt.event_id_size]u8,
+    repo_id: [evt.event_id_size]u8,
+    title: []const u8,
+    tags: []const u8,
+    description: []const u8,
+    author: evt.CommitAuthor,
+    timestamp: u64,
+};
+
 pub const MergeRevision = enum { squash, source };
 
 pub const MergeInput = struct {
@@ -32,7 +43,7 @@ pub fn publish(
     allocator: std.mem.Allocator,
     admin_repo: *rp.Repo(.xit, evt.admin_repo_opts),
     target_repo: *rp.Repo(.xit, repo_opts),
-    path: []const u8,
+    fork_path: []const u8,
     input: PublishInput,
 ) !void {
     const patch_id = try evt.parseEventId(&input.id);
@@ -49,7 +60,7 @@ pub fn publish(
         !std.mem.eql(u8, user.event.name, input.author.name) or
         !std.mem.eql(u8, user.event.email, input.author.email)) return error.InvalidPatchDraft;
 
-    var fork_repo = rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = path }) catch return error.PatchDataUnavailable;
+    var fork_repo = rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = fork_path }) catch return error.PatchDataUnavailable;
     defer fork_repo.deinit(io, allocator);
     const fork_moment = evt.currentMoment(repo_opts, &fork_repo) catch return error.PatchDataUnavailable;
     const local_patch = (try evt.Patch.readById(evt.EventDB(repo_opts.hash), repo_opts.hash, fork_moment, &arena, &patch_id)) orelse return error.PatchDataUnavailable;
@@ -101,6 +112,49 @@ pub fn publish(
             .event = .{ .fork = published },
         }});
     }
+}
+
+pub fn editDraft(
+    comptime repo_opts: rp.RepoOpts(.xit),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    admin_repo: *rp.Repo(.xit, evt.admin_repo_opts),
+    fork_path: []const u8,
+    input: EditDraftInput,
+) !bool {
+    if (!evt.Patch.fieldsValid(input.title, input.tags)) return error.InvalidFields;
+    const patch_id = try evt.parseEventId(&input.id);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const admin_moment = try evt.currentMoment(evt.admin_repo_opts, admin_repo);
+    const fork_record = (try evt.Fork.readById(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &arena, &patch_id)) orelse return false;
+    if (fork_record.event.stage != .draft) return false;
+    if (fork_record.removed or
+        !std.mem.eql(u8, fork_record.event.user_id, &input.user_id) or
+        !std.mem.eql(u8, fork_record.event.repo_id, &input.repo_id)) return error.InvalidPatchDraft;
+    const user = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &arena, &input.user_id)) orelse return error.InvalidPatchDraft;
+    if (user.removed or
+        !std.mem.eql(u8, user.event.name, input.author.name) or
+        !std.mem.eql(u8, user.event.email, input.author.email)) return error.InvalidPatchDraft;
+
+    var fork_repo = rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = fork_path, .require_repo_root = true }) catch return error.PatchDataUnavailable;
+    defer fork_repo.deinit(io, allocator);
+    const fork_moment = evt.currentMoment(repo_opts, &fork_repo) catch return error.PatchDataUnavailable;
+    const record = (try evt.Patch.readById(evt.EventDB(repo_opts.hash), repo_opts.hash, fork_moment, &arena, &patch_id)) orelse return error.PatchDataUnavailable;
+    if (record.removed) return error.PatchDataUnavailable;
+
+    var patch = record.event;
+    patch.title = input.title;
+    patch.tags = input.tags;
+    patch.description = input.description;
+    try evt.consume(.fork, .xit, repo_opts, io, allocator, &fork_repo, evt.events_ref, &.{.{
+        .id = input.id,
+        .timestamp = input.timestamp,
+        .author = input.author,
+        .event = .{ .patch = patch },
+    }});
+    return true;
 }
 
 // merge the selected patch revision into its target branch

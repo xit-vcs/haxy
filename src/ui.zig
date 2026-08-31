@@ -1467,6 +1467,14 @@ pub const Session = struct {
         }
     }
 
+    pub fn userId(self: *const Self) ?[evt.event_id_size]u8 {
+        const bytes = self.data.user_id orelse return null;
+        if (bytes.len != evt.event_id_size) return null;
+        var id: [evt.event_id_size]u8 = undefined;
+        @memcpy(&id, bytes);
+        return id;
+    }
+
     // the commit author for an event this session creates, or null when it may
     // not create one
     pub fn eventAuthor(self: *Self) !?evt.CommitAuthor {

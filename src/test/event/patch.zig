@@ -648,6 +648,21 @@ fn patchLifecycle(temp_dir_name: []const u8, merge_revision: pch.MergeRevision) 
     try std.testing.expectError(error.NotFound, evt.currentMoment(repo_opts, &target));
 
     //
+    // edit the patch metadata in the fork
+    //
+
+    try std.testing.expect(try pch.editDraft(repo_opts, io, allocator, &admin, draft_path, .{
+        .id = patch_id_hex,
+        .user_id = user_id,
+        .repo_id = repo_id,
+        .title = "explain the answer",
+        .tags = "enhancement documentation",
+        .description = "adds and explains a reusable answer constant",
+        .author = author,
+        .timestamp = 4,
+    }));
+
+    //
     // publish the metadata and revision pointer
     //
 
@@ -656,20 +671,21 @@ fn patchLifecycle(temp_dir_name: []const u8, merge_revision: pch.MergeRevision) 
         .user_id = user_id,
         .repo_id = repo_id,
         .author = author,
-        .timestamp = 3,
+        .timestamp = 5,
     });
     try pch.publish(repo_opts, io, allocator, &admin, &target, draft_path, .{
         .id = patch_id_hex,
         .user_id = user_id,
         .repo_id = repo_id,
         .author = author,
-        .timestamp = 4,
+        .timestamp = 6,
     });
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const moment = try evt.currentMoment(repo_opts, &target);
     const patch = (try evt.Patch.readById(Repo.DB, repo_opts.hash, moment, &arena, &patch_id)) orelse return error.NotFound;
+    try std.testing.expectEqualStrings("explain the answer", patch.event.title);
     try std.testing.expectEqualStrings(&first_patchrev_hex, &(patch.event.revision orelse return error.NotFound).id);
     try std.testing.expectEqual(.open, patch.event.status);
     try std.testing.expectEqual(null, try evt.PatchRev.readById(Repo.DB, repo_opts.hash, moment, &arena, &first_patchrev_id));

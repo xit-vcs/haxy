@@ -1271,8 +1271,10 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                         try addToolButton(allocator, row, "publish", "submit");
                     }
                     if (self.session.data.user_id != null) {
-                        const route = ui.RoutablePage.repoThreadRemoveRoute(kind, self.data.identity, entry.id, "") orelse return error.RouteTooLong;
-                        try addToolButton(allocator, row, "✕", try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}));
+                        const edit_route = ui.RoutablePage.repoThreadEditRoute(kind, self.data.identity, entry.id) orelse return error.RouteTooLong;
+                        try addToolButton(allocator, row, "edit", try std.fmt.allocPrint(pa, "a:{s}", .{try edit_route.toUrl(self.session.page_arena)}));
+                        const remove_route = ui.RoutablePage.repoThreadRemoveRoute(kind, self.data.identity, entry.id, "") orelse return error.RouteTooLong;
+                        try addToolButton(allocator, row, "✕", try std.fmt.allocPrint(pa, "a:{s}", .{try remove_route.toUrl(self.session.page_arena)}));
                     }
                     if (row.children.count() > first_in_row_index)
                         row.getFocus().child_id = row.children.keys()[first_in_row_index];
@@ -2278,9 +2280,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         fn submitEditedThread(self: *This, allocator: std.mem.Allocator) !void {
             if (comptime wasm) return;
             const io = self.session.io orelse return;
-            const src = self.data.repo_source orelse return;
             const entry = self.data.selectedThread() orelse return;
-            const author = (try self.session.eventAuthor()) orelse return;
 
             const form = self.threadForm() orelse return;
             const title_input = &form.children.values()[title_field_index].widget.text_input;
@@ -2296,7 +2296,18 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
 
             if (!Event.fieldsValid(title, tags)) return;
 
+            if (comptime supports_drafts) {
+                if (entryDraft(entry.*)) {
+                    try self.data.editDraft(self.session, allocator, entry.id, title, tags, description);
+                    const route = listRoute(self.data.identity, entryStatus(entry.*), "", entry.id) orelse return;
+                    try self.session.navigate(route);
+                    return;
+                }
+            }
+
             const id_bytes = try evt.parseEventId(entry.id);
+            const src = self.data.repo_source orelse return;
+            const author = (try self.session.eventAuthor()) orelse return;
 
             switch (src.repo_kind) {
                 inline else => |repo_kind| {

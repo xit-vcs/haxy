@@ -159,16 +159,13 @@ pub fn createDraft(
     const io = session.io orelse return error.NotFound;
     const repos_dir = session.repos_dir orelse return error.NotFound;
     const admin_repo = session.admin_repo orelse return error.NotFound;
-    const user_id_slice = session.data.user_id orelse return error.NotFound;
-    if (user_id_slice.len != evt.event_id_size) return error.NotFound;
+    const user_id = session.userId() orelse return error.NotFound;
     const repo_id = data.repo_id orelse return error.NotFound;
     const author = (try session.eventAuthor()) orelse return error.NotFound;
     var id_bytes: [evt.event_id_size]u8 = undefined;
     io.random(&id_bytes);
     const id = std.fmt.bytesToHex(id_bytes, .lower);
-    var user_id: [evt.event_id_size]u8 = undefined;
-    @memcpy(&user_id, user_id_slice);
-    const path = try fork.create(.{}, io, allocator, repos_dir, admin_repo, .{
+    const fork_path = try fork.create(.{}, io, allocator, repos_dir, admin_repo, .{
         .id = id,
         .user_id = user_id,
         .repo_id = repo_id,
@@ -178,7 +175,7 @@ pub fn createDraft(
         .author = author,
         .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
     });
-    allocator.free(path);
+    allocator.free(fork_path);
     return id;
 }
 
@@ -188,13 +185,10 @@ pub fn publishDraft(data: *const Self, session: *ui.Session, allocator: std.mem.
     const admin_repo = session.admin_repo orelse return error.NotFound;
     const repo_source = data.repo_source orelse return error.NotFound;
     const repo_id = data.repo_id orelse return error.NotFound;
-    const user_id_slice = session.data.user_id orelse return error.NotFound;
-    if (user_id_slice.len != evt.event_id_size) return error.NotFound;
+    const user_id = session.userId() orelse return error.NotFound;
     const patch_id = evt.parseEventId(id) catch return error.NotFound;
     const author = (try session.eventAuthor()) orelse return error.NotFound;
 
-    var user_id: [evt.event_id_size]u8 = undefined;
-    @memcpy(&user_id, user_id_slice);
     const id_hex = std.fmt.bytesToHex(patch_id, .lower);
     const fork_path = try fork.forkPath(allocator, repos_dir, &id_hex);
     defer allocator.free(fork_path);
@@ -210,16 +204,45 @@ pub fn publishDraft(data: *const Self, session: *ui.Session, allocator: std.mem.
     });
 }
 
+pub fn editDraft(
+    data: *const Self,
+    session: *ui.Session,
+    allocator: std.mem.Allocator,
+    id: []const u8,
+    title: []const u8,
+    tags: []const u8,
+    description: []const u8,
+) !void {
+    const io = session.io orelse return error.NotFound;
+    const repos_dir = session.repos_dir orelse return error.NotFound;
+    const admin_repo = session.admin_repo orelse return error.NotFound;
+    const repo_id = data.repo_id orelse return error.NotFound;
+    const user_id = session.userId() orelse return error.NotFound;
+    const patch_id = evt.parseEventId(id) catch return error.NotFound;
+    const author = (try session.eventAuthor()) orelse return error.NotFound;
+
+    const id_hex = std.fmt.bytesToHex(patch_id, .lower);
+    const fork_path = try fork.forkPath(allocator, repos_dir, &id_hex);
+    defer allocator.free(fork_path);
+    if (!try pch.editDraft(.{}, io, allocator, admin_repo, fork_path, .{
+        .id = id_hex,
+        .user_id = user_id,
+        .repo_id = repo_id,
+        .title = title,
+        .tags = tags,
+        .description = description,
+        .author = author,
+        .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
+    })) return error.NotFound;
+}
+
 pub fn removeDraft(session: *ui.Session, allocator: std.mem.Allocator, id: *const [evt.event_id_size]u8) !void {
     const io = session.io orelse return error.NotFound;
     const repos_dir = session.repos_dir orelse return error.NotFound;
     const admin_repo = session.admin_repo orelse return error.NotFound;
-    const user_id_slice = session.data.user_id orelse return error.NotFound;
-    if (user_id_slice.len != evt.event_id_size) return error.NotFound;
+    const user_id = session.userId() orelse return error.NotFound;
     const author = (try session.eventAuthor()) orelse return error.NotFound;
 
-    var user_id: [evt.event_id_size]u8 = undefined;
-    @memcpy(&user_id, user_id_slice);
     const id_hex = std.fmt.bytesToHex(id.*, .lower);
     try fork.remove(io, allocator, repos_dir, admin_repo, &id_hex, &user_id, author);
 }
@@ -330,7 +353,7 @@ pub fn init(
         }
     };
     empty.drafts = drafts_window;
-    if (draft_selected and view != .remove) empty.view = .drafts;
+    if (draft_selected and view != .edit and view != .remove) empty.view = .drafts;
 
     // an explicitly named published patch that doesn't exist is a bad url
     // (NotFound -> 404); drafts, tags, and bare routes can use the empty fallback.
