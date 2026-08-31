@@ -564,7 +564,7 @@ pub const RoutablePage = union(enum) {
         } };
     }
 
-    pub fn repoPatchesRoute(identity: []const u8, status: evt.Patch.Status, tag: []const u8, selected: []const u8) ?RoutablePage {
+    pub fn repoPatchesRoute(identity: []const u8, status: evt.Patch.StatusKind, tag: []const u8, selected: []const u8) ?RoutablePage {
         return .{ .repo_patches = .{
             .name = Array(repo_route_max_len).from(identity) orelse return null,
             .tag = Array(patch_tag_route_max_len).from(tag) orelse return null,
@@ -1320,7 +1320,7 @@ pub const RoutablePage = union(enum) {
                 return repoPatchesConflictsRoute(pair, params.values.get(.start) orelse "");
             }
             if (!params.only(&.{.tag})) return null;
-            if (std.meta.stringToEnum(evt.Patch.Status, view)) |status| return repoPatchesRoute(pair, status, tag_value, "");
+            if (std.meta.stringToEnum(evt.Patch.StatusKind, view)) |status| return repoPatchesRoute(pair, status, tag_value, "");
             if (std.mem.eql(u8, view, "tags")) return repoThreadTagsRoute(.patch, pair, tag_value);
             if (std.mem.eql(u8, view, "new")) return if (tag_value.len == 0) repoThreadNewRoute(.patch, pair) else null;
             if (std.mem.eql(u8, view, "drafts")) return if (tag_value.len == 0) repoPatchesDraftsRoute(pair) else null;

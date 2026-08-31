@@ -794,7 +794,12 @@ fn testPushFork(
         defer arena.deinit();
         const moment = try evt.currentMoment(.{}, &target);
         const patch = (try evt.Patch.readById(evt.EventDB(.sha1), .sha1, moment, &arena, &fork_id)) orelse return error.NotFound;
-        try std.testing.expectEqual(.merged, patch.event.status);
+        try std.testing.expectEqual(.merged, patch.event.status.kind());
+        const merged_oid = switch (patch.event.status) {
+            .merged => |oid| oid,
+            else => return error.InvalidPatch,
+        };
+        try std.testing.expectEqualStrings(&second_source_oid, merged_oid);
         const imported = (try evt.PatchRev.readById(evt.EventDB(.sha1), .sha1, moment, &arena, &second_revision_id)) orelse return error.NotFound;
         try std.testing.expectEqualStrings(&second_patch_oid, imported.patch_oid);
     }

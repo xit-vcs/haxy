@@ -112,6 +112,10 @@ pub const ViewKind = ui.RoutablePage.IssuesView;
 pub const thread_name = "issue";
 pub const header_widget_name = "repo_issues_header";
 
+pub fn statusKind(event: Event) Status {
+    return event.status;
+}
+
 pub fn listRoute(identity: []const u8, status: Status, tag: []const u8, selected: []const u8) ?ui.RoutablePage {
     return ui.RoutablePage.repoIssuesRoute(identity, status, tag, selected);
 }

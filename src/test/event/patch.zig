@@ -311,7 +311,7 @@ test "patch event conflicts, stacking, and gc" {
         .{ .tree = .{ .name = "head", .oid = &source_b_tree } },
     };
     var parent_patch = updated_patch;
-    parent_patch.status = .merged;
+    parent_patch.status = .{ .merged = &source_b_oid };
     {
         try consumePatchWithRevision(.repo, io, allocator, &target, side_events_ref, patchrev_b_id, .{
             .base_oid = &base_oid,
@@ -426,7 +426,7 @@ test "patch event conflicts, stacking, and gc" {
         .event = .{ .patch = closed_child },
     }});
     var merged_child = child.event;
-    merged_child.status = .merged;
+    merged_child.status = .{ .merged = (child.event.revision orelse return error.NotFound).source_oid };
     try evt.consume(.repo, .xit, repo_opts, io, allocator, &target, status_side_ref, &.{.{
         .id = std.fmt.bytesToHex(child_id, .lower),
         .timestamp = 15,
@@ -439,7 +439,7 @@ test "patch event conflicts, stacking, and gc" {
     _ = arena.reset(.retain_capacity);
     const status_moment = try evt.currentMoment(repo_opts, &target);
     const merged_child_record = (try evt.Patch.readById(Repo.DB, repo_opts.hash, status_moment, &arena, &child_id)) orelse return error.NotFound;
-    try std.testing.expectEqual(.merged, merged_child_record.event.status);
+    try std.testing.expectEqual(.merged, merged_child_record.event.status.kind());
     try std.testing.expectEqual(0, try patchStatusCount(status_moment, .open));
     try std.testing.expectEqual(1, try patchStatusCount(status_moment, .closed));
     try std.testing.expectEqual(1, try patchStatusCount(status_moment, .merged));
@@ -467,7 +467,7 @@ test "patch event conflicts, stacking, and gc" {
             .title = "invalid merged patch",
             .description = "has no revision",
             .tags = "enhancement",
-            .status = .merged,
+            .status = .{ .merged = &base_oid },
         } },
     }}));
 
@@ -788,7 +788,12 @@ fn patchLifecycle(temp_dir_name: []const u8, merge_revision: pch.MergeRevision) 
     _ = arena.reset(.retain_capacity);
     const merged_moment = try evt.currentMoment(repo_opts, &target);
     const merged = (try evt.Patch.readById(Repo.DB, repo_opts.hash, merged_moment, &arena, &patch_id)) orelse return error.NotFound;
-    try std.testing.expectEqual(.merged, merged.event.status);
+    try std.testing.expectEqual(.merged, merged.event.status.kind());
+    const merged_oid = switch (merged.event.status) {
+        .merged => |oid| oid,
+        else => return error.InvalidPatch,
+    };
+    try std.testing.expectEqualStrings(&selected_oid, merged_oid);
     try std.testing.expect(null != try evt.PatchRev.readById(Repo.DB, repo_opts.hash, merged_moment, &arena, &first_patchrev_id));
 
     _ = arena.reset(.retain_capacity);
@@ -808,7 +813,7 @@ fn indexedForkCount(
     return try ids.count();
 }
 
-fn patchStatusCount(moment: Repo.DB.HashMap(.read_only), status: evt.Patch.Status) !u64 {
+fn patchStatusCount(moment: Repo.DB.HashMap(.read_only), status: evt.Patch.StatusKind) !u64 {
     const statuses_cursor = try moment.getCursor(hash.hashInt(repo_opts.hash, evt.Patch.status_to_id_set_key)) orelse return 0;
     const statuses = try Repo.DB.SortedMap(.read_only).init(statuses_cursor);
     const ids_cursor = try statuses.getCursor(@tagName(status)) orelse return 0;
@@ -816,7 +821,7 @@ fn patchStatusCount(moment: Repo.DB.HashMap(.read_only), status: evt.Patch.Statu
     return try ids.count();
 }
 
-fn patchTagStatusCount(moment: Repo.DB.HashMap(.read_only), tag: []const u8, status: evt.Patch.Status) !u64 {
+fn patchTagStatusCount(moment: Repo.DB.HashMap(.read_only), tag: []const u8, status: evt.Patch.StatusKind) !u64 {
     const tags_cursor = try moment.getCursor(hash.hashInt(repo_opts.hash, evt.Patch.tag_status_to_id_set_key)) orelse return 0;
     const tags = try Repo.DB.SortedMap(.read_only).init(tags_cursor);
     var key_buffer: evt.Patch.TagStatusKey = undefined;

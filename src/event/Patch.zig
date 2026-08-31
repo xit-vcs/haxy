@@ -35,6 +35,10 @@ pub const Revision = struct {
             std.mem.eql(u8, record.event.target_ref, self.target_ref);
     }
 
+    pub fn includesOid(self: Revision, oid: []const u8) bool {
+        return std.mem.eql(u8, oid, self.source_oid) or std.mem.eql(u8, oid, self.squash_oid);
+    }
+
     pub fn targetBranch(self: Revision) ?[]const u8 {
         const target_ref = rf.Ref.initFromPath(self.target_ref, null) orelse return null;
         return switch (target_ref.kind) {
@@ -53,16 +57,66 @@ pub const Record = struct {
 
 const Self = @This();
 
-pub const Status = enum {
+pub const StatusKind = enum {
     open,
     closed,
     merged,
 
     const longest_len = blk: {
         var len: usize = 0;
-        for (@typeInfo(Status).@"enum".fields) |field| len = @max(len, field.name.len);
+        for (@typeInfo(StatusKind).@"enum".fields) |field| len = @max(len, field.name.len);
         break :blk len;
     };
+};
+
+pub const Status = union(StatusKind) {
+    open,
+    closed,
+    merged: []const u8,
+
+    pub const max_encoded_len = "merged ".len + blk: {
+        var len: usize = 0;
+        for (std.enums.values(hash.HashKind)) |hash_kind| len = @max(len, hash.hexLen(hash_kind));
+        break :blk len;
+    };
+
+    pub fn kind(self: Status) StatusKind {
+        return std.meta.activeTag(self);
+    }
+
+    pub fn encode(self: Status, buffer: []u8) ![]const u8 {
+        return switch (self) {
+            .open => "open",
+            .closed => "closed",
+            .merged => |oid| try std.fmt.bufPrint(buffer, "merged {s}", .{oid}),
+        };
+    }
+
+    pub fn decode(encoded: []const u8) !Status {
+        if (std.mem.eql(u8, encoded, "open")) return .open;
+        if (std.mem.eql(u8, encoded, "closed")) return .closed;
+        const prefix = "merged ";
+        if (std.mem.startsWith(u8, encoded, prefix) and encoded.len != prefix.len) {
+            return .{ .merged = encoded[prefix.len..] };
+        }
+        return error.InvalidEnumTag;
+    }
+
+    pub fn jsonStringify(self: Status, jw: anytype) !void {
+        var buffer: [max_encoded_len]u8 = undefined;
+        try jw.write(self.encode(&buffer) catch return error.WriteFailed);
+    }
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !Status {
+        return decode(try std.json.innerParse([]const u8, allocator, source, options));
+    }
+
+    pub fn jsonParseFromValue(_: std.mem.Allocator, source: std.json.Value, _: std.json.ParseOptions) !Status {
+        return switch (source) {
+            .string => |encoded| decode(encoded),
+            else => error.UnexpectedToken,
+        };
+    }
 };
 
 pub const Resolve = struct {
@@ -73,7 +127,7 @@ pub const Resolve = struct {
 };
 
 pub const Update = union(enum) {
-    status: Status,
+    status: StatusKind,
     fields: struct { title: []const u8, tags: []const u8, description: []const u8 },
     resolve: Resolve,
 };
@@ -89,9 +143,9 @@ pub const status_to_id_set_key = "status->patch-id-set";
 pub const tag_status_to_id_set_key = "tag+status->patch-id-set";
 pub const revision_to_id_set_key = "target-ref+oid->patch-id-set";
 
-pub const TagStatusKey = [tag_max_len + 1 + Status.longest_len]u8;
+pub const TagStatusKey = [tag_max_len + 1 + StatusKind.longest_len]u8;
 
-pub fn tagStatusKey(buffer: *TagStatusKey, tag: []const u8, status: Status) ![]const u8 {
+pub fn tagStatusKey(buffer: *TagStatusKey, tag: []const u8, status: StatusKind) ![]const u8 {
     return std.fmt.bufPrint(buffer, "{s} {s}", .{ tag, @tagName(status) });
 }
 
@@ -149,11 +203,13 @@ pub fn consume(
     if (target_patch_id) |*id| {
         if (std.mem.eql(u8, id, event_id)) return error.InvalidPatch;
     }
+    const status_kind = record.event.status.kind();
 
     if (existing_maybe) |existing| {
         record.created_order = existing.created_order;
         record.author_email = existing.author_email;
-        if (existing.event.status == .merged and record.event.status != .merged) return error.PatchAlreadyMerged;
+        const existing_status_kind = existing.event.status.kind();
+        if (existing_status_kind == .merged and !evt.fieldEqual(Status, existing.event.status, record.event.status)) return error.PatchAlreadyMerged;
         if (event_oid != null) {
             if (!std.meta.eql(existing.event.target_patch_id, record.event.target_patch_id)) {
                 return error.TargetPatchChanged;
@@ -161,21 +217,27 @@ pub fn consume(
         }
     }
 
-    if (record.event.status == .merged) {
-        const id = revision_id orelse return error.InvalidPatch;
-        const selected = record.event.revision orelse return error.InvalidPatch;
-        const revision = (try evt.PatchRev.readById(DB, hash_kind, haxy_moment.readOnly(), arena, &id)) orelse return error.InvalidPatch;
-        if (!selected.matches(revision)) return error.InvalidPatch;
+    switch (record.event.status) {
+        .open, .closed => {},
+        .merged => |merged_oid| {
+            try evt.PatchRev.validateOid(hash_kind, merged_oid);
+            const id = revision_id orelse return error.InvalidPatch;
+            const selected = record.event.revision orelse return error.InvalidPatch;
+            if (!selected.includesOid(merged_oid)) return error.InvalidPatch;
+            const revision = (try evt.PatchRev.readById(DB, hash_kind, haxy_moment.readOnly(), arena, &id)) orelse return error.InvalidPatch;
+            if (!selected.matches(revision)) return error.InvalidPatch;
+        },
     }
 
     const order_key = evt.orderKeyDesc(record.created_order, event_id);
     if (existing_maybe) |existing| {
         if (event_oid != null or record.removed) _ = try conflicts.remove(&order_key);
         if (!existing.removed) {
-            const old_status = try statusSet(DB, statuses, existing.event.status);
+            const existing_status_kind = existing.event.status.kind();
+            const old_status = try statusSet(DB, statuses, existing_status_kind);
             _ = try old_status.remove(&order_key);
-            try removeFromTagSets(DB, tag_statuses, existing.event.tags, existing.event.status, &order_key);
-            if (existing.event.status != .merged) {
+            try removeFromTagSets(DB, tag_statuses, existing.event.tags, existing_status_kind, &order_key);
+            if (existing_status_kind != .merged) {
                 if (existing.event.revision) |revision| {
                     const revisions = try DB.HashMap(.read_write).init(try haxy_moment.putCursor(hash.hashInt(hash_kind, revision_to_id_set_key)));
                     for ([_][]const u8{ revision.squash_oid, revision.source_oid }, 0..) |oid, i| {
@@ -207,18 +269,18 @@ pub fn consume(
     }
 
     if (!record.removed) {
-        const status = try statusSet(DB, statuses, record.event.status);
+        const status = try statusSet(DB, statuses, status_kind);
         try status.put(&order_key);
 
         var tag_iter = tagIterator(record.event.tags);
         while (tag_iter.next()) |tag| {
             if (tag.len == 0 or tag.len > tag_max_len) continue;
             var key_buffer: TagStatusKey = undefined;
-            const set = try DB.SortedSet(.read_write).init(try tag_statuses.putCursor(try tagStatusKey(&key_buffer, tag, record.event.status)));
+            const set = try DB.SortedSet(.read_write).init(try tag_statuses.putCursor(try tagStatusKey(&key_buffer, tag, status_kind)));
             try set.put(&order_key);
         }
 
-        if (record.event.status != .merged) {
+        if (status_kind != .merged) {
             if (record.event.revision) |revision| {
                 const revisions = try DB.HashMap(.read_write).init(try haxy_moment.putCursor(hash.hashInt(hash_kind, revision_to_id_set_key)));
                 for ([_][]const u8{ revision.squash_oid, revision.source_oid }, 0..) |oid, i| {
@@ -242,11 +304,11 @@ pub fn resolveMerge(
     const revision_index = std.meta.fieldIndex(Self, "revision") orelse @compileError("Patch.revision not found");
     if (outcome[status_index] != .conflicted or outcome[revision_index] == .conflicted) return;
 
-    if (target.status == .merged and evt.fieldEqual(?Revision, target.revision, merged.revision)) {
-        merged.status = .merged;
+    if (target.status.kind() == .merged and evt.fieldEqual(?Revision, target.revision, merged.revision)) {
+        merged.status = target.status;
         outcome[status_index] = .kept;
-    } else if (parent.status == .merged and evt.fieldEqual(?Revision, parent.revision, merged.revision)) {
-        merged.status = .merged;
+    } else if (parent.status.kind() == .merged and evt.fieldEqual(?Revision, parent.revision, merged.revision)) {
+        merged.status = parent.status;
         outcome[status_index] = .parent;
     }
 }
@@ -269,8 +331,12 @@ pub fn update(
     var updated = record.event;
     switch (change) {
         .status => |status| {
-            if (updated.status == status) return;
-            updated.status = status;
+            if (updated.status.kind() == status) return;
+            updated.status = switch (status) {
+                .open => .open,
+                .closed => .closed,
+                .merged => return error.InvalidPatchStatus,
+            };
         },
         .fields => |fields| {
             updated.title = fields.title;
@@ -383,7 +449,7 @@ fn revisionKey(allocator: std.mem.Allocator, target_ref: []const u8, oid: []cons
 fn statusSet(
     comptime DB: type,
     statuses: DB.SortedMap(.read_write),
-    status: Status,
+    status: StatusKind,
 ) !DB.SortedSet(.read_write) {
     return DB.SortedSet(.read_write).init(try statuses.putCursor(@tagName(status)));
 }
@@ -392,7 +458,7 @@ fn removeFromTagSets(
     comptime DB: type,
     tag_statuses: DB.SortedMap(.read_write),
     tags: []const u8,
-    status: Status,
+    status: StatusKind,
     order_key: []const u8,
 ) !void {
     var tag_iter = tagIterator(tags);

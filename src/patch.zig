@@ -248,7 +248,7 @@ pub fn merge(
                 }
 
                 // import the revision and mark the patch merged
-                if (!try importMergedFromFork(repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, ctx.fork_repo, &ctx.patch_id, ctx.expected_patch, ctx.author, ctx.timestamp)) return error.PatchOutOfDate;
+                if (!try importMergedFromFork(repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, ctx.fork_repo, &ctx.patch_id, &ctx.merge_oid, ctx.expected_patch, ctx.author, ctx.timestamp)) return error.PatchOutOfDate;
 
                 // merge the selected commit
                 {
@@ -325,6 +325,7 @@ fn importMerged(
     allocator: std.mem.Allocator,
     repo_root_path: []const u8,
     patch_id: *const [evt.event_id_size]u8,
+    merged_oid: *const [hash.hexLen(repo_opts.hash)]u8,
 ) !void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -334,7 +335,7 @@ fn importMerged(
     var fork_repo = try rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = fork_path, .require_repo_root = true });
     defer fork_repo.deinit(io, allocator);
 
-    _ = try importMergedFromFork(repo_opts, state, db, moment, io, allocator, &fork_repo, patch_id, null, null, 0);
+    _ = try importMergedFromFork(repo_opts, state, db, moment, io, allocator, &fork_repo, patch_id, merged_oid, null, null, 0);
 }
 
 // import the revision and mark its patch merged in the current transaction
@@ -347,6 +348,7 @@ fn importMergedFromFork(
     allocator: std.mem.Allocator,
     fork_repo: *rp.Repo(.xit, repo_opts),
     patch_id: *const [evt.event_id_size]u8,
+    merged_oid: *const [hash.hexLen(repo_opts.hash)]u8,
     expected_patch: ?evt.Patch,
     merged_author: ?evt.CommitAuthor,
     merged_timestamp: u64,
@@ -358,11 +360,12 @@ fn importMergedFromFork(
     const haxy_moment = try evt.currentMomentFromRepoMoment(repo_opts.hash, moment.readOnly());
     const patch_record = (try evt.Patch.readById(DB, repo_opts.hash, haxy_moment, &arena, patch_id)) orelse return false;
     const selected = patch_record.event.revision orelse return false;
-    if (patch_record.removed or patch_record.event.status == .merged) return false;
+    if (patch_record.removed or patch_record.event.status.kind() == .merged) return false;
     if (expected_patch) |expected| {
         if (!evt.fieldEqual(evt.Patch, expected, patch_record.event)) return false;
     }
     const revision_id = try evt.parseEventId(&selected.id);
+    if (!selected.includesOid(merged_oid)) return false;
 
     const fork_moment = try evt.currentMoment(repo_opts, fork_repo);
     const revision = (try evt.PatchRev.readById(DB, repo_opts.hash, fork_moment, &arena, &revision_id)) orelse return false;
@@ -401,7 +404,7 @@ fn importMergedFromFork(
     }
 
     var patch = patch_record.event;
-    patch.status = .merged;
+    patch.status = .{ .merged = merged_oid };
     events[event_count] = .{
         .id = std.fmt.bytesToHex(patch_id.*, .lower),
         .timestamp = if (merged_author != null) merged_timestamp else @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
@@ -464,7 +467,7 @@ pub fn detectMerged(
                 var patch_id: [evt.event_id_size]u8 = undefined;
                 if ((try pair.key_cursor.readBytes(&patch_id)).len != patch_id.len) return error.InvalidPatch;
                 const patch_hex = std.fmt.bytesToHex(patch_id, .lower);
-                importMerged(repo_opts, state, db, moment, io, allocator, repo_root_path, &patch_id) catch |err| {
+                importMerged(repo_opts, state, db, moment, io, allocator, repo_root_path, &patch_id, &commit.oid) catch |err| {
                     serve_common.logError(io, error_writer, "failed to mark patch {s} as merged: {s}\n", .{ &patch_hex, @errorName(err) });
                     continue;
                 };

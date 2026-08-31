@@ -121,10 +121,14 @@ repo_id: ?[evt.event_id_size]u8 = null,
 const Self = @This();
 
 pub const Event = evt.Patch;
-pub const Status = evt.Patch.Status;
+pub const Status = evt.Patch.StatusKind;
 pub const ViewKind = ui.RoutablePage.PatchesView;
 pub const thread_name = "patch";
 pub const header_widget_name = "repo_patches_header";
+
+pub fn statusKind(event: Event) Status {
+    return event.status.kind();
+}
 
 pub fn listRoute(identity: []const u8, status: Status, tag: []const u8, selected: []const u8) ?ui.RoutablePage {
     return ui.RoutablePage.repoPatchesRoute(identity, status, tag, selected);
@@ -159,7 +163,7 @@ pub fn canMerge(entry: Entry, session: *const ui.Session) bool {
         entry.fork_exists and
         !entry.conflicted and
         entry.record.event.revision != null and
-        entry.record.event.status == .open and
+        entry.record.event.status.kind() == .open and
         !session.data.is_local and
         session.data.user_id != null;
 }
@@ -285,7 +289,7 @@ pub fn removeDraft(session: *ui.Session, allocator: std.mem.Allocator, id: *cons
 }
 
 // `status`'s windowed listing.
-pub fn window(self: *const Self, status: evt.Patch.Status) *const Window {
+pub fn window(self: *const Self, status: Status) *const Window {
     return switch (status) {
         .open => &self.open,
         .closed => &self.closed,
@@ -586,9 +590,12 @@ fn setForkDetails(
             continue;
         };
         const target_branch = revision.targetBranch() orelse continue;
-        item.fork_oid = revision.source_oid;
+        item.fork_oid = switch (item.record.event.status) {
+            .merged => |oid| oid,
+            else => revision.source_oid,
+        };
         item.target_branch = target_branch;
-        if (item.record.event.status == .merged) continue;
+        if (item.record.event.status.kind() == .merged) continue;
         const target_oid = try repo.readRef(io, .{ .kind = .head, .name = target_branch });
         item.no_changes = if (target_oid) |oid| std.mem.eql(u8, &oid, revision.source_oid) else false;
     }
@@ -711,10 +718,11 @@ pub const Header = thread.Header;
 
 pub fn appendDetails(self: *const Self, allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), session: *ui.Session, entry: Entry) !void {
     const aa = session.page_arena.allocator();
+    const status_kind = entry.record.event.status.kind();
     var fields: [2]ui.widget.CopyableText.Choice = undefined;
     var field_count: usize = 0;
 
-    if (entry.record.event.status != .merged and entry.fork_exists and entry.target_branch.len != 0) if (session.data.git_ssh_port) |port| {
+    if (status_kind != .merged and entry.fork_exists and entry.target_branch.len != 0) if (session.data.git_ssh_port) |port| {
         const url = try std.fmt.allocPrint(aa, "ssh://localhost:{d}/repo/{s}/patch:{s}/branch:{s}", .{ port, self.identity, entry.id, entry.target_branch });
         const push_command = try std.fmt.allocPrint(aa, "git push {s} HEAD:patch", .{url});
         const clone_name = try cloneDirectoryName(aa, entry.record.event.title);
@@ -752,8 +760,8 @@ pub fn appendDetails(self: *const Self, allocator: std.mem.Allocator, box: *wgt.
         fields[field_count] = .{
             .selector = "to",
             .text = entry.target_branch,
-            .label = if (entry.record.event.status == .merged) " target branch this patch was merged into " else " target branch this patch will go to ",
-            .bottom_label = if (entry.record.event.status == .merged) "" else " (set by the url you push to above) ",
+            .label = if (status_kind == .merged) " target branch this patch was merged into " else " target branch this patch will go to ",
+            .bottom_label = if (status_kind == .merged) "" else " (set by the url you push to above) ",
         };
         field_count += 1;
     }
@@ -800,7 +808,7 @@ pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *con
     const page_selected = std.meta.activeTag(session.data.current_page) == .repo_patches;
 
     // a list tab per status, labeled with its listing's patch count
-    for ([_]evt.Patch.Status{ .open, .closed, .merged }, 0..) |status, index| {
+    for ([_]Status{ .open, .closed, .merged }, 0..) |status, index| {
         const route = ui.RoutablePage.repoPatchesRoute(data.identity, status, data.tag, "") orelse return error.RouteTooLong;
         const link = try ui.inPageTabLink(session, route, page_selected and selected_index == index);
         var label_buf: [64]u8 = undefined;

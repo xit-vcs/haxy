@@ -1633,6 +1633,10 @@ pub fn read(
                         const bytes = try readBytes(DB, hash_kind, arena.allocator(), map, field.name);
                         @field(event, field.name) = std.meta.stringToEnum(field.type, bytes) orelse return error.InvalidEnumTag;
                     },
+                    .@"union" => {
+                        if (!@hasDecl(field.type, "decode")) @compileError("unsupported read field type: " ++ @typeName(field.type));
+                        @field(event, field.name) = try field.type.decode(try readBytes(DB, hash_kind, arena.allocator(), map, field.name));
+                    },
                     .optional => |optional_info| {
                         // a missing key is null
                         if (try map.getCursor(hash.hashInt(hash_kind, field.name))) |cursor| {
@@ -1709,7 +1713,14 @@ pub fn fieldEqual(comptime Field: type, a: Field, b: Field) bool {
                 @compileError("unsupported field type: " ++ @typeName(Field));
             }
         },
+        .void => return true,
         .bool, .int, .@"enum" => return a == b,
+        .@"union" => {
+            if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
+            return switch (a) {
+                inline else => |value, tag| fieldEqual(@TypeOf(value), value, @field(b, @tagName(tag))),
+            };
+        },
         .@"struct" => return fieldsEqual(Field, a, b),
         .optional => |optional_info| {
             if (a) |a_value| {
@@ -1850,6 +1861,13 @@ fn upsertField(
             try map.put(key, .{ .bytes_object = .{ .value = bytes, .format_tag = "bl".* } });
         },
         .@"enum" => try upsertBytes(DB, hash_kind, map, key, @tagName(value)),
+        .@"union" => {
+            if (!@hasDecl(Field, "encode") or !@hasDecl(Field, "max_encoded_len")) {
+                @compileError("unsupported upsert field type: " ++ @typeName(Field));
+            }
+            var buffer: [Field.max_encoded_len]u8 = undefined;
+            try upsertBytes(DB, hash_kind, map, key, try value.encode(&buffer));
+        },
         .optional => |optional_info| {
             // a missing key is null
             if (value) |child| {

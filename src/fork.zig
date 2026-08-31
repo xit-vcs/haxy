@@ -225,7 +225,7 @@ pub fn receivePack(
     if (fork_patch.removed and target_patch == null) return error.PatchDataUnavailable;
     if (target_patch) |patch| {
         if (!std.mem.eql(u8, patch.author_email orelse "", author.email)) return error.PatchDataUnavailable;
-        if (patch.event.status == .merged) return error.PatchAlreadyMerged;
+        if (patch.event.status.kind() == .merged) return error.PatchAlreadyMerged;
     }
     const published = target_patch != null;
     const title = if (target_patch) |patch| patch.event.title else fork_patch.event.title;

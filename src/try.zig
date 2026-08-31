@@ -1085,7 +1085,7 @@ fn seedPatches(
         title: []const u8,
         description: []const u8,
         tags: []const u8,
-        status: ?evt.Patch.Status,
+        status: ?evt.Patch.StatusKind,
     }{
         .{
             .title = "Draft a faster dependency scanner",

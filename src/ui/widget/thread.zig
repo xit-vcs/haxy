@@ -90,8 +90,8 @@ pub fn readConflict(
         } else if (comptime @hasField(Data.Conflict, "status")) {
             if (std.mem.eql(u8, field, "status")) {
                 conflict.status = .{
-                    .ours = .{ .text = @tagName(ours.event.status), .author = our_author },
-                    .theirs = .{ .text = @tagName(theirs.event.status), .author = their_author },
+                    .ours = .{ .text = @tagName(Data.statusKind(ours.event)), .author = our_author },
+                    .theirs = .{ .text = @tagName(Data.statusKind(theirs.event)), .author = their_author },
                 };
             } else if (std.mem.eql(u8, field, "revision")) {
                 conflict.revision = .{
@@ -433,7 +433,8 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
         }
 
         fn entryStatus(entry: Entry) Status {
-            return if (has_status) entry.record.event.status else @enumFromInt(0);
+            if (comptime has_status) return Data.statusKind(entry.record.event);
+            return @enumFromInt(0);
         }
 
         fn entryDraft(entry: Entry) bool {
@@ -1285,7 +1286,8 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         }
 
         fn entryStatus(entry: Entry) Status {
-            return if (has_status) entry.record.event.status else @enumFromInt(0);
+            if (comptime has_status) return Data.statusKind(entry.record.event);
+            return @enumFromInt(0);
         }
 
         fn entryDraft(entry: Entry) bool {
