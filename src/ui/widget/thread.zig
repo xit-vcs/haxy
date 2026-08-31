@@ -640,9 +640,9 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
             }
 
             const whole = entry.record.event.description;
-            const cut_short = !description_page and whole.len > Data.max_description_size;
-            const shown = if (cut_short)
-                std.mem.trimEnd(u8, whole[0 .. std.mem.lastIndexOfScalar(u8, whole[0..Data.max_description_size], '\n') orelse 0], " \t\r\n")
+            const preview_end = if (description_page) null else ui.detailPreviewEnd(whole);
+            const shown = if (preview_end) |end|
+                std.mem.trimEnd(u8, whole[0..end], " \t\r\n")
             else if (whole.len == 0)
                 "(no description)"
             else
@@ -652,11 +652,11 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                 .rounded_corners = true,
                 .wrap_kind = .word,
                 .label = " description ",
-                .bottom_label = if (cut_short) " click or press enter to see more " else "",
+                .bottom_label = if (preview_end != null) " click or press enter to see more " else "",
             });
             errdefer description.deinit(allocator);
             description.getFocus().focusable = true;
-            if (cut_short) {
+            if (preview_end != null) {
                 const route = ui.RoutablePage.repoThreadDescriptionRoute(kind, self.data.identity, entry.id) orelse return error.RouteTooLong;
                 description.getFocus().kind = .{ .custom = try std.fmt.allocPrint(self.session.page_arena.allocator(), "a:{s}", .{try route.toUrl(self.session.page_arena)}) };
             }
@@ -675,11 +675,13 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                     try Comment.appendCount(allocator, inner_box, entry.comments.count, "comment", "comments");
                     for (entry.comments.comments) |comment| try Comment.appendComment(allocator, inner_box, self.session, self.data.identity, kind, comment);
                     try Comment.appendWindowNav(allocator, inner_box, self.session, self.data.identity, kind, entry.id, null, entry.comments);
-
-                    var spacer = try Spacer.init(allocator);
-                    errdefer spacer.deinit(allocator);
-                    try inner_box.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null });
                 }
+            }
+
+            if (!description_page) {
+                var spacer = try Spacer.init(allocator);
+                errdefer spacer.deinit(allocator);
+                try inner_box.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null });
             }
 
             _ = self.focusFirst(null);

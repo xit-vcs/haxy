@@ -41,6 +41,18 @@ pub fn clippedBottomLabel(buffer: []u8, text: []const u8) ![]const u8 {
     return try std.fmt.bufPrint(buffer, "{s}{s}", .{ text[0..if (clipped) clipped_end else end], if (clipped) ".." else "" });
 }
 
+pub const detail_preview_lines = 50;
+
+pub fn detailPreviewEnd(text: []const u8) ?usize {
+    var lines: usize = 1;
+    for (text, 0..) |byte, i| {
+        if (byte != '\n') continue;
+        if (lines == detail_preview_lines and i + 1 < text.len) return i;
+        lines += 1;
+    }
+    return null;
+}
+
 pub const PageKind = enum {
     home,
     user,

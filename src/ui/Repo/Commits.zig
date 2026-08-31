@@ -18,11 +18,9 @@ const page_size = 20;
 // how many diff hunks one window of a commit's diff shows; "next"/"previous"
 // move to the adjacent window.
 const diff_page = 10;
-// the largest commit message a log page's detail view reads; a longer one is
-// cut here, with the message page carrying the whole thing.
-pub const max_message_size = 2 * 1024;
-// the same for the message page, which only reads the one commit.
-const max_full_message_size = 100 * 1024;
+// the largest message read even when it has fewer than the preview's line
+// limit.
+const max_message_size = 100 * 1024;
 
 pub const Hunk = struct {
     path: ?[]const u8 = null, // the file this hunk belongs to
@@ -35,7 +33,7 @@ pub const Commit = struct {
     oid: []const u8,
     date: []const u8, // "YYYY-MM-DD"
     message: []const u8, // trimmed, may be multi-line
-    // whether `message` is only the first line of a message too big to read.
+    // whether `message` is a shortened preview.
     message_truncated: bool = false,
     author: ui.Author = .unknown,
     hunks: []const Hunk,
@@ -63,8 +61,7 @@ header: Header,
 const Self = @This();
 
 // the diff and the message are alternatives, so a filtered diff can't also be
-// a message. the message is read whole, however big, since it's all its pane
-// shows.
+// a message. the message page reads up to the safety limit above.
 pub const Content = union(enum) {
     diff: struct {
         // the file the top commit's diff is filtered to ("" = every file).
@@ -136,8 +133,7 @@ pub fn init(
             }
             const md = commit_object.content.commit.metadata;
             @memcpy(&oids[count], &commit_object.oid);
-            // only the message the pane shows is read past the log's limit.
-            const text, const truncated = try readMessage(repo_kind, repo_opts, aa, commit_object, if (root_message and count == 0) max_full_message_size else max_message_size);
+            const text, const truncated = try readMessage(repo_kind, repo_opts, aa, commit_object, root_message and count == 0);
             buf[count] = .{
                 .oid = try aa.dupe(u8, &commit_object.oid),
                 .date = try formatDate(aa, md.timestamp),
@@ -344,32 +340,30 @@ fn formatDate(arena: std.mem.Allocator, timestamp: u64) ![]const u8 {
     });
 }
 
-// the commit message, trimmed and read into `aa`, plus whether it ran past
-// `limit` and was cut short there.
+// the commit message, trimmed and read into `aa`, plus whether its preview was
+// cut short.
 fn readMessage(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     aa: std.mem.Allocator,
     commit_object: *xit.object.Object(repo_kind, repo_opts),
-    limit: usize,
+    full_message: bool,
 ) !struct { []const u8, bool } {
     var message: std.ArrayList(u8) = .empty;
-    // a message past the limit keeps the bytes read so far
-    const truncated = if (commit_object.readMessage(aa, &message, .limited(limit))) |_|
+    const byte_truncated = if (commit_object.readMessage(aa, &message, .limited(max_message_size))) |_|
         false
     else |err| switch (err) {
         error.StreamTooLong => true,
         else => |e| return e,
     };
-    // the cut lands wherever the limit falls, so a truncated message keeps
-    // only its whole lines: a line break can't fall inside a codepoint, and
-    // the widgets need valid utf-8. a first line past the limit is instead
-    // cut at the last codepoint boundary.
-    const text = if (truncated)
-        (if (std.mem.lastIndexOfScalar(u8, message.items, '\n')) |nl| message.items[0..nl] else trimIncompleteCodepoint(message.items))
+    const preview_end = if (full_message) null else ui.detailPreviewEnd(message.items);
+    const text = if (preview_end) |end|
+        message.items[0..end]
+    else if (byte_truncated)
+        trimIncompleteCodepoint(message.items)
     else
         message.items;
-    return .{ std.mem.trim(u8, text, " \t\r\n"), truncated };
+    return .{ std.mem.trim(u8, text, " \t\r\n"), byte_truncated or preview_end != null };
 }
 
 /// drop any incomplete UTF data from the end of a byte array

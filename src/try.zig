@@ -371,8 +371,7 @@ pub fn main(init: std.process.Init) !void {
                 // the newest commit's message runs past what the detail pane
                 // reads, so it shows the truncated message and its link.
                 if (c == commit_count - 1) {
-                    var line: usize = 0;
-                    while (msg_writer.written().len <= ui.Repo.Commits.max_message_size) : (line += 1) {
+                    for (0..ui.detail_preview_lines) |line| {
                         try msg_writer.writer.print("\n{d} {s}", .{ line, scatter_words[line % scatter_words.len] });
                     }
                 }
@@ -572,16 +571,10 @@ pub fn main(init: std.process.Init) !void {
                 // the fifth-newest issue's description runs past what the detail
                 // pane shows, so it shows the truncated description and its
                 // link.
-                const description = if (i == issue_data.len - 5) desc: {
-                    var desc_writer = std.Io.Writer.Allocating.init(allocator);
-                    defer desc_writer.deinit();
-                    try desc_writer.writer.print("{s}", .{issue.description});
-                    var line: usize = 0;
-                    while (desc_writer.written().len <= ui.Repo.Issues.max_description_size) : (line += 1) {
-                        try desc_writer.writer.print("\n{d} {s}", .{ line, scatter_words[line % scatter_words.len] });
-                    }
-                    break :desc try arena.allocator().dupe(u8, desc_writer.written());
-                } else issue.description;
+                const description = if (i == issue_data.len - 5)
+                    try longDescription(arena.allocator(), issue.description)
+                else
+                    issue.description;
                 issue_events[i] = .{
                     .id = std.fmt.bytesToHex(evt.EventWithId.randomId(prng.random()), .lower),
                     // stepped timestamps so the issues list in a stable order
@@ -940,6 +933,15 @@ const scatter_words = [_][]const u8{
     "scatter", "gather", "encode", "decode", "render", "commit",
 };
 
+fn longDescription(allocator: std.mem.Allocator, initial: []const u8) ![]u8 {
+    var writer = std.Io.Writer.Allocating.init(allocator);
+    defer writer.deinit();
+    try writer.writer.print("{s}", .{initial});
+    for (0..ui.detail_preview_lines) |line|
+        try writer.writer.print("\n{d} {s}", .{ line, scatter_words[line % scatter_words.len] });
+    return writer.toOwnedSlice();
+}
+
 // write `path` as 40 lines of mostly-stable filler. revision `c` and file
 // index `fi` shift which lines change and the words used, so each (c, fi)
 // yields a distinct multi-hunk diff against the previous revision. untouched
@@ -1211,7 +1213,11 @@ fn seedPatches(
     var ours_values = values;
     ours_values[0].title = "Drop the legacy configuration loader";
     ours_values[0].tags = "cleanup config breaking";
-    ours_values[1].description = "Cache parsed manifests for the lifetime of a command invocation and invalidate entries when their files change.";
+    const closed_description = try longDescription(
+        patch_arena.allocator(),
+        "Cache parsed manifests for the lifetime of a command invocation and invalidate entries when their files change.",
+    );
+    ours_values[1].description = closed_description;
     ours_values[2].description = "Add JSON output to inspect with versioned field names and deterministic object ordering.";
     var theirs_values = values;
     theirs_values[0].title = "Delete compatibility configuration support";

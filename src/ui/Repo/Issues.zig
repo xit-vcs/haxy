@@ -12,10 +12,6 @@ const thread = ui.widget.thread;
 
 const wasm = builtin.target.cpu.arch == .wasm32;
 
-// how much of a description the detail pane shows before linking to the
-// /description page, the same limit commit messages use.
-pub const max_description_size = 2 * 1024;
-
 // how many issues one window shows before a "next" link appears.
 pub const page_size = 20;
 
