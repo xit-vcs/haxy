@@ -182,7 +182,7 @@ pub fn createDraft(
     return id;
 }
 
-pub fn postDraft(data: *const Self, session: *ui.Session, allocator: std.mem.Allocator, id: []const u8) !void {
+pub fn publishDraft(data: *const Self, session: *ui.Session, allocator: std.mem.Allocator, id: []const u8) !void {
     const io = session.io orelse return error.NotFound;
     const repos_dir = session.repos_dir orelse return error.NotFound;
     const admin_repo = session.admin_repo orelse return error.NotFound;
@@ -201,7 +201,7 @@ pub fn postDraft(data: *const Self, session: *ui.Session, allocator: std.mem.All
 
     var target_repo = try rp.Repo(.xit, .{}).open(io, allocator, repo_source.localInitOpts());
     defer target_repo.deinit(io, allocator);
-    try pch.post(.{}, io, allocator, admin_repo, &target_repo, fork_path, .{
+    try pch.publish(.{}, io, allocator, admin_repo, &target_repo, fork_path, .{
         .id = id_hex,
         .user_id = user_id,
         .repo_id = repo_id,
@@ -332,7 +332,7 @@ pub fn init(
     empty.drafts = drafts_window;
     if (draft_selected and view != .remove) empty.view = .drafts;
 
-    // an explicitly named posted patch that doesn't exist is a bad url
+    // an explicitly named published patch that doesn't exist is a bad url
     // (NotFound -> 404); drafts, tags, and bare routes can use the empty fallback.
     const strict = rooted and !draft_selected;
 

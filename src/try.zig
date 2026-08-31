@@ -1133,7 +1133,7 @@ fn seedPatches(
         const revision = try seedPatchRevision(io, allocator, repos_path, &patch_ids[i], patch.title, @intCast(502 + i * 10), random);
         const fork_path = try fork.forkPath(allocator, repos_path, &patch_hex);
         defer allocator.free(fork_path);
-        try pch.post(.{}, io, allocator, admin_repo, target_repo, fork_path, .{
+        try pch.publish(.{}, io, allocator, admin_repo, target_repo, fork_path, .{
             .id = patch_hex,
             .user_id = user_id.*,
             .repo_id = repo_id.*,

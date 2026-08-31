@@ -233,7 +233,7 @@ pub fn update(
     }});
 }
 
-// the live fields with `resolve` applied: posted title/tags stand in for the
+// the live fields with `resolve` applied: submitted title/tags stand in for the
 // live ones, and a conflicted description is reassembled from the hunk
 // resolutions against the conflict entry. the chunking is deterministic: the
 // entry holds immutable slots and any event since would have removed it, so

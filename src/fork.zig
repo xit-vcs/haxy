@@ -227,7 +227,7 @@ pub fn receivePack(
         if (!std.mem.eql(u8, patch.author_email orelse "", author.email)) return error.PatchDataUnavailable;
         if (patch.event.status == .merged) return error.PatchAlreadyMerged;
     }
-    const posted = target_patch != null;
+    const published = target_patch != null;
     const title = if (target_patch) |patch| patch.event.title else fork_patch.event.title;
 
     // resolve the target and the newest fork revision
@@ -249,7 +249,7 @@ pub fn receivePack(
             writer: *std.Io.Writer,
             patch_id: [evt.event_id_size * 2]u8,
             patch: evt.Patch.Record,
-            posted: bool,
+            published: bool,
             target_oid: [hash.hexLen(repo_opts.hash)]u8,
             target_ref: []const u8,
             title: []const u8,
@@ -288,7 +288,7 @@ pub fn receivePack(
                 var head_tree_oid: [hash.hexLen(repo_opts.hash)]u8 = undefined;
                 var tree_entries: [2]evt.EventTreeEntry = undefined;
                 if (existing_revision) |latest| {
-                    if (ctx.posted) ctx.revision_id_maybe.* = latest.id;
+                    if (ctx.published) ctx.revision_id_maybe.* = latest.id;
                 } else {
                     var base_object = try obj.Object(.xit, repo_opts).initCommit(state.readOnly(), ctx.io, ctx.allocator, &base_oid);
                     defer base_object.deinit();
@@ -334,7 +334,7 @@ pub fn receivePack(
                     event_count += 1;
                     ctx.revision_id_maybe.* = revision_id;
 
-                    if (!ctx.posted) {
+                    if (!ctx.published) {
                         var patch = ctx.patch.event;
                         patch.revision = .{
                             .id = revision_hex,
@@ -352,8 +352,8 @@ pub fn receivePack(
                     }
                 }
 
-                // posted patches keep only revisions in the fork
-                if (ctx.posted and !ctx.patch.removed) {
+                // published patches keep only revisions in the fork
+                if (ctx.published and !ctx.patch.removed) {
                     events[event_count] = .{
                         .id = ctx.patch_id,
                         .timestamp = ctx.timestamp,
@@ -385,7 +385,7 @@ pub fn receivePack(
             .writer = writer,
             .patch_id = id.*,
             .patch = fork_patch,
-            .posted = posted,
+            .published = published,
             .target_oid = target_oid,
             .target_ref = target_ref,
             .title = title,
@@ -400,23 +400,23 @@ pub fn receivePack(
         try writer.flush();
     }
 
-    // best-effort update the posted patch so it has the new revision
+    // best-effort update the published patch so it has the new revision
     {
         const revision_id = revision_id_maybe orelse return;
-        if (!posted) return;
+        if (!published) return;
         var update_arena = std.heap.ArenaAllocator.init(allocator);
         defer update_arena.deinit();
         const target_update_moment = evt.currentMoment(repo_opts, target_repo) catch return;
-        const posted_patch = (evt.Patch.readById(evt.EventDB(repo_opts.hash), repo_opts.hash, target_update_moment, &update_arena, &patch_id) catch return) orelse return;
-        if (posted_patch.removed) return;
+        const published_patch = (evt.Patch.readById(evt.EventDB(repo_opts.hash), repo_opts.hash, target_update_moment, &update_arena, &patch_id) catch return) orelse return;
+        if (published_patch.removed) return;
         const fork_update_moment = evt.currentMoment(repo_opts, fork_repo) catch return;
         const revision = (evt.PatchRev.readById(evt.EventDB(repo_opts.hash), repo_opts.hash, fork_update_moment, &update_arena, &revision_id) catch return) orelse return;
         if (revision.removed) return;
         const selected = evt.Patch.Revision.fromRecord(revision_id, revision);
-        if (posted_patch.event.revision) |current| {
+        if (published_patch.event.revision) |current| {
             if (evt.fieldEqual(evt.Patch.Revision, current, selected)) return;
         }
-        var patch = posted_patch.event;
+        var patch = published_patch.event;
         patch.revision = selected;
         evt.consume(.repo, .xit, repo_opts, io, allocator, target_repo, evt.events_ref, &.{.{
             .id = id.*,
@@ -424,7 +424,7 @@ pub fn receivePack(
             .author = author,
             .event = .{ .patch = patch },
         }}) catch |update_err| {
-            serve_common.logError(io, error_writer, "failed to update posted patch {s}: {s}\n", .{ id, @errorName(update_err) });
+            serve_common.logError(io, error_writer, "failed to update published patch {s}: {s}\n", .{ id, @errorName(update_err) });
         };
     }
 }

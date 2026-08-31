@@ -152,7 +152,7 @@ test "rebase" {
             .event = .{
                 .issue = .{
                     .title = "Double clicking causes the form to submit twice",
-                    .description = "When I double click the post button I see duplicate posts.",
+                    .description = "When I double click the submit button I see duplicate submissions.",
                     .tags = "bug priority-high ui",
                 },
             },

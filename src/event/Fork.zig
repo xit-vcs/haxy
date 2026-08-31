@@ -18,7 +18,7 @@ const Self = @This();
 
 pub const Stage = enum {
     draft,
-    posted,
+    publish,
 };
 
 pub const merge_policy: evt.MergePolicy = .target_wins;
@@ -73,7 +73,7 @@ pub fn consume(
     if (existing_maybe) |existing| {
         if (!std.mem.eql(u8, existing.event.user_id, record.event.user_id) or
             !std.mem.eql(u8, existing.event.repo_id, record.event.repo_id)) return error.ForkChanged;
-        if (existing.event.stage == .posted and record.event.stage != .posted) return error.ForkAlreadyPosted;
+        if (existing.event.stage == .publish and record.event.stage != .publish) return error.ForkAlreadyPublished;
         record.created_order = existing.created_order;
         if (!existing.removed) {
             const order_key = evt.orderKeyDesc(existing.created_order, event_id);

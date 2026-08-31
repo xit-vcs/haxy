@@ -1267,8 +1267,8 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 if (supports_drafts and entryDraft(entry)) {
                     if (entry.revision_ready) {
                         const route = listRoute(self.data.identity, @enumFromInt(0), "", entry.id) orelse return error.RouteTooLong;
-                        row.getFocus().kind = .{ .custom = try std.fmt.allocPrint(pa, "form:{s}/post", .{try route.toUrl(self.session.page_arena)}) };
-                        try addToolButton(allocator, row, "post", "submit");
+                        row.getFocus().kind = .{ .custom = try std.fmt.allocPrint(pa, "form:{s}/publish", .{try route.toUrl(self.session.page_arena)}) };
+                        try addToolButton(allocator, row, "publish", "submit");
                     }
                     if (self.session.data.user_id != null) {
                         const route = ui.RoutablePage.repoThreadRemoveRoute(kind, self.data.identity, entry.id, "") orelse return error.RouteTooLong;
@@ -1668,17 +1668,17 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             const selected = self.detailed_index[index] orelse return;
             const entry = self.window(index).items[selected];
             if (supports_drafts and entryDraft(entry))
-                try self.postDraft(allocator, index)
+                try self.publishDraft(allocator, index)
             else
                 try self.toggleStatus(allocator, index);
         }
 
-        fn postDraft(self: *This, allocator: std.mem.Allocator, index: usize) !void {
+        fn publishDraft(self: *This, allocator: std.mem.Allocator, index: usize) !void {
             if (!supports_drafts or comptime wasm) return;
             const selected = self.detailed_index[index] orelse return;
             const entry = self.window(index).items[selected];
             if (!entryDraft(entry) or !entry.revision_ready) return;
-            try self.data.postDraft(self.session, allocator, entry.id);
+            try self.data.publishDraft(self.session, allocator, entry.id);
             const route = listRoute(self.data.identity, @enumFromInt(0), "", entry.id) orelse return;
             try self.session.navigate(route);
         }

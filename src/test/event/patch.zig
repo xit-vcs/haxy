@@ -648,17 +648,17 @@ fn patchLifecycle(temp_dir_name: []const u8, merge_revision: pch.MergeRevision) 
     try std.testing.expectError(error.NotFound, evt.currentMoment(repo_opts, &target));
 
     //
-    // post the metadata and revision pointer
+    // publish the metadata and revision pointer
     //
 
-    try pch.post(repo_opts, io, allocator, &admin, &target, draft_path, .{
+    try pch.publish(repo_opts, io, allocator, &admin, &target, draft_path, .{
         .id = patch_id_hex,
         .user_id = user_id,
         .repo_id = repo_id,
         .author = author,
         .timestamp = 3,
     });
-    try pch.post(repo_opts, io, allocator, &admin, &target, draft_path, .{
+    try pch.publish(repo_opts, io, allocator, &admin, &target, draft_path, .{
         .id = patch_id_hex,
         .user_id = user_id,
         .repo_id = repo_id,
@@ -676,9 +676,9 @@ fn patchLifecycle(temp_dir_name: []const u8, merge_revision: pch.MergeRevision) 
 
     _ = arena.reset(.retain_capacity);
     const admin_moment = try evt.currentMoment(evt.admin_repo_opts, &admin);
-    const posted_fork = (try evt.Fork.readById(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &arena, &patch_id)) orelse return error.NotFound;
-    try std.testing.expect(!posted_fork.removed);
-    try std.testing.expectEqual(.posted, posted_fork.event.stage);
+    const published_fork = (try evt.Fork.readById(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &arena, &patch_id)) orelse return error.NotFound;
+    try std.testing.expect(!published_fork.removed);
+    try std.testing.expectEqual(.publish, published_fork.event.stage);
     const draft_key = evt.Fork.draftKey(&repo_id, &user_id);
     try std.testing.expectEqual(0, try indexedForkCount(admin_moment, evt.Fork.repo_user_to_draft_id_set_key, &draft_key));
     try std.testing.expectEqual(1, try indexedForkCount(admin_moment, evt.Fork.user_id_to_fork_id_set_key, &user_id));

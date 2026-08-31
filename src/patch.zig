@@ -9,7 +9,7 @@ const mrg = xit.merge;
 const fork = @import("fork.zig");
 const serve_common = @import("serve_common.zig");
 
-pub const PostInput = struct {
+pub const PublishInput = struct {
     id: [evt.event_id_size * 2]u8,
     user_id: [evt.event_id_size]u8,
     repo_id: [evt.event_id_size]u8,
@@ -26,14 +26,14 @@ pub const MergeInput = struct {
     timestamp: u64,
 };
 
-pub fn post(
+pub fn publish(
     comptime repo_opts: rp.RepoOpts(.xit),
     io: std.Io,
     allocator: std.mem.Allocator,
     admin_repo: *rp.Repo(.xit, evt.admin_repo_opts),
     target_repo: *rp.Repo(.xit, repo_opts),
     path: []const u8,
-    input: PostInput,
+    input: PublishInput,
 ) !void {
     const patch_id = try evt.parseEventId(&input.id);
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -92,13 +92,13 @@ pub fn post(
     }
 
     if (fork_record.event.stage == .draft) {
-        var posted = fork_record.event;
-        posted.stage = .posted;
+        var published = fork_record.event;
+        published.stage = .publish;
         try evt.consume(.admin, .xit, evt.admin_repo_opts, io, allocator, admin_repo, evt.events_ref, &.{.{
             .id = input.id,
             .timestamp = input.timestamp,
             .author = input.author,
-            .event = .{ .fork = posted },
+            .event = .{ .fork = published },
         }});
     }
 }

@@ -639,7 +639,7 @@ fn testPushFork(
     }
 
     //
-    // post, then push another revision
+    // publish, then push another revision
     //
 
     {
@@ -648,7 +648,7 @@ fn testPushFork(
         var target = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = target_path });
         defer target.deinit(io, allocator);
         try target.addBranch(io, .{ .name = "feature" });
-        try pch.post(.{}, io, allocator, &admin, &target, draft_path, .{
+        try pch.publish(.{}, io, allocator, &admin, &target, draft_path, .{
             .id = fork_id_hex,
             .user_id = user_id,
             .repo_id = repo_id,

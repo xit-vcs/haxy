@@ -134,7 +134,7 @@ fn handleRequest(
     if (method == .POST) {
         switch (host) {
             .remote => |remote| {
-                const PostRoute = enum { login, logout, ansi, new, edit, remove, open, close, resolve, post, attach };
+                const PostRoute = enum { login, logout, ansi, new, edit, remove, open, close, resolve, publish, attach };
                 inline for (@typeInfo(PostRoute).@"enum".fields) |field| {
                     const suffix = "/" ++ field.name;
                     if (std.mem.endsWith(u8, path, suffix)) {
@@ -149,7 +149,7 @@ fn handleRequest(
                             .open => handleThreadStatus(io, request, allocator, base, host, true),
                             .close => handleThreadStatus(io, request, allocator, base, host, false),
                             .resolve => handleThreadResolve(io, request, allocator, base, host),
-                            .post => handlePatchPost(io, request, allocator, base, host),
+                            .publish => handlePatchPublish(io, request, allocator, base, host),
                             .attach => handleAttach(io, request, allocator, base, host),
                         };
                     }
@@ -640,7 +640,7 @@ fn commentBaseParts(base: []const u8) ?CommentBaseParts {
     return .{ .repo_base = base[0..repo_base_len], .thread_kind = thread_kind, .thread_id = thread_id, .comment_id = comment_id };
 }
 
-fn handlePatchPost(
+fn handlePatchPublish(
     io: std.Io,
     request: *std.http.Server.Request,
     allocator: std.mem.Allocator,
@@ -672,7 +672,7 @@ fn handlePatchPost(
     defer allocator.free(repos_dir);
     const path = try fork.forkPath(allocator, repos_dir, &id);
     defer allocator.free(path);
-    try pch.post(.{}, io, allocator, &admin_repo, &target_repo, path, .{
+    try pch.publish(.{}, io, allocator, &admin_repo, &target_repo, path, .{
         .id = id,
         .user_id = user_id,
         .repo_id = repo_id,
@@ -706,9 +706,9 @@ fn handleCommentNew(
     defer author_arena.deinit();
     const author = (try eventAuthor(io, allocator, &author_arena, request, host)) orelse return respondLoginRequired(request);
 
-    const posted = try readFormBody(request, allocator);
-    defer allocator.free(posted);
-    const body_crlf = (try parseFormField(allocator, posted, "body")) orelse try allocator.dupe(u8, "");
+    const form_body = try readFormBody(request, allocator);
+    defer allocator.free(form_body);
+    const body_crlf = (try parseFormField(allocator, form_body, "body")) orelse try allocator.dupe(u8, "");
     defer allocator.free(body_crlf);
     const body = try std.mem.replaceOwned(u8, allocator, body_crlf, "\r\n", "\n");
     defer allocator.free(body);
@@ -895,7 +895,7 @@ fn attachParentParts(base: []const u8) ?AttachParentParts {
     return .{ .repo_base = base[0..segment_at], .id_bytes = id_bytes };
 }
 
-// attach the posted file to the event the url names, then reload. the file is
+// attach the uploaded file to the event the url names, then reload. the file is
 // the whole request body, so it streams from the socket into the object store
 // without being buffered.
 fn handleAttach(
@@ -1017,9 +1017,9 @@ fn handleCommentEdit(
     defer author_arena.deinit();
     const author = (try eventAuthor(io, allocator, &author_arena, request, host)) orelse return respondLoginRequired(request);
 
-    const posted = try readFormBody(request, allocator);
-    defer allocator.free(posted);
-    const body_crlf = (try parseFormField(allocator, posted, "body")) orelse try allocator.dupe(u8, "");
+    const form_body = try readFormBody(request, allocator);
+    defer allocator.free(form_body);
+    const body_crlf = (try parseFormField(allocator, form_body, "body")) orelse try allocator.dupe(u8, "");
     defer allocator.free(body_crlf);
     const body = try std.mem.replaceOwned(u8, allocator, body_crlf, "\r\n", "\n");
     defer allocator.free(body);
@@ -1354,14 +1354,14 @@ fn handleThreadResolve(
     const title = try parseFormField(aa, body, "title");
     const tags = try parseFormField(aa, body, "tags");
 
-    // the hunk inputs post as d0, d1, ...; form submission normalizes their
+    // the hunk inputs are submitted as d0, d1, ...; form submission normalizes their
     // textarea line breaks to CRLF
     var hunks: std.ArrayList([]const u8) = .empty;
     var hunk_index: usize = 0;
     while (true) : (hunk_index += 1) {
         const name = try std.fmt.allocPrint(aa, "d{d}", .{hunk_index});
-        const posted = (try parseFormField(aa, body, name)) orelse break;
-        try hunks.append(aa, try std.mem.replaceOwned(u8, aa, posted, "\r\n", "\n"));
+        const submitted = (try parseFormField(aa, body, name)) orelse break;
+        try hunks.append(aa, try std.mem.replaceOwned(u8, aa, submitted, "\r\n", "\n"));
     }
 
     const parts = commentBaseParts(base) orelse {
