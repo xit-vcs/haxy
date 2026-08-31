@@ -469,6 +469,10 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
             return if (supports_drafts) Data.draftsRoute(identity) else null;
         }
 
+        fn publishRoute(identity: []const u8, selected: []const u8) ?ui.RoutablePage {
+            return if (supports_drafts) Data.publishRoute(identity, selected) else null;
+        }
+
         fn forkRoute(identity: []const u8, id: []const u8) ?ui.RoutablePage {
             return if (supports_forks) Data.forkRoute(identity, id) else null;
         }
@@ -528,11 +532,8 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                 }
 
                 if (supports_drafts and entryDraft(entry)) {
-                    if (entry.revision_ready) {
-                        const route = listRoute(self.data.identity, @enumFromInt(0), "", entry.id) orelse return error.RouteTooLong;
-                        row.getFocus().kind = .{ .custom = try std.fmt.allocPrint(pa, "form:{s}/publish", .{try route.toUrl(self.session.page_arena)}) };
-                        try addToolButton(allocator, row, "publish", "submit");
-                    }
+                    const route = publishRoute(self.data.identity, entry.id) orelse return error.RouteTooLong;
+                    try addToolButton(allocator, row, "publish", try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}));
                     if (self.session.data.user_id != null) {
                         const edit_route = ui.RoutablePage.repoThreadEditRoute(kind, self.data.identity, entry.id) orelse return error.RouteTooLong;
                         try addToolButton(allocator, row, "edit", try std.fmt.allocPrint(pa, "a:{s}", .{try edit_route.toUrl(self.session.page_arena)}));
@@ -811,20 +812,7 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
         }
 
         fn primaryAction(self: *This, allocator: std.mem.Allocator) !void {
-            const entry = self.entry orelse return;
-            if (supports_drafts and entryDraft(entry))
-                try self.publishDraft(allocator)
-            else
-                try self.toggleStatus(allocator);
-        }
-
-        fn publishDraft(self: *This, allocator: std.mem.Allocator) !void {
-            if (!supports_drafts or comptime wasm) return;
-            const entry = self.entry orelse return;
-            if (!entryDraft(entry) or !entry.revision_ready) return;
-            try self.data.publishDraft(self.session, allocator, entry.id);
-            const route = listRoute(self.data.identity, @enumFromInt(0), "", entry.id) orelse return;
-            try self.session.navigate(route);
+            try self.toggleStatus(allocator);
         }
 
         fn descriptionInput(self: *This, key: Key, root_focus: *Focus) void {
@@ -1252,7 +1240,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         pub fn viewIndex(view: ViewKind) usize {
             const name = @tagName(view);
             if (std.mem.eql(u8, name, "tags")) return tags_view_index;
-            if (std.mem.eql(u8, name, "new") or std.mem.eql(u8, name, "edit") or std.mem.eql(u8, name, "new_comment") or std.mem.eql(u8, name, "edit_comment") or std.mem.eql(u8, name, "remove") or std.mem.eql(u8, name, "resolve")) return form_view_index;
+            if (std.mem.eql(u8, name, "new") or std.mem.eql(u8, name, "edit") or std.mem.eql(u8, name, "publish") or std.mem.eql(u8, name, "new_comment") or std.mem.eql(u8, name, "edit_comment") or std.mem.eql(u8, name, "remove") or std.mem.eql(u8, name, "resolve")) return form_view_index;
             if (std.mem.eql(u8, name, "conflicts")) return conflict_view_index;
             if (std.mem.eql(u8, name, "drafts")) return drafts_view_index;
             if (std.mem.eql(u8, name, "description")) unreachable;
@@ -1260,6 +1248,14 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 if (std.mem.eql(u8, name, field.name)) return index;
             }
             unreachable;
+        }
+
+        const Confirmation = enum { remove, publish };
+
+        fn confirmation(view: ViewKind) ?Confirmation {
+            if (view == .remove) return .remove;
+            if (supports_drafts and std.mem.eql(u8, @tagName(view), "publish")) return .publish;
+            return null;
         }
 
         // the status a status split lists; the conflicts split has none (its
@@ -1286,6 +1282,10 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
 
         fn draftsRoute(identity: []const u8) ?ui.RoutablePage {
             return if (supports_drafts) Data.draftsRoute(identity) else null;
+        }
+
+        fn publishRoute(identity: []const u8, selected: []const u8) ?ui.RoutablePage {
+            return if (supports_drafts) Data.publishRoute(identity, selected) else null;
         }
 
         fn conflictsRoute(identity: []const u8, selected: []const u8) ?ui.RoutablePage {
@@ -1378,14 +1378,20 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             // logged-out session can't create events, so the unauthorized view
             // stands in.
             if (session.data.is_local or session.data.user_id != null) {
-                if (data.view == .remove) {
+                if (confirmation(data.view)) |confirmation_kind| {
                     const aa = session.page_arena.allocator();
-                    const route = ui.RoutablePage.repoThreadRemoveRoute(kind, data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong;
+                    const route = switch (confirmation_kind) {
+                        .remove => ui.RoutablePage.repoThreadRemoveRoute(kind, data.identity, data.selected_id, data.comment_id),
+                        .publish => publishRoute(data.identity, data.selected_id),
+                    } orelse return error.RouteTooLong;
                     const action = try std.fmt.allocPrint(aa, "form:{s}", .{try route.toUrl(session.page_arena)});
                     const event_name = if (data.comment_id.len == 0) thread_name else "comment";
                     var label_buf: ["remove ".len + @max(thread_name.len, "comment".len)]u8 = undefined;
-                    const label = try std.fmt.bufPrint(&label_buf, "remove {s}", .{event_name});
-                    var center = try initRemoveForm(allocator, action, label);
+                    const label = switch (confirmation_kind) {
+                        .remove => try std.fmt.bufPrint(&label_buf, "remove {s}", .{event_name}),
+                        .publish => "publish patch",
+                    };
+                    var center = try initConfirmationForm(allocator, action, label);
                     errdefer center.deinit(allocator);
                     try stack.children.put(allocator, center.getFocus().id, .{ .center = center });
                 } else if (data.view == .new_comment or data.view == .edit_comment) {
@@ -1616,7 +1622,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             return box;
         }
 
-        fn initRemoveForm(allocator: std.mem.Allocator, action: []const u8, label: []const u8) !Center {
+        fn initConfirmationForm(allocator: std.mem.Allocator, action: []const u8, label: []const u8) !Center {
             var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .rounded_corners = true, .direction = .vert });
             errdefer box.deinit(allocator);
             box.getFocus().kind = .{ .custom = action };
@@ -1879,7 +1885,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             };
         }
 
-        fn removeForm(self: *This) ?*wgt.Box(Widget) {
+        fn confirmationForm(self: *This) ?*wgt.Box(Widget) {
             return switch (self.viewStack().children.values()[form_view_index]) {
                 .center => |*center| switch (center.child.*) {
                     .box => |*box| box,
@@ -2050,8 +2056,8 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 return;
             }
             if (self.formViewActive()) {
-                if (self.data.view == .remove) {
-                    try self.removeFormInput(allocator, key, root_focus);
+                if (confirmation(self.data.view) != null) {
+                    try self.confirmationFormInput(allocator, key, root_focus);
                 } else if (supports_conflicts and self.data.view == .resolve) {
                     try self.resolveInput(allocator, key, root_focus);
                 } else if (self.data.view == .new_comment or self.data.view == .edit_comment) {
@@ -2161,13 +2167,13 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             }
         }
 
-        fn removeFormInput(self: *This, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
-            const form = self.removeForm() orelse return;
+        fn confirmationFormInput(self: *This, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
+            const form = self.confirmationForm() orelse return;
             const button_id = form.children.keys()[1];
             switch (key) {
                 .arrow_up, .back_tab => self.focusHeader(root_focus),
-                .enter => try self.submitRemove(allocator),
-                .mouse => |mouse| if (inp.leftClickOn(root_focus, button_id, mouse)) try self.submitRemove(allocator),
+                .enter => try self.submitConfirmation(allocator),
+                .mouse => |mouse| if (inp.leftClickOn(root_focus, button_id, mouse)) try self.submitConfirmation(allocator),
                 else => {},
             }
         }
@@ -2496,6 +2502,20 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
 
             const route = listRoute(self.data.identity, entryStatus(entry.*), "", entry.id) orelse return;
             try self.session.navigate(route);
+        }
+
+        fn submitConfirmation(self: *This, allocator: std.mem.Allocator) !void {
+            switch (confirmation(self.data.view) orelse return) {
+                .publish => if (comptime supports_drafts) {
+                    if (comptime wasm) return;
+                    const entry = self.data.selectedThread() orelse return;
+                    if (!entryDraft(entry.*)) return;
+                    try self.data.publishDraft(self.session, allocator, entry.id);
+                    const route = listRoute(self.data.identity, @enumFromInt(0), "", entry.id) orelse return;
+                    try self.session.navigate(route);
+                } else unreachable,
+                .remove => try self.submitRemove(allocator),
+            }
         }
 
         fn submitRemove(self: *This, allocator: std.mem.Allocator) !void {

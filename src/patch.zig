@@ -79,12 +79,13 @@ pub fn publish(
     if (local_patch.removed) {
         if (existing == null) return error.PatchDataUnavailable;
     } else {
-        const selected = local_patch.event.revision orelse return error.PatchNotPushed;
-        const revision_id = try evt.parseEventId(&selected.id);
-        const revision = (try evt.PatchRev.readById(evt.EventDB(repo_opts.hash), repo_opts.hash, fork_moment, &arena, &revision_id)) orelse return error.PatchNotPushed;
-        if (!selected.matches(revision)) return error.PatchNotPushed;
         var patch = (existing orelse local_patch).event;
-        patch.revision = selected;
+        if (local_patch.event.revision) |selected| {
+            const revision_id = try evt.parseEventId(&selected.id);
+            const revision = (try evt.PatchRev.readById(evt.EventDB(repo_opts.hash), repo_opts.hash, fork_moment, &arena, &revision_id)) orelse return error.PatchNotPushed;
+            if (!selected.matches(revision)) return error.PatchNotPushed;
+            patch.revision = selected;
+        }
         if (existing == null) patch.status = .open;
 
         try evt.consume(.repo, .xit, repo_opts, io, allocator, target_repo, evt.events_ref, &.{.{

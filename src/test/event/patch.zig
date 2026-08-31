@@ -648,6 +648,44 @@ fn patchLifecycle(temp_dir_name: []const u8, merge_revision: pch.MergeRevision) 
     try std.testing.expectError(error.NotFound, evt.currentMoment(repo_opts, &target));
 
     //
+    // publish another draft before its first push
+    //
+
+    const unpushed_id = evt.EventWithId.randomId(prng.random());
+    const unpushed_id_hex = std.fmt.bytesToHex(unpushed_id, .lower);
+    const unpushed_path = try fork.create(repo_opts, io, allocator, repos_dir, &admin, .{
+        .id = unpushed_id_hex,
+        .user_id = user_id,
+        .repo_id = repo_id,
+        .title = "explain the answer",
+        .tags = "documentation",
+        .description = "describes the existing answer",
+        .author = author,
+        .timestamp = 3,
+    });
+    defer allocator.free(unpushed_path);
+    try pch.publish(repo_opts, io, allocator, &admin, &target, unpushed_path, .{
+        .id = unpushed_id_hex,
+        .user_id = user_id,
+        .repo_id = repo_id,
+        .author = author,
+        .timestamp = 4,
+    });
+    {
+        var verify_arena = std.heap.ArenaAllocator.init(allocator);
+        defer verify_arena.deinit();
+        const target_moment = try evt.currentMoment(repo_opts, &target);
+        const unpushed = (try evt.Patch.readById(Repo.DB, repo_opts.hash, target_moment, &verify_arena, &unpushed_id)) orelse return error.NotFound;
+        try std.testing.expectEqual(null, unpushed.event.revision);
+
+        var unpushed_repo = try Repo.open(io, allocator, .{ .path = unpushed_path });
+        defer unpushed_repo.deinit(io, allocator);
+        const fork_moment = try evt.currentMoment(repo_opts, &unpushed_repo);
+        const removed = (try evt.Patch.readById(Repo.DB, repo_opts.hash, fork_moment, &verify_arena, &unpushed_id)) orelse return error.NotFound;
+        try std.testing.expect(removed.removed);
+    }
+
+    //
     // edit the patch metadata in the fork
     //
 
@@ -697,7 +735,7 @@ fn patchLifecycle(temp_dir_name: []const u8, merge_revision: pch.MergeRevision) 
     try std.testing.expectEqual(.publish, published_fork.event.stage);
     const draft_key = evt.Fork.draftKey(&repo_id, &user_id);
     try std.testing.expectEqual(0, try indexedForkCount(admin_moment, evt.Fork.repo_user_to_draft_id_set_key, &draft_key));
-    try std.testing.expectEqual(1, try indexedForkCount(admin_moment, evt.Fork.user_id_to_fork_id_set_key, &user_id));
+    try std.testing.expectEqual(2, try indexedForkCount(admin_moment, evt.Fork.user_id_to_fork_id_set_key, &user_id));
     var squash_oid: [hash.hexLen(repo_opts.hash)]u8 = undefined;
     {
         var draft = try Repo.open(io, allocator, .{ .path = draft_path });

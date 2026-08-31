@@ -38,7 +38,6 @@ pub const PatchWithId = struct {
     comments: Comment.Window = .empty,
     attachments: []const Attachment.WithId = &.{},
     draft: bool = false,
-    revision_ready: bool = false,
     fork_oid: []const u8 = "",
     target_branch: []const u8 = "",
     no_changes: bool = false,
@@ -149,6 +148,10 @@ pub fn conflictsRoute(identity: []const u8, selected: []const u8) ?ui.RoutablePa
 
 pub fn resolveRoute(identity: []const u8, selected: []const u8, picks: []const u8) ?ui.RoutablePage {
     return ui.RoutablePage.repoPatchesResolveRoute(identity, selected, picks);
+}
+
+pub fn publishRoute(identity: []const u8, selected: []const u8) ?ui.RoutablePage {
+    return ui.RoutablePage.repoPatchPublishRoute(identity, selected);
 }
 
 pub fn createDraft(
@@ -378,7 +381,7 @@ pub fn init(
         }
     };
     empty.drafts = drafts_window;
-    if (draft_selected and view != .edit and view != .remove) empty.view = .drafts;
+    if (draft_selected and view != .edit and view != .publish and view != .remove) empty.view = .drafts;
 
     // an explicitly named published patch that doesn't exist is a bad url
     // (NotFound -> 404); drafts, tags, and bare routes can use the empty fallback.
@@ -497,10 +500,10 @@ pub fn init(
     var closed_window = try thread.loadWindow(Self, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_patch, closed_set, closed_root, conflict_set, empty.selected_id, thread_comments_start);
     var merged_window = try thread.loadWindow(Self, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_patch, merged_set, merged_root, conflict_set, empty.selected_id, thread_comments_start);
     var conflicts_window = try thread.loadWindow(Self, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_patch, conflict_set, conflicts_root, conflict_set, empty.selected_id, thread_comments_start);
-    try setForkDetails(repo_kind, repo_opts, io, arena, admin_moment, repo, &open_window);
-    try setForkDetails(repo_kind, repo_opts, io, arena, admin_moment, repo, &closed_window);
-    try setForkDetails(repo_kind, repo_opts, io, arena, admin_moment, repo, &merged_window);
-    try setForkDetails(repo_kind, repo_opts, io, arena, admin_moment, repo, &conflicts_window);
+    try setForkDetails(repo_kind, repo_opts, io, arena, admin_moment, repo, target_branch, &open_window);
+    try setForkDetails(repo_kind, repo_opts, io, arena, admin_moment, repo, target_branch, &closed_window);
+    try setForkDetails(repo_kind, repo_opts, io, arena, admin_moment, repo, target_branch, &merged_window);
+    try setForkDetails(repo_kind, repo_opts, io, arena, admin_moment, repo, target_branch, &conflicts_window);
     if (view == .conflicts and conflicts_window.count > 0) resolved_view = .conflicts;
 
     const comment_page = if (empty.comment_id.len == 0)
@@ -537,6 +540,7 @@ fn setForkDetails(
     arena: *std.heap.ArenaAllocator,
     admin_moment: ?evt.AdminDB.HashMap(.read_only),
     repo: *rp.Repo(repo_kind, repo_opts),
+    default_target_branch: []const u8,
     target: *Window,
 ) !void {
     if (target.items.len == 0) return;
@@ -547,7 +551,10 @@ fn setForkDetails(
             const record = try evt.Fork.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, &id);
             item.fork_exists = if (record) |value| !value.removed else false;
         }
-        const revision = item.record.event.revision orelse continue;
+        const revision = item.record.event.revision orelse {
+            if (item.fork_exists) item.target_branch = default_target_branch;
+            continue;
+        };
         const target_branch = revision.targetBranch() orelse continue;
         item.fork_oid = revision.source_oid;
         item.target_branch = target_branch;
@@ -646,13 +653,9 @@ pub fn loadDraftEntry(
     const fork_oid = (try fork_repo.readRef(io, fork.ref)) orelse return null;
     const moment = evt.currentMoment(.{}, fork_repo) catch return null;
     const patch = (try evt.Patch.readById(evt.EventDB(.sha1), .sha1, moment, arena, &id)) orelse return null;
-    var revision_ready = false;
     var target_branch = default_target_branch;
     if (patch.event.revision) |revision| {
         target_branch = revision.targetBranch() orelse return null;
-        const revision_id = evt.parseEventId(&revision.id) catch return null;
-        if (try evt.PatchRev.readById(evt.EventDB(.sha1), .sha1, moment, arena, &revision_id)) |record|
-            revision_ready = revision.matches(record);
     }
     const target_oid = if (target_branch.len != 0)
         try target_repo.readRef(io, .{ .kind = .head, .name = target_branch })
@@ -663,7 +666,6 @@ pub fn loadDraftEntry(
         .record = patch,
         .author = try ui.Author.initFromEmail(admin_moment, arena, patch.author_email),
         .draft = true,
-        .revision_ready = revision_ready,
         .fork_oid = try aa.dupe(u8, &fork_oid),
         .target_branch = try aa.dupe(u8, target_branch),
         .no_changes = if (target_oid) |oid| std.mem.eql(u8, &oid, &fork_oid) else false,
@@ -791,6 +793,7 @@ pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *con
     if (session.local == null) {
         const route = switch (data.view) {
             .edit => ui.RoutablePage.repoThreadEditRoute(.patch, data.identity, data.selected_id) orelse return error.RouteTooLong,
+            .publish => ui.RoutablePage.repoPatchPublishRoute(data.identity, data.selected_id) orelse return error.RouteTooLong,
             .new_comment => ui.RoutablePage.repoThreadCommentNewRoute(.patch, data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong,
             .edit_comment => ui.RoutablePage.repoThreadCommentEditRoute(.patch, data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong,
             .remove => ui.RoutablePage.repoThreadRemoveRoute(.patch, data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong,
@@ -800,6 +803,7 @@ pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *con
         const link = try ui.inPageTabLink(session, route, page_selected and selected_index == View.viewIndex(.new));
         const label: []const u8 = switch (data.view) {
             .edit => "edit",
+            .publish => "publish",
             .new_comment => "reply",
             .edit_comment => "edit",
             .remove => "remove",
