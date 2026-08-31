@@ -14,6 +14,7 @@ pub const Options = struct {
     wui_listen: []const u8 = "127.0.0.1:8000",
     data_dir: []const u8 = ".",
     git_ssh_prefix: []const u8 = "",
+    fallback_on_address_in_use: bool = false,
 };
 
 const ListenAddress = struct {
@@ -72,9 +73,10 @@ pub fn run(
 
     // create http listener
 
+    const port_policy: PortPolicy = if (options.fallback_on_address_in_use) .fallback else .exact;
     var http_maybe: ?BoundListener = if (options.http_listen) |value| blk: {
         const address = try parseListenAddress(value);
-        break :blk .{ .address = address, .server = try listen(io, address, .reuse) };
+        break :blk .{ .address = address, .server = try listen(io, address, port_policy) };
     } else null;
     defer if (http_maybe) |*http| http.deinit(io);
 
@@ -85,7 +87,7 @@ pub fn run(
     // create wui listener
 
     const wui_listen_address = try parseListenAddress(options.wui_listen);
-    var wui_server = try listen(io, wui_listen_address, .reuse);
+    var wui_server = try listen(io, wui_listen_address, port_policy);
     defer wui_server.deinit(io);
 
     // create ssh listener and its session state
@@ -93,7 +95,7 @@ pub fn run(
     const git_http_port: ?u16 = if (http_maybe) |*http| http.port() else null;
     var ssh_maybe: ?SshService = if (options.ssh_listen) |value| blk: {
         const address = try parseListenAddress(value);
-        var listener = BoundListener{ .address = address, .server = try listen(io, address, .reuse) };
+        var listener = BoundListener{ .address = address, .server = try listen(io, address, port_policy) };
         errdefer listener.deinit(io);
         const ssh_port = listener.port();
         break :blk .{
@@ -210,10 +212,7 @@ fn runWebListener(
 
 // what a listener does with a port that is already taken
 const PortPolicy = enum {
-    // bind it anyway, so a restart isn't blocked by the last run's connections
-    // sitting in TIME_WAIT. on linux this also sets SO_REUSEPORT, so a server
-    // already holding the port ends up sharing it.
-    reuse,
+    exact,
     // leave it to whoever holds it and take an OS-assigned port instead
     fallback,
 };
@@ -221,7 +220,7 @@ const PortPolicy = enum {
 fn listen(io: std.Io, listen_address: ListenAddress, policy: PortPolicy) !std.Io.net.Server {
     const address = try std.Io.net.IpAddress.parseIp4(listen_address.host, listen_address.port);
     return switch (policy) {
-        .reuse => try address.listen(io, .{ .reuse_address = true }),
+        .exact => try address.listen(io, .{}),
         .fallback => address.listen(io, .{}) catch |listen_err| switch (listen_err) {
             error.AddressInUse => blk: {
                 const any_port = try std.Io.net.IpAddress.parseIp4(listen_address.host, 0);

@@ -86,6 +86,7 @@ pub fn main(init: std.process.Init) !void {
         "";
     defer if (git_ssh_prefix.len != 0) allocator.free(git_ssh_prefix);
     serve_options.git_ssh_prefix = git_ssh_prefix;
+    serve_options.fallback_on_address_in_use = true;
 
     const server_path = if (std.mem.eql(u8, serve_options.data_dir, "."))
         try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "server" })
