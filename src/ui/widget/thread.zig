@@ -354,6 +354,7 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
     const supports_conflicts = Event.merge_policy == .field_conflicts;
     const supports_drafts = @hasField(Data, "drafts");
     const supports_forks = @hasField(Entry, "fork_exists");
+    const supports_merge = @hasDecl(Data, "mergeRoute");
     return struct {
         const This = @This();
         const thread_name = Data.thread_name;
@@ -473,6 +474,10 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
             return if (supports_drafts) Data.publishRoute(identity, selected) else null;
         }
 
+        fn mergeRoute(identity: []const u8, selected: []const u8) ?ui.RoutablePage {
+            return if (supports_merge) Data.mergeRoute(identity, selected) else null;
+        }
+
         fn forkRoute(identity: []const u8, id: []const u8) ?ui.RoutablePage {
             return if (supports_forks) Data.forkRoute(identity, id) else null;
         }
@@ -529,6 +534,13 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                     var spacer = try Spacer.init(allocator);
                     errdefer spacer.deinit(allocator);
                     try row.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null });
+                }
+
+                if (comptime supports_merge) {
+                    if (Data.canMerge(entry, self.session)) {
+                        const route = mergeRoute(self.data.identity, entry.id) orelse return error.RouteTooLong;
+                        try addToolButton(allocator, row, "merge", try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}));
+                    }
                 }
 
                 if (supports_drafts and entryDraft(entry)) {
@@ -1198,6 +1210,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
     const has_status = @hasField(Event, "status");
     const supports_conflicts = Event.merge_policy == .field_conflicts;
     const supports_drafts = @hasField(Self, "drafts");
+    const supports_merge = @hasDecl(Data, "mergeRoute");
     const FieldConflict = if (supports_conflicts) Data.FieldConflict else void;
     const ViewKind = Data.ViewKind;
     const thread_name = Data.thread_name;
@@ -1242,7 +1255,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         pub fn viewIndex(view: ViewKind) usize {
             const name = @tagName(view);
             if (std.mem.eql(u8, name, "tags")) return tags_view_index;
-            if (std.mem.eql(u8, name, "new") or std.mem.eql(u8, name, "edit") or std.mem.eql(u8, name, "publish") or std.mem.eql(u8, name, "new_comment") or std.mem.eql(u8, name, "edit_comment") or std.mem.eql(u8, name, "remove") or std.mem.eql(u8, name, "resolve")) return form_view_index;
+            if (std.mem.eql(u8, name, "new") or std.mem.eql(u8, name, "edit") or std.mem.eql(u8, name, "publish") or std.mem.eql(u8, name, "merge") or std.mem.eql(u8, name, "new_comment") or std.mem.eql(u8, name, "edit_comment") or std.mem.eql(u8, name, "remove") or std.mem.eql(u8, name, "resolve")) return form_view_index;
             if (std.mem.eql(u8, name, "conflicts")) return conflict_view_index;
             if (std.mem.eql(u8, name, "drafts")) return drafts_view_index;
             if (std.mem.eql(u8, name, "description")) unreachable;
@@ -1252,11 +1265,12 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             unreachable;
         }
 
-        const Confirmation = enum { remove, publish };
+        const Confirmation = enum { remove, publish, merge };
 
         fn confirmation(view: ViewKind) ?Confirmation {
             if (view == .remove) return .remove;
             if (supports_drafts and std.mem.eql(u8, @tagName(view), "publish")) return .publish;
+            if (supports_merge and std.mem.eql(u8, @tagName(view), "merge")) return .merge;
             return null;
         }
 
@@ -1288,6 +1302,10 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
 
         fn publishRoute(identity: []const u8, selected: []const u8) ?ui.RoutablePage {
             return if (supports_drafts) Data.publishRoute(identity, selected) else null;
+        }
+
+        fn mergeRoute(identity: []const u8, selected: []const u8) ?ui.RoutablePage {
+            return if (supports_merge) Data.mergeRoute(identity, selected) else null;
         }
 
         fn conflictsRoute(identity: []const u8, selected: []const u8) ?ui.RoutablePage {
@@ -1385,15 +1403,29 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     const route = switch (confirmation_kind) {
                         .remove => ui.RoutablePage.repoThreadRemoveRoute(kind, data.identity, data.selected_id, data.comment_id),
                         .publish => publishRoute(data.identity, data.selected_id),
+                        .merge => mergeRoute(data.identity, data.selected_id),
                     } orelse return error.RouteTooLong;
-                    const action = try std.fmt.allocPrint(aa, "form:{s}", .{try route.toUrl(session.page_arena)});
+                    const page_url = try route.toUrl(session.page_arena);
+                    const action = try std.fmt.allocPrint(aa, "form:{s}", .{page_url});
                     const event_name = if (data.comment_id.len == 0) thread_name else "comment";
                     var label_buf: ["remove ".len + @max(thread_name.len, "comment".len)]u8 = undefined;
-                    const label = switch (confirmation_kind) {
+                    var buttons: [2]ConfirmationButton = undefined;
+                    buttons[0] = .{ .label = switch (confirmation_kind) {
                         .remove => try std.fmt.bufPrint(&label_buf, "remove {s}", .{event_name}),
                         .publish => "publish patch",
-                    };
-                    var center = try initConfirmationForm(allocator, action, label);
+                        .merge => "merge patch",
+                    } };
+                    var button_count: usize = 1;
+                    if (confirmation_kind == .merge) {
+                        if (comptime supports_merge) {
+                            buttons[1] = .{
+                                .label = "squash and merge patch",
+                                .action = try std.fmt.allocPrint(aa, "{s}{s}/squash", .{ ui.submit_action_prefix, page_url }),
+                            };
+                            button_count += 1;
+                        } else unreachable;
+                    }
+                    var center = try initConfirmationForm(allocator, action, buttons[0..button_count]);
                     errdefer center.deinit(allocator);
                     try stack.children.put(allocator, center.getFocus().id, .{ .center = center });
                 } else if (data.view == .new_comment or data.view == .edit_comment) {
@@ -1624,7 +1656,12 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             return box;
         }
 
-        fn initConfirmationForm(allocator: std.mem.Allocator, action: []const u8, label: []const u8) !Center {
+        const ConfirmationButton = struct {
+            label: []const u8,
+            action: []const u8 = "submit",
+        };
+
+        fn initConfirmationForm(allocator: std.mem.Allocator, action: []const u8, buttons: []const ConfirmationButton) !Center {
             var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .rounded_corners = true, .direction = .vert });
             errdefer box.deinit(allocator);
             box.getFocus().kind = .{ .custom = action };
@@ -1633,12 +1670,14 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             errdefer prompt.deinit(allocator);
             try box.children.put(allocator, prompt.getFocus().id, .{ .widget = .{ .text = prompt }, .rect = null, .min_size = null });
 
-            var button = try wgt.TextBox.init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
-            errdefer button.deinit(allocator);
-            button.getFocus().focusable = true;
-            button.getFocus().kind = .{ .custom = "submit" };
-            try box.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = null });
-            box.getFocus().child_id = button.getFocus().id;
+            for (buttons, 0..) |options, index| {
+                var button = try wgt.TextBox.init(allocator, options.label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+                errdefer button.deinit(allocator);
+                button.getFocus().focusable = true;
+                button.getFocus().kind = .{ .custom = options.action };
+                try box.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = null });
+                if (index == 0) box.getFocus().child_id = button.getFocus().id;
+            }
 
             return Center.init(allocator, .{ .box = box });
         }
@@ -2171,11 +2210,21 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
 
         fn confirmationFormInput(self: *This, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
             const form = self.confirmationForm() orelse return;
-            const button_id = form.children.keys()[1];
+            const child_id = form.getFocus().child_id orelse return;
+            const index = form.children.getIndex(child_id) orelse return;
             switch (key) {
-                .arrow_up, .back_tab => self.focusHeader(root_focus),
-                .enter => try self.submitConfirmation(allocator),
-                .mouse => |mouse| if (inp.leftClickOn(root_focus, button_id, mouse)) try self.submitConfirmation(allocator),
+                .arrow_up, .back_tab => if (index > 1)
+                    root_focus.setFocus(form.children.keys()[index - 1])
+                else
+                    self.focusHeader(root_focus),
+                .arrow_down, .tab => if (index + 1 < form.children.count()) root_focus.setFocus(form.children.keys()[index + 1]),
+                .enter => try self.submitConfirmation(allocator, index),
+                .mouse => |mouse| for (form.children.keys()[1..], 1..) |button_id, button_index| {
+                    if (inp.leftClickOn(root_focus, button_id, mouse)) {
+                        try self.submitConfirmation(allocator, button_index);
+                        break;
+                    }
+                },
                 else => {},
             }
         }
@@ -2506,7 +2555,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             try self.session.navigate(route);
         }
 
-        fn submitConfirmation(self: *This, allocator: std.mem.Allocator) !void {
+        fn submitConfirmation(self: *This, allocator: std.mem.Allocator, button_index: usize) !void {
             switch (confirmation(self.data.view) orelse return) {
                 .publish => if (comptime supports_drafts) {
                     if (comptime wasm) return;
@@ -2514,6 +2563,14 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     if (!entryDraft(entry.*)) return;
                     try self.data.publishDraft(self.session, allocator, entry.id);
                     const route = listRoute(self.data.identity, @enumFromInt(0), "", entry.id) orelse return;
+                    try self.session.navigate(route);
+                } else unreachable,
+                .merge => if (comptime supports_merge) {
+                    if (comptime wasm) return;
+                    const entry = self.data.selectedThread() orelse return;
+                    try self.data.mergePatch(self.session, allocator, entry.id, button_index > 1);
+                    const merged = std.meta.stringToEnum(Status, "merged") orelse return;
+                    const route = listRoute(self.data.identity, merged, "", entry.id) orelse return;
                     try self.session.navigate(route);
                 } else unreachable,
                 .remove => try self.submitRemove(allocator),

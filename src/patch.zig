@@ -293,6 +293,20 @@ pub fn merge(
     }
 }
 
+// merge a published patch and remove its fork
+pub fn mergeAndRemoveFork(
+    comptime repo_opts: rp.RepoOpts(.xit),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    repo_root_path: []const u8,
+    admin_repo: *rp.Repo(.xit, evt.admin_repo_opts),
+    target_repo: *rp.Repo(.xit, repo_opts),
+    input: MergeInput,
+) !void {
+    try merge(repo_opts, io, allocator, repo_root_path, target_repo, input);
+    try fork.remove(io, allocator, repo_root_path, admin_repo, &input.id, null, input.author);
+}
+
 fn commitAuthor(line: []const u8) !evt.CommitAuthor {
     const open = std.mem.lastIndexOfScalar(u8, line, '<') orelse return error.AuthorNotFound;
     const close = std.mem.indexOfScalarPos(u8, line, open + 1, '>') orelse return error.AuthorNotFound;

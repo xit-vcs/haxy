@@ -177,7 +177,7 @@ pub const RoutablePage = union(enum) {
 
     pub const IssuesView = enum { open, closed, tags, new, edit, description, new_comment, edit_comment, remove, conflicts, resolve };
 
-    pub const PatchesView = enum { open, closed, merged, tags, new, drafts, edit, publish, description, new_comment, edit_comment, remove, conflicts, resolve };
+    pub const PatchesView = enum { open, closed, merged, tags, new, drafts, edit, publish, merge, description, new_comment, edit_comment, remove, conflicts, resolve };
 
     pub const DiscussionsView = enum { recent, tags, new, edit, description, new_comment, edit_comment, remove };
 
@@ -594,6 +594,16 @@ pub const RoutablePage = union(enum) {
         return route;
     }
 
+    pub fn repoPatchMergeRoute(identity: []const u8, selected: []const u8) ?RoutablePage {
+        if (selected.len == 0) return null;
+        var route = repoPatchesRoute(identity, .open, "", selected) orelse return null;
+        switch (route) {
+            .repo_patches => |*patch| patch.view = .merge,
+            else => unreachable,
+        }
+        return route;
+    }
+
     pub fn repoDiscussionsRoute(identity: []const u8, tag: []const u8, selected: []const u8) ?RoutablePage {
         return .{ .repo_discussions = .{
             .name = Array(repo_route_max_len).from(identity) orelse return null,
@@ -896,6 +906,7 @@ pub const RoutablePage = union(enum) {
                 const prefix = try repoUrlPrefix(arena, p.name.slice());
                 if (p.view == .edit) break :blk try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ patch_seg ++ "{s}/edit", .{ prefix, p.selected.slice() });
                 if (p.view == .publish) break :blk try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ patch_seg ++ "{s}/publish", .{ prefix, p.selected.slice() });
+                if (p.view == .merge) break :blk try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ patch_seg ++ "{s}/merge", .{ prefix, p.selected.slice() });
                 if (p.view == .description) break :blk try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ patch_seg ++ "{s}/description", .{ prefix, p.selected.slice() });
                 if (p.view == .resolve) break :blk if (p.theirs.len == 0)
                     try std.fmt.allocPrint(arena.allocator(), "{s}/" ++ patch_seg ++ "{s}/resolve", .{ prefix, p.selected.slice() })
@@ -1240,6 +1251,7 @@ pub const RoutablePage = union(enum) {
                 if (std.mem.eql(u8, tail, "new")) return if (params.only(&.{})) repoThreadCommentNewRoute(.patch, pair, patch_id, "") else null;
                 if (std.mem.eql(u8, tail, "edit")) return if (params.only(&.{})) repoThreadEditRoute(.patch, pair, patch_id) else null;
                 if (std.mem.eql(u8, tail, "publish")) return if (params.only(&.{})) repoPatchPublishRoute(pair, patch_id) else null;
+                if (std.mem.eql(u8, tail, "merge")) return if (params.only(&.{})) repoPatchMergeRoute(pair, patch_id) else null;
                 if (std.mem.eql(u8, tail, "remove")) return if (params.only(&.{})) repoThreadRemoveRoute(.patch, pair, patch_id, "") else null;
                 if (std.mem.eql(u8, tail, "description")) return if (params.only(&.{})) repoThreadDescriptionRoute(.patch, pair, patch_id) else null;
                 if (std.mem.eql(u8, tail, "resolve")) {

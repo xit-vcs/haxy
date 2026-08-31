@@ -436,7 +436,7 @@ pub fn remove(
     repo_root_path: []const u8,
     admin_repo: *rp.Repo(.xit, evt.admin_repo_opts),
     id: *const [evt.event_id_size * 2]u8,
-    user_id: *const [evt.event_id_size]u8,
+    expected_user_id: ?*const [evt.event_id_size]u8,
     author: evt.CommitAuthor,
 ) !void {
     const fork_id = try evt.parseEventId(id);
@@ -444,7 +444,9 @@ pub fn remove(
     defer arena.deinit();
     const moment = try evt.currentMoment(evt.admin_repo_opts, admin_repo);
     const record = (try evt.Fork.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, &arena, &fork_id)) orelse return error.InvalidPatchDraft;
-    if (!std.mem.eql(u8, record.event.user_id, user_id)) return error.InvalidPatchDraft;
+    if (expected_user_id) |user_id| {
+        if (!std.mem.eql(u8, record.event.user_id, user_id)) return error.InvalidPatchDraft;
+    }
     if (!record.removed) try evt.remove(.admin, .xit, evt.admin_repo_opts, io, allocator, admin_repo, &fork_id, .fork, author);
 
     const path = try forkPath(allocator, repo_root_path, id);

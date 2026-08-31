@@ -763,11 +763,20 @@ fn patchLifecycle(temp_dir_name: []const u8, merge_revision: pch.MergeRevision) 
     // merge the selected revision into the target
     //
 
+    try evt.Patch.update(.xit, repo_opts, io, allocator, &target, &patch_id, .{ .status = .closed }, author);
+    try std.testing.expectError(error.PatchClosed, pch.merge(repo_opts, io, allocator, repos_dir, &target, .{
+        .id = patch_id_hex,
+        .revision = merge_revision,
+        .author = author,
+        .timestamp = 5,
+    }));
+    try evt.Patch.update(.xit, repo_opts, io, allocator, &target, &patch_id, .{ .status = .open }, author);
+
     const selected_oid = switch (merge_revision) {
         .squash => squash_oid,
         .source => source_oid,
     };
-    try pch.merge(repo_opts, io, allocator, repos_dir, &target, .{
+    try pch.mergeAndRemoveFork(repo_opts, io, allocator, repos_dir, &admin, &target, .{
         .id = patch_id_hex,
         .revision = merge_revision,
         .author = author,
@@ -781,6 +790,10 @@ fn patchLifecycle(temp_dir_name: []const u8, merge_revision: pch.MergeRevision) 
     const merged = (try evt.Patch.readById(Repo.DB, repo_opts.hash, merged_moment, &arena, &patch_id)) orelse return error.NotFound;
     try std.testing.expectEqual(.merged, merged.event.status);
     try std.testing.expect(null != try evt.PatchRev.readById(Repo.DB, repo_opts.hash, merged_moment, &arena, &first_patchrev_id));
+
+    _ = arena.reset(.retain_capacity);
+    const removed_fork = (try evt.Fork.readById(evt.AdminDB, evt.admin_repo_opts.hash, try evt.currentMoment(evt.admin_repo_opts, &admin), &arena, &patch_id)) orelse return error.NotFound;
+    try std.testing.expect(removed_fork.removed);
 }
 
 fn indexedForkCount(

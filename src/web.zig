@@ -134,7 +134,7 @@ fn handleRequest(
     if (method == .POST) {
         switch (host) {
             .remote => |remote| {
-                const PostRoute = enum { login, logout, ansi, new, edit, remove, open, close, resolve, publish, attach };
+                const PostRoute = enum { login, logout, ansi, new, edit, remove, open, close, resolve, publish, merge, squash, attach };
                 inline for (@typeInfo(PostRoute).@"enum".fields) |field| {
                     const suffix = "/" ++ field.name;
                     if (std.mem.endsWith(u8, path, suffix)) {
@@ -150,6 +150,8 @@ fn handleRequest(
                             .close => handleThreadStatus(io, request, allocator, base, host, false),
                             .resolve => handleThreadResolve(io, request, allocator, base, host),
                             .publish => handlePatchPublish(io, request, allocator, base, host),
+                            .merge => handlePatchMerge(io, request, allocator, base, host, .source),
+                            .squash => handlePatchMerge(io, request, allocator, base, host, .squash),
                             .attach => handleAttach(io, request, allocator, base, host),
                         };
                     }
@@ -679,6 +681,50 @@ fn handlePatchPublish(
     try request.respond("", .{
         .status = .see_other,
         .extra_headers = &.{.{ .name = "location", .value = base }},
+    });
+}
+
+fn handlePatchMerge(
+    io: std.Io,
+    request: *std.http.Server.Request,
+    allocator: std.mem.Allocator,
+    base: []const u8,
+    host: Host,
+    revision: pch.MergeRevision,
+) !void {
+    const parts = commentBaseParts(base) orelse return respondRemoveNotFound(request);
+    if (parts.thread_kind != .patch or parts.comment_id != null) return respondRemoveNotFound(request);
+    const remote = switch (host) {
+        .remote => |remote| remote,
+        .local => return respondRemoveNotFound(request),
+    };
+    var author_arena = std.heap.ArenaAllocator.init(allocator);
+    defer author_arena.deinit();
+    const author = ((try eventAuthor(io, allocator, &author_arena, request, host)) orelse return respondLoginRequired(request)).author;
+
+    const request_repo = (try requestRepoSource(io, allocator, host, parts.repo_base)) orelse return respondRemoveNotFound(request);
+    defer request_repo.deinit(allocator);
+    var target_repo = try rp.Repo(.xit, .{}).open(io, allocator, request_repo.source.localInitOpts());
+    defer target_repo.deinit(io, allocator);
+    var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = remote.admin_repo_path });
+    defer admin_repo.deinit(io, allocator);
+
+    const id = std.fmt.bytesToHex(parts.thread_id, .lower);
+    const repos_dir = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(remote.admin_repo_path) orelse ".", "repos" });
+    defer allocator.free(repos_dir);
+    try pch.mergeAndRemoveFork(.{}, io, allocator, repos_dir, &admin_repo, &target_repo, .{
+        .id = id,
+        .revision = revision,
+        .author = author,
+        .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
+    });
+
+    const location = try std.fmt.allocPrint(allocator, "{s}/patch:{s}", .{ parts.repo_base, &id });
+    defer allocator.free(location);
+    try request.respond("", .{
+        .status = .see_other,
+        .keep_alive = false,
+        .extra_headers = &.{.{ .name = "location", .value = location }},
     });
 }
 

@@ -1152,13 +1152,12 @@ fn seedPatches(
         });
 
         if (status == .merged) {
-            try pch.merge(.{}, io, allocator, repos_path, target_repo, .{
+            try pch.mergeAndRemoveFork(.{}, io, allocator, repos_path, admin_repo, target_repo, .{
                 .id = patch_hex,
                 .revision = .source,
                 .author = patch_author,
                 .timestamp = timestamp + 7,
             });
-            try fork.remove(io, allocator, repos_path, admin_repo, &patch_hex, user_id, patch_author);
         } else if (status != .open) {
             try evt.Patch.update(.xit, .{}, io, allocator, target_repo, &patch_ids[i], .{ .status = status }, patch_author);
         }

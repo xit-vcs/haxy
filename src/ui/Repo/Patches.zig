@@ -150,6 +150,20 @@ pub fn publishRoute(identity: []const u8, selected: []const u8) ?ui.RoutablePage
     return ui.RoutablePage.repoPatchPublishRoute(identity, selected);
 }
 
+pub fn mergeRoute(identity: []const u8, selected: []const u8) ?ui.RoutablePage {
+    return ui.RoutablePage.repoPatchMergeRoute(identity, selected);
+}
+
+pub fn canMerge(entry: Entry, session: *const ui.Session) bool {
+    return !entry.draft and
+        entry.fork_exists and
+        !entry.conflicted and
+        entry.record.event.revision != null and
+        entry.record.event.status == .open and
+        !session.data.is_local and
+        session.data.user_id != null;
+}
+
 pub fn createDraft(
     data: *const Self,
     session: *ui.Session,
@@ -202,6 +216,26 @@ pub fn publishDraft(data: *const Self, session: *ui.Session, allocator: std.mem.
         .id = id_hex,
         .user_id = user_id,
         .repo_id = repo_id,
+        .author = author,
+        .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
+    });
+}
+
+pub fn mergePatch(data: *const Self, session: *ui.Session, allocator: std.mem.Allocator, id: []const u8, squash: bool) !void {
+    const io = session.io orelse return error.NotFound;
+    const repos_dir = session.repos_dir orelse return error.NotFound;
+    const admin_repo = session.admin_repo orelse return error.NotFound;
+    const repo_source = data.repo_source orelse return error.NotFound;
+    if (repo_source.repo_kind != .xit) return error.NotFound;
+    const patch_id = evt.parseEventId(id) catch return error.NotFound;
+    const author = (try session.eventAuthor()) orelse return error.NotFound;
+
+    const id_hex = std.fmt.bytesToHex(patch_id, .lower);
+    var target_repo = try rp.Repo(.xit, .{}).open(io, allocator, repo_source.localInitOpts());
+    defer target_repo.deinit(io, allocator);
+    try pch.mergeAndRemoveFork(.{}, io, allocator, repos_dir, admin_repo, &target_repo, .{
+        .id = id_hex,
+        .revision = if (squash) .squash else .source,
         .author = author,
         .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
     });
@@ -468,7 +502,7 @@ pub fn init(
                 .merged => merged_root = order_key,
             }
             // form urls keep their view; otherwise the patch's status picks it.
-            if (view != .edit and view != .new_comment and view != .edit_comment and view != .remove) resolved_view = switch (patch_event.event.status) {
+            if (view != .edit and view != .merge and view != .new_comment and view != .edit_comment and view != .remove) resolved_view = switch (patch_event.event.status) {
                 .open => .open,
                 .closed => .closed,
                 .merged => .merged,
@@ -790,6 +824,7 @@ pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *con
         const route = switch (data.view) {
             .edit => ui.RoutablePage.repoThreadEditRoute(.patch, data.identity, data.selected_id) orelse return error.RouteTooLong,
             .publish => ui.RoutablePage.repoPatchPublishRoute(data.identity, data.selected_id) orelse return error.RouteTooLong,
+            .merge => ui.RoutablePage.repoPatchMergeRoute(data.identity, data.selected_id) orelse return error.RouteTooLong,
             .new_comment => ui.RoutablePage.repoThreadCommentNewRoute(.patch, data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong,
             .edit_comment => ui.RoutablePage.repoThreadCommentEditRoute(.patch, data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong,
             .remove => ui.RoutablePage.repoThreadRemoveRoute(.patch, data.identity, data.selected_id, data.comment_id) orelse return error.RouteTooLong,
@@ -800,6 +835,7 @@ pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *con
         const label: []const u8 = switch (data.view) {
             .edit => "edit",
             .publish => "publish",
+            .merge => "merge",
             .new_comment => "reply",
             .edit_comment => "edit",
             .remove => "remove",
