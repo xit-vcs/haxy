@@ -165,7 +165,7 @@ test "sync creates missing event branches and preserves head" {
     try std.testing.expectEqualStrings(&local_tip, &remote_tip);
 
     var start_oids = [_][local_tip.len]u8{local_tip};
-    var commit_iter = try local.log(io, allocator, &start_oids);
+    var commit_iter = try local.log(io, allocator, .{ .start_oids = &start_oids });
     defer commit_iter.deinit();
     var merge_commit = (try commit_iter.next(allocator)) orelse return error.TestExpectedEqual;
     defer merge_commit.deinit();

@@ -138,7 +138,7 @@ fn oidAuthor(
     const oid = oid_maybe orelse return .unknown;
     const gpa = arena.child_allocator;
     var start_oids = [_][hash.hexLen(repo_opts.hash)]u8{std.fmt.bytesToHex(oid, .lower)};
-    var commit_iter = repo.log(io, gpa, start_oids[0..1]) catch return .unknown;
+    var commit_iter = repo.log(io, gpa, .{ .start_oids = start_oids[0..1] }) catch return .unknown;
     defer commit_iter.deinit();
     const commit_object = (commit_iter.next(gpa) catch return .unknown) orelse return .unknown;
     defer commit_object.deinit();

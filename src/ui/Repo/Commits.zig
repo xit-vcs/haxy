@@ -124,7 +124,7 @@ pub fn init(
     var count: usize = 0;
     var next_start: ?[]const u8 = null;
     {
-        var iter = repo.log(io, gpa, start_oids) catch return emptyResult(aa, location, resolved.ref_or_oid, resolved.value, content);
+        var iter = repo.log(io, gpa, .{ .start_oids = start_oids, .first_parent = true }) catch return emptyResult(aa, location, resolved.ref_or_oid, resolved.value, content);
         defer iter.deinit();
         // omit the base and its ancestors
         if (base_oid_maybe) |base_oid| try iter.exclude(&base_oid);
@@ -228,7 +228,7 @@ fn renderCommitDiff(
 
     // load the commit so we can diff it against its first parent.
     var start_oids = [_][xit.hash.hexLen(repo_opts.hash)]u8{oid};
-    var commit_iter = repo.log(io, gpa, start_oids[0..1]) catch return empty;
+    var commit_iter = repo.log(io, gpa, .{ .start_oids = start_oids[0..1] }) catch return empty;
     defer commit_iter.deinit();
     const commit_object = (commit_iter.next(gpa) catch return empty) orelse return empty;
     defer commit_object.deinit();
