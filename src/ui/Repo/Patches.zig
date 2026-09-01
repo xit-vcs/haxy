@@ -723,7 +723,7 @@ pub fn appendDetails(self: *const Self, allocator: std.mem.Allocator, box: *wgt.
     var field_count: usize = 0;
 
     if (status_kind != .merged and entry.fork_exists and entry.target_branch.len != 0) if (session.data.git_ssh_port) |port| {
-        const url = try std.fmt.allocPrint(aa, "ssh://localhost:{d}/repo/{s}/patch:{s}/branch:{s}", .{ port, self.identity, entry.id, entry.target_branch });
+        const url = try std.fmt.allocPrint(aa, "ssh://localhost:{d}/fork/{s}/patch:{s}/branch:{s}", .{ port, self.identity, entry.id, entry.target_branch });
         const push_command = try std.fmt.allocPrint(aa, "git push {s} HEAD:patch", .{url});
         const clone_name = try cloneDirectoryName(aa, entry.record.event.title);
         const clone_command = if (clone_name.len == 0)

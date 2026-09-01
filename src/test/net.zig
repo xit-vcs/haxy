@@ -614,7 +614,7 @@ fn testPushFork(
         break :blk try client.commit(io, allocator, .{ .message = "add feature" });
     };
 
-    const remote_url = try std.fmt.allocPrint(allocator, "git@localhost:admin/target/patch:{s}/branch:master", .{&fork_id_hex});
+    const remote_url = try std.fmt.allocPrint(allocator, "git@localhost:fork/admin/target/patch:{s}/branch:master", .{&fork_id_hex});
     defer allocator.free(remote_url);
     try client.addRemote(io, allocator, .{ .name = "patch", .value = remote_url });
     try client.push(io, allocator, "patch", "master:patch", false, .{ .wire = .{ .ssh = .{ .command = ssh_cmd } } });
@@ -673,7 +673,7 @@ fn testPushFork(
         }});
     }
 
-    const feature_remote_url = try std.fmt.allocPrint(allocator, "git@localhost:admin/target/patch:{s}/branch:feature", .{&fork_id_hex});
+    const feature_remote_url = try std.fmt.allocPrint(allocator, "git@localhost:fork/admin/target/patch:{s}/branch:feature", .{&fork_id_hex});
     defer allocator.free(feature_remote_url);
     try client.addRemote(io, allocator, .{ .name = "patch-to-feature", .value = feature_remote_url });
 
@@ -804,7 +804,7 @@ fn testPushFork(
         try std.testing.expectEqualStrings(&second_patch_oid, imported.patch_oid);
     }
 
-    const other_url = try std.fmt.allocPrint(allocator, "git@localhost:admin/other/patch:{s}/branch:other", .{&fork_id_hex});
+    const other_url = try std.fmt.allocPrint(allocator, "git@localhost:fork/admin/other/patch:{s}/branch:other", .{&fork_id_hex});
     defer allocator.free(other_url);
     try client.addRemote(io, allocator, .{ .name = "other", .value = other_url });
     const wrong_repo_rejected = if (client.push(io, allocator, "other", "master:patch", false, .{ .wire = .{ .ssh = .{ .command = ssh_cmd } } })) |_| false else |_| true;
@@ -861,7 +861,7 @@ fn testPushFork(
         });
     }
 
-    const denied_url = try std.fmt.allocPrint(allocator, "git@localhost:admin/target/patch:{s}/branch:denied", .{&fork_id_hex});
+    const denied_url = try std.fmt.allocPrint(allocator, "git@localhost:fork/admin/target/patch:{s}/branch:denied", .{&fork_id_hex});
     defer allocator.free(denied_url);
     try client.addRemote(io, allocator, .{ .name = "denied", .value = denied_url });
     const unauthorized_rejected = if (client.push(io, allocator, "denied", "master:patch", false, .{ .wire = .{ .ssh = .{ .command = ssh_cmd } } })) |_| false else |_| true;

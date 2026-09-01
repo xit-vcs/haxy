@@ -317,10 +317,11 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, command:
 
     const parsed = parseGitCommand(allocator, command) catch return writeError(sess, "unsupported command (expected git-upload-pack or git-receive-pack)");
     defer parsed.deinit(allocator);
-    const repo_prefix = "/repo/";
-    const repo_identity = if (std.mem.startsWith(u8, parsed.dir, repo_prefix)) parsed.dir[repo_prefix.len..] else parsed.dir;
+    const path = std.mem.trimStart(u8, parsed.dir, "/");
+    const fork_prefix = "fork/";
 
-    if (fork.parseRoute(repo_identity)) |route| {
+    if (std.mem.startsWith(u8, path, fork_prefix)) {
+        const route = fork.parseRoute(path[fork_prefix.len..]) orelse return writeError(sess, "invalid fork path");
         const owner_repo = evt.parseOwnerRepoPath(route.identity) orelse return writeError(sess, "repo path must be <owner>/<repo>");
         if (parsed.service == .receive_pack and !xit.ref.validateName(route.target)) return writeError(sess, "invalid target branch");
 
@@ -374,6 +375,9 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, command:
         try sess.exit(0);
         return;
     }
+
+    const repo_prefix = "repo/";
+    const repo_identity = if (std.mem.startsWith(u8, path, repo_prefix)) path[repo_prefix.len..] else path;
 
     const create_if_missing = parsed.service == .receive_pack;
     const any_repo_opts: rp.AnyRepoOpts(.xit) = .{};
