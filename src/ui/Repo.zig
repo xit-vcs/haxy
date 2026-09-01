@@ -293,7 +293,7 @@ pub const View = struct {
         // build the header first so we can grab the files-tab id for the auth
         // view (it focuses there after login).
         {
-            var header_view = try Header.View.init(allocator, &data.header, session);
+            var header_view = try Header.View.init(allocator, &data.header, data.commits.commit_count, session);
             errdefer header_view.deinit(allocator);
             try box.children.put(allocator, header_view.getFocus().id, .{ .widget = .{ .repo_header = header_view }, .rect = null, .min_size = null });
         }

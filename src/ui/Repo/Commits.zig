@@ -50,6 +50,7 @@ location: ui.RoutablePage.RepoLocation,
 // didn't name one), so the page can canonicalize its url to it.
 ref_or_oid: ui.RoutablePage.RefOrOid,
 ref_or_oid_value: []const u8,
+commit_count: ?u64 = null,
 commits: []const Commit,
 // the first oid of the next page, or null when this is the last page.
 next_start: ?[]const u8,
@@ -170,10 +171,21 @@ pub fn init(
         }
     }
 
+    const commit_count: ?u64 = switch (repo_kind) {
+        .git => null,
+        .xit => blk: {
+            const head_count = repo.commitCount(io, gpa, .{ .oid = &resolved.oid }) catch break :blk null;
+            const base_oid = base_oid_maybe orelse break :blk head_count;
+            const base_count = repo.commitCount(io, gpa, .{ .oid = &base_oid }) catch break :blk null;
+            break :blk if (head_count >= base_count) head_count - base_count else null;
+        },
+    };
+
     return .{
         .location = try location.dupe(aa),
         .ref_or_oid = resolved.ref_or_oid,
         .ref_or_oid_value = resolved.value,
+        .commit_count = commit_count,
         .commits = try aa.dupe(Commit, buf[0..count]),
         .next_start = next_start,
         .content = try pageContent(aa, content),
@@ -187,6 +199,7 @@ pub fn emptyResult(aa: std.mem.Allocator, location: ui.RoutablePage.RepoLocation
         .location = try location.dupe(aa),
         .ref_or_oid = ref_or_oid,
         .ref_or_oid_value = try aa.dupe(u8, value),
+        .commit_count = null,
         .commits = &.{},
         .next_start = null,
         .content = try pageContent(aa, content),

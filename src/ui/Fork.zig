@@ -147,7 +147,7 @@ pub const View = struct {
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert });
         errdefer box.deinit(allocator);
         {
-            var header = try Header.View.init(allocator, &data.header, session);
+            var header = try Header.View.init(allocator, &data.header, data.commits.commit_count, session);
             errdefer header.deinit(allocator);
             try box.children.put(allocator, header.getFocus().id, .{ .widget = .{ .fork_header = header }, .rect = null, .min_size = null });
         }

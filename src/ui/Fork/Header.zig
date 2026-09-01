@@ -36,7 +36,7 @@ pub const View = struct {
     tabs_id: usize,
     first_group_width: usize,
 
-    pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !View {
+    pub fn init(allocator: std.mem.Allocator, data: *const Self, commit_count: ?u64, session: *ui.Session) !View {
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = .hidden, .rounded_corners = true, .direction = .horiz });
         errdefer box.deinit(allocator);
 
@@ -53,6 +53,7 @@ pub const View = struct {
 
         const aa = session.page_arena.allocator();
         const identity = try std.fmt.allocPrint(aa, "{s}/{s}", .{ data.owner_name, data.name });
+        const commits_label = if (commit_count) |count| try std.fmt.allocPrint(aa, "commits ({d})", .{count}) else "commits";
         var first_group_width = try data.title.width();
 
         // the user's name links to their page.
@@ -91,7 +92,7 @@ pub const View = struct {
             ui.RoutablePage.forkCommitsRoute(identity, data.id, data.oid, 0, "") orelse return error.RouteTooLong,
         };
         const tags = [_]std.meta.Tag(ui.RoutablePage){ .fork_patch, .fork_files, .fork_commits };
-        const labels = [_][]const u8{ "patch", "files", "commits" };
+        const labels = [_][]const u8{ "patch", "files", commits_label };
         var selected_tab: ?usize = null;
 
         for (routes, tags, labels) |route, tag, label| {

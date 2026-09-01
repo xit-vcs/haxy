@@ -49,7 +49,7 @@ pub const View = struct {
     tabs_id: usize,
     first_group_width: usize,
 
-    pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !View {
+    pub fn init(allocator: std.mem.Allocator, data: *const Self, commit_count: ?u64, session: *ui.Session) !View {
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = .hidden, .rounded_corners = true, .direction = .horiz });
         errdefer box.deinit(allocator);
 
@@ -68,6 +68,8 @@ pub const View = struct {
         const ref_name = std.Uri.percentDecodeInPlace(try aa.dupe(u8, data.ref_or_oid_value));
         const bottom_label = try ui.clippedBottomLabel(try aa.alloc(u8, ui.clipped_bottom_label_max_len), ref_name);
         const bottom_label_width = try xitui.width.displayWidth(bottom_label);
+        const commits_label = if (commit_count) |count| try std.fmt.allocPrint(aa, "commits ({d})", .{count}) else "commits";
+        const commits_label_width = try xitui.width.displayWidth(commits_label);
         var first_group_width = try data.title.width();
 
         // the user's name (local mode has no user pages to link to)
@@ -169,7 +171,7 @@ pub const View = struct {
 
         // commits tab
         {
-            var text_box = try wgt.TextBox.init(allocator, "commits", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none, .bottom_label = bottom_label });
+            var text_box = try wgt.TextBox.init(allocator, commits_label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none, .bottom_label = bottom_label });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().focusable = true;
             text_box.getFocus().kind = .{ .custom = commits_link };
@@ -178,7 +180,7 @@ pub const View = struct {
             try tabs_box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
-                .min_size = .{ .width = @max("commits".len, bottom_label_width) + 2, .height = null },
+                .min_size = .{ .width = @max(commits_label_width, bottom_label_width) + 2, .height = null },
             });
         }
 
