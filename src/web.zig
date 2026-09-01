@@ -522,6 +522,8 @@ fn handleThreadNew(
     // newlines so the text renders the same on every host
     const description = try std.mem.replaceOwned(u8, allocator, description_crlf, "\r\n", "\n");
     defer allocator.free(description);
+    const target_branch = (try parseFormField(allocator, body, "target_branch")) orelse try allocator.dupe(u8, "");
+    defer allocator.free(target_branch);
 
     const valid = switch (kind) {
         .issue => evt.Issue.fieldsValid(title, tags),
@@ -557,6 +559,12 @@ fn handleThreadNew(
         const user_id = request_author.user_id orelse return respondLoginRequired(request);
         const request_repo = (try requestRepoSource(io, allocator, host, base)) orelse return respondRemoveNotFound(request);
         defer request_repo.deinit(allocator);
+        if (!try request_repo.source.hasBranch(io, allocator, target_branch)) {
+            const form_location = try std.fmt.allocPrint(allocator, "{s}/patches/new", .{base});
+            defer allocator.free(form_location);
+            try request.respond("", .{ .status = .see_other, .extra_headers = &.{.{ .name = "location", .value = form_location }} });
+            return;
+        }
         const repo_id = evt.parseEventId(std.fs.path.basename(request_repo.source.path)) catch return respondRemoveNotFound(request);
         var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = remote.admin_repo_path });
         defer admin_repo.deinit(io, allocator);
@@ -569,6 +577,7 @@ fn handleThreadNew(
             .title = title,
             .description = description,
             .tags = tags,
+            .target_branch = target_branch,
             .author = author,
             .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
         });
@@ -1295,7 +1304,7 @@ fn handleThreadStatus(
     });
 }
 
-// replace the title, tags and description of a thread.
+// replace a thread's editable fields.
 fn handleThreadEdit(
     io: std.Io,
     request: *std.http.Server.Request,
@@ -1322,6 +1331,8 @@ fn handleThreadEdit(
     // newlines so the text renders the same on every host
     const description = try std.mem.replaceOwned(u8, allocator, description_crlf, "\r\n", "\n");
     defer allocator.free(description);
+    const target_branch = (try parseFormField(allocator, body, "target_branch")) orelse try allocator.dupe(u8, "");
+    defer allocator.free(target_branch);
 
     // invalid fields send the user back to the edit form
     const valid = switch (parts.thread_kind) {
@@ -1348,6 +1359,12 @@ fn handleThreadEdit(
         };
         const request_repo = (try requestRepoSource(io, allocator, host, parts.repo_base)) orelse return respondRemoveNotFound(request);
         defer request_repo.deinit(allocator);
+        if (!try request_repo.source.hasBranch(io, allocator, target_branch)) {
+            const form_location = try std.fmt.allocPrint(allocator, "{s}/edit", .{base});
+            defer allocator.free(form_location);
+            try request.respond("", .{ .status = .see_other, .extra_headers = &.{.{ .name = "location", .value = form_location }} });
+            return;
+        }
         const repo_id = evt.parseEventId(std.fs.path.basename(request_repo.source.path)) catch return respondRemoveNotFound(request);
         var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = remote.admin_repo_path });
         defer admin_repo.deinit(io, allocator);
@@ -1363,6 +1380,7 @@ fn handleThreadEdit(
             .title = title,
             .tags = tags,
             .description = description,
+            .target_branch = target_branch,
             .author = author,
             .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
         })) {
@@ -1390,6 +1408,7 @@ fn handleThreadEdit(
             .title = title,
             .tags = tags,
             .description = description,
+            .target_branch = target_branch,
         } }, author),
         .discuss => updateDiscussion(io, allocator, host, parts.repo_base, &parts.thread_id, title, tags, description, author),
         else => unreachable,

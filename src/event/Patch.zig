@@ -9,6 +9,7 @@ const rf = xit.ref;
 title: []const u8,
 description: []const u8,
 tags: []const u8, // space-separated
+target_branch: []const u8,
 target_patch_id: ?[evt.event_id_size * 2]u8 = null,
 revision: ?Revision = null,
 status: Status = .open,
@@ -17,34 +18,23 @@ pub const Revision = struct {
     id: [evt.event_id_size * 2]u8,
     squash_oid: []const u8,
     source_oid: []const u8,
-    target_ref: []const u8,
 
     pub fn fromRecord(id: [evt.event_id_size]u8, record: evt.PatchRev.Record) Revision {
         return .{
             .id = std.fmt.bytesToHex(id, .lower),
             .squash_oid = record.patch_oid,
             .source_oid = record.event.source_oid,
-            .target_ref = record.event.target_ref,
         };
     }
 
     pub fn matches(self: Revision, record: evt.PatchRev.Record) bool {
         return !record.removed and
             std.mem.eql(u8, record.patch_oid, self.squash_oid) and
-            std.mem.eql(u8, record.event.source_oid, self.source_oid) and
-            std.mem.eql(u8, record.event.target_ref, self.target_ref);
+            std.mem.eql(u8, record.event.source_oid, self.source_oid);
     }
 
     pub fn includesOid(self: Revision, oid: []const u8) bool {
         return std.mem.eql(u8, oid, self.source_oid) or std.mem.eql(u8, oid, self.squash_oid);
-    }
-
-    pub fn targetBranch(self: Revision) ?[]const u8 {
-        const target_ref = rf.Ref.initFromPath(self.target_ref, null) orelse return null;
-        return switch (target_ref.kind) {
-            .head => target_ref.name,
-            else => null,
-        };
     }
 };
 
@@ -128,7 +118,7 @@ pub const Resolve = struct {
 
 pub const Update = union(enum) {
     status: StatusKind,
-    fields: struct { title: []const u8, tags: []const u8, description: []const u8 },
+    fields: struct { title: []const u8, tags: []const u8, description: []const u8, target_branch: []const u8 },
     resolve: Resolve,
 };
 
@@ -141,7 +131,7 @@ pub const id_to_field_to_oid_key = "patch-id->field->oid";
 pub const target_patch_id_to_patch_id_set_key = "target-patch-id->patch-id-set";
 pub const status_to_id_set_key = "status->patch-id-set";
 pub const tag_status_to_id_set_key = "tag+status->patch-id-set";
-pub const revision_to_id_set_key = "target-ref+oid->patch-id-set";
+pub const revision_to_id_set_key = "target-branch+oid->patch-id-set";
 
 pub const TagStatusKey = [tag_max_len + 1 + StatusKind.longest_len]u8;
 
@@ -193,10 +183,10 @@ pub fn consume(
     };
 
     if (!fieldsValid(record.event.title, record.event.tags)) return error.InvalidPatch;
+    if (!rf.validateName(record.event.target_branch)) return error.InvalidTarget;
     const revision_id = if (record.event.revision) |*revision| blk: {
         try evt.PatchRev.validateOid(hash_kind, revision.squash_oid);
         try evt.PatchRev.validateOid(hash_kind, revision.source_oid);
-        try evt.PatchRev.validateTarget(revision.target_ref);
         break :blk try evt.parseEventId(&revision.id);
     } else null;
     const target_patch_id = if (record.event.target_patch_id) |*id| try evt.parseEventId(id) else null;
@@ -210,6 +200,7 @@ pub fn consume(
         record.author_email = existing.author_email;
         const existing_status_kind = existing.event.status.kind();
         if (existing_status_kind == .merged and !evt.fieldEqual(Status, existing.event.status, record.event.status)) return error.PatchAlreadyMerged;
+        if (existing_status_kind == .merged and !std.mem.eql(u8, existing.event.target_branch, record.event.target_branch)) return error.PatchAlreadyMerged;
         if (event_oid != null) {
             if (!std.meta.eql(existing.event.target_patch_id, record.event.target_patch_id)) {
                 return error.TargetPatchChanged;
@@ -242,7 +233,7 @@ pub fn consume(
                     const revisions = try DB.HashMap(.read_write).init(try haxy_moment.putCursor(hash.hashInt(hash_kind, revision_to_id_set_key)));
                     for ([_][]const u8{ revision.squash_oid, revision.source_oid }, 0..) |oid, i| {
                         if (i != 0 and std.mem.eql(u8, revision.squash_oid, revision.source_oid)) continue;
-                        const key_hash = hash.hashInt(hash_kind, try revisionKey(arena.allocator(), revision.target_ref, oid));
+                        const key_hash = hash.hashInt(hash_kind, try revisionKey(arena.allocator(), existing.event.target_branch, oid));
                         const ids = try DB.CountedHashSet(.read_write).init(try revisions.putCursor(key_hash));
                         _ = try ids.remove(record_key);
                         if (try ids.count() == 0) _ = try revisions.remove(key_hash);
@@ -285,7 +276,7 @@ pub fn consume(
                 const revisions = try DB.HashMap(.read_write).init(try haxy_moment.putCursor(hash.hashInt(hash_kind, revision_to_id_set_key)));
                 for ([_][]const u8{ revision.squash_oid, revision.source_oid }, 0..) |oid, i| {
                     if (i != 0 and std.mem.eql(u8, revision.squash_oid, revision.source_oid)) continue;
-                    const key = try revisionKey(arena.allocator(), revision.target_ref, oid);
+                    const key = try revisionKey(arena.allocator(), record.event.target_branch, oid);
                     const ids = try DB.CountedHashSet(.read_write).init(try revisions.putCursor(hash.hashInt(hash_kind, key)));
                     try ids.put(record_key, .{ .bytes = event_id });
                 }
@@ -339,9 +330,13 @@ pub fn update(
             };
         },
         .fields => |fields| {
+            if (!rf.validateName(fields.target_branch)) return error.InvalidFields;
+            if ((try repo.readRef(io, .{ .kind = .head, .name = fields.target_branch })) == null) return error.InvalidFields;
             updated.title = fields.title;
             updated.tags = fields.tags;
             updated.description = fields.description;
+            if (!std.mem.eql(u8, updated.target_branch, fields.target_branch)) updated.revision = null;
+            updated.target_branch = fields.target_branch;
         },
         .resolve => |resolve| {
             updated = try resolveFields(repo_kind, repo_opts, io, allocator, &arena, repo, id, record, resolve);
@@ -390,11 +385,14 @@ fn resolveFields(
     const their_cursor = (try entry.getCursor(hash.hashInt(repo_opts.hash, evt.their_record_key))) orelse return updated;
     const theirs = try evt.read(Record, DB, repo_opts.hash, arena, try DB.HashMap(.read_only).init(their_cursor));
 
+    const original_target_branch = updated.target_branch;
     var field_iter = std.mem.splitScalar(u8, fields, ' ');
     while (field_iter.next()) |field| {
         if (std.mem.eql(u8, field, "status") and fieldListed(resolve.theirs, ',', field)) updated.status = theirs.event.status;
         if (std.mem.eql(u8, field, "revision") and fieldListed(resolve.theirs, ',', field)) updated.revision = theirs.event.revision;
+        if (std.mem.eql(u8, field, "target_branch") and fieldListed(resolve.theirs, ',', field)) updated.target_branch = theirs.event.target_branch;
     }
+    if (!std.mem.eql(u8, original_target_branch, updated.target_branch)) updated.revision = null;
 
     if (!fieldListed(fields, ' ', "description")) return updated;
     var base_description: []const u8 = "";
@@ -442,8 +440,8 @@ fn readFromRepo(
     return readById(evt.EventDB(repo_opts.hash), repo_opts.hash, moment, arena, id);
 }
 
-fn revisionKey(allocator: std.mem.Allocator, target_ref: []const u8, oid: []const u8) ![]u8 {
-    return std.mem.concat(allocator, u8, &.{ target_ref, "\x00", oid });
+fn revisionKey(allocator: std.mem.Allocator, target_branch: []const u8, oid: []const u8) ![]u8 {
+    return std.mem.concat(allocator, u8, &.{ target_branch, "\x00", oid });
 }
 
 fn statusSet(

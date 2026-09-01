@@ -147,6 +147,7 @@ test "patch event conflicts, stacking, and gc" {
         .title = "add the answer",
         .description = "adds a reusable answer constant",
         .tags = "enhancement",
+        .target_branch = "master",
     };
     const tree_entries = [_]evt.EventTreeEntry{
         .{ .tree = .{ .name = "base", .oid = &base_tree_oid } },
@@ -165,7 +166,7 @@ test "patch event conflicts, stacking, and gc" {
             &target,
             evt.events_ref,
             patchrev_id,
-            .{ .base_oid = &base_oid, .source_oid = &source_oid, .target_ref = "refs/heads/master", .message = patch.title },
+            .{ .base_oid = &base_oid, .source_oid = &source_oid, .message = patch.title },
             &tree_entries,
             3,
             patch_id,
@@ -224,7 +225,6 @@ test "patch event conflicts, stacking, and gc" {
         .id = std.fmt.bytesToHex(patchrev_id, .lower),
         .squash_oid = &initial_patch_oid,
         .source_oid = &source_oid,
-        .target_ref = "refs/heads/master",
     };
     updated_patch.title = "add a reusable answer";
     {
@@ -296,7 +296,6 @@ test "patch event conflicts, stacking, and gc" {
         try consumePatchWithRevision(.repo, io, allocator, &target, evt.events_ref, patchrev_a_id, .{
             .base_oid = &base_oid,
             .source_oid = &source_a_oid,
-            .target_ref = "refs/heads/master",
             .message = updated_patch.title,
         }, &target_entries, 8, patch_id, target_patch, 9);
     }
@@ -316,7 +315,6 @@ test "patch event conflicts, stacking, and gc" {
         try consumePatchWithRevision(.repo, io, allocator, &target, side_events_ref, patchrev_b_id, .{
             .base_oid = &base_oid,
             .source_oid = &source_b_oid,
-            .target_ref = "refs/heads/master",
             .message = updated_patch.title,
         }, &parent_entries, 10, patch_id, parent_patch, 11);
     }
@@ -366,12 +364,12 @@ test "patch event conflicts, stacking, and gc" {
         try consumePatchWithRevision(.repo, io, allocator, &target, evt.events_ref, child_patchrev_id, .{
             .base_oid = merged_patchrev.patch_oid,
             .source_oid = &source_b_oid,
-            .target_ref = "refs/heads/master",
             .message = "stack another answer change",
         }, &child_entries, 12, child_id, .{
             .title = "stack another answer change",
             .description = "depends on the first patch",
             .tags = "enhancement",
+            .target_branch = "master",
             .target_patch_id = std.fmt.bytesToHex(patch_id, .lower),
         }, 13);
     }
@@ -467,6 +465,7 @@ test "patch event conflicts, stacking, and gc" {
             .title = "invalid merged patch",
             .description = "has no revision",
             .tags = "enhancement",
+            .target_branch = "master",
             .status = .{ .merged = &base_oid },
         } },
     }}));
@@ -575,6 +574,7 @@ fn patchLifecycle(temp_dir_name: []const u8, merge_revision: pch.MergeRevision) 
     const patch_id = evt.EventWithId.randomId(prng.random());
     const patch_id_hex = std.fmt.bytesToHex(patch_id, .lower);
     const draft_path = try fork.create(repo_opts, io, allocator, repos_dir, &admin, .{
+        .target_branch = "master",
         .id = patch_id_hex,
         .user_id = user_id,
         .repo_id = repo_id,
@@ -630,12 +630,12 @@ fn patchLifecycle(temp_dir_name: []const u8, merge_revision: pch.MergeRevision) 
         try consumePatchWithRevision(.fork, io, allocator, &draft, evt.events_ref, first_patchrev_id, .{
             .base_oid = &base_oid,
             .source_oid = &source_oid,
-            .target_ref = "refs/heads/master",
             .message = "add the answer",
         }, &first_entries, 3, patch_id, .{
             .title = "add the answer",
             .tags = "enhancement",
             .description = "adds a reusable answer constant",
+            .target_branch = "master",
         }, 3);
 
         _ = arena.reset(.retain_capacity);
@@ -660,6 +660,7 @@ fn patchLifecycle(temp_dir_name: []const u8, merge_revision: pch.MergeRevision) 
         .title = "explain the answer",
         .tags = "documentation",
         .description = "describes the existing answer",
+        .target_branch = "master",
         .author = author,
         .timestamp = 3,
     });
@@ -696,6 +697,7 @@ fn patchLifecycle(temp_dir_name: []const u8, merge_revision: pch.MergeRevision) 
         .title = "explain the answer",
         .tags = "enhancement documentation",
         .description = "adds and explains a reusable answer constant",
+        .target_branch = "master",
         .author = author,
         .timestamp = 4,
     }));
@@ -746,7 +748,7 @@ fn patchLifecycle(temp_dir_name: []const u8, merge_revision: pch.MergeRevision) 
         try std.testing.expect(removed.removed);
         const revision = (try evt.PatchRev.readById(Repo.DB, repo_opts.hash, draft_moment, &arena, &first_patchrev_id)) orelse return error.NotFound;
         @memcpy(&squash_oid, revision.patch_oid);
-        try std.testing.expectEqualStrings("refs/heads/master", revision.event.target_ref);
+        try std.testing.expectEqualStrings("master", removed.event.target_branch);
         try std.testing.expectEqual(hash.hexLen(repo_opts.hash), revision.event_oid.len);
         var event_oid: [hash.hexLen(repo_opts.hash)]u8 = undefined;
         @memcpy(&event_oid, revision.event_oid);

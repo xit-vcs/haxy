@@ -585,6 +585,7 @@ fn testPushFork(
             .title = "add a feature",
             .description = "a draft patch",
             .tags = "enhancement",
+            .target_branch = "master",
             .author = .{ .name = "admin", .email = "admin@example.test" },
             .timestamp = 1,
         });
@@ -614,7 +615,7 @@ fn testPushFork(
         break :blk try client.commit(io, allocator, .{ .message = "add feature" });
     };
 
-    const remote_url = try std.fmt.allocPrint(allocator, "git@localhost:fork/admin/target/patch:{s}/branch:master", .{&fork_id_hex});
+    const remote_url = try std.fmt.allocPrint(allocator, "git@localhost:fork/admin/target/patch:{s}", .{&fork_id_hex});
     defer allocator.free(remote_url);
     try client.addRemote(io, allocator, .{ .name = "patch", .value = remote_url });
     try client.push(io, allocator, "patch", "master:patch", false, .{ .wire = .{ .ssh = .{ .command = ssh_cmd } } });
@@ -630,11 +631,10 @@ fn testPushFork(
         try std.testing.expect(!patch.removed);
         try std.testing.expectEqualStrings(&source_oid, &(try draft.readRef(io, fork.ref) orelse return error.NotFound));
         const selected = patch.event.revision orelse return error.NotFound;
-        try std.testing.expectEqualStrings("refs/heads/master", selected.target_ref);
+        try std.testing.expectEqualStrings("master", patch.event.target_branch);
         try std.testing.expectEqualStrings(&source_oid, selected.source_oid);
         first_revision_id = try evt.parseEventId(&selected.id);
         const revision = (try evt.PatchRev.readById(evt.EventDB(.sha1), .sha1, moment, &arena, &first_revision_id)) orelse return error.NotFound;
-        try std.testing.expectEqualStrings("refs/heads/master", revision.event.target_ref);
         try std.testing.expectEqualStrings(&source_oid, revision.event.source_oid);
     }
 
@@ -659,21 +659,15 @@ fn testPushFork(
         defer arena.deinit();
         const moment = try evt.currentMoment(.{}, &target);
         const patch = (try evt.Patch.readById(evt.EventDB(.sha1), .sha1, moment, &arena, &fork_id)) orelse return error.NotFound;
-        try evt.consume(.repo, .xit, .{}, io, allocator, &target, evt.events_ref, &.{.{
-            .id = fork_id_hex,
-            .timestamp = 3,
-            .author = .{ .name = "admin", .email = "admin@example.test" },
-            .event = .{ .patch = .{
-                .title = "edited feature",
-                .description = patch.event.description,
-                .tags = patch.event.tags,
-                .target_patch_id = patch.event.target_patch_id,
-                .revision = patch.event.revision,
-            } },
-        }});
+        try evt.Patch.update(.xit, .{}, io, allocator, &target, &fork_id, .{ .fields = .{
+            .title = "edited feature",
+            .description = patch.event.description,
+            .tags = patch.event.tags,
+            .target_branch = "feature",
+        } }, .{ .name = "admin", .email = "admin@example.test" });
     }
 
-    const feature_remote_url = try std.fmt.allocPrint(allocator, "git@localhost:fork/admin/target/patch:{s}/branch:feature", .{&fork_id_hex});
+    const feature_remote_url = try std.fmt.allocPrint(allocator, "git@localhost:fork/admin/target/patch:{s}", .{&fork_id_hex});
     defer allocator.free(feature_remote_url);
     try client.addRemote(io, allocator, .{ .name = "patch-to-feature", .value = feature_remote_url });
 
@@ -701,7 +695,6 @@ fn testPushFork(
         @memcpy(&second_patch_oid, newest.record.patch_oid);
         try std.testing.expect(!std.mem.eql(u8, &first_revision_id, &second_revision_id));
         try std.testing.expectEqualStrings(&second_source_oid, newest.record.event.source_oid);
-        try std.testing.expectEqualStrings("refs/heads/feature", newest.record.event.target_ref);
         try std.testing.expectEqualStrings("edited feature", newest.record.event.message);
     }
     {
@@ -715,7 +708,7 @@ fn testPushFork(
         const selected = patch.event.revision orelse return error.NotFound;
         try std.testing.expectEqualStrings(&std.fmt.bytesToHex(second_revision_id, .lower), &selected.id);
         try std.testing.expectEqualStrings(&second_source_oid, selected.source_oid);
-        try std.testing.expectEqualStrings("refs/heads/feature", selected.target_ref);
+        try std.testing.expectEqualStrings("feature", patch.event.target_branch);
     }
 
     //
@@ -804,7 +797,7 @@ fn testPushFork(
         try std.testing.expectEqualStrings(&second_patch_oid, imported.patch_oid);
     }
 
-    const other_url = try std.fmt.allocPrint(allocator, "git@localhost:fork/admin/other/patch:{s}/branch:other", .{&fork_id_hex});
+    const other_url = try std.fmt.allocPrint(allocator, "git@localhost:fork/admin/other/patch:{s}", .{&fork_id_hex});
     defer allocator.free(other_url);
     try client.addRemote(io, allocator, .{ .name = "other", .value = other_url });
     const wrong_repo_rejected = if (client.push(io, allocator, "other", "master:patch", false, .{ .wire = .{ .ssh = .{ .command = ssh_cmd } } })) |_| false else |_| true;
@@ -861,7 +854,7 @@ fn testPushFork(
         });
     }
 
-    const denied_url = try std.fmt.allocPrint(allocator, "git@localhost:fork/admin/target/patch:{s}/branch:denied", .{&fork_id_hex});
+    const denied_url = try std.fmt.allocPrint(allocator, "git@localhost:fork/admin/target/patch:{s}", .{&fork_id_hex});
     defer allocator.free(denied_url);
     try client.addRemote(io, allocator, .{ .name = "denied", .value = denied_url });
     const unauthorized_rejected = if (client.push(io, allocator, "denied", "master:patch", false, .{ .wire = .{ .ssh = .{ .command = ssh_cmd } } })) |_| false else |_| true;

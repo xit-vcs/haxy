@@ -1040,7 +1040,6 @@ fn seedPatchRevision(
     const revision: evt.PatchRev = .{
         .base_oid = &base_oid,
         .source_oid = &source_oid,
-        .target_ref = "refs/heads/master",
         .message = title,
     };
     const revision_timestamp = timestamp + 3;
@@ -1134,6 +1133,7 @@ fn seedPatches(
             .title = patch.title,
             .description = patch.description,
             .tags = patch.tags,
+            .target_branch = "master",
             .author = patch_author,
             .timestamp = timestamp,
         });

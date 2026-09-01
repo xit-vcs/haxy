@@ -1290,8 +1290,8 @@ pub const CopyableText = struct {
                     count += 1;
                 }
             },
-            .fork => |f| if (f.target_branch.len != 0) if (session.data.git_ssh_port) |port| {
-                const url = try std.fmt.allocPrint(aa, "ssh://localhost:{d}/fork/{s}/patch:{s}/branch:{s}", .{ port, f.identity, f.id, try ui.urlEncodeRef(aa, f.target_branch) });
+            .fork => |f| if (session.data.git_ssh_port) |port| {
+                const url = try std.fmt.allocPrint(aa, "ssh://localhost:{d}/fork/{s}/patch:{s}", .{ port, f.identity, f.id });
                 choices[count] = .{
                     .text = url,
                     .copyable_text = try std.fmt.allocPrint(aa, "{s}git clone {s}", .{ session.data.git_ssh_prefix, url }),

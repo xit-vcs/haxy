@@ -24,6 +24,7 @@ pub const EditDraftInput = struct {
     title: []const u8,
     tags: []const u8,
     description: []const u8,
+    target_branch: []const u8,
     author: evt.CommitAuthor,
     timestamp: u64,
 };
@@ -149,6 +150,8 @@ pub fn editDraft(
     patch.title = input.title;
     patch.tags = input.tags;
     patch.description = input.description;
+    if (!std.mem.eql(u8, patch.target_branch, input.target_branch)) patch.revision = null;
+    patch.target_branch = input.target_branch;
     try evt.consume(.fork, .xit, repo_opts, io, allocator, &fork_repo, evt.events_ref, &.{.{
         .id = input.id,
         .timestamp = input.timestamp,
@@ -182,11 +185,7 @@ pub fn merge(
     }
     const selected = patch_record.event.revision orelse return error.PatchNotPushed;
     const revision_id = try evt.parseEventId(&selected.id);
-    const target_ref = rf.Ref.initFromPath(selected.target_ref, null) orelse return error.InvalidPatch;
-    switch (target_ref.kind) {
-        .head => {},
-        else => return error.InvalidPatch,
-    }
+    const target_ref = rf.Ref{ .kind = .head, .name = patch_record.event.target_branch };
 
     // open and lock the fork
     const fork_path = try fork.forkPath(arena.allocator(), repo_root_path, &input.id);
@@ -439,8 +438,9 @@ pub fn detectMerged(
     const revisions = try DB.HashMap(.read_only).init(revisions_cursor);
     var events_ref_buffer: [rf.MAX_REF_CONTENT_SIZE]u8 = undefined;
     const events_ref_path = try evt.events_ref.toPath(&events_ref_buffer);
+    const heads_prefix = "refs/heads/";
     for (updates) |update| {
-        if (!std.mem.startsWith(u8, update.ref_name, "refs/heads/") or
+        if (!std.mem.startsWith(u8, update.ref_name, heads_prefix) or
             std.mem.eql(u8, update.ref_name, events_ref_path) or
             std.mem.eql(u8, update.old_oid, update.new_oid)) continue;
         if (update.old_oid.len != hash.hexLen(repo_opts.hash) or
@@ -458,7 +458,7 @@ pub fn detectMerged(
         var revision_key_buffer: [rf.MAX_REF_CONTENT_SIZE + 1 + hash.hexLen(repo_opts.hash)]u8 = undefined;
         while (try commits.next(arena.allocator())) |commit| {
             defer commit.deinit();
-            const key = try std.fmt.bufPrint(&revision_key_buffer, "{s}\x00{s}", .{ update.ref_name, &commit.oid });
+            const key = try std.fmt.bufPrint(&revision_key_buffer, "{s}\x00{s}", .{ update.ref_name[heads_prefix.len..], &commit.oid });
             const ids_cursor = try revisions.getCursor(hash.hashInt(repo_opts.hash, key)) orelse continue;
             const ids = try DB.CountedHashSet(.read_only).init(ids_cursor);
             var ids_iter = try ids.iterator();

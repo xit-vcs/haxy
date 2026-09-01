@@ -396,8 +396,16 @@ test "fork query and removal lifecycle" {
     defer allocator.free(target_path);
     var target = try rp.Repo(.xit, fork_repo_opts).init(io, allocator, .{ .path = target_path });
     defer target.deinit(io, allocator);
+    {
+        const file = try target.core.work_dir.createFile(io, "README", .{});
+        defer file.close(io);
+        try file.writeStreamingAll(io, "repo\n");
+    }
+    try target.add(io, allocator, &.{"README"});
+    _ = try target.commit(io, allocator, .{ .message = "initial" });
 
     const draft_path = try fork.create(fork_repo_opts, io, allocator, repos_dir, &admin, .{
+        .target_branch = "master",
         .id = fork_id_hex,
         .user_id = user_id,
         .repo_id = repo_id,

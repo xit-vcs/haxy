@@ -7,7 +7,6 @@ const rp = xit.repo;
 
 base_oid: []const u8,
 source_oid: []const u8,
-target_ref: []const u8,
 message: []const u8,
 
 pub const Record = struct {
@@ -116,7 +115,6 @@ pub fn consume(
 
     try validateOid(hash_kind, record.event.base_oid);
     try validateOid(hash_kind, record.event.source_oid);
-    try validateTarget(record.event.target_ref);
     try validateOid(hash_kind, record.event_oid);
     try validateOid(hash_kind, record.base_tree_oid);
     try validateOid(hash_kind, record.head_tree_oid);
@@ -125,7 +123,6 @@ pub fn consume(
     if (existing_maybe) |existing| {
         if (!std.mem.eql(u8, existing.event.base_oid, record.event.base_oid) or
             !std.mem.eql(u8, existing.event.source_oid, record.event.source_oid) or
-            !std.mem.eql(u8, existing.event.target_ref, record.event.target_ref) or
             !std.mem.eql(u8, existing.event.message, record.event.message) or
             !std.mem.eql(u8, existing.base_tree_oid, record.base_tree_oid) or
             !std.mem.eql(u8, existing.head_tree_oid, record.head_tree_oid) or
@@ -152,11 +149,6 @@ pub fn validateOid(comptime hash_kind: hash.HashKind, oid: []const u8) !void {
     var bytes: [hash.byteLen(hash_kind)]u8 = undefined;
     _ = try std.fmt.hexToBytes(&bytes, oid);
     if (!std.mem.eql(u8, oid, &std.fmt.bytesToHex(bytes, .lower))) return error.InvalidOid;
-}
-
-pub fn validateTarget(target_ref: []const u8) !void {
-    if (!std.mem.startsWith(u8, target_ref, "refs/heads/") or
-        !xit.ref.validateName(target_ref["refs/".len..])) return error.InvalidTarget;
 }
 
 pub fn readById(

@@ -390,7 +390,6 @@ pub const RoutablePage = union(enum) {
         fork: struct {
             identity: []const u8,
             id: []const u8,
-            target_branch: []const u8,
         },
 
         pub fn dupe(self: RepoLocation, allocator: std.mem.Allocator) !RepoLocation {
@@ -399,7 +398,6 @@ pub const RoutablePage = union(enum) {
                 .fork => |f| .{ .fork = .{
                     .identity = try allocator.dupe(u8, f.identity),
                     .id = try allocator.dupe(u8, f.id),
-                    .target_branch = try allocator.dupe(u8, f.target_branch),
                 } },
             };
         }
@@ -1587,6 +1585,19 @@ pub const RepoSource = struct {
 
     pub fn localInitOpts(self: RepoSource) rp.InitOpts {
         return .{ .path = self.path, .global_config_path = self.global_config_path };
+    }
+
+    pub fn hasBranch(self: RepoSource, io: std.Io, allocator: std.mem.Allocator, branch: []const u8) !bool {
+        if (!xit.ref.validateName(branch)) return false;
+        return switch (self.repo_kind) {
+            inline else => |repo_kind| blk: {
+                var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, self.localInitOpts());
+                defer any_repo.deinit(io, allocator);
+                break :blk switch (any_repo) {
+                    inline else => |*repo| (try repo.readRef(io, .{ .kind = .head, .name = branch })) != null,
+                };
+            },
+        };
     }
 };
 

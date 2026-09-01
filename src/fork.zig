@@ -15,20 +15,16 @@ const ref_path = "refs/heads/patch";
 pub const Route = struct {
     identity: []const u8,
     id: [evt.event_id_size * 2]u8,
-    target: []const u8,
 };
 
 pub fn parseRoute(route_path: []const u8) ?Route {
     const patch_segment = "/patch:";
-    const branch_segment = "/branch:";
     const patch_start = std.mem.indexOf(u8, route_path, patch_segment) orelse return null;
-    const branch_start = std.mem.indexOfPos(u8, route_path, patch_start + patch_segment.len, branch_segment) orelse return null;
     const identity = route_path[0..patch_start];
-    const id_text = route_path[patch_start + patch_segment.len .. branch_start];
-    const target = route_path[branch_start + branch_segment.len ..];
-    if (identity.len == 0 or target.len == 0 or id_text.len != evt.event_id_size * 2) return null;
+    const id_text = route_path[patch_start + patch_segment.len ..];
+    if (identity.len == 0 or id_text.len != evt.event_id_size * 2) return null;
     const id_bytes = evt.parseEventId(id_text) catch return null;
-    return .{ .identity = identity, .id = std.fmt.bytesToHex(id_bytes, .lower), .target = target };
+    return .{ .identity = identity, .id = std.fmt.bytesToHex(id_bytes, .lower) };
 }
 
 pub fn forkPath(allocator: std.mem.Allocator, repo_root_path: []const u8, id: []const u8) ![]u8 {
@@ -43,6 +39,7 @@ pub const CreateInput = struct {
     title: []const u8,
     description: []const u8,
     tags: []const u8,
+    target_branch: []const u8,
     author: evt.CommitAuthor,
     timestamp: u64,
 };
@@ -79,6 +76,8 @@ pub fn create(
     defer allocator.free(target_path);
     var target_repo = try rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = target_path, .require_repo_root = true });
     defer target_repo.deinit(io, allocator);
+    if (!rf.validateName(input.target_branch)) return error.InvalidTarget;
+    if ((try target_repo.readRef(io, .{ .kind = .head, .name = input.target_branch })) == null) return error.TargetNotFound;
 
     // create the fork repo dir
     const forks_path = std.fs.path.dirname(fork_path) orelse return error.InvalidPatchDraft;
@@ -175,6 +174,7 @@ pub fn create(
             .title = input.title,
             .description = input.description,
             .tags = input.tags,
+            .target_branch = input.target_branch,
         } },
     }});
 
@@ -199,14 +199,12 @@ pub fn receivePack(
     fork_repo: *rp.Repo(.xit, repo_opts),
     target_repo: *rp.Repo(.xit, repo_opts),
     id: *const [evt.event_id_size * 2]u8,
-    target_branch: []const u8,
     author: evt.CommitAuthor,
     timestamp: u64,
     reader: *std.Io.Reader,
     writer: *std.Io.Writer,
     error_writer: *std.Io.Writer,
 ) !void {
-    if (!rf.validateName(target_branch)) return error.InvalidTarget;
     const patch_id = try evt.parseEventId(id);
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -228,12 +226,13 @@ pub fn receivePack(
         if (patch.event.status.kind() == .merged) return error.PatchAlreadyMerged;
     }
     const published = target_patch != null;
-    const title = if (target_patch) |patch| patch.event.title else fork_patch.event.title;
+    const active_patch = target_patch orelse fork_patch;
+    const title = active_patch.event.title;
 
     // resolve the target and the newest fork revision
+    const target_branch = active_patch.event.target_branch;
     const target_oid = (try target_repo.readRef(io, .{ .kind = .head, .name = target_branch })) orelse return error.TargetNotFound;
     const newest = try evt.PatchRev.readNewest(evt.EventDB(repo_opts.hash), repo_opts.hash, fork_moment, &arena);
-    const target_ref = try std.fmt.allocPrint(arena.allocator(), "refs/heads/{s}", .{target_branch});
     var revision_id_maybe: ?[evt.event_id_size]u8 = null;
 
     // execute a transaction that receives the push and materializes its revision
@@ -251,7 +250,6 @@ pub fn receivePack(
             patch: evt.Patch.Record,
             published: bool,
             target_oid: [hash.hexLen(repo_opts.hash)]u8,
-            target_ref: []const u8,
             title: []const u8,
             author: evt.CommitAuthor,
             timestamp: u64,
@@ -276,8 +274,7 @@ pub fn receivePack(
                 const base_oid = try mrg.commonAncestor(.xit, repo_opts, state.readOnly(), ctx.io, ctx.allocator, &ctx.target_oid, &source_oid);
                 const existing_revision = if (ctx.newest) |latest|
                     if (std.mem.eql(u8, latest.record.event.base_oid, &base_oid) and
-                        std.mem.eql(u8, latest.record.event.source_oid, &source_oid) and
-                        std.mem.eql(u8, latest.record.event.target_ref, ctx.target_ref)) latest else null
+                        std.mem.eql(u8, latest.record.event.source_oid, &source_oid)) latest else null
                 else
                     null;
 
@@ -303,7 +300,6 @@ pub fn receivePack(
                     const revision_event: evt.PatchRev = .{
                         .base_oid = &base_oid,
                         .source_oid = &source_oid,
-                        .target_ref = ctx.target_ref,
                         .message = ctx.title,
                     };
                     const identity = try std.fmt.allocPrint(ctx.allocator, "{s} <{s}>", .{ ctx.author.name, ctx.author.email });
@@ -340,7 +336,6 @@ pub fn receivePack(
                             .id = revision_hex,
                             .squash_oid = &patch_oid,
                             .source_oid = &source_oid,
-                            .target_ref = ctx.target_ref,
                         };
                         events[event_count] = .{
                             .id = ctx.patch_id,
@@ -387,7 +382,6 @@ pub fn receivePack(
             .patch = fork_patch,
             .published = published,
             .target_oid = target_oid,
-            .target_ref = target_ref,
             .title = title,
             .author = author,
             .timestamp = timestamp,

@@ -70,13 +70,7 @@ pub fn init(arena: *std.heap.ArenaAllocator, session: *ui.Session, route: ui.Rou
         null;
     defer if (target_repo_maybe) |*target_repo| target_repo.deinit(io, arena.child_allocator);
 
-    var target_branch = if (retained_patch.event.revision) |revision| revision.targetBranch() orelse "" else "";
-    if (target_repo_maybe) |*target_repo| {
-        if (target_branch.len == 0) {
-            if (try ui.ResolvedRefOrOid(.xit, .{}).init(target_repo, io, aa, null, "")) |resolved|
-                target_branch = resolved.value;
-        }
-    }
+    const target_branch = retained_patch.event.target_branch;
 
     const retained_entry = Patches.PatchWithId{
         .id = try aa.dupe(u8, &id_hex),
@@ -84,13 +78,12 @@ pub fn init(arena: *std.heap.ArenaAllocator, session: *ui.Session, route: ui.Rou
         .author = try ui.Author.initFromEmail(haxy_moment, arena, retained_patch.author_email),
         .draft = fork_record.event.stage == .draft,
         .fork_oid = try aa.dupe(u8, &fork_oid),
-        .target_branch = try aa.dupe(u8, target_branch),
         .fork_exists = true,
     };
     var patch_data = try Patches.detailResult(aa, identity.identity, retained_entry);
 
     if (target_repo_maybe) |*target_repo| switch (fork_record.event.stage) {
-        .draft => if (try Patches.loadDraftEntry(.xit, .{}, arena, io, haxy_moment, &fork_repo, target_repo, id, target_branch)) |entry| {
+        .draft => if (try Patches.loadDraftEntry(.xit, .{}, arena, io, haxy_moment, &fork_repo, target_repo, id)) |entry| {
             patch_data = try Patches.detailResult(aa, identity.identity, entry);
             patch_data.repo_source = target_source;
         },
@@ -99,12 +92,7 @@ pub fn init(arena: *std.heap.ArenaAllocator, session: *ui.Session, route: ui.Rou
                 error.NotFound => patch_data,
                 else => |other| return other,
             };
-            if (patch_data.selectedThread()) |entry| {
-                patch_data.repo_source = target_source;
-                if (entry.record.event.revision) |revision| {
-                    if (revision.targetBranch()) |branch| target_branch = branch;
-                }
-            }
+            if (patch_data.selectedThread() != null) patch_data.repo_source = target_source;
         },
     };
     patch_data.repo_id = target_id;
@@ -134,7 +122,6 @@ pub fn init(arena: *std.heap.ArenaAllocator, session: *ui.Session, route: ui.Rou
     const location = ui.RoutablePage.RepoLocation{ .fork = .{
         .identity = identity.identity,
         .id = &id_hex,
-        .target_branch = target_branch,
     } };
     const files = try Files.init(.xit, .{}, arena, &fork_repo, io, arena.child_allocator, location, requested_ref, requested_value, files_path, files_line);
     const commits = try Commits.init(.xit, .{}, arena, &fork_repo, io, arena.child_allocator, haxy_moment, location, requested_ref, requested_value, commits_content, commits_base_oid);

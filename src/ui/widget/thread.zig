@@ -98,6 +98,11 @@ pub fn readConflict(
                     .ours = .{ .text = try revisionSummary(aa, ours.event.revision), .author = our_author },
                     .theirs = .{ .text = try revisionSummary(aa, theirs.event.revision), .author = their_author },
                 };
+            } else if (std.mem.eql(u8, field, "target_branch")) {
+                conflict.target_branch = .{
+                    .ours = .{ .text = ours.event.target_branch, .author = our_author },
+                    .theirs = .{ .text = theirs.event.target_branch, .author = their_author },
+                };
             }
         }
     }
@@ -106,7 +111,7 @@ pub fn readConflict(
 
 fn revisionSummary(allocator: std.mem.Allocator, revision_maybe: ?evt.Patch.Revision) ![]const u8 {
     const revision = revision_maybe orelse return "(none)";
-    return std.fmt.allocPrint(allocator, "{s}\nsquash {s}\nsource {s}", .{ revision.target_ref, revision.squash_oid, revision.source_oid });
+    return std.fmt.allocPrint(allocator, "squash {s}\nsource {s}", .{ revision.squash_oid, revision.source_oid });
 }
 
 fn readFieldOid(
@@ -1248,7 +1253,8 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         const title_field_index: usize = 0;
         const tags_field_index: usize = 1;
         const description_field_index: usize = 2;
-        const submit_field_index: usize = 3;
+        const target_branch_field_index: usize = 3;
+        const submit_field_index: usize = 3 + @as(usize, @intFromBool(supports_drafts));
         const comment_author_field_index: usize = 0;
         const comment_body_field_index: usize = 1;
         const comment_submit_field_index: usize = 2;
@@ -1492,7 +1498,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                         (if (data.selectedThread()) |entry| &entry.record else null)
                     else
                         null;
-                    var form = try initThreadForm(allocator, session, action, record);
+                    var form = try initThreadForm(allocator, session, data, action, record);
                     errdefer form.deinit(allocator);
                     try stack.children.put(allocator, form.getFocus().id, .{ .box = form });
                 }
@@ -1585,10 +1591,10 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             return box;
         }
 
-        // a thread form: title/tags/description inputs and a submit button,
-        // prefilled from `record` when given. its form: subtree makes the web
-        // renderer POST them to `action`'s route.
-        fn initThreadForm(allocator: std.mem.Allocator, session: *ui.Session, action: []const u8, record: ?*const Event.Record) !wgt.Box(Widget) {
+        // a thread form, plus the target branch for patches, prefilled from
+        // `record` when given. its form: subtree makes the web renderer POST
+        // the inputs to `action`'s route.
+        fn initThreadForm(allocator: std.mem.Allocator, session: *ui.Session, data: *const Self, action: []const u8, record: ?*const Event.Record) !wgt.Box(Widget) {
             var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });
             errdefer box.deinit(allocator);
             box.getFocus().kind = .{ .custom = action };
@@ -1615,6 +1621,15 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 description.getFocus().focusable = true;
                 if (record) |r| try description.setContent(allocator, r.event.description);
                 try box.children.put(allocator, description.getFocus().id, .{ .widget = .{ .text_input = description }, .rect = null, .min_size = null });
+            }
+
+            if (supports_drafts) {
+                var target = try wgt.TextInput.init(allocator, .{ .label = " target branch ", .name = "target_branch", .visible_width = null, .rounded_corners = true, .render_content = session.is_terminal });
+                errdefer target.deinit(allocator);
+                target.getFocus().focusable = true;
+                const content = if (record) |r| r.event.target_branch else data.default_target_branch;
+                try target.setContent(allocator, content);
+                try box.children.put(allocator, target.getFocus().id, .{ .widget = .{ .text_input = target }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
             }
 
             try addSubmitButtonLabeled(allocator, &box, if (supports_drafts and record == null) "submit draft" else "submit");
@@ -1732,6 +1747,10 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 if (conflict.revision) |*fc| {
                     try addLabel(allocator, &box, "revision conflict:");
                     try addAtomicConflict(allocator, &box, session, data, "revision", fc);
+                }
+                if (conflict.target_branch) |*fc| {
+                    try addLabel(allocator, &box, "target branch conflict:");
+                    try addAtomicConflict(allocator, &box, session, data, "target_branch", fc);
                 }
             }
 
@@ -2454,14 +2473,17 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             defer allocator.free(tags);
             const description = try description_input.text(allocator);
             defer allocator.free(description);
+            const target_branch = if (comptime supports_drafts) try form.children.values()[target_branch_field_index].widget.text_input.text(allocator) else "";
+            defer if (comptime supports_drafts) allocator.free(target_branch);
 
             if (!Event.fieldsValid(title, tags)) return;
 
             if (comptime supports_drafts) {
-                const event_id_hex = try Data.createDraft(self.data, self.session, allocator, title, tags, description);
+                const event_id_hex = Data.createDraft(self.data, self.session, allocator, title, tags, description, target_branch) catch return;
                 title_input.clear(allocator);
                 tags_input.clear(allocator);
                 description_input.clear(allocator);
+                form.children.values()[target_branch_field_index].widget.text_input.clear(allocator);
                 const route = ui.RoutablePage.repoThreadCommentsRoute(kind, self.data.identity, &event_id_hex, 0) orelse return;
                 try self.session.navigate(route);
                 return;
@@ -2520,12 +2542,14 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             defer allocator.free(tags);
             const description = try description_input.text(allocator);
             defer allocator.free(description);
+            const target_branch = if (comptime supports_drafts) try form.children.values()[target_branch_field_index].widget.text_input.text(allocator) else "";
+            defer if (comptime supports_drafts) allocator.free(target_branch);
 
             if (!Event.fieldsValid(title, tags)) return;
 
             if (comptime supports_drafts) {
                 if (entryDraft(entry.*)) {
-                    try self.data.editDraft(self.session, allocator, entry.id, title, tags, description);
+                    self.data.editDraft(self.session, allocator, entry.id, title, tags, description, target_branch) catch return;
                     const route = listRoute(self.data.identity, entryStatus(entry.*), "", entry.id) orelse return;
                     try self.session.navigate(route);
                     return;
@@ -2541,7 +2565,14 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, src.localInitOpts());
                     defer any_repo.deinit(io, allocator);
                     switch (any_repo) {
-                        inline else => |*repo| if (has_status)
+                        inline else => |*repo| if (supports_drafts) {
+                            try Event.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &id_bytes, .{ .fields = .{
+                                .title = title,
+                                .tags = tags,
+                                .description = description,
+                                .target_branch = target_branch,
+                            } }, author);
+                        } else if (has_status)
                             try Event.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &id_bytes, .{ .fields = .{
                                 .title = title,
                                 .tags = tags,

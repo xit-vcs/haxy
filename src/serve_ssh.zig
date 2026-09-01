@@ -323,7 +323,6 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, command:
     if (std.mem.startsWith(u8, path, fork_prefix)) {
         const route = fork.parseRoute(path[fork_prefix.len..]) orelse return writeError(sess, "invalid fork path");
         const owner_repo = evt.parseOwnerRepoPath(route.identity) orelse return writeError(sess, "repo path must be <owner>/<repo>");
-        if (parsed.service == .receive_pack and !xit.ref.validateName(route.target)) return writeError(sess, "invalid target branch");
 
         var admin = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = handler.admin_repo_path });
         defer admin.deinit(io, allocator);
@@ -367,7 +366,7 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, command:
                     var target_repo = rp.Repo(.xit, repo.self_repo_opts).open(io, allocator, .{ .path = target_path }) catch
                         return writeError(sess, "repo not found or has the wrong hash");
                     defer target_repo.deinit(io, allocator);
-                    try fork.receivePack(repo.self_repo_opts, io, allocator, repo, &target_repo, &route.id, route.target, author, timestamp, &reader.interface, &writer.interface, handler.err);
+                    try fork.receivePack(repo.self_repo_opts, io, allocator, repo, &target_repo, &route.id, author, timestamp, &reader.interface, &writer.interface, handler.err);
                 },
             }
         }
