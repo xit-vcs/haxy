@@ -18,10 +18,6 @@ const wasm = builtin.target.cpu.arch == .wasm32;
 
 const Self = @This();
 
-// classifies a failed /login attempt; null in session.data.login_failure means
-// "no failure to surface".
-pub const Failure = enum { wrong_password, unknown_user };
-
 pub fn init() Self {
     return .{};
 }
@@ -48,6 +44,7 @@ pub const View = struct {
             var username = try wgt.TextInput.init(allocator, .{ .label = " username ", .name = "username", .rounded_corners = true, .render_content = session.is_terminal });
             errdefer username.deinit(allocator);
             username.getFocus().focusable = true;
+            if (session.formFeedback(.login)) |feedback| try username.setContent(allocator, feedback.username);
             nav_ids[username_index] = username.getFocus().id;
             try box.children.put(allocator, username.getFocus().id, .{
                 .widget = .{ .text_input = username },
@@ -100,7 +97,7 @@ pub const View = struct {
     pub fn build(self: *View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
         const box = &self.center.child.box;
 
-        const failure = self.session.data.login_failure;
+        const failure = if (self.session.formFeedback(.login)) |feedback| feedback.failure else null;
 
         const username_input = &box.children.values()[username_index].widget.text_input;
         username_input.options.label = if (failure == .unknown_user)
@@ -161,21 +158,8 @@ pub const View = struct {
             }
         }
 
-        const username_input = &box.children.values()[username_index].widget.text_input;
-        const password_input = &box.children.values()[password_index].widget.text_input;
-        const username_len_before = username_input.content.items.len;
-        const password_len_before = password_input.content.items.len;
-
         if (box.children.getIndex(child_id)) |idx| {
             try box.children.values()[idx].widget.input(allocator, key, root_focus);
-        }
-
-        if (username_input.content.items.len != username_len_before or
-            password_input.content.items.len != password_len_before)
-        {
-            // any edit clears the failure flag so the "(invalid)" label
-            // doesn't linger after the user has typed a correction.
-            self.session.data.login_failure = null;
         }
     }
 
@@ -204,12 +188,6 @@ pub const View = struct {
     }
 
     fn submit(self: *View, allocator: std.mem.Allocator) !void {
-        if (comptime wasm) {
-            // no DB cursor available on the wasm render path
-            self.session.data.login_failure = .unknown_user;
-            return;
-        }
-
         const box = &self.center.child.box;
         const username_input = &box.children.values()[username_index].widget.text_input;
         const password_input = &box.children.values()[password_index].widget.text_input;
@@ -220,27 +198,32 @@ pub const View = struct {
         const password = try password_input.text(allocator);
         defer allocator.free(password);
 
+        if (comptime wasm) {
+            // no DB cursor available on the wasm render path
+            try self.rememberFailure(.unknown_user, username);
+            return;
+        }
+
         const haxy_moment = self.session.haxy_moment orelse {
             // no DB context (e.g. wasm/web rendering path); treat as unknown.
-            self.session.data.login_failure = .unknown_user;
+            try self.rememberFailure(.unknown_user, username);
             return;
         };
 
         const result = try evt.User.verifyCredentials(evt.AdminDB, evt.admin_repo_opts.hash, haxy_moment, self.session.arena, username, password);
         switch (result) {
             .unknown_user => {
-                self.session.data.login_failure = .unknown_user;
+                try self.rememberFailure(.unknown_user, username);
                 return;
             },
             .wrong_password => {
-                self.session.data.login_failure = .wrong_password;
+                try self.rememberFailure(.wrong_password, username);
                 return;
             },
             .success => |user_id| {
                 // dupe user_id into the arena so the session can hold a stable slice
                 const user_id_stable = try self.session.arena.allocator().dupe(u8, &user_id);
                 self.session.data.user_id = user_id_stable;
-                self.session.data.login_failure = null;
 
                 // adopt the user's name and persisted prefs
                 try self.session.loadUser();
@@ -255,5 +238,12 @@ pub const View = struct {
                 try self.session.navigate(self.session.data.current_page.pageRoot());
             },
         }
+    }
+
+    fn rememberFailure(self: *View, failure: ui.Session.FormFeedback.LoginFailure, username: []const u8) !void {
+        self.session.data.form_feedback = .{ .login = .{
+            .failure = failure,
+            .username = try self.session.arena.allocator().dupe(u8, username),
+        } };
     }
 };

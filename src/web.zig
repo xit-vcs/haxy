@@ -17,11 +17,10 @@ const cookie_name = "haxy_session";
 // the session cookie a login or a claimed auto-login sets; both must scope
 // it the same way.
 const session_cookie_fmt = cookie_name ++ "={s}; Path=/; HttpOnly; SameSite=Strict";
-// flash cookie for surfacing the outcome of the most recent /login POST.
-// set on the failure redirect, read and immediately expired on the next
-// GET / so refreshing the page doesn't keep showing the error.
-const login_failure_cookie = "haxy_login_failure";
-const sync_failure_cookie = "haxy_sync_failure";
+const form_flash_cookie = "haxy_form_flash";
+const local_flash_cookie = "haxy_local_flash";
+const local_required_title_prefix = "required_title:";
+const local_sync_failure_prefix = "sync:";
 
 const Embed = struct {
     path: []const u8,
@@ -211,7 +210,11 @@ fn handleRequest(
         // accounts, so it is always logged out.
         var user_id_buf: [evt.event_id_size]u8 = undefined;
         var user_id: ?[]const u8 = null;
-        var login_failure: ?ui.Home.Auth.Login.Failure = null;
+        var form_arena = std.heap.ArenaAllocator.init(allocator);
+        defer form_arena.deinit();
+        var form_feedback: ?ui.Session.FormFeedback = null;
+        var form_cookie_seen = false;
+        var local_flash_seen = false;
         var sync_failure: ?[]const u8 = null;
         var sync_failure_allocated: ?[]u8 = null;
         defer if (sync_failure_allocated) |value| allocator.free(value);
@@ -233,20 +236,28 @@ fn handleRequest(
                         user_id = user_id_buf[0..evt.event_id_size];
                     }
                 }
-                login_failure = if (getCookieValue(request, login_failure_cookie)) |raw|
-                    if (std.mem.eql(u8, raw, "unknown_user"))
-                        .unknown_user
-                    else if (std.mem.eql(u8, raw, "wrong_password"))
-                        .wrong_password
-                    else
-                        null
-                else
-                    null;
+                if (getCookieValue(request, form_flash_cookie)) |token| {
+                    form_cookie_seen = true;
+                    form_feedback = remote.session_store.takeFlash(form_arena.allocator(), token);
+                }
             },
-            .local => if (getCookieValue(request, sync_failure_cookie)) |raw| {
-                const value = try allocator.dupe(u8, raw);
-                sync_failure_allocated = value;
-                sync_failure = std.Uri.percentDecodeInPlace(value);
+            .local => {
+                if (getCookieValue(request, local_flash_cookie)) |raw| {
+                    local_flash_seen = true;
+                    if (std.mem.startsWith(u8, raw, local_required_title_prefix)) {
+                        const tag = std.meta.stringToEnum(std.meta.Tag(ui.Session.FormFeedback), raw[local_required_title_prefix.len..]);
+                        form_feedback = if (tag) |feedback_tag| switch (feedback_tag) {
+                            .issue => .{ .issue = .{ .failure = .required_title } },
+                            .patch => .{ .patch = .{ .failure = .required_title } },
+                            .discussion => .{ .discussion = .{ .failure = .required_title } },
+                            else => null,
+                        } else null;
+                    } else if (std.mem.startsWith(u8, raw, local_sync_failure_prefix)) {
+                        const value = try allocator.dupe(u8, raw[local_sync_failure_prefix.len..]);
+                        sync_failure_allocated = value;
+                        sync_failure = std.Uri.percentDecodeInPlace(value);
+                    }
+                }
             },
         }
 
@@ -256,7 +267,7 @@ fn handleRequest(
         };
         const html = renderIndexHtml(io, allocator, host, .{
             .user_id = user_id,
-            .login_failure = login_failure,
+            .form_feedback = form_feedback,
             .sync_failure = sync_failure,
             .current_page = current_page,
             .is_local = host == .local,
@@ -275,13 +286,16 @@ fn handleRequest(
         };
         defer allocator.free(html);
 
+        const expired_form_cookie = if (form_cookie_seen)
+            try std.fmt.allocPrint(allocator, form_flash_cookie ++ "=; Path={s}; Max-Age=0", .{path})
+        else
+            null;
+        defer if (expired_form_cookie) |cookie| allocator.free(cookie);
         var header_buf: [4]std.http.Header = undefined;
         var headers: std.ArrayList(std.http.Header) = .initBuffer(&header_buf);
         headers.appendAssumeCapacity(.{ .name = "content-type", .value = "text/html; charset=utf-8" });
-        // expire the flash cookie on the way out so a refresh doesn't keep
-        // showing the failure label
-        if (login_failure != null) headers.appendAssumeCapacity(.{ .name = "set-cookie", .value = login_failure_cookie ++ "=; Path=/; Max-Age=0" });
-        if (sync_failure != null) headers.appendAssumeCapacity(.{ .name = "set-cookie", .value = sync_failure_cookie ++ "=; Path=/; Max-Age=0" });
+        if (expired_form_cookie) |cookie| headers.appendAssumeCapacity(.{ .name = "set-cookie", .value = cookie });
+        if (local_flash_seen) headers.appendAssumeCapacity(.{ .name = "set-cookie", .value = local_flash_cookie ++ "=; Path=/; Max-Age=0" });
         if (session_cookie) |cookie| headers.appendAssumeCapacity(.{ .name = "set-cookie", .value = cookie });
         try request.respond(html, .{ .extra_headers = headers.items });
         return;
@@ -349,25 +363,78 @@ fn handleLogin(
                 },
             });
         },
-        .unknown_user => {
-            try request.respond("", .{
-                .status = .see_other,
-                .extra_headers = &.{
-                    .{ .name = "location", .value = failure_location },
-                    .{ .name = "set-cookie", .value = login_failure_cookie ++ "=unknown_user; Path=/; HttpOnly; SameSite=Strict" },
-                },
-            });
-        },
-        .wrong_password => {
-            try request.respond("", .{
-                .status = .see_other,
-                .extra_headers = &.{
-                    .{ .name = "location", .value = failure_location },
-                    .{ .name = "set-cookie", .value = login_failure_cookie ++ "=wrong_password; Path=/; HttpOnly; SameSite=Strict" },
-                },
-            });
-        },
+        .unknown_user => try respondFormFailure(request, allocator, session_store, failure_location, .{ .login = .{ .failure = .unknown_user, .username = username } }),
+        .wrong_password => try respondFormFailure(request, allocator, session_store, failure_location, .{ .login = .{ .failure = .wrong_password, .username = username } }),
     }
+}
+
+fn respondFormFailure(request: *std.http.Server.Request, allocator: std.mem.Allocator, session_store: SessionStore, location: []const u8, feedback: ui.Session.FormFeedback) !void {
+    const token = try session_store.createFlash(allocator, feedback);
+    const cookie = try std.fmt.allocPrint(allocator, form_flash_cookie ++ "={s}; Path={s}; HttpOnly; SameSite=Strict", .{ token, location });
+    defer allocator.free(cookie);
+    try request.respond("", .{
+        .status = .see_other,
+        .extra_headers = &.{
+            .{ .name = "location", .value = location },
+            .{ .name = "set-cookie", .value = cookie },
+        },
+    });
+}
+
+fn respondThreadFormFailure(request: *std.http.Server.Request, allocator: std.mem.Allocator, host: Host, location: []const u8, feedback: ui.Session.FormFeedback) !void {
+    return switch (host) {
+        .remote => |remote| respondFormFailure(request, allocator, remote.session_store, location, feedback),
+        .local => {
+            const tag = std.meta.activeTag(feedback);
+            const required_title = switch (feedback) {
+                .issue => |value| value.failure == .required_title,
+                .discussion => |value| value.failure == .required_title,
+                .patch => |value| value.failure == .required_title,
+                else => false,
+            };
+            if (!required_title) return error.InvalidFormFeedback;
+            const cookie = try std.fmt.allocPrint(allocator, local_flash_cookie ++ "=" ++ local_required_title_prefix ++ "{s}; Path=/; HttpOnly; SameSite=Strict", .{@tagName(tag)});
+            defer allocator.free(cookie);
+            try request.respond("", .{
+                .status = .see_other,
+                .extra_headers = &.{
+                    .{ .name = "location", .value = location },
+                    .{ .name = "set-cookie", .value = cookie },
+                },
+            });
+        },
+    };
+}
+
+fn requiredTitleFeedback(kind: evt.EventKind, title: []const u8, tags: []const u8, description: []const u8, target_branch: []const u8) ui.Session.FormFeedback {
+    return switch (kind) {
+        .issue => .{ .issue = .{ .failure = .required_title, .fields = .{
+            .title = title,
+            .tags = tags,
+            .description = description,
+        } } },
+        .patch => .{ .patch = .{ .failure = .required_title, .fields = .{
+            .title = title,
+            .tags = tags,
+            .description = description,
+            .target_branch = target_branch,
+        } } },
+        .discuss => .{ .discussion = .{ .failure = .required_title, .fields = .{
+            .title = title,
+            .tags = tags,
+            .description = description,
+        } } },
+        else => unreachable,
+    };
+}
+
+fn invalidTargetBranchFeedback(title: []const u8, tags: []const u8, description: []const u8, target_branch: []const u8) ui.Session.FormFeedback {
+    return .{ .patch = .{ .failure = .invalid_target_branch, .fields = .{
+        .title = title,
+        .tags = tags,
+        .description = description,
+        .target_branch = target_branch,
+    } } };
 }
 
 fn handleLogout(request: *std.http.Server.Request, base: []const u8, session_store: SessionStore) !void {
@@ -540,6 +607,9 @@ fn handleThreadNew(
         };
         const form_location = try std.fmt.allocPrint(allocator, "{s}/{s}/new", .{ base, list_name });
         defer allocator.free(form_location);
+        if (!evt.titleValid(title)) {
+            return respondThreadFormFailure(request, allocator, host, form_location, requiredTitleFeedback(kind, title, tags, description, target_branch));
+        }
         try request.respond("", .{
             .status = .see_other,
             .extra_headers = &.{.{ .name = "location", .value = form_location }},
@@ -562,8 +632,7 @@ fn handleThreadNew(
         if (!try request_repo.source.hasBranch(io, allocator, target_branch)) {
             const form_location = try std.fmt.allocPrint(allocator, "{s}/patches/new", .{base});
             defer allocator.free(form_location);
-            try request.respond("", .{ .status = .see_other, .extra_headers = &.{.{ .name = "location", .value = form_location }} });
-            return;
+            return respondThreadFormFailure(request, allocator, host, form_location, invalidTargetBranchFeedback(title, tags, description, target_branch));
         }
         const repo_id = evt.parseEventId(std.fs.path.basename(request_repo.source.path)) catch return respondRemoveNotFound(request);
         var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = remote.admin_repo_path });
@@ -1344,6 +1413,9 @@ fn handleThreadEdit(
     if (!valid) {
         const form_location = try std.fmt.allocPrint(allocator, "{s}/edit", .{base});
         defer allocator.free(form_location);
+        if (!evt.titleValid(title)) {
+            return respondThreadFormFailure(request, allocator, host, form_location, requiredTitleFeedback(parts.thread_kind, title, tags, description, target_branch));
+        }
         try request.respond("", .{
             .status = .see_other,
             .extra_headers = &.{.{ .name = "location", .value = form_location }},
@@ -1362,8 +1434,7 @@ fn handleThreadEdit(
         if (!try request_repo.source.hasBranch(io, allocator, target_branch)) {
             const form_location = try std.fmt.allocPrint(allocator, "{s}/edit", .{base});
             defer allocator.free(form_location);
-            try request.respond("", .{ .status = .see_other, .extra_headers = &.{.{ .name = "location", .value = form_location }} });
-            return;
+            return respondThreadFormFailure(request, allocator, host, form_location, invalidTargetBranchFeedback(title, tags, description, target_branch));
         }
         const repo_id = evt.parseEventId(std.fs.path.basename(request_repo.source.path)) catch return respondRemoveNotFound(request);
         var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = remote.admin_repo_path });
@@ -1559,7 +1630,7 @@ fn handleSync(
         }.isUnreserved);
         const cookie = try std.fmt.allocPrint(
             allocator,
-            sync_failure_cookie ++ "={s}; Path=/; HttpOnly; SameSite=Strict",
+            local_flash_cookie ++ "=" ++ local_sync_failure_prefix ++ "{s}; Path=/; HttpOnly; SameSite=Strict",
             .{encoded.written()},
         );
         defer allocator.free(cookie);
@@ -1577,7 +1648,7 @@ fn handleSync(
         .status = .see_other,
         .extra_headers = &.{
             .{ .name = "location", .value = "/events" },
-            .{ .name = "set-cookie", .value = sync_failure_cookie ++ "=; Path=/; Max-Age=0" },
+            .{ .name = "set-cookie", .value = local_flash_cookie ++ "=; Path=/; Max-Age=0" },
         },
     });
 }
@@ -2156,10 +2227,13 @@ fn decodeFormValue(allocator: std.mem.Allocator, encoded: []const u8) ![]u8 {
 // (not the user's id) that is stored as a file named by the token hex, whose
 // contents are the raw user_id bytes. authenticating a request is a lookup of
 // the cookie's token; logout deletes the file, revoking the session. there is
-// deliberately no expiry — a session lives until logout.
+// deliberately no expiry — a session lives until logout. form failures use
+// files in the flash subdirectory that the redirected GET consumes. the
+// directory is cleared whenever the server starts.
 pub const SessionStore = struct {
     io: std.Io,
     dir: std.Io.Dir,
+    flash_dir: std.Io.Dir,
     auto_login: ?[token_hex_len]u8,
 
     pub const token_hex_len = evt.event_id_size * 2;
@@ -2167,6 +2241,11 @@ pub const SessionStore = struct {
     pub fn init(io: std.Io, data_dir: std.Io.Dir) !SessionStore {
         try data_dir.createDirPath(io, "sessions");
         const dir = try data_dir.openDir(io, "sessions", .{});
+        errdefer dir.close(io);
+        try dir.deleteTree(io, "flash");
+        try dir.createDirPath(io, "flash");
+        const flash_dir = try dir.openDir(io, "flash", .{});
+        errdefer flash_dir.close(io);
         const auto_login = blk: {
             const file = dir.openFile(io, auto_login_name, .{ .mode = .read_only }) catch break :blk null;
             defer file.close(io);
@@ -2176,10 +2255,11 @@ pub const SessionStore = struct {
             reader.interface.readSliceAll(&token) catch break :blk null;
             break :blk token;
         };
-        return .{ .io = io, .dir = dir, .auto_login = auto_login };
+        return .{ .io = io, .dir = dir, .flash_dir = flash_dir, .auto_login = auto_login };
     }
 
     pub fn deinit(self: SessionStore) void {
+        self.flash_dir.close(self.io);
         self.dir.close(self.io);
     }
 
@@ -2193,6 +2273,33 @@ pub const SessionStore = struct {
         defer file.close(self.io);
         try file.writeStreamingAll(self.io, user_id);
         return token_hex;
+    }
+
+    fn createFlash(self: SessionStore, allocator: std.mem.Allocator, value: ui.Session.FormFeedback) ![token_hex_len]u8 {
+        var token: [evt.event_id_size]u8 = undefined;
+        self.io.random(&token);
+        const token_hex = std.fmt.bytesToHex(token, .lower);
+        const file = try self.flash_dir.createFile(self.io, &token_hex, .{});
+        errdefer self.flash_dir.deleteFile(self.io, &token_hex) catch {};
+        defer file.close(self.io);
+
+        var json: std.Io.Writer.Allocating = .init(allocator);
+        defer json.deinit();
+        try std.json.Stringify.value(value, .{}, &json.writer);
+        try file.writeStreamingAll(self.io, json.written());
+        return token_hex;
+    }
+
+    fn takeFlash(self: SessionStore, allocator: std.mem.Allocator, token_hex: []const u8) ?ui.Session.FormFeedback {
+        if (!isToken(token_hex)) return null;
+        const file = self.flash_dir.openFile(self.io, token_hex, .{ .mode = .read_only }) catch return null;
+        defer self.flash_dir.deleteFile(self.io, token_hex) catch {};
+        defer file.close(self.io);
+
+        var storage: [4096]u8 = undefined;
+        var reader = file.reader(self.io, &storage);
+        const bytes = reader.interface.allocRemaining(allocator, .limited(512 * 1024)) catch return null;
+        return std.json.parseFromSliceLeaky(ui.Session.FormFeedback, allocator, bytes, .{}) catch null;
     }
 
     // resolve a cookie's token to its user_id. returns false (logged out) for a

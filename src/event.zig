@@ -93,6 +93,10 @@ pub const active_event_id_set_key = "active-event-id-set";
 pub const removed_event_id_set_key = "removed-event-id-set";
 const event_order_key = "event-order";
 
+pub fn titleValid(title: []const u8) bool {
+    return std.mem.trim(u8, title, " \t\r\n").len != 0;
+}
+
 // a null payload removes the record
 pub const Event = union(EventKind) {
     user: ?User,

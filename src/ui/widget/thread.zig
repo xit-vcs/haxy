@@ -1212,6 +1212,13 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
     const Window = Data.Window;
     const Entry = Data.Entry;
     const Event = Data.Event;
+    const feedback_tag: std.meta.Tag(ui.Session.FormFeedback) = switch (kind) {
+        .issue => .issue,
+        .patch => .patch,
+        .discuss => .discussion,
+        else => unreachable,
+    };
+    const FeedbackFailure = if (kind == .patch) ui.Session.FormFeedback.PatchFailure else ui.Session.FormFeedback.ThreadFailure;
     const Status = Data.Status;
     const has_status = @hasField(Event, "status");
     const supports_conflicts = Event.merge_policy == .field_conflicts;
@@ -1599,11 +1606,17 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             errdefer box.deinit(allocator);
             box.getFocus().kind = .{ .custom = action };
 
+            const saved_form = session.formFeedback(feedback_tag);
+            const saved_fields = if (saved_form) |saved| saved.fields else null;
+
             {
                 var title = try wgt.TextInput.init(allocator, .{ .label = " title ", .name = "title", .visible_width = null, .rounded_corners = true, .render_content = session.is_terminal });
                 errdefer title.deinit(allocator);
                 title.getFocus().focusable = true;
-                if (record) |r| try title.setContent(allocator, r.event.title);
+                if (saved_fields) |saved|
+                    try title.setContent(allocator, saved.title)
+                else if (record) |r|
+                    try title.setContent(allocator, r.event.title);
                 try box.children.put(allocator, title.getFocus().id, .{ .widget = .{ .text_input = title }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
             }
 
@@ -1611,7 +1624,10 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 var tags = try wgt.TextInput.init(allocator, .{ .label = " tags (separate with spaces) ", .name = "tags", .visible_width = null, .rounded_corners = true, .render_content = session.is_terminal });
                 errdefer tags.deinit(allocator);
                 tags.getFocus().focusable = true;
-                if (record) |r| try tags.setContent(allocator, r.event.tags);
+                if (saved_fields) |saved|
+                    try tags.setContent(allocator, saved.tags)
+                else if (record) |r|
+                    try tags.setContent(allocator, r.event.tags);
                 try box.children.put(allocator, tags.getFocus().id, .{ .widget = .{ .text_input = tags }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
             }
 
@@ -1619,7 +1635,10 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 var description = try wgt.TextInput.init(allocator, .{ .label = " description ", .name = "description", .visible_width = null, .rounded_corners = true, .render_content = session.is_terminal, .multiline = true, .scroll = .{ .fill = true } });
                 errdefer description.deinit(allocator);
                 description.getFocus().focusable = true;
-                if (record) |r| try description.setContent(allocator, r.event.description);
+                if (saved_fields) |saved|
+                    try description.setContent(allocator, saved.description)
+                else if (record) |r|
+                    try description.setContent(allocator, r.event.description);
                 try box.children.put(allocator, description.getFocus().id, .{ .widget = .{ .text_input = description }, .rect = null, .min_size = null });
             }
 
@@ -1627,7 +1646,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 var target = try wgt.TextInput.init(allocator, .{ .label = " target branch ", .name = "target_branch", .visible_width = null, .rounded_corners = true, .render_content = session.is_terminal });
                 errdefer target.deinit(allocator);
                 target.getFocus().focusable = true;
-                const content = if (record) |r| r.event.target_branch else data.default_target_branch;
+                const content = if (saved_fields) |saved| saved.target_branch else if (record) |r| r.event.target_branch else data.default_target_branch;
                 try target.setContent(allocator, content);
                 try box.children.put(allocator, target.getFocus().id, .{ .widget = .{ .text_input = target }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
             }
@@ -2080,6 +2099,12 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             // map with this frame's addresses, so the web/wasm form handling can
             // find them by focus id
             if (self.threadForm()) |form| {
+                const failure = if (self.session.formFeedback(feedback_tag)) |saved| saved.failure else null;
+                form.children.values()[title_field_index].widget.text_input.options.label = if (failure == .required_title) " title (required) " else " title ";
+                if (comptime supports_drafts) {
+                    const invalid_target = failure == .invalid_target_branch;
+                    form.children.values()[target_branch_field_index].widget.text_input.options.label = if (invalid_target) " target branch (not found) " else " target branch ";
+                }
                 const inputs_arena = self.session.arena.allocator();
                 for (form.children.values()) |*child| switch (child.widget) {
                     .text_input => |*ti| try self.session.text_inputs.put(inputs_arena, ti.getFocus().id, ti),
@@ -2476,10 +2501,19 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             const target_branch = if (comptime supports_drafts) try form.children.values()[target_branch_field_index].widget.text_input.text(allocator) else "";
             defer if (comptime supports_drafts) allocator.free(target_branch);
 
-            if (!Event.fieldsValid(title, tags)) return;
+            if (!Event.fieldsValid(title, tags)) {
+                if (!evt.titleValid(title)) try self.rememberThreadFeedback(.required_title, title, tags, description, target_branch);
+                return;
+            }
 
             if (comptime supports_drafts) {
-                const event_id_hex = Data.createDraft(self.data, self.session, allocator, title, tags, description, target_branch) catch return;
+                const event_id_hex = Data.createDraft(self.data, self.session, allocator, title, tags, description, target_branch) catch |err| switch (err) {
+                    error.InvalidFields => {
+                        try self.rememberThreadFeedback(.invalid_target_branch, title, tags, description, target_branch);
+                        return;
+                    },
+                    else => |other| return other,
+                };
                 title_input.clear(allocator);
                 tags_input.clear(allocator);
                 description_input.clear(allocator);
@@ -2545,11 +2579,21 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             const target_branch = if (comptime supports_drafts) try form.children.values()[target_branch_field_index].widget.text_input.text(allocator) else "";
             defer if (comptime supports_drafts) allocator.free(target_branch);
 
-            if (!Event.fieldsValid(title, tags)) return;
+            if (!Event.fieldsValid(title, tags)) {
+                if (!evt.titleValid(title)) try self.rememberThreadFeedback(.required_title, title, tags, description, target_branch);
+                return;
+            }
+            const src = self.data.repo_source orelse return;
 
             if (comptime supports_drafts) {
                 if (entryDraft(entry.*)) {
-                    self.data.editDraft(self.session, allocator, entry.id, title, tags, description, target_branch) catch return;
+                    self.data.editDraft(self.session, allocator, entry.id, title, tags, description, target_branch) catch |err| switch (err) {
+                        error.InvalidFields => {
+                            try self.rememberThreadFeedback(.invalid_target_branch, title, tags, description, target_branch);
+                            return;
+                        },
+                        else => |other| return other,
+                    };
                     const route = listRoute(self.data.identity, entryStatus(entry.*), "", entry.id) orelse return;
                     try self.session.navigate(route);
                     return;
@@ -2557,7 +2601,6 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             }
 
             const id_bytes = try evt.parseEventId(entry.id);
-            const src = self.data.repo_source orelse return;
             const author = (try self.session.eventAuthor()) orelse return;
 
             switch (src.repo_kind) {
@@ -2566,12 +2609,18 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     defer any_repo.deinit(io, allocator);
                     switch (any_repo) {
                         inline else => |*repo| if (supports_drafts) {
-                            try Event.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &id_bytes, .{ .fields = .{
+                            Event.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &id_bytes, .{ .fields = .{
                                 .title = title,
                                 .tags = tags,
                                 .description = description,
                                 .target_branch = target_branch,
-                            } }, author);
+                            } }, author) catch |err| switch (err) {
+                                error.InvalidFields => {
+                                    try self.rememberThreadFeedback(.invalid_target_branch, title, tags, description, target_branch);
+                                    return;
+                                },
+                                else => |other| return other,
+                            };
                         } else if (has_status)
                             try Event.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &id_bytes, .{ .fields = .{
                                 .title = title,
@@ -2586,6 +2635,23 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
 
             const route = listRoute(self.data.identity, entryStatus(entry.*), "", entry.id) orelse return;
             try self.session.navigate(route);
+        }
+
+        fn rememberThreadFeedback(self: *This, failure: FeedbackFailure, title: []const u8, tags: []const u8, description: []const u8, target_branch: []const u8) !void {
+            const aa = self.session.arena.allocator();
+            self.session.data.form_feedback = @unionInit(ui.Session.FormFeedback, @tagName(feedback_tag), .{
+                .failure = failure,
+                .fields = if (comptime supports_drafts) .{
+                    .title = try aa.dupe(u8, title),
+                    .tags = try aa.dupe(u8, tags),
+                    .description = try aa.dupe(u8, description),
+                    .target_branch = try aa.dupe(u8, target_branch),
+                } else .{
+                    .title = try aa.dupe(u8, title),
+                    .tags = try aa.dupe(u8, tags),
+                    .description = try aa.dupe(u8, description),
+                },
+            });
         }
 
         fn submitConfirmation(self: *This, allocator: std.mem.Allocator, button_index: usize) !void {

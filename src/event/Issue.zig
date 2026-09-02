@@ -56,7 +56,7 @@ pub fn tagIterator(tags: []const u8) std.mem.SplitIterator(u8, .scalar) {
 
 // a title is required, and a too-long tag would go unindexed once consumed
 pub fn fieldsValid(title: []const u8, tags: []const u8) bool {
-    if (title.len == 0) return false;
+    if (!evt.titleValid(title)) return false;
     var tag_iter = tagIterator(tags);
     while (tag_iter.next()) |tag| {
         if (tag.len > tag_max_len) return false;

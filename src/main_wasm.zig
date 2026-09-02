@@ -244,8 +244,4 @@ fn setTextInputValue(focus_id: u32, bytes: []const u8) !void {
     }
     const ti = session.text_inputs.get(focus_id) orelse return error.UnknownFocusId;
     try ti.setContent(allocator, bytes);
-    // mirror the TTY behavior in Login.View.input: editing an input clears
-    // the stale failure flag so the "(invalid)" label doesn't linger after
-    // the user has typed a correction
-    session.data.login_failure = null;
 }

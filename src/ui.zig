@@ -1681,6 +1681,42 @@ pub const Session = struct {
         sync_events,
     };
 
+    pub const FormFeedback = union(enum) {
+        pub const LoginFailure = enum { unknown_user, wrong_password };
+        pub const ThreadFailure = enum { required_title };
+        pub const PatchFailure = enum { required_title, invalid_target_branch };
+
+        login: struct {
+            failure: LoginFailure,
+            username: []const u8,
+        },
+        issue: struct {
+            failure: ThreadFailure,
+            fields: ?struct {
+                title: []const u8,
+                tags: []const u8,
+                description: []const u8,
+            } = null,
+        },
+        patch: struct {
+            failure: PatchFailure,
+            fields: ?struct {
+                title: []const u8,
+                tags: []const u8,
+                description: []const u8,
+                target_branch: []const u8,
+            } = null,
+        },
+        discussion: struct {
+            failure: ThreadFailure,
+            fields: ?struct {
+                title: []const u8,
+                tags: []const u8,
+                description: []const u8,
+            } = null,
+        },
+    };
+
     const Self = @This();
 
     // serializable data sent down to web client
@@ -1688,8 +1724,8 @@ pub const Session = struct {
         user_id: ?[]const u8 = null,
         // the logged-in user's name, for the views that show it
         user_name: ?[]const u8 = null,
-        // a transient outcome to surface from the last /login POST attempt
-        login_failure: ?Home.Auth.Login.Failure = null,
+        // a failed form retained long enough to render it for correction
+        form_feedback: ?FormFeedback = null,
         // a transient local event-sync error
         sync_failure: ?[]const u8 = null,
         current_page: RoutablePage = .default,
@@ -1754,6 +1790,16 @@ pub const Session = struct {
         var id: [evt.event_id_size]u8 = undefined;
         @memcpy(&id, bytes);
         return id;
+    }
+
+    pub fn formFeedback(self: *const Self, comptime tag: std.meta.Tag(FormFeedback)) ?@FieldType(FormFeedback, @tagName(tag)) {
+        const feedback = self.data.form_feedback orelse return null;
+        if (std.meta.activeTag(feedback) != tag) return null;
+        return @field(feedback, @tagName(tag));
+    }
+
+    pub fn clearFormFeedback(self: *Self) void {
+        self.data.form_feedback = null;
     }
 
     // the commit author for an event this session creates, or null when it may
@@ -1824,6 +1870,7 @@ pub const Session = struct {
     // request a forward navigation to `route`; the host consumes next_page
     // (Nav.sync on the terminal, the wasm tick on the web).
     pub fn navigate(self: *Session, route: RoutablePage) !void {
+        self.clearFormFeedback();
         self.next_page = route;
     }
 };
