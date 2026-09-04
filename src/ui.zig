@@ -1661,7 +1661,7 @@ pub const Session = struct {
     // focus id -> the live TextInput, refreshed each frame by the views that own
     // inputs. web/wasm form handling looks widgets up here by focus id.
     text_inputs: std.AutoHashMapUnmanaged(usize, *wgt.TextInput) = .empty,
-    nav_back: bool = false, // set by input (escape) to request the native TUI pop a page; see Nav
+    back: enum { unavailable, available, requested } = .unavailable,
     refresh_requested: bool = false, // set by input (ctrl+r)
     // a requested forward navigation. set this (via navigate) to move to a new
     // page; Nav.sync builds it and then copies it into current_page, clearing
@@ -1989,7 +1989,7 @@ pub fn inputKey(allocator: std.mem.Allocator, root: *Widget, key: Key, session: 
         // request a navigation pop; the host's Nav.sync goes back a page, or
         // quits when there's no history left.
         .escape => {
-            session.nav_back = true;
+            session.back = .requested;
             return;
         },
         .ctrl => |letter| switch (letter) {
@@ -2016,7 +2016,7 @@ pub fn inputKey(allocator: std.mem.Allocator, root: *Widget, key: Key, session: 
                 var iter = root_focus.children.iterator();
                 while (iter.next()) |entry| {
                     const child = entry.value_ptr.*;
-                    if (!child.focus.focusable) continue;
+                    if (!child.focus.focusable and !widget.isBackButton(child.focus)) continue;
                     const r = child.rect;
                     if (mouse.x >= r.x and mouse.y >= r.y and
                         mouse.x < r.x + r.size.width and mouse.y < r.y + r.size.height)
@@ -2026,6 +2026,10 @@ pub fn inputKey(allocator: std.mem.Allocator, root: *Widget, key: Key, session: 
                     }
                 }
                 if (clicked) |focus_id| {
+                    if (widget.isBackButton((root_focus.children.get(focus_id) orelse return).focus)) {
+                        if (session.back == .available) session.back = .requested;
+                        return;
+                    }
                     // follow a cross-page link
                     if (crossPageLink(root_focus, focus_id, session.data)) |route| {
                         return session.navigate(route);
@@ -2205,6 +2209,7 @@ pub const Nav = struct {
     const max_history: usize = 16;
 
     pub fn init(allocator: std.mem.Allocator, session: *Session) !Nav {
+        session.back = .unavailable;
         const arena = try allocator.create(std.heap.ArenaAllocator);
         arena.* = std.heap.ArenaAllocator.init(allocator);
         errdefer {
@@ -2270,9 +2275,9 @@ pub const Nav = struct {
             return;
         }
 
-        if (session.nav_back) {
-            session.nav_back = false;
+        if (session.back == .requested) {
             if (self.history.pop()) |entry| {
+                session.back = if (self.history.items.len == 0) .unavailable else .available;
                 self.root.deinit(allocator);
                 freeArena(allocator, self.arena);
                 self.root = entry.root;
@@ -2283,6 +2288,7 @@ pub const Nav = struct {
                 chooseAnsiArtForNavigation(session);
                 return;
             }
+            session.back = .unavailable;
             // nothing to go back to; switch to the quit confirmation
             const root_focus = self.root.getFocus();
             var iter = root_focus.children.iterator();
@@ -2315,6 +2321,7 @@ pub const Nav = struct {
             if (session.haxy_moment == null and session.local == null) return;
             // the page we navigated to becomes the current page
             session.data.current_page = route;
+            session.back = .available;
 
             const arena = try allocator.create(std.heap.ArenaAllocator);
             arena.* = std.heap.ArenaAllocator.init(allocator);

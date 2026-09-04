@@ -24,6 +24,7 @@ pub fn init(arena: *std.heap.ArenaAllocator) !Self {
 pub const View = struct {
     scroll: wgt.Scroll(ui.Widget),
     tab_ids: std.AutoArrayHashMapUnmanaged(usize, void),
+    session: *ui.Session,
 
     pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !View {
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = .hidden, .rounded_corners = true, .direction = .horiz });
@@ -31,6 +32,18 @@ pub const View = struct {
 
         var tab_ids: std.AutoArrayHashMapUnmanaged(usize, void) = .empty;
         errdefer tab_ids.deinit(allocator);
+
+        try ui.widget.addBackButton(allocator, &box, session);
+
+        {
+            var text = try wgt.Text.init(allocator, " ");
+            errdefer text.deinit(allocator);
+            try box.children.put(allocator, text.getFocus().id, .{
+                .widget = .{ .text = text },
+                .rect = null,
+                .min_size = .{ .width = 1, .height = null },
+            });
+        }
 
         // title sits to the left of the tabs
         {
@@ -160,6 +173,7 @@ pub const View = struct {
         var self = View{
             .scroll = try wgt.Scroll(ui.Widget).init(allocator, .{ .box = box }, .{ .direction = .horiz, .show_bar = false, .web_native = !session.is_terminal }),
             .tab_ids = tab_ids,
+            .session = session,
         };
         self.getFocus().child_id = selected_tab orelse self.tab_ids.keys()[0];
         return self;
@@ -173,6 +187,7 @@ pub const View = struct {
     pub fn build(self: *View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
         self.clearGrid();
         const box = &self.scroll.child.box;
+        ui.widget.setBackButtonVisible(box, self.session.back == .available);
         for (box.children.keys(), box.children.values()) |id, *child| {
             const tb: ?*wgt.TextBox = switch (child.widget) {
                 .text_box => |*x| x,

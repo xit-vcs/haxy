@@ -48,6 +48,7 @@ pub const View = struct {
     tab_ids: std.AutoArrayHashMapUnmanaged(usize, void),
     tabs_id: usize,
     first_group_width: usize,
+    session: *ui.Session,
 
     pub fn init(allocator: std.mem.Allocator, data: *const Self, commit_count: ?u64, session: *ui.Session) !View {
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = .hidden, .rounded_corners = true, .direction = .horiz });
@@ -71,6 +72,8 @@ pub const View = struct {
         const commits_label = if (commit_count) |count| try std.fmt.allocPrint(aa, "commits ({d})", .{count}) else "commits";
         const commits_label_width = try xitui.width.displayWidth(commits_label);
         var first_group_width = try data.title.width();
+
+        try ui.widget.addBackButton(allocator, &title_box, session);
 
         // the user's name (local mode has no user pages to link to)
         if (!session.data.is_local) {
@@ -340,6 +343,7 @@ pub const View = struct {
             .tab_ids = tab_ids,
             .tabs_id = tabs_id,
             .first_group_width = first_group_width,
+            .session = session,
         };
     }
 
@@ -351,6 +355,8 @@ pub const View = struct {
     pub fn build(self: *View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
         self.clearGrid();
         const box = &self.scroll.child.box;
+        const back_visible = self.session.back == .available;
+        ui.widget.setBackButtonVisible(box, back_visible);
         const tabs_child = self.tabsChild();
         const tabs_box = &tabs_child.widget.box;
 
@@ -377,7 +383,8 @@ pub const View = struct {
         // the outer box's hidden border occupies two columns. keep the title
         // and tabs together if they fit; otherwise tab strip on its own row.
         const content_width = if (viewport_width) |width| width -| 2 else null;
-        const wrap = if (content_width) |width| self.first_group_width + tabs_width > width else false;
+        const back_width: usize = if (back_visible) ui.widget.back_button_width else 0;
+        const wrap = if (content_width) |width| self.first_group_width + back_width + tabs_width > width else false;
         box.options.direction = if (wrap) .vert else .horiz;
         tabs_child.min_size = if (wrap) .{ .width = content_width, .height = null } else null;
 

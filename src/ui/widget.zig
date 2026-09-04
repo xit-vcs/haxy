@@ -100,6 +100,44 @@ pub const Widget = union(enum) {
     }
 };
 
+pub const back_button_width = 3;
+const back_button_height = 3;
+const back_kind = "back";
+
+pub fn addBackButton(allocator: std.mem.Allocator, box: *wgt.Box(Widget), session: *ui.Session) !void {
+    if (!session.is_terminal) return;
+    var back = try wgt.TextBox.init(allocator, "←", .{ .border_style = .hidden, .wrap_kind = .none });
+    errdefer back.deinit(allocator);
+    back.getFocus().kind = .{ .custom = back_kind };
+    try box.children.put(allocator, back.getFocus().id, .{
+        .widget = .{ .text_box = back },
+        .rect = null,
+        .min_size = .{ .width = back_button_width, .height = back_button_height },
+        .max_size = .{ .width = back_button_width, .height = back_button_height },
+        .hidden = session.back != .available,
+    });
+}
+
+pub fn setBackButtonVisible(box: *wgt.Box(Widget), visible: bool) void {
+    for (box.children.values()) |*child| {
+        if (isBackButton(child.widget.getFocus())) {
+            child.hidden = !visible;
+            continue;
+        }
+        switch (child.widget) {
+            .box => |*nested| setBackButtonVisible(nested, visible),
+            else => {},
+        }
+    }
+}
+
+pub fn isBackButton(focus: *Focus) bool {
+    return switch (focus.kind) {
+        .custom => |kind| std.mem.eql(u8, kind, back_kind),
+        else => false,
+    };
+}
+
 // move the focused row in `box` by `delta`, clamped to the ends, scrolling
 // `scroll` to keep it visible.
 pub fn moveRowFocus(box: *wgt.Box(Widget), scroll: *wgt.Scroll(Widget), root_focus: *Focus, delta: isize) void {
