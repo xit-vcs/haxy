@@ -1955,13 +1955,19 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             return &self.viewStack().children.values()[tags_view_index].tag_flow;
         }
 
-        // the new-thread, edit, or resolve form inside the stack, or null when the
-        // unauthorized view stands in for it.
-        fn threadForm(self: *This) ?*wgt.Box(Widget) {
+        // the non-confirmation form inside the stack
+        fn formBox(self: *This) ?*wgt.Box(Widget) {
             return switch (self.viewStack().children.values()[form_view_index]) {
                 .box => |*box| box,
                 // the resolve form sits inside a scroll on the terminal
                 .scroll => |*scroll| &scroll.child.box,
+                else => null,
+            };
+        }
+
+        fn threadForm(self: *This) ?*wgt.Box(Widget) {
+            return switch (self.data.view) {
+                .new, .edit => self.formBox(),
                 else => null,
             };
         }
@@ -2105,6 +2111,8 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     const invalid_target = failure == .invalid_target_branch;
                     form.children.values()[target_branch_field_index].widget.text_input.options.label = if (invalid_target) " target branch (not found) " else " target branch ";
                 }
+            }
+            if (self.formBox()) |form| {
                 const inputs_arena = self.session.arena.allocator();
                 for (form.children.values()) |*child| switch (child.widget) {
                     .text_input => |*ti| try self.session.text_inputs.put(inputs_arena, ti.getFocus().id, ti),
@@ -2230,7 +2238,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         }
 
         fn commentFormInput(self: *This, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
-            const form = self.threadForm() orelse return;
+            const form = self.formBox() orelse return;
             const cid = form.getFocus().child_id orelse return;
             const cur = form.children.getIndex(cid) orelse return;
             const child = &form.children.values()[cur];
@@ -2279,7 +2287,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         // move to; enter on a "use this" link is a navigation the host follows
         // before this runs.
         fn resolveInput(self: *This, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
-            const form = self.threadForm() orelse return;
+            const form = self.formBox() orelse return;
             const cid = form.getFocus().child_id orelse return;
             const cur = form.children.getIndex(cid) orelse return;
             const child = &form.children.values()[cur];
@@ -2368,7 +2376,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             const src = self.data.repo_source orelse return;
             const entry = self.data.selectedThread() orelse return;
             const author = (try self.session.eventAuthor()) orelse return;
-            const form = self.threadForm() orelse return;
+            const form = self.formBox() orelse return;
 
             // gather the inputs by name; the d<n> hunk inputs appear in chunk order
             var title: ?[]u8 = null;
@@ -2431,7 +2439,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             const io = self.session.io orelse return;
             const src = self.data.repo_source orelse return;
             const author = (try self.session.eventAuthor()) orelse return;
-            const form = self.threadForm() orelse return;
+            const form = self.formBox() orelse return;
             const body_input = &form.children.values()[comment_body_field_index].widget.text_input;
             const body = try body_input.text(allocator);
             defer allocator.free(body);
