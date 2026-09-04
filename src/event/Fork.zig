@@ -12,6 +12,7 @@ pub const Record = struct {
     event: Self,
     removed: bool = false,
     created_order: u64 = 0,
+    updated_order: u64 = 0,
 };
 
 const Self = @This();
@@ -60,13 +61,7 @@ pub fn consume(
         existing_maybe = try evt.read(Record, DB, hash_kind, arena, try DB.HashMap(.read_only).init(cursor));
     }
 
-    var record = if (record_maybe) |value|
-        value
-    else blk: {
-        var existing = existing_maybe orelse return error.EventNotFound;
-        existing.removed = true;
-        break :blk existing;
-    };
+    var record = record_maybe orelse try evt.removedRecord(Record, DB, hash_kind, haxy_moment.readOnly(), existing_maybe);
 
     if (!record.removed) try validate(record);
 
@@ -87,7 +82,7 @@ pub fn consume(
 
     const fork_cursor = try records.putCursor(fork_key);
     try evt.upsert(Record, DB, hash_kind, try DB.HashMap(.read_write).init(fork_cursor), record);
-    try evt.indexEvent(DB, hash_kind, haxy_moment, event_id, .fork, record.created_order, record.removed);
+    try evt.indexEvent(DB, hash_kind, haxy_moment, event_id, .fork, existing_maybe, record);
 
     const order_key = evt.orderKeyDesc(record.created_order, event_id);
     if (existing_cursor_maybe == null) {

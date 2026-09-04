@@ -87,7 +87,7 @@ pub const RepoRole = enum {
     }
 };
 
-// every logical event's kind and creation-ordered active/removed id sets
+// every logical event's kind and update-ordered active/removed id sets
 pub const event_index_key = "event-id->kind";
 pub const active_event_id_set_key = "active-event-id-set";
 pub const removed_event_id_set_key = "removed-event-id-set";
@@ -964,15 +964,15 @@ pub fn consumeInTransaction(
             // existing record's
             switch (event_with_id.event) {
                 .user => |event_maybe| {
-                    const record_maybe: ?User.Record = if (event_maybe) |event| .{ .event = event, .created_order = event_order } else null;
+                    const record_maybe: ?User.Record = if (event_maybe) |event| .{ .event = event, .created_order = event_order, .updated_order = event_order } else null;
                     try User.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, record_maybe, &arena, &repo_event_oid);
                 },
                 .repo => |event_maybe| {
-                    const record_maybe: ?Repo.Record = if (event_maybe) |event| .{ .event = event, .created_order = event_order } else null;
+                    const record_maybe: ?Repo.Record = if (event_maybe) |event| .{ .event = event, .created_order = event_order, .updated_order = event_order } else null;
                     try Repo.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, record_maybe, &arena, &repo_event_oid);
                 },
                 .fork => |event_maybe| {
-                    const record_maybe: ?Fork.Record = if (event_maybe) |event| .{ .event = event, .created_order = event_order } else null;
+                    const record_maybe: ?Fork.Record = if (event_maybe) |event| .{ .event = event, .created_order = event_order, .updated_order = event_order } else null;
                     try Fork.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, record_maybe, &arena, &repo_event_oid);
                 },
                 .issue => |event_maybe| {
@@ -980,6 +980,7 @@ pub fn consumeInTransaction(
                         .event = event,
                         .author_email = authorEmail(commit_object.content.commit.metadata.author orelse ""),
                         .created_order = event_order,
+                        .updated_order = event_order,
                     } else null;
                     try Issue.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, record_maybe, &arena, &repo_event_oid);
                 },
@@ -988,6 +989,7 @@ pub fn consumeInTransaction(
                         .event = event,
                         .author_email = authorEmail(commit_object.content.commit.metadata.author orelse ""),
                         .created_order = event_order,
+                        .updated_order = event_order,
                     } else null;
                     try Discussion.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, record_maybe, &arena, &repo_event_oid);
                 },
@@ -996,6 +998,7 @@ pub fn consumeInTransaction(
                         .event = event,
                         .author_email = authorEmail(commit_object.content.commit.metadata.author orelse ""),
                         .created_order = event_order,
+                        .updated_order = event_order,
                     } else null;
                     try Comment.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, record_maybe, &arena, &repo_event_oid);
                 },
@@ -1006,6 +1009,7 @@ pub fn consumeInTransaction(
                             .event = event,
                             .author_email = authorEmail(commit_object.content.commit.metadata.author orelse ""),
                             .created_order = event_order,
+                            .updated_order = event_order,
                             .name = entry.name,
                             .blob_oid = entry.oid,
                         };
@@ -1043,6 +1047,7 @@ pub fn consumeInTransaction(
                             .event = event,
                             .author_email = authorEmail(commit_object.content.commit.metadata.author orelse ""),
                             .created_order = event_order,
+                            .updated_order = event_order,
                             .event_oid = &event_oid,
                             .base_tree_oid = &trees.base,
                             .head_tree_oid = &trees.head,
@@ -1056,6 +1061,7 @@ pub fn consumeInTransaction(
                         .event = event,
                         .author_email = authorEmail(commit_object.content.commit.metadata.author orelse ""),
                         .created_order = event_order,
+                        .updated_order = event_order,
                     } else null;
                     try Patch.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, record_maybe, &arena, &repo_event_oid);
                 },
@@ -1269,6 +1275,7 @@ pub fn merge(
                     outcome = @splat(.kept);
                     merged = target_record;
                     merged.event = mergeFields(T, if (baseline_record) |baseline| baseline.event else null, target_record.event, parent_record.event, &outcome);
+                    merged.updated_order = @max(target_record.updated_order, parent_record.updated_order);
                     if (comptime @hasDecl(T, "resolveMerge")) {
                         T.resolveMerge(target_record.event, parent_record.event, &merged.event, &outcome);
                     }
@@ -1456,31 +1463,50 @@ pub fn orderKeyDesc(order: u64, event_id: *const [event_id_size]u8) [@sizeOf(u64
     return orderKey(std.math.maxInt(u64) - order, event_id);
 }
 
-// add or refresh one entry in the global logical-event index. updates and
-// removed records preserve created_order, so the key never moves.
+pub fn removedRecord(
+    comptime T: type,
+    comptime DB: type,
+    comptime hash_kind: hash.HashKind,
+    haxy_moment: DB.HashMap(.read_only),
+    existing_maybe: ?T,
+) !T {
+    var record = existing_maybe orelse return error.EventNotFound;
+    record.removed = true;
+    const order_cursor = try haxy_moment.getCursor(hash.hashInt(hash_kind, event_order_key)) orelse return error.CursorNotFound;
+    record.updated_order = try order_cursor.readUint();
+    return record;
+}
+
+// add or refresh one entry in the global logical-event index
 pub fn indexEvent(
     comptime DB: type,
     comptime hash_kind: hash.HashKind,
     haxy_moment: DB.HashMap(.read_write),
     event_id: *const [event_id_size]u8,
     kind: EventKind,
-    created_order: u64,
-    removed: bool,
+    existing_maybe: anytype,
+    record: anytype,
 ) !void {
+    const event_key = hash.hashInt(hash_kind, event_id);
     const kind_map_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, event_index_key));
     const kind_map = try DB.HashMap(.read_write).init(kind_map_cursor);
-    try kind_map.put(hash.hashInt(hash_kind, event_id), .{ .bytes = @tagName(kind) });
+    try kind_map.put(event_key, .{ .bytes = @tagName(kind) });
 
     const active_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, active_event_id_set_key));
     const active = try DB.SortedSet(.read_write).init(active_cursor);
     const removed_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, removed_event_id_set_key));
     const removed_set = try DB.SortedSet(.read_write).init(removed_cursor);
-    const order_key = orderKeyDesc(created_order, event_id);
-    if (removed) {
-        _ = try active.remove(&order_key);
+
+    if (existing_maybe) |existing| {
+        const old_key = orderKeyDesc(existing.updated_order, event_id);
+        _ = try active.remove(&old_key);
+        _ = try removed_set.remove(&old_key);
+    }
+
+    const order_key = orderKeyDesc(record.updated_order, event_id);
+    if (record.removed) {
         try removed_set.put(&order_key);
     } else {
-        _ = try removed_set.remove(&order_key);
         try active.put(&order_key);
     }
 }

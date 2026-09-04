@@ -14,6 +14,7 @@ pub const Record = struct {
     removed: bool = false,
     author_email: ?[]const u8 = null,
     created_order: u64 = 0,
+    updated_order: u64 = 0,
     name: []const u8,
     blob_oid: []const u8,
 };
@@ -76,13 +77,7 @@ pub fn consume(
         existing_record_maybe = try evt.read(Record, DB, hash_kind, arena, existing_attachment);
     }
 
-    var record_to_write = if (record_maybe) |record|
-        record
-    else blk: {
-        var record = existing_record_maybe orelse return error.EventNotFound;
-        record.removed = true;
-        break :blk record;
-    };
+    var record_to_write = record_maybe orelse try evt.removedRecord(Record, DB, hash_kind, haxy_moment.readOnly(), existing_record_maybe);
 
     const id_bytes = try evt.parseEventId(&record_to_write.event.parent_id);
     if (!try parentExists(DB, hash_kind, haxy_moment, &id_bytes)) return error.ParentNotFound;
@@ -103,7 +98,7 @@ pub fn consume(
     const attachment_cursor = try event_id_to_attachment.putCursor(attachment_key);
     const attachment = try DB.HashMap(.read_write).init(attachment_cursor);
     try evt.upsert(Record, DB, hash_kind, attachment, record_to_write);
-    try evt.indexEvent(DB, hash_kind, haxy_moment, event_id, .attach, record_to_write.created_order, record_to_write.removed);
+    try evt.indexEvent(DB, hash_kind, haxy_moment, event_id, .attach, existing_record_maybe, record_to_write);
 
     if (existing_cursor_maybe == null) {
         const attachment_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, id_set_key));

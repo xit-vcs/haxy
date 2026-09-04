@@ -16,6 +16,7 @@ pub const Record = struct {
     event: Self,
     removed: bool = false,
     created_order: u64 = 0,
+    updated_order: u64 = 0,
 
     // a user's key in the name index
     pub fn indexKey(self: Record, allocator: std.mem.Allocator) ![]const u8 {
@@ -86,13 +87,7 @@ pub fn consume(
         existing_record_maybe = try evt.read(Record, DB, hash_kind, arena, existing_user);
     }
 
-    var record_to_write = if (record_maybe) |record|
-        record
-    else blk: {
-        var record = existing_record_maybe orelse return error.EventNotFound;
-        record.removed = true;
-        break :blk record;
-    };
+    var record_to_write = record_maybe orelse try evt.removedRecord(Record, DB, hash_kind, haxy_moment.readOnly(), existing_record_maybe);
 
     if (!record_to_write.removed) try validateName(record_to_write.event.name);
 
@@ -110,7 +105,7 @@ pub fn consume(
     const user_cursor = try event_id_to_user.putCursor(user_key);
     const user = try DB.HashMap(.read_write).init(user_cursor);
     try evt.upsert(Record, DB, hash_kind, user, record_to_write);
-    try evt.indexEvent(DB, hash_kind, haxy_moment, event_id, .user, record_to_write.created_order, record_to_write.removed);
+    try evt.indexEvent(DB, hash_kind, haxy_moment, event_id, .user, existing_record_maybe, record_to_write);
 
     const order_key = evt.orderKeyDesc(record_to_write.created_order, event_id);
 

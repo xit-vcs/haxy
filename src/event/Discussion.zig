@@ -13,6 +13,7 @@ pub const Record = struct {
     removed: bool = false,
     author_email: ?[]const u8 = null,
     created_order: u64 = 0,
+    updated_order: u64 = 0,
 };
 
 const Self = @This();
@@ -58,13 +59,7 @@ pub fn consume(
         existing_record_maybe = try evt.read(Record, DB, hash_kind, arena, try DB.HashMap(.read_only).init(existing_cursor));
     }
 
-    var record_to_write = if (record_maybe) |record|
-        record
-    else blk: {
-        var record = existing_record_maybe orelse return error.EventNotFound;
-        record.removed = true;
-        break :blk record;
-    };
+    var record_to_write = record_maybe orelse try evt.removedRecord(Record, DB, hash_kind, haxy_moment.readOnly(), existing_record_maybe);
 
     if (existing_record_maybe) |existing| {
         record_to_write.created_order = existing.created_order;
@@ -85,7 +80,7 @@ pub fn consume(
 
     const record = try DB.HashMap(.read_write).init(try records.putCursor(discussion_key));
     try evt.upsert(Record, DB, hash_kind, record, record_to_write);
-    try evt.indexEvent(DB, hash_kind, haxy_moment, event_id, .discuss, record_to_write.created_order, record_to_write.removed);
+    try evt.indexEvent(DB, hash_kind, haxy_moment, event_id, .discuss, existing_record_maybe, record_to_write);
 
     const order_key = evt.orderKeyDesc(activity_order, event_id);
     if (existing_cursor_maybe == null) {

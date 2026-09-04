@@ -97,7 +97,7 @@ pub fn init(
         result.selected = .{ .id = try aa.dupe(u8, selected), .kind = kind };
         const meta = try readMeta(repo_opts.hash, arena, haxy_moment, kind, &id);
         result.view = if (meta.removed) .removed else .active;
-        root_key = evt.orderKeyDesc(meta.created_order, &id);
+        root_key = evt.orderKeyDesc(meta.updated_order, &id);
     }
 
     for ([_]ui.RoutablePage.EventsView{ .active, .removed }) |view| {
@@ -173,7 +173,7 @@ fn readRecord(
 }
 
 const EventMeta = struct {
-    created_order: u64,
+    updated_order: u64,
     removed: bool,
 };
 
@@ -198,7 +198,7 @@ fn readMeta(
                 .patch => evt.Patch,
             };
             const record = (try readRecord(T, hash_kind, arena, haxy_moment, id)) orelse return error.NotFound;
-            break :blk .{ .created_order = record.created_order, .removed = record.removed };
+            break :blk .{ .updated_order = record.updated_order, .removed = record.removed };
         },
     };
 }

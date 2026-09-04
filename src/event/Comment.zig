@@ -14,6 +14,7 @@ pub const Record = struct {
     removed: bool = false,
     author_email: ?[]const u8 = null,
     created_order: u64 = 0,
+    updated_order: u64 = 0,
 };
 
 const Self = @This();
@@ -58,13 +59,7 @@ pub fn consume(
         existing_record_maybe = try evt.read(Record, DB, hash_kind, arena, existing_comment);
     }
 
-    var record_to_write = if (record_maybe) |record|
-        record
-    else blk: {
-        var record = existing_record_maybe orelse return error.EventNotFound;
-        record.removed = true;
-        break :blk record;
-    };
+    var record_to_write = record_maybe orelse try evt.removedRecord(Record, DB, hash_kind, haxy_moment.readOnly(), existing_record_maybe);
 
     const thread_id = try evt.parseEventId(&record_to_write.event.thread_id);
     _ = try evt.parseEventId(&record_to_write.event.parent_id);
@@ -82,7 +77,7 @@ pub fn consume(
     const comment_cursor = try event_id_to_comment.putCursor(comment_key);
     const comment = try DB.HashMap(.read_write).init(comment_cursor);
     try evt.upsert(Record, DB, hash_kind, comment, record_to_write);
-    try evt.indexEvent(DB, hash_kind, haxy_moment, event_id, .comment, record_to_write.created_order, record_to_write.removed);
+    try evt.indexEvent(DB, hash_kind, haxy_moment, event_id, .comment, existing_record_maybe, record_to_write);
 
     if (existing_cursor_maybe == null) {
         const comment_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, id_set_key));

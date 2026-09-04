@@ -43,6 +43,7 @@ pub const Record = struct {
     removed: bool = false,
     author_email: ?[]const u8 = null,
     created_order: u64 = 0,
+    updated_order: u64 = 0,
 };
 
 const Self = @This();
@@ -174,13 +175,7 @@ pub fn consume(
         existing_maybe = try evt.read(Record, DB, hash_kind, arena, try DB.HashMap(.read_only).init(cursor));
     }
 
-    var record = if (record_maybe) |value|
-        value
-    else blk: {
-        var value = existing_maybe orelse return error.EventNotFound;
-        value.removed = true;
-        break :blk value;
-    };
+    var record = record_maybe orelse try evt.removedRecord(Record, DB, hash_kind, haxy_moment.readOnly(), existing_maybe);
 
     if (!fieldsValid(record.event.title, record.event.tags)) return error.InvalidPatch;
     if (!rf.validateName(record.event.target_branch)) return error.InvalidTarget;
@@ -247,7 +242,7 @@ pub fn consume(
 
     const cursor = try records.putCursor(record_key);
     try evt.upsert(Record, DB, hash_kind, try DB.HashMap(.read_write).init(cursor), record);
-    try evt.indexEvent(DB, hash_kind, haxy_moment, event_id, .patch, record.created_order, record.removed);
+    try evt.indexEvent(DB, hash_kind, haxy_moment, event_id, .patch, existing_maybe, record);
 
     if (existing_cursor_maybe == null) {
         const ids = try DB.SortedSet(.read_write).init(try haxy_moment.putCursor(hash.hashInt(hash_kind, id_set_key)));
