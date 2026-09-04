@@ -245,7 +245,7 @@ pub const FlowBox = struct {
 
         // build at the slot size so every text box fits a single grid cell
         for (self.text_boxes.items) |*tb| {
-            tb.options.border_style = if (self.focus.child_id == tb.getFocus().id) .single else .hidden;
+            tb.options.border_style = if (root_focus.grandchild_id == tb.getFocus().id) .double else .hidden;
             try tb.build(allocator, .{
                 .min_size = .{ .width = cell_width, .height = null },
                 .max_size = .{ .width = cell_width, .height = slot_height },
