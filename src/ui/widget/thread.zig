@@ -2749,8 +2749,8 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         // for the parent's "scroll up at the top jumps to the header" check: at the
         // top only while the header tabs hold focus, so up from the split
         // crosses into the tabs first.
-        pub fn getSelectedIndex(self: *This) ?usize {
-            return if (self.headerActive()) 0 else 1;
+        pub fn atTop(self: *This) bool {
+            return self.headerActive();
         }
     };
 }

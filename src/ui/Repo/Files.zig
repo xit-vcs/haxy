@@ -748,9 +748,8 @@ pub const View = struct {
     }
 
     // only the clone-url row sits directly below the repository header.
-    pub fn getSelectedIndex(self: *View) ?usize {
-        if (self.headerActive()) return 0;
-        return if (self.header().hasCloneUrl() or !self.contentAtTop()) 1 else 0;
+    pub fn atTop(self: *View) bool {
+        return self.headerActive() or (!self.header().hasCloneUrl() and self.contentAtTop());
     }
 
     pub fn focusCloneUrl(self: *View, root_focus: *Focus) bool {

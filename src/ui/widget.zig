@@ -98,6 +98,15 @@ pub const Widget = union(enum) {
             inline else => |*case| return case.getFocus(),
         }
     }
+
+    // whether moving up should return to the page header
+    pub fn atTop(self: *Widget, root_focus: *Focus) bool {
+        return switch (self.*) {
+            inline .home_users, .home_repos, .flow_box_scroll, .home_settings, .home_auth, .quit, .repo_files, .repo_commits, .repo_refs, .repo_issues, .repo_patches, .repo_discussions, .repo_events => |*view| view.atTop(),
+            .repo_patch_detail => |*view| view.atTop(root_focus),
+            else => false,
+        };
+    }
 };
 
 pub const back_button_width = 3;
@@ -410,10 +419,10 @@ pub const FlowBox = struct {
             return self.scroll.getFocus();
         }
 
-        pub fn getSelectedIndex(self: Scroll) ?usize {
+        pub fn atTop(self: Scroll) bool {
             const in = self.scroll.child.flow_box;
-            const child_id = in.focus.child_id orelse return null;
-            return in.indexOfFocusId(child_id);
+            const child_id = in.focus.child_id orelse return false;
+            return in.indexOfFocusId(child_id) == 0;
         }
 
         fn inner(self: *Scroll) *FlowBox {

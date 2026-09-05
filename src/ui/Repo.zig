@@ -411,20 +411,7 @@ pub const View = struct {
                             },
                             .stack => {
                                 if (child.stack.getSelected()) |selected_widget| {
-                                    const at_top = switch (selected_widget.*) {
-                                        .repo_files => |*v| v.getSelectedIndex() == 0,
-                                        .repo_commits => |*v| v.getSelectedIndex() == 0,
-                                        .repo_refs => |*v| v.getSelectedIndex() == 0,
-                                        .repo_issues => |*v| v.getSelectedIndex() == 0,
-                                        .repo_patches => |*v| v.getSelectedIndex() == 0,
-                                        .repo_discussions => |*v| v.getSelectedIndex() == 0,
-                                        .repo_events => |*v| v.getSelectedIndex() == 0,
-                                        .home_settings => |*v| v.getSelectedIndex() == 0,
-                                        .home_auth => |*v| v.getSelectedIndex() == 0,
-                                        .quit => |*v| v.getSelectedIndex() == 0,
-                                        else => false,
-                                    };
-                                    if (at_top) {
+                                    if (selected_widget.atTop(root_focus)) {
                                         index = header_index;
                                     } else {
                                         try child.input(allocator, key, root_focus);

@@ -138,15 +138,7 @@ pub const View = struct {
                             },
                             .stack => {
                                 if (child.stack.getSelected()) |selected_widget| {
-                                    const at_top = switch (selected_widget.*) {
-                                        .home_users => |*v| v.getSelectedIndex() == 0,
-                                        .home_repos => |*v| v.getSelectedIndex() == 0,
-                                        .home_settings => |*v| v.getSelectedIndex() == 0,
-                                        .home_auth => |*v| v.getSelectedIndex() == 0,
-                                        .quit => |*v| v.getSelectedIndex() == 0,
-                                        else => false,
-                                    };
-                                    if (at_top) {
+                                    if (selected_widget.atTop(root_focus)) {
                                         index = header_index;
                                     } else {
                                         try child.input(allocator, key, root_focus);

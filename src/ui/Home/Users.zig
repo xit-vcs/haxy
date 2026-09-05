@@ -128,7 +128,7 @@ pub const View = struct {
         return self.list.getFocus();
     }
 
-    pub fn getSelectedIndex(self: View) ?usize {
-        return self.list.getSelectedIndex();
+    pub fn atTop(self: View) bool {
+        return self.list.atTop();
     }
 };

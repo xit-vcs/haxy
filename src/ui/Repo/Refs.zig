@@ -337,13 +337,10 @@ pub const View = struct {
         return self.box.getFocus();
     }
 
-    // the selected row's offset within the active column (0 = first row), so the
-    // parent knows when up should escape to the header.
-    pub fn getSelectedIndex(self: View) ?usize {
-        var copy = self;
-        const col = copy.activeColumn() orelse return null;
-        const cur_id = col.getFocus().child_id orelse return null;
-        return col.children.getIndex(cur_id);
+    pub fn atTop(self: *View) bool {
+        const col = self.activeColumn() orelse return false;
+        const cur_id = col.getFocus().child_id orelse return false;
+        return col.children.getIndex(cur_id) == 0;
     }
 };
 

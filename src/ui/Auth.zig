@@ -90,8 +90,8 @@ pub const View = struct {
         return self.focus;
     }
 
-    pub fn getSelectedIndex(self: View) ?usize {
-        if (self.session.data.user_id != null) return self.logout.getSelectedIndex();
-        return self.login.getSelectedIndex();
+    pub fn atTop(self: View) bool {
+        if (self.session.data.user_id != null) return self.logout.atTop();
+        return self.login.atTop();
     }
 };

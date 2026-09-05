@@ -507,8 +507,8 @@ pub const View = struct {
         return box.children.getIndex(id) == 0 and scroll.y == 0;
     }
 
-    pub fn getSelectedIndex(self: *View) ?usize {
-        return if (self.headerActive()) 0 else 1;
+    pub fn atTop(self: *View) bool {
+        return self.headerActive();
     }
 
     pub fn clearGrid(self: *View) void {

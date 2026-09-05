@@ -111,8 +111,8 @@ pub const View = struct {
         return self.center.getFocus();
     }
 
-    pub fn getSelectedIndex(self: View) ?usize {
+    pub fn atTop(self: View) bool {
         _ = self;
-        return 0;
+        return true;
     }
 };

@@ -211,16 +211,7 @@ pub const View = struct {
             .up => switch (child.*) {
                 .fork_header => try child.input(allocator, key, root_focus),
                 .stack => if (stack.getSelected()) |selected| {
-                    const at_top = switch (selected.*) {
-                        .repo_patch_detail => |*view| view.atTop(root_focus),
-                        .repo_files => |*view| view.getSelectedIndex() == 0,
-                        .repo_commits => |*view| view.getSelectedIndex() == 0,
-                        .home_settings => |*view| view.getSelectedIndex() == 0,
-                        .home_auth => |*view| view.getSelectedIndex() == 0,
-                        .quit => |*view| view.getSelectedIndex() == 0,
-                        else => false,
-                    };
-                    if (at_top) next_index = header_index else try child.input(allocator, key, root_focus);
+                    if (selected.atTop(root_focus)) next_index = header_index else try child.input(allocator, key, root_focus);
                 },
                 else => {},
             },

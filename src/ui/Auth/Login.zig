@@ -175,9 +175,8 @@ pub const View = struct {
         return self.center.getFocus();
     }
 
-    pub fn getSelectedIndex(self: View) ?usize {
-        const child_id = self.center.child.box.focus.child_id orelse return null;
-        return self.indexOf(child_id);
+    pub fn atTop(self: View) bool {
+        return self.center.child.box.focus.child_id == self.nav_ids[username_index];
     }
 
     fn indexOf(self: View, child_id: usize) ?usize {
