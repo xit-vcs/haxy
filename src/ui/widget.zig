@@ -109,6 +109,7 @@ pub fn addBackButton(allocator: std.mem.Allocator, box: *wgt.Box(Widget), sessio
     var back = try wgt.TextBox.init(allocator, "←", .{ .border_style = .hidden, .wrap_kind = .none });
     errdefer back.deinit(allocator);
     back.getFocus().kind = .{ .custom = back_kind };
+    back.getFocus().mode = .mouse;
     try box.children.put(allocator, back.getFocus().id, .{
         .widget = .{ .text_box = back },
         .rect = null,
@@ -215,7 +216,7 @@ pub const FlowBox = struct {
         for (items) |item| {
             var text_box = try wgt.TextBox.init(allocator, item.text, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .word });
             errdefer text_box.deinit(allocator);
-            text_box.getFocus().focusable = true;
+            text_box.getFocus().mode = .all;
 
             if (item.link.len > 0) {
                 text_box.getFocus().kind = .{ .custom = try aa.dupe(u8, item.link) };
@@ -474,7 +475,7 @@ pub const TagFlow = struct {
         for (items) |item| {
             var text_box = try wgt.TextBox.init(allocator, item.text, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
-            text_box.getFocus().focusable = true;
+            text_box.getFocus().mode = .all;
 
             if (item.link.len > 0) {
                 text_box.getFocus().kind = .{ .custom = try aa.dupe(u8, item.link) };
@@ -743,7 +744,7 @@ pub const SectionLabel = struct {
         {
             var tb = try wgt.TextBox.init(allocator, content, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer tb.deinit(allocator);
-            tb.getFocus().focusable = true;
+            tb.getFocus().mode = .all;
             try box.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
         }
 
@@ -801,7 +802,7 @@ pub const SubmitButton = struct {
         {
             var button = try wgt.TextBox.init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer button.deinit(allocator);
-            button.getFocus().focusable = true;
+            button.getFocus().mode = .all;
             // the renderer distinguishes plain clickables from buttons that
             // should POST to a server route by this kind.
             button.getFocus().kind = .{ .custom = "submit" };
@@ -1280,7 +1281,7 @@ pub const CopyableText = struct {
         if (choices.len > 1) for (choices) |choice| {
             var selector_box = try wgt.TextBox.init(allocator, choice.selector, .{ .border_style = .hidden, .wrap_kind = .none });
             errdefer selector_box.deinit(allocator);
-            selector_box.getFocus().focusable = true;
+            selector_box.getFocus().mode = .all;
             try box.children.put(allocator, selector_box.getFocus().id, .{ .widget = .{ .text_box = selector_box }, .rect = null, .min_size = .{ .width = choice.selector.len + 2, .height = 3 } });
         };
 
@@ -1293,7 +1294,7 @@ pub const CopyableText = struct {
             .visible_width = null,
         });
         errdefer text_input.deinit(allocator);
-        text_input.getFocus().focusable = true;
+        text_input.getFocus().mode = .all;
         try text_input.setContent(allocator, choices[0].text);
         box.getFocus().child_id = text_input.getFocus().id;
         try box.children.put(allocator, text_input.getFocus().id, .{ .widget = .{ .text_input = text_input }, .rect = null, .min_size = null, .flex = .shrink });

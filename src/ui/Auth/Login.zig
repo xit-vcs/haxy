@@ -43,7 +43,7 @@ pub const View = struct {
         {
             var username = try wgt.TextInput.init(allocator, .{ .label = " username ", .name = "username", .rounded_corners = true, .render_content = session.is_terminal });
             errdefer username.deinit(allocator);
-            username.getFocus().focusable = true;
+            username.getFocus().mode = .all;
             if (session.formFeedback(.login)) |feedback| try username.setContent(allocator, feedback.username);
             nav_ids[username_index] = username.getFocus().id;
             try box.children.put(allocator, username.getFocus().id, .{
@@ -56,7 +56,7 @@ pub const View = struct {
         {
             var password = try wgt.TextInput.init(allocator, .{ .label = " password ", .password = true, .name = "password", .rounded_corners = true, .render_content = session.is_terminal });
             errdefer password.deinit(allocator);
-            password.getFocus().focusable = true;
+            password.getFocus().mode = .all;
             nav_ids[password_index] = password.getFocus().id;
             try box.children.put(allocator, password.getFocus().id, .{
                 .widget = .{ .text_input = password },
@@ -68,7 +68,7 @@ pub const View = struct {
         {
             var button = try wgt.TextBox.init(allocator, "login", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer button.deinit(allocator);
-            button.getFocus().focusable = true;
+            button.getFocus().mode = .all;
             // the renderer distinguishes plain clickables from buttons that
             // should POST to a server route by this kind.
             button.getFocus().kind = .{ .custom = "submit" };

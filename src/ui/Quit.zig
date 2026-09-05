@@ -44,7 +44,7 @@ pub const View = struct {
         {
             var button = try wgt.TextBox.init(allocator, "quit", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer button.deinit(allocator);
-            button.getFocus().focusable = true;
+            button.getFocus().mode = .all;
             button_id = button.getFocus().id;
             try box.children.put(allocator, button.getFocus().id, .{
                 .widget = .{ .text_box = button },

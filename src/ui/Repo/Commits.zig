@@ -405,7 +405,7 @@ fn messageBox(allocator: std.mem.Allocator, message: []const u8, bottom_label: [
         .label = " message ",
         .bottom_label = bottom_label,
     });
-    tb.getFocus().focusable = true;
+    tb.getFocus().mode = .all;
     return tb;
 }
 
@@ -491,6 +491,7 @@ pub const View = struct {
                 break :blk frame;
             };
             errdefer diff_outer.deinit(allocator);
+            diff_outer.getFocus().mode = .mouse;
             try box.children.put(allocator, diff_outer.getFocus().id, .{ .widget = .{ .box = diff_outer }, .rect = null, .min_size = .{ .width = diff_min_width, .height = null } });
         }
 
@@ -511,7 +512,7 @@ pub const View = struct {
     fn addRow(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8, link: []const u8) !void {
         var row = try wgt.TextBox.init(allocator, label, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .word });
         errdefer row.deinit(allocator);
-        row.getFocus().focusable = true;
+        row.getFocus().mode = .all;
         if (link.len != 0) row.getFocus().kind = .{ .custom = link };
         try box.children.put(allocator, row.getFocus().id, .{ .widget = .{ .text_box = row }, .rect = null, .min_size = null, .max_size = .{ .width = null, .height = 5 } });
     }
@@ -524,7 +525,7 @@ pub const View = struct {
         const text = try std.mem.join(self.session.page_arena.allocator(), "\n", lines);
         var tb = try wgt.TextBox.init(allocator, text, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
         errdefer tb.deinit(allocator);
-        tb.getFocus().focusable = true;
+        tb.getFocus().mode = .all;
         try box.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
     }
 
@@ -535,7 +536,7 @@ pub const View = struct {
         const link = try commitsLink(self.session.page_arena, self.data.location, oid, 0, path);
         var tb = try wgt.TextBox.init(allocator, path, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
         errdefer tb.deinit(allocator);
-        tb.getFocus().focusable = true;
+        tb.getFocus().mode = .all;
         tb.getFocus().kind = .{ .custom = link };
         try box.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
     }
@@ -547,7 +548,7 @@ pub const View = struct {
         const link = try commitsLink(self.session.page_arena, self.data.location, oid, target_start, path);
         var tb = try wgt.TextBox.init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
         errdefer tb.deinit(allocator);
-        tb.getFocus().focusable = true;
+        tb.getFocus().mode = .all;
         tb.getFocus().kind = .{ .custom = link };
         try box.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
     }
@@ -558,7 +559,7 @@ pub const View = struct {
         const link = try filesObjectLink(self.session.page_arena, self.data.location, oid);
         var tb = try wgt.TextBox.init(allocator, "view files at this commit", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
         errdefer tb.deinit(allocator);
-        tb.getFocus().focusable = true;
+        tb.getFocus().mode = .all;
         tb.getFocus().kind = .{ .custom = link };
         try box.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
     }
@@ -715,7 +716,7 @@ pub const View = struct {
                     // the file's path, then a row returning to this commit's unfiltered diff.
                     var label = try wgt.TextBox.init(allocator, d.path, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
                     errdefer label.deinit(allocator);
-                    label.getFocus().focusable = true;
+                    label.getFocus().mode = .all;
                     try inner.children.put(allocator, label.getFocus().id, .{ .widget = .{ .text_box = label }, .rect = null, .min_size = null });
                     try self.addNavLink(allocator, inner, "← all files", commit.oid, 0, "");
                 } else {

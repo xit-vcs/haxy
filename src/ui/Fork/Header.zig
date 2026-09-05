@@ -65,7 +65,7 @@ pub const View = struct {
             const text = try std.fmt.bufPrint(&text_buf, "{s}/", .{data.owner_name});
             var owner = try wgt.TextBox.init(allocator, text, .{ .border_style = .hidden, .wrap_kind = .none });
             errdefer owner.deinit(allocator);
-            owner.getFocus().focusable = true;
+            owner.getFocus().mode = .all;
             owner.getFocus().kind = .{ .custom = try std.fmt.allocPrint(aa, "a:/user/{s}", .{data.owner_name}) };
             first_group_width += try xitui.width.displayWidth(text) + 2;
             try title_box.children.put(allocator, owner.getFocus().id, .{ .widget = .{ .text_box = owner }, .rect = null, .min_size = null });
@@ -76,7 +76,7 @@ pub const View = struct {
             const route = ui.RoutablePage.repoFilesRoute(identity, null, "", "", 0) orelse return error.RouteTooLong;
             var title = try ui.Title.View.init(allocator, &data.title);
             errdefer title.deinit(allocator);
-            title.getFocus().focusable = true;
+            title.getFocus().mode = .all;
             title.getFocus().kind = .{ .custom = try std.fmt.allocPrint(aa, "a:{s}", .{try route.toUrl(session.page_arena)}) };
             try title_box.children.put(allocator, title.getFocus().id, .{ .widget = .{ .title = title }, .rect = null, .min_size = null });
         }
@@ -102,7 +102,7 @@ pub const View = struct {
             const selected = current_tag == tag;
             var tab = try wgt.TextBox.init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer tab.deinit(allocator);
-            tab.getFocus().focusable = true;
+            tab.getFocus().mode = .all;
             tab.getFocus().kind = .{ .custom = try ui.inPageTabLink(session, route, selected) };
             try tab_ids.put(allocator, tab.getFocus().id, {});
             if (selected) selected_tab = tab.getFocus().id;
@@ -129,7 +129,7 @@ pub const View = struct {
         if (session.data.user_id != null) {
             var settings = try wgt.TextBox.init(allocator, "settings", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer settings.deinit(allocator);
-            settings.getFocus().focusable = true;
+            settings.getFocus().mode = .all;
             settings.getFocus().kind = .{ .custom = settings_link };
             try tab_ids.put(allocator, settings.getFocus().id, {});
             if (current_tag == .fork_settings) selected_tab = settings.getFocus().id;
@@ -149,7 +149,7 @@ pub const View = struct {
         if (session.is_terminal) {
             var quit = try wgt.TextBox.init(allocator, ui.Quit.tab_label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer quit.deinit(allocator);
-            quit.getFocus().focusable = true;
+            quit.getFocus().mode = .all;
             quit.getFocus().kind = .{ .custom = ui.Quit.tab_kind };
             try tab_ids.put(allocator, quit.getFocus().id, {});
             try tabs_box.children.put(allocator, quit.getFocus().id, .{ .widget = .{ .text_box = quit }, .rect = null, .min_size = .{ .width = 3, .height = null } });

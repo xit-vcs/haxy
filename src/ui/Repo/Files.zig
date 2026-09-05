@@ -337,6 +337,7 @@ pub const View = struct {
                 break :blk frame;
             };
             errdefer detail_outer.deinit(allocator);
+            detail_outer.getFocus().mode = .mouse;
             try box.children.put(allocator, detail_outer.getFocus().id, .{ .widget = .{ .box = detail_outer }, .rect = null, .min_size = .{ .width = detail_min_width, .height = null } });
         }
 
@@ -351,7 +352,7 @@ pub const View = struct {
     fn addRow(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8, link: []const u8) !void {
         var row = try wgt.TextBox.init(allocator, label, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .none });
         errdefer row.deinit(allocator);
-        row.getFocus().focusable = true;
+        row.getFocus().mode = .all;
         if (link.len != 0) row.getFocus().kind = .{ .custom = link };
         try box.children.put(allocator, row.getFocus().id, .{ .widget = .{ .text_box = row }, .rect = null, .min_size = null });
     }
@@ -364,7 +365,7 @@ pub const View = struct {
         _ = self;
         var tb = try wgt.TextBox.init(allocator, text, .{ .border_style = null, .wrap_kind = .none });
         errdefer tb.deinit(allocator);
-        tb.getFocus().focusable = true;
+        tb.getFocus().mode = .all;
         if (link.len != 0) tb.getFocus().kind = .{ .custom = link };
         try box.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
     }
@@ -565,7 +566,7 @@ pub const View = struct {
         const link = try std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{try route.toUrl(page_arena)});
         var tb = try wgt.TextBox.init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
         errdefer tb.deinit(allocator);
-        tb.getFocus().focusable = true;
+        tb.getFocus().mode = .all;
         tb.getFocus().kind = .{ .custom = link };
         try box.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
     }

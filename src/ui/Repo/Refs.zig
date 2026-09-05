@@ -223,7 +223,7 @@ pub const View = struct {
     fn addRow(allocator: std.mem.Allocator, col: *wgt.Box(ui.Widget), label: []const u8, link: ?[]const u8) !void {
         var row = try wgt.TextBox.init(allocator, label, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .none });
         errdefer row.deinit(allocator);
-        row.getFocus().focusable = true;
+        row.getFocus().mode = .all;
         if (link) |l| row.getFocus().kind = .{ .custom = l };
         try col.children.put(allocator, row.getFocus().id, .{ .widget = .{ .text_box = row }, .rect = null, .min_size = null });
     }

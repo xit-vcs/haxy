@@ -2012,20 +2012,12 @@ pub fn inputKey(allocator: std.mem.Allocator, root: *Widget, key: Key, session: 
         },
         .mouse => |mouse| {
             if (mouse.action == .press and mouse.action.press == .left) {
-                var clicked: ?usize = null;
-                var iter = root_focus.children.iterator();
-                while (iter.next()) |entry| {
-                    const child = entry.value_ptr.*;
-                    if (!child.focus.focusable and !widget.isBackButton(child.focus)) continue;
-                    const r = child.rect;
-                    if (mouse.x >= r.x and mouse.y >= r.y and
-                        mouse.x < r.x + r.size.width and mouse.y < r.y + r.size.height)
-                    {
-                        clicked = entry.key_ptr.*;
-                        break;
+                if (root_focus.hitTest(mouse.x, mouse.y)) |hit| {
+                    const focus_id = hit.id;
+                    if (hit.kind == .background) {
+                        root_focus.setFocus(focus_id);
+                        return;
                     }
-                }
-                if (clicked) |focus_id| {
                     if (widget.isBackButton((root_focus.children.get(focus_id) orelse return).focus)) {
                         if (session.back == .available) session.back = .requested;
                         return;
@@ -2182,7 +2174,7 @@ pub fn authorBox(allocator: std.mem.Allocator, page_arena: *std.heap.ArenaAlloca
     };
     var tb = try wgt.TextBox.init(allocator, text, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none, .label = " author " });
     errdefer tb.deinit(allocator);
-    tb.getFocus().focusable = true;
+    tb.getFocus().mode = .all;
     switch (author) {
         .user_name => |name| tb.getFocus().kind = .{ .custom = try userLink(page_arena, name) },
         else => {},

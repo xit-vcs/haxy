@@ -283,7 +283,7 @@ pub const Header = struct {
     pub fn addTab(self: *Header, allocator: std.mem.Allocator, label: []const u8, link: []const u8, view_index: usize) !void {
         var text_box = try wgt.TextBox.init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
         errdefer text_box.deinit(allocator);
-        text_box.getFocus().focusable = true;
+        text_box.getFocus().mode = .all;
         text_box.getFocus().kind = .{ .custom = link };
         try self.tab_ids.put(allocator, text_box.getFocus().id, view_index);
         try self.box.children.put(allocator, text_box.getFocus().id, .{
@@ -505,7 +505,7 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
         fn addToolButton(allocator: std.mem.Allocator, row: *wgt.Box(Widget), label: []const u8, action: []const u8) !void {
             var button = try wgt.TextBox.init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer button.deinit(allocator);
-            button.getFocus().focusable = true;
+            button.getFocus().mode = .all;
             button.getFocus().kind = .{ .custom = action };
             try row.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = .{ .width = try xitui.width.displayWidth(label) + 2, .height = null } });
         }
@@ -591,7 +591,7 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                 }
 
                 for (row.children.keys(), row.children.values()) |id, *child| {
-                    if (!child.widget.getFocus().focusable) continue;
+                    if (child.widget.getFocus().mode != .all) continue;
                     row.getFocus().child_id = id;
                     break;
                 }
@@ -626,14 +626,14 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                 const back_label = try std.fmt.bufPrint(&back_label_buf, "← back to {s}", .{thread_name});
                 var text_box = try wgt.TextBox.init(allocator, back_label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
                 errdefer text_box.deinit(allocator);
-                text_box.getFocus().focusable = true;
+                text_box.getFocus().mode = .all;
                 text_box.getFocus().kind = .{ .custom = try listLink(self.session.page_arena, self.data.identity, entryStatus(entry), "", entry.id) };
                 try inner_box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
                 self.title_id = text_box.getFocus().id;
             } else {
                 var title = try wgt.TextBox.init(allocator, entry.record.event.title, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .word, .label = " title " });
                 errdefer title.deinit(allocator);
-                title.getFocus().focusable = true;
+                title.getFocus().mode = .all;
                 try inner_box.children.put(allocator, title.getFocus().id, .{ .widget = .{ .text_box = title }, .rect = null, .min_size = null });
                 self.title_id = title.getFocus().id;
 
@@ -673,7 +673,7 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                 .bottom_label = if (preview_end != null) " click or press enter to see more " else "",
             });
             errdefer description.deinit(allocator);
-            description.getFocus().focusable = true;
+            description.getFocus().mode = .all;
             if (preview_end != null) {
                 const route = ui.RoutablePage.repoThreadDescriptionRoute(kind, self.data.identity, entry.id) orelse return error.RouteTooLong;
                 description.getFocus().kind = .{ .custom = try std.fmt.allocPrint(self.session.page_arena.allocator(), "a:{s}", .{try route.toUrl(self.session.page_arena)}) };
@@ -809,7 +809,7 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                     var previous = cur;
                     while (previous > 0) {
                         previous -= 1;
-                        if (!row.children.values()[previous].widget.getFocus().focusable) continue;
+                        if (row.children.values()[previous].widget.getFocus().mode != .all) continue;
                         root_focus.setFocus(row.children.keys()[previous]);
                         return;
                     }
@@ -818,7 +818,7 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                 .arrow_right => {
                     var next = cur + 1;
                     while (next < row.children.count()) : (next += 1) {
-                        if (!row.children.values()[next].widget.getFocus().focusable) continue;
+                        if (row.children.values()[next].widget.getFocus().mode != .all) continue;
                         root_focus.setFocus(row.children.keys()[next]);
                         return;
                     }
@@ -895,7 +895,7 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                 const focus = self.inner().getFocus();
                 var chosen: ?usize = null;
                 for (focus.children.keys(), focus.children.values()) |id, child| {
-                    if (!child.focus.focusable) continue;
+                    if (child.focus.mode != .all) continue;
                     chosen = id;
                     if (!to_end) break;
                 }
@@ -925,7 +925,7 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
             const child = &inner_box.children.values()[child_index];
             const child_rect = child.rect orelse return false;
             var chosen: ?usize = null;
-            if (child.widget.getFocus().focusable and self.rectVisible(child_rect)) {
+            if (child.widget.getFocus().mode == .all and self.rectVisible(child_rect)) {
                 const id = inner_box.children.keys()[child_index];
                 chosen = id;
                 if (!last) {
@@ -935,7 +935,7 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
             }
 
             for (child.widget.getFocus().children.keys(), child.widget.getFocus().children.values()) |id, focus_child| {
-                if (!focus_child.focus.focusable) continue;
+                if (focus_child.focus.mode != .all) continue;
                 const rect: layout.IRect = .{
                     .x = child_rect.x + @as(isize, @intCast(focus_child.rect.x)),
                     .y = child_rect.y + @as(isize, @intCast(focus_child.rect.y)),
@@ -982,9 +982,9 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
 
         fn childFocusable(self: *This, child_index: usize) bool {
             const focus = self.inner().children.values()[child_index].widget.getFocus();
-            if (focus.focusable) return true;
+            if (focus.mode == .all) return true;
             for (focus.children.values()) |item| {
-                if (item.focus.focusable) return true;
+                if (item.focus.mode == .all) return true;
             }
             return false;
         }
@@ -1587,6 +1587,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             {
                 var frame = try wgt.Box(Widget).init(allocator, .{ .border_style = .hidden, .direction = .vert });
                 errdefer frame.deinit(allocator);
+                frame.getFocus().mode = .mouse;
                 var detail_view = try DetailType.init(allocator, data, session, null, .{});
                 errdefer detail_view.deinit(allocator);
                 frame.getFocus().child_id = detail_view.getFocus().id;
@@ -1612,7 +1613,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             {
                 var title = try wgt.TextInput.init(allocator, .{ .label = " title ", .name = "title", .visible_width = null, .rounded_corners = true, .render_content = session.is_terminal });
                 errdefer title.deinit(allocator);
-                title.getFocus().focusable = true;
+                title.getFocus().mode = .all;
                 if (saved_fields) |saved|
                     try title.setContent(allocator, saved.title)
                 else if (record) |r|
@@ -1623,7 +1624,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             {
                 var tags = try wgt.TextInput.init(allocator, .{ .label = " tags (separate with spaces) ", .name = "tags", .visible_width = null, .rounded_corners = true, .render_content = session.is_terminal });
                 errdefer tags.deinit(allocator);
-                tags.getFocus().focusable = true;
+                tags.getFocus().mode = .all;
                 if (saved_fields) |saved|
                     try tags.setContent(allocator, saved.tags)
                 else if (record) |r|
@@ -1634,7 +1635,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             {
                 var description = try wgt.TextInput.init(allocator, .{ .label = " description ", .name = "description", .visible_width = null, .rounded_corners = true, .render_content = session.is_terminal, .multiline = true, .scroll = .{ .fill = true } });
                 errdefer description.deinit(allocator);
-                description.getFocus().focusable = true;
+                description.getFocus().mode = .all;
                 if (saved_fields) |saved|
                     try description.setContent(allocator, saved.description)
                 else if (record) |r|
@@ -1645,7 +1646,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             if (supports_drafts) {
                 var target = try wgt.TextInput.init(allocator, .{ .label = " target branch ", .name = "target_branch", .visible_width = null, .rounded_corners = true, .render_content = session.is_terminal });
                 errdefer target.deinit(allocator);
-                target.getFocus().focusable = true;
+                target.getFocus().mode = .all;
                 const content = if (saved_fields) |saved| saved.target_branch else if (record) |r| r.event.target_branch else data.default_target_branch;
                 try target.setContent(allocator, content);
                 try box.children.put(allocator, target.getFocus().id, .{ .widget = .{ .text_input = target }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
@@ -1682,7 +1683,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     .scroll = .{ .fill = true },
                 });
                 errdefer body.deinit(allocator);
-                body.getFocus().focusable = true;
+                body.getFocus().mode = .all;
                 if (initial_body) |text| try body.setContent(allocator, text);
                 try box.children.put(allocator, body.getFocus().id, .{ .widget = .{ .text_input = body }, .rect = null, .min_size = null });
             }
@@ -1709,7 +1710,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             for (buttons, 0..) |options, index| {
                 var button = try wgt.TextBox.init(allocator, options.label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
                 errdefer button.deinit(allocator);
-                button.getFocus().focusable = true;
+                button.getFocus().mode = .all;
                 button.getFocus().kind = .{ .custom = options.action };
                 try box.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = null });
                 if (index == 0) box.getFocus().child_id = button.getFocus().id;
@@ -1781,7 +1782,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                         .same => |text| {
                             var tb = try wgt.TextBox.init(allocator, text, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .word });
                             errdefer tb.deinit(allocator);
-                            tb.getFocus().focusable = true;
+                            tb.getFocus().mode = .all;
                             try box.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
                         },
                         // an auto-resolved chunk: only one side changed it, so its
@@ -1795,7 +1796,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                             };
                             var tb = try wgt.TextBox.init(allocator, auto.text orelse "(removed)", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .word, .label = label });
                             errdefer tb.deinit(allocator);
-                            tb.getFocus().focusable = true;
+                            tb.getFocus().mode = .all;
                             try box.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
                         },
                         .conflict => |hunk| {
@@ -1809,7 +1810,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                             try addVersionRow(allocator, &box, try sideLabel(aa, desc.theirs_author, false), hunk.theirs orelse "", try useThisLink(session, data, name, true));
                             var resolution_input = try wgt.TextInput.init(allocator, .{ .label = " resolution ", .name = name, .visible_width = null, .rounded_corners = true, .render_content = session.is_terminal, .multiline = true });
                             errdefer resolution_input.deinit(allocator);
-                            resolution_input.getFocus().focusable = true;
+                            resolution_input.getFocus().mode = .all;
                             try resolution_input.setContent(allocator, (if (picked_theirs) hunk.theirs else hunk.ours) orelse "");
                             try box.children.put(allocator, resolution_input.getFocus().id, .{ .widget = .{ .text_input = resolution_input }, .rect = null, .min_size = null });
                             if (chunk_index + 1 < desc.chunks.len) try addGap(allocator, &box);
@@ -1833,7 +1834,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
 
             var resolution_input = try wgt.TextInput.init(allocator, .{ .label = " resolution ", .name = name, .visible_width = null, .rounded_corners = true, .render_content = session.is_terminal });
             errdefer resolution_input.deinit(allocator);
-            resolution_input.getFocus().focusable = true;
+            resolution_input.getFocus().mode = .all;
             try resolution_input.setContent(allocator, if (data.theirsPicked(name)) fc.theirs.text else fc.ours.text);
             try box.children.put(allocator, resolution_input.getFocus().id, .{ .widget = .{ .text_input = resolution_input }, .rect = null, .min_size = null });
         }
@@ -1850,7 +1851,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 .label = " resolution ",
             });
             errdefer selected.deinit(allocator);
-            selected.getFocus().focusable = true;
+            selected.getFocus().mode = .all;
             try box.children.put(allocator, selected.getFocus().id, .{ .widget = .{ .text_box = selected }, .rect = null, .min_size = null });
         }
 
@@ -1877,7 +1878,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 const use_label = "use this";
                 var use = try wgt.TextBox.init(allocator, use_label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
                 errdefer use.deinit(allocator);
-                use.getFocus().focusable = true;
+                use.getFocus().mode = .all;
                 use.getFocus().kind = .{ .custom = link };
                 try row.children.put(allocator, use.getFocus().id, .{
                     .widget = .{ .text_box = use },
@@ -1890,7 +1891,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             {
                 var tb = try wgt.TextBox.init(allocator, if (text.len > 0) text else "(removed)", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .word, .label = label });
                 errdefer tb.deinit(allocator);
-                tb.getFocus().focusable = true;
+                tb.getFocus().mode = .all;
                 try row.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
             }
 
@@ -1928,7 +1929,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         fn addRow(allocator: std.mem.Allocator, box: *wgt.Box(Widget), text: []const u8, bottom_label: []const u8, link: []const u8) !void {
             var row = try wgt.TextBox.init(allocator, text, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .word, .bottom_label = bottom_label });
             errdefer row.deinit(allocator);
-            row.getFocus().focusable = true;
+            row.getFocus().mode = .all;
             if (link.len != 0) row.getFocus().kind = .{ .custom = link };
             try box.children.put(allocator, row.getFocus().id, .{ .widget = .{ .text_box = row }, .rect = null, .min_size = null, .max_size = .{ .width = null, .height = 5 } });
         }

@@ -83,7 +83,7 @@ pub const View = struct {
 
             var text_box = try wgt.TextBox.init(allocator, text, .{ .border_style = .hidden, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
-            text_box.getFocus().focusable = true;
+            text_box.getFocus().mode = .all;
             text_box.getFocus().kind = .{ .custom = link };
             first_group_width += try xitui.width.displayWidth(text) + 2;
             try title_box.children.put(allocator, text_box.getFocus().id, .{
@@ -103,7 +103,7 @@ pub const View = struct {
             const title_link = try std.fmt.allocPrint(aa, "a:{s}", .{try files_root_route.toUrl(session.page_arena)});
             var title_view = try ui.Title.View.init(allocator, &data.title);
             errdefer title_view.deinit(allocator);
-            title_view.getFocus().focusable = true;
+            title_view.getFocus().mode = .all;
             title_view.getFocus().kind = .{ .custom = title_link };
             try title_box.children.put(allocator, title_view.getFocus().id, .{
                 .widget = .{ .title = title_view },
@@ -161,7 +161,7 @@ pub const View = struct {
         {
             var text_box = try wgt.TextBox.init(allocator, "files", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none, .bottom_label = bottom_label });
             errdefer text_box.deinit(allocator);
-            text_box.getFocus().focusable = true;
+            text_box.getFocus().mode = .all;
             text_box.getFocus().kind = .{ .custom = files_link };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
             if (current_tag == .repo_files) selected_tab = text_box.getFocus().id;
@@ -176,7 +176,7 @@ pub const View = struct {
         {
             var text_box = try wgt.TextBox.init(allocator, commits_label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none, .bottom_label = bottom_label });
             errdefer text_box.deinit(allocator);
-            text_box.getFocus().focusable = true;
+            text_box.getFocus().mode = .all;
             text_box.getFocus().kind = .{ .custom = commits_link };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
             if (current_tag == .repo_commits) selected_tab = text_box.getFocus().id;
@@ -191,7 +191,7 @@ pub const View = struct {
         {
             var text_box = try wgt.TextBox.init(allocator, "refs", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
-            text_box.getFocus().focusable = true;
+            text_box.getFocus().mode = .all;
             text_box.getFocus().kind = .{ .custom = refs_link };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
             if (current_tag == .repo_refs) selected_tab = text_box.getFocus().id;
@@ -206,7 +206,7 @@ pub const View = struct {
         {
             var text_box = try wgt.TextBox.init(allocator, "issues", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
-            text_box.getFocus().focusable = true;
+            text_box.getFocus().mode = .all;
             text_box.getFocus().kind = .{ .custom = issues_link };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
             if (current_tag == .repo_issues) selected_tab = text_box.getFocus().id;
@@ -221,7 +221,7 @@ pub const View = struct {
         {
             var text_box = try wgt.TextBox.init(allocator, "patches", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
-            text_box.getFocus().focusable = true;
+            text_box.getFocus().mode = .all;
             text_box.getFocus().kind = .{ .custom = patches_link };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
             if (current_tag == .repo_patches) selected_tab = text_box.getFocus().id;
@@ -236,7 +236,7 @@ pub const View = struct {
         {
             var text_box = try wgt.TextBox.init(allocator, "discussions", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
-            text_box.getFocus().focusable = true;
+            text_box.getFocus().mode = .all;
             text_box.getFocus().kind = .{ .custom = discussions_link };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
             if (current_tag == .repo_discussions) selected_tab = text_box.getFocus().id;
@@ -251,7 +251,7 @@ pub const View = struct {
         {
             var text_box = try wgt.TextBox.init(allocator, "events", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
-            text_box.getFocus().focusable = true;
+            text_box.getFocus().mode = .all;
             text_box.getFocus().kind = .{ .custom = events_link };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
             if (current_tag == .repo_events) selected_tab = text_box.getFocus().id;
@@ -279,7 +279,7 @@ pub const View = struct {
         if (session.data.user_id != null) {
             var text_box = try wgt.TextBox.init(allocator, "settings", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
-            text_box.getFocus().focusable = true;
+            text_box.getFocus().mode = .all;
             text_box.getFocus().kind = .{ .custom = settings_link };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
             if (current_tag == .repo_settings) selected_tab = text_box.getFocus().id;
@@ -310,7 +310,7 @@ pub const View = struct {
         if (session.is_terminal) {
             var text_box = try wgt.TextBox.init(allocator, ui.Quit.tab_label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
-            text_box.getFocus().focusable = true;
+            text_box.getFocus().mode = .all;
             text_box.getFocus().kind = .{ .custom = ui.Quit.tab_kind };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
             try tabs_box.children.put(allocator, text_box.getFocus().id, .{

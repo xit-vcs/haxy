@@ -1896,7 +1896,7 @@ fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: 
                 var iter = focus.children.iterator();
                 while (iter.next()) |entry| {
                     const child = entry.value_ptr.*;
-                    if (!child.focus.focusable) continue;
+                    if (child.focus.mode != .all) continue;
                     if (excluded.contains(entry.key_ptr.*)) continue;
                     const r = child.rect;
                     if (x >= r.x and y >= r.y and x < r.x + r.size.width and y < r.y + r.size.height) {

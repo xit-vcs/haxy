@@ -51,7 +51,7 @@ pub const View = struct {
         {
             var title_view = try ui.Title.View.init(allocator, &data.title);
             errdefer title_view.deinit(allocator);
-            title_view.getFocus().focusable = true;
+            title_view.getFocus().mode = .all;
             title_view.getFocus().kind = .{ .custom = "a:/" };
             // shrink the title when there is not enough space
             try box.children.put(allocator, title_view.getFocus().id, .{
@@ -103,7 +103,7 @@ pub const View = struct {
         {
             var text_box = try wgt.TextBox.init(allocator, "repos", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
-            text_box.getFocus().focusable = true;
+            text_box.getFocus().mode = .all;
             text_box.getFocus().kind = .{ .custom = repos_link };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
             if (std.mem.eql(u8, repos_link, selected_link)) selected_tab = text_box.getFocus().id;
@@ -118,7 +118,7 @@ pub const View = struct {
         {
             var text_box = try wgt.TextBox.init(allocator, "forks", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
-            text_box.getFocus().focusable = true;
+            text_box.getFocus().mode = .all;
             text_box.getFocus().kind = .{ .custom = forks_link };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
             if (std.mem.eql(u8, forks_link, selected_link)) selected_tab = text_box.getFocus().id;
@@ -145,7 +145,7 @@ pub const View = struct {
         if (session.data.user_id != null) {
             var text_box = try wgt.TextBox.init(allocator, "settings", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
-            text_box.getFocus().focusable = true;
+            text_box.getFocus().mode = .all;
             text_box.getFocus().kind = .{ .custom = settings_link };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
             if (std.mem.eql(u8, settings_link, selected_link)) selected_tab = text_box.getFocus().id;
@@ -175,7 +175,7 @@ pub const View = struct {
         if (session.is_terminal) {
             var text_box = try wgt.TextBox.init(allocator, ui.Quit.tab_label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
-            text_box.getFocus().focusable = true;
+            text_box.getFocus().mode = .all;
             text_box.getFocus().kind = .{ .custom = ui.Quit.tab_kind };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
             try box.children.put(allocator, text_box.getFocus().id, .{

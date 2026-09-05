@@ -61,7 +61,7 @@ pub fn appendRows(
             .label = " attachment ",
         });
         errdefer tb.deinit(allocator);
-        tb.getFocus().focusable = true;
+        tb.getFocus().mode = .all;
         tb.getFocus().kind = .{ .custom = try std.fmt.allocPrint(pa, "{s}{s}", .{ ui.raw_link_prefix, try url(session.page_arena, identity, &entry.id) }) };
         try row.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
 
@@ -69,7 +69,7 @@ pub fn appendRows(
             row.getFocus().kind = .{ .custom = try std.fmt.allocPrint(pa, "form:{s}/attachment:{s}/remove", .{ parent_url, &entry.id }) };
             var remove = try wgt.TextBox.init(allocator, "✕", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer remove.deinit(allocator);
-            remove.getFocus().focusable = true;
+            remove.getFocus().mode = .all;
             remove.getFocus().kind = .{ .custom = "submit" };
             try row.children.put(allocator, remove.getFocus().id, .{ .widget = .{ .text_box = remove }, .rect = null, .min_size = .{ .width = 3, .height = null } });
         }

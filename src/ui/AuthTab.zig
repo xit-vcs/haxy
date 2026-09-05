@@ -17,7 +17,7 @@ pub const View = struct {
     pub fn init(allocator: std.mem.Allocator, session: *ui.Session) !View {
         var text_box = try wgt.TextBox.init(allocator, "login", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
         errdefer text_box.deinit(allocator);
-        text_box.getFocus().focusable = true;
+        text_box.getFocus().mode = .all;
         text_box.getFocus().kind = .{ .custom = "ai:/auth" };
         return .{
             .text_box = text_box,

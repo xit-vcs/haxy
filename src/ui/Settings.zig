@@ -40,7 +40,7 @@ pub const View = struct {
                 // the renderer distinguishes plain clickables from buttons that
                 // should POST to a server route by this kind.
                 button.getFocus().kind = .{ .custom = "submit" };
-                button.getFocus().focusable = true;
+                button.getFocus().mode = .all;
                 button_id = button.getFocus().id;
                 try box.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = null });
             }
