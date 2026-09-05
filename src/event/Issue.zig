@@ -37,7 +37,7 @@ pub const tag_max_len = 64;
 // the moment keys `evt.merge` reads and writes for this kind
 pub const merge_policy: evt.MergePolicy = .field_conflicts;
 pub const record_map_key = "event-id->issue";
-pub const id_set_key = "issue-id-set";
+pub const all_id_set_key = "issue-id-set";
 pub const conflicts_key = "conflicted-issue-id->conflict";
 pub const id_to_field_to_oid_key = "issue-id->field->oid";
 pub const status_to_id_set_key = "status->issue-id-set";
@@ -134,7 +134,7 @@ pub fn consume(
 
     // the id set retains removed records so merges can carry removals
     if (existing_cursor_maybe == null) {
-        const issue_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, id_set_key));
+        const issue_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, all_id_set_key));
         const issue_id_set = try DB.SortedSet(.read_write).init(issue_id_set_cursor);
         try issue_id_set.put(&order_key);
     }

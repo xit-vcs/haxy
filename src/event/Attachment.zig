@@ -24,7 +24,7 @@ const Self = @This();
 // the moment keys `evt.merge` reads and writes for this kind
 pub const merge_policy: evt.MergePolicy = .target_wins;
 pub const record_map_key = "event-id->attachment";
-pub const id_set_key = "attachment-id-set";
+pub const all_id_set_key = "attachment-id-set";
 
 // the index a parent event's view reads
 pub const parent_id_to_attachment_id_set_key = "parent-id->attachment-id-set";
@@ -101,7 +101,7 @@ pub fn consume(
     try evt.indexEvent(DB, hash_kind, haxy_moment, event_id, .attach, existing_record_maybe, record_to_write);
 
     if (existing_cursor_maybe == null) {
-        const attachment_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, id_set_key));
+        const attachment_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, all_id_set_key));
         const attachment_id_set = try DB.SortedSet(.read_write).init(attachment_id_set_cursor);
         try attachment_id_set.put(&evt.orderKeyDesc(record_to_write.created_order, event_id));
     }

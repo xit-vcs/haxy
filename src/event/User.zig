@@ -37,7 +37,8 @@ pub const name_max_len = 32;
 // the moment keys `evt.merge` reads and writes for this kind
 pub const merge_policy: evt.MergePolicy = .target_wins;
 pub const record_map_key = "event-id->user";
-pub const id_set_key = "user-id-set";
+pub const all_id_set_key = "user-id-set";
+pub const active_id_set_key = "active-user-id-set";
 pub const name_index_key = "name->user-id";
 
 // resolves a commit's author email to its user at read time
@@ -111,12 +112,16 @@ pub fn consume(
 
     // the id set retains removed records so merges can carry removals
     if (existing_cursor_maybe == null) {
-        const user_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, id_set_key));
+        const user_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, all_id_set_key));
         const user_id_set = try DB.SortedSet(.read_write).init(user_id_set_cursor);
         try user_id_set.put(&order_key);
     }
 
-    if (!record_to_write.removed) {
+    const active = try DB.SortedSet(.read_write).init(try haxy_moment.putCursor(hash.hashInt(hash_kind, active_id_set_key)));
+    if (record_to_write.removed) {
+        _ = try active.remove(&order_key);
+    } else {
+        try active.put(&order_key);
         try name_to_user_id.put(hash.hashInt(hash_kind, record_to_write.event.name), .{ .bytes = event_id });
         try email_to_user_id.put(hash.hashInt(hash_kind, record_to_write.event.email), .{ .bytes = event_id });
     }

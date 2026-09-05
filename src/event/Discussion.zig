@@ -22,7 +22,7 @@ pub const tag_max_len = 64;
 
 pub const merge_policy: evt.MergePolicy = .target_wins;
 pub const record_map_key = "event-id->discussion";
-pub const id_set_key = "discussion-id-set";
+pub const all_id_set_key = "discussion-id-set";
 pub const active_id_set_key = "active-discussion-id-set";
 pub const tag_to_id_set_key = "tag->discussion-id-set";
 const activity_order_key = "discussion-id->activity-order";
@@ -86,7 +86,7 @@ pub fn consume(
     if (existing_cursor_maybe == null) {
         const activity = try DB.HashMap(.read_write).init(try haxy_moment.putCursor(hash.hashInt(hash_kind, activity_order_key)));
         try activity.put(discussion_key, .{ .uint = activity_order });
-        const ids = try DB.SortedSet(.read_write).init(try haxy_moment.putCursor(hash.hashInt(hash_kind, id_set_key)));
+        const ids = try DB.SortedSet(.read_write).init(try haxy_moment.putCursor(hash.hashInt(hash_kind, all_id_set_key)));
         try ids.put(&evt.orderKeyDesc(record_to_write.created_order, event_id));
     }
 

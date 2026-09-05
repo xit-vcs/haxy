@@ -22,7 +22,7 @@ const Self = @This();
 // the moment keys `evt.merge` reads and writes for this kind
 pub const merge_policy: evt.MergePolicy = .target_wins;
 pub const record_map_key = "event-id->comment";
-pub const id_set_key = "comment-id-set";
+pub const all_id_set_key = "comment-id-set";
 
 // the indexes the thread reads
 pub const thread_id_to_comment_id_set_key = "thread-id->comment-id-set";
@@ -80,7 +80,7 @@ pub fn consume(
     try evt.indexEvent(DB, hash_kind, haxy_moment, event_id, .comment, existing_record_maybe, record_to_write);
 
     if (existing_cursor_maybe == null) {
-        const comment_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, id_set_key));
+        const comment_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, all_id_set_key));
         const comment_id_set = try DB.SortedSet(.read_write).init(comment_id_set_cursor);
         try comment_id_set.put(&evt.orderKeyDesc(record_to_write.created_order, event_id));
         try evt.touchThread(DB, hash_kind, haxy_moment, &thread_id, record_to_write.created_order, arena);

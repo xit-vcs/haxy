@@ -28,10 +28,10 @@ pub fn init(
 
     var users: std.ArrayList(evt.User.Public) = .empty;
 
-    // the users ordered by creation (newest first); absent until the first user
+    // the active users ordered by creation (newest first); absent until the first user
     // exists. keyed by orderKey ([created-order][event-id]); the trailing bytes
     // of each key are the user event id.
-    const user_id_set_cursor = try haxy_moment.getCursor(hash.hashInt(hash_kind, "user-id-set")) orelse
+    const user_id_set_cursor = try haxy_moment.getCursor(hash.hashInt(hash_kind, evt.User.active_id_set_key)) orelse
         return .{ .users = &.{}, .start = start, .next_start = null };
     const user_id_set = try DB.SortedSet(.read_only).init(user_id_set_cursor);
     const count = try user_id_set.count();

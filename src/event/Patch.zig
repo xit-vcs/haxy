@@ -126,7 +126,7 @@ pub const Update = union(enum) {
 pub const tag_max_len = 64;
 pub const merge_policy: evt.MergePolicy = .field_conflicts;
 pub const record_map_key = "event-id->patch";
-pub const id_set_key = "patch-id-set";
+pub const all_id_set_key = "patch-id-set";
 pub const conflicts_key = "conflicted-patch-id->conflict";
 pub const id_to_field_to_oid_key = "patch-id->field->oid";
 pub const target_patch_id_to_patch_id_set_key = "target-patch-id->patch-id-set";
@@ -245,7 +245,7 @@ pub fn consume(
     try evt.indexEvent(DB, hash_kind, haxy_moment, event_id, .patch, existing_maybe, record);
 
     if (existing_cursor_maybe == null) {
-        const ids = try DB.SortedSet(.read_write).init(try haxy_moment.putCursor(hash.hashInt(hash_kind, id_set_key)));
+        const ids = try DB.SortedSet(.read_write).init(try haxy_moment.putCursor(hash.hashInt(hash_kind, all_id_set_key)));
         try ids.put(&order_key);
         if (target_patch_id) |*target_id| {
             const targets = try DB.HashMap(.read_write).init(try haxy_moment.putCursor(hash.hashInt(hash_kind, target_patch_id_to_patch_id_set_key)));

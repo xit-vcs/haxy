@@ -2185,7 +2185,6 @@ pub fn authorBox(allocator: std.mem.Allocator, page_arena: *std.heap.ArenaAlloca
 // native-TUI navigation
 pub const Nav = struct {
     root: Widget,
-    route: RoutablePage,
     // backs the current page (its Page data and the page-scoped strings its
     // widgets build). owned here, swapped on each navigation. session.page_arena
     // tracks whichever of these is current so widgets allocate into it.
@@ -2216,7 +2215,6 @@ pub const Nav = struct {
         page.* = try Page.init(arena, session, route);
         return .{
             .root = try initRoot(allocator, page, session),
-            .route = route,
             .arena = arena,
             .history = .empty,
         };
@@ -2261,7 +2259,6 @@ pub const Nav = struct {
                 self.root.deinit(allocator);
                 freeArena(allocator, self.arena);
                 self.root = new_root;
-                self.route = route;
                 self.arena = arena;
             }
             return;
@@ -2273,7 +2270,6 @@ pub const Nav = struct {
                 self.root.deinit(allocator);
                 freeArena(allocator, self.arena);
                 self.root = entry.root;
-                self.route = entry.route;
                 self.arena = entry.arena;
                 session.page_arena = entry.arena;
                 session.data.current_page = entry.route;
@@ -2311,6 +2307,7 @@ pub const Nav = struct {
         if (session.next_page) |route| {
             session.next_page = null;
             if (session.haxy_moment == null and session.local == null) return;
+            const previous_route = session.data.current_page;
             // the page we navigated to becomes the current page
             session.data.current_page = route;
             session.back = .available;
@@ -2325,7 +2322,7 @@ pub const Nav = struct {
             page.* = try Page.init(arena, session, route);
             const new_root = try initRoot(allocator, page, session);
 
-            try self.history.append(allocator, .{ .root = self.root, .route = self.route, .arena = self.arena });
+            try self.history.append(allocator, .{ .root = self.root, .route = previous_route, .arena = self.arena });
             // drop the oldest entry (freeing its widget tree and arena) once over cap
             if (self.history.items.len > max_history) {
                 var oldest = self.history.orderedRemove(0);
@@ -2333,7 +2330,6 @@ pub const Nav = struct {
                 freeArena(allocator, oldest.arena);
             }
             self.root = new_root;
-            self.route = route;
             self.arena = arena;
         }
     }

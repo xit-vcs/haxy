@@ -1198,7 +1198,7 @@ pub fn merge(
     parent_moment: DB.HashMap(.read_only),
     baseline_moment: DB.HashMap(.read_only),
 ) !void {
-    const parent_set_cursor = try parent_moment.getCursor(hash.hashInt(hash_kind, T.id_set_key)) orelse return;
+    const parent_set_cursor = try parent_moment.getCursor(hash.hashInt(hash_kind, T.all_id_set_key)) orelse return;
     const parent_set = try DB.SortedSet(.read_only).init(parent_set_cursor);
 
     const parent_records_cursor = try parent_moment.getCursor(hash.hashInt(hash_kind, T.record_map_key)) orelse return;

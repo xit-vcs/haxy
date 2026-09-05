@@ -37,7 +37,8 @@ pub const name_max_len = 32;
 // the moment keys `evt.merge` reads and writes for this kind
 pub const merge_policy: evt.MergePolicy = .target_wins;
 pub const record_map_key = "event-id->repo";
-pub const id_set_key = "repo-id-set";
+pub const all_id_set_key = "repo-id-set";
+pub const active_id_set_key = "active-repo-id-set";
 pub const name_index_key = "name->repo-id";
 
 pub fn validateName(name: []const u8) !void {
@@ -116,12 +117,16 @@ pub fn consume(
 
     // the id set retains removed records so merges can carry removals
     if (existing_cursor_maybe == null) {
-        const repo_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, id_set_key));
+        const repo_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, all_id_set_key));
         const repo_id_set = try DB.SortedSet(.read_write).init(repo_id_set_cursor);
         try repo_id_set.put(&order_key);
     }
 
-    if (!record_to_write.removed) {
+    const active = try DB.SortedSet(.read_write).init(try haxy_moment.putCursor(hash.hashInt(hash_kind, active_id_set_key)));
+    if (record_to_write.removed) {
+        _ = try active.remove(&order_key);
+    } else {
+        try active.put(&order_key);
         const repo_path = try record_to_write.indexKey(arena.allocator());
         try name_to_repo_id.put(hash.hashInt(hash_kind, repo_path), .{ .bytes = event_id });
 

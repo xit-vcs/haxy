@@ -24,7 +24,7 @@ pub const Stage = enum {
 
 pub const merge_policy: evt.MergePolicy = .target_wins;
 pub const record_map_key = "event-id->fork";
-pub const id_set_key = "fork-id-set";
+pub const all_id_set_key = "fork-id-set";
 pub const user_id_to_fork_id_set_key = "user-id->fork-id-set";
 pub const repo_user_to_draft_id_set_key = "repo+user->draft-id-set";
 pub const DraftKey = [evt.event_id_size * 2]u8;
@@ -86,7 +86,7 @@ pub fn consume(
 
     const order_key = evt.orderKeyDesc(record.created_order, event_id);
     if (existing_cursor_maybe == null) {
-        const ids = try DB.SortedSet(.read_write).init(try haxy_moment.putCursor(hash.hashInt(hash_kind, id_set_key)));
+        const ids = try DB.SortedSet(.read_write).init(try haxy_moment.putCursor(hash.hashInt(hash_kind, all_id_set_key)));
         try ids.put(&order_key);
     }
 

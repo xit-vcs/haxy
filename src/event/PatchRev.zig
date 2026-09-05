@@ -25,7 +25,7 @@ const Self = @This();
 
 pub const merge_policy: evt.MergePolicy = .target_wins;
 pub const record_map_key = "event-id->patchrev";
-pub const id_set_key = "patchrev-id-set";
+pub const all_id_set_key = "patchrev-id-set";
 
 // create the mergeable squash commit represented by this patch revision
 pub fn writeSquashCommit(
@@ -135,7 +135,7 @@ pub fn consume(
     try evt.indexEvent(DB, hash_kind, haxy_moment, event_id, .patchrev, existing_maybe, record);
 
     if (existing_cursor_maybe == null) {
-        const ids = try DB.SortedSet(.read_write).init(try haxy_moment.putCursor(hash.hashInt(hash_kind, id_set_key)));
+        const ids = try DB.SortedSet(.read_write).init(try haxy_moment.putCursor(hash.hashInt(hash_kind, all_id_set_key)));
         try ids.put(&evt.orderKeyDesc(record.created_order, event_id));
     }
 }
@@ -170,7 +170,7 @@ pub fn readNewest(
     haxy_moment: DB.HashMap(.read_only),
     arena: *std.heap.ArenaAllocator,
 ) !?WithId {
-    const ids_cursor = try haxy_moment.getCursor(hash.hashInt(hash_kind, id_set_key)) orelse return null;
+    const ids_cursor = try haxy_moment.getCursor(hash.hashInt(hash_kind, all_id_set_key)) orelse return null;
     const ids = try DB.SortedSet(.read_only).init(ids_cursor);
     var iter = try ids.iteratorFromIndex(0);
     while (try iter.next()) |cursor| {
@@ -193,7 +193,7 @@ pub fn gcRoots(
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    const ids_cursor = try haxy_moment.getCursor(hash.hashInt(hash_kind, id_set_key)) orelse return try roots.toOwnedSlice(allocator);
+    const ids_cursor = try haxy_moment.getCursor(hash.hashInt(hash_kind, all_id_set_key)) orelse return try roots.toOwnedSlice(allocator);
     const ids = try DB.SortedSet(.read_only).init(ids_cursor);
     var iter = try ids.iteratorFromIndex(0);
     while (try iter.next()) |cursor| {
