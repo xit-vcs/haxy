@@ -2,6 +2,7 @@ const std = @import("std");
 const ui = @import("../ui.zig");
 const xit = @import("xit");
 const xitui = xit.xitui;
+const wgt = xitui.widget;
 const layout = xitui.layout;
 const Key = xitui.input.Key;
 const Grid = xitui.grid.Grid;
@@ -23,75 +24,59 @@ pub fn init() Self {
 }
 
 pub const View = struct {
-    // own container focus so callers (e.g. wgt.Stack) see a stable id. the
-    // inner views' focus ids change as login/logout swap; if we exposed those
-    // directly, anything keyed off our id at one moment would mismatch the
-    // focus tree the next frame.
-    focus: *Focus,
-    login: Login.View,
-    logout: Logout.View,
+    stack: wgt.Stack(ui.Widget),
     session: *ui.Session,
 
+    const login_index = 0;
+    const logout_index = 1;
+
     pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !View {
-        var login_view = try Login.View.init(allocator, &data.login, session);
-        errdefer login_view.deinit(allocator);
-        var logout_view = try Logout.View.init(allocator, &data.logout, session);
-        errdefer logout_view.deinit(allocator);
+        var stack = try wgt.Stack(ui.Widget).init(allocator);
+        errdefer stack.deinit(allocator);
+        {
+            var login = try Login.View.init(allocator, &data.login, session);
+            errdefer login.deinit(allocator);
+            try stack.children.put(allocator, login.getFocus().id, .{ .auth_login = login });
+        }
+        {
+            var logout = try Logout.View.init(allocator, &data.logout, session);
+            errdefer logout.deinit(allocator);
+            try stack.children.put(allocator, logout.getFocus().id, .{ .auth_logout = logout });
+        }
         return .{
-            .focus = try Focus.create(allocator, .container),
-            .login = login_view,
-            .logout = logout_view,
+            .stack = stack,
             .session = session,
         };
     }
 
     pub fn deinit(self: *View, allocator: std.mem.Allocator) void {
-        self.focus.destroy(allocator);
-        self.login.deinit(allocator);
-        self.logout.deinit(allocator);
+        self.stack.deinit(allocator);
     }
 
     pub fn build(self: *View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
-        self.focus.clear();
-        if (self.session.data.user_id != null) {
-            try self.logout.build(allocator, constraint, root_focus);
-            if (self.logout.getGrid()) |inner_grid| {
-                try self.focus.addChild(allocator, self.logout.getFocus(), inner_grid.size, 0, 0);
-            }
-            self.focus.child_id = self.logout.getFocus().id;
-        } else {
-            try self.login.build(allocator, constraint, root_focus);
-            if (self.login.getGrid()) |inner_grid| {
-                try self.focus.addChild(allocator, self.login.getFocus(), inner_grid.size, 0, 0);
-            }
-            self.focus.child_id = self.login.getFocus().id;
-        }
+        const index: usize = if (self.session.data.user_id != null) logout_index else login_index;
+        self.stack.getFocus().child_id = self.stack.children.keys()[index];
+        try self.stack.build(allocator, constraint, root_focus);
     }
 
     pub fn input(self: *View, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
-        if (self.session.data.user_id != null) {
-            try self.logout.input(allocator, key, root_focus);
-        } else {
-            try self.login.input(allocator, key, root_focus);
-        }
+        try self.stack.input(allocator, key, root_focus);
     }
 
     pub fn clearGrid(self: *View) void {
-        self.login.clearGrid();
-        self.logout.clearGrid();
+        self.stack.clearGrid();
     }
 
     pub fn getGrid(self: View) ?Grid {
-        if (self.session.data.user_id != null) return self.logout.getGrid();
-        return self.login.getGrid();
+        return self.stack.getGrid();
     }
 
     pub fn getFocus(self: *View) *Focus {
-        return self.focus;
+        return self.stack.getFocus();
     }
 
-    pub fn atTop(self: View) bool {
-        if (self.session.data.user_id != null) return self.logout.atTop();
-        return self.login.atTop();
+    pub fn atTop(self: View, root_focus: *Focus) bool {
+        const selected = self.stack.getSelected() orelse return false;
+        return selected.atTop(root_focus);
     }
 };

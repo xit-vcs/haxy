@@ -61,6 +61,8 @@ pub const Widget = union(enum) {
     auth_tab: ui.Home.Header.AuthTab.View,
     home_settings: ui.Home.Settings.View,
     home_auth: ui.Home.Auth.View,
+    auth_login: ui.Home.Auth.Login.View,
+    auth_logout: ui.Home.Auth.Logout.View,
     footer: Footer,
 
     pub fn deinit(self: *Widget, allocator: std.mem.Allocator) void {
@@ -102,8 +104,8 @@ pub const Widget = union(enum) {
     // whether moving up should return to the page header
     pub fn atTop(self: *Widget, root_focus: *Focus) bool {
         return switch (self.*) {
-            inline .home_users, .home_repos, .flow_box_scroll, .home_settings, .home_auth, .quit, .repo_files, .repo_commits, .repo_refs, .repo_issues, .repo_patches, .repo_discussions, .repo_events => |*view| view.atTop(),
-            .repo_patch_detail => |*view| view.atTop(root_focus),
+            inline .home_users, .home_repos, .flow_box_scroll, .home_settings, .auth_login, .auth_logout, .quit, .repo_files, .repo_commits, .repo_refs, .repo_issues, .repo_patches, .repo_discussions, .repo_events => |*view| view.atTop(),
+            inline .home_auth, .repo_patch_detail => |*view| view.atTop(root_focus),
             else => false,
         };
     }
