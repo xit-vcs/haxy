@@ -145,16 +145,18 @@ pub fn update(
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    const DB = evt.EventDB(repo_opts.hash);
-    var event_db_maybe: ?evt.LocalEventDB(repo_opts.hash) = if (repo_kind == .git) try evt.LocalEventDB(repo_opts.hash).openReadOnly(io, allocator, repo.core.repo_dir) else null;
-    defer if (event_db_maybe) |*event_db| event_db.deinit(io, allocator);
-    const moment = (if (event_db_maybe) |*event_db|
-        evt.currentMomentFromDb(repo_opts.hash, event_db.db)
-    else if (repo_kind == .git)
-        return error.NotFound
-    else
-        evt.currentMoment(repo_opts, repo)) catch return error.NotFound;
-    const comment = (try readById(DB, repo_opts.hash, moment, &arena, comment_id)) orelse return error.NotFound;
+    const comment = blk: {
+        const DB = evt.EventDB(repo_opts.hash);
+        var event_db_maybe: ?evt.LocalEventDB(repo_opts.hash) = if (repo_kind == .git) try evt.LocalEventDB(repo_opts.hash).openReadOnly(io, allocator, repo.core.repo_dir) else null;
+        defer if (event_db_maybe) |*event_db| event_db.deinit(io, allocator);
+        const moment = (if (event_db_maybe) |*event_db|
+            evt.currentMomentFromDb(repo_opts.hash, event_db.db)
+        else if (repo_kind == .git)
+            return error.NotFound
+        else
+            evt.currentMoment(repo_opts, repo)) catch return error.NotFound;
+        break :blk (try readById(DB, repo_opts.hash, moment, &arena, comment_id)) orelse return error.NotFound;
+    };
     if (!std.mem.eql(u8, &comment.event.thread_id, thread_id)) return error.NotFound;
     if (comment.removed) return error.NotFound;
 
