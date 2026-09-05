@@ -79,7 +79,7 @@ pub fn init(
 
             // read the window [start, start+page_size) with one seek to the start
             // rank, then a sequential walk.
-            const end = @min(repos_start + page_size, count);
+            const end = @min(repos_start +| page_size, count);
             var repos_iter = try user_repos.iteratorFromIndex(repos_start);
             var i = repos_start;
             while (i < end) : (i += 1) {
@@ -108,7 +108,7 @@ pub fn init(
             const repos_cursor = try haxy_moment.getCursor(hash.hashInt(hash_kind, evt.Repo.record_map_key)) orelse return error.NotFound;
             const repo_records = try DB.HashMap(.read_only).init(repos_cursor);
             const count = try user_forks.count();
-            const end = @min(forks_start + page_size, count);
+            const end = @min(forks_start +| page_size, count);
             var iter = try user_forks.iteratorFromIndex(forks_start);
             var i = forks_start;
             while (i < end) : (i += 1) {

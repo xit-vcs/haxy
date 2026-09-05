@@ -42,7 +42,7 @@ pub fn init(
 
     // read the window [start, start+page_size) with one seek to the start rank,
     // then a sequential walk
-    const end = @min(start + page_size, count);
+    const end = @min(start +| page_size, count);
     var iter = try user_id_set.iteratorFromIndex(start);
     var i = start;
     while (i < end) : (i += 1) {

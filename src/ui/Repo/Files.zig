@@ -183,7 +183,7 @@ fn readFileContent(
     // init reads through the file to validate it (and buffer it in memory), so
     // the line count is known and a window can be sliced out of the buffer.
     const total = line_iter.count();
-    const end = @min(start + file_page, total);
+    const end = @min(start +| file_page, total);
 
     var lines: std.ArrayList([]const u8) = .empty;
     var i = start;
