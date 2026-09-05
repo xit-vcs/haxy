@@ -3,9 +3,143 @@ const proto = @import("../serve_ssh_protocol.zig");
 const Ed25519 = std.crypto.sign.Ed25519;
 const X25519 = std.crypto.dh.X25519;
 const Sha256 = std.crypto.hash.sha2.Sha256;
+const server_impl = @import("../serve_ssh.zig");
+const StreamTerminal = @import("xit").xitui.stream_terminal.StreamTerminal;
 
 comptime {
     std.testing.refAllDecls(@import("../serve_ssh.zig"));
+}
+
+// a post-auth session with deterministic ciphers, for exercising the packet
+// pump independently of the full handshake below. initialize in place.
+const TestSession = struct {
+    const key = [_]u8{0x5a} ** 64;
+    const Channel = @typeInfo(@FieldType(proto.SessionCtx, "channel")).pointer.child;
+    reader: std.Io.Reader = undefined,
+    output: [2048]u8 = undefined,
+    writer: std.Io.Writer = undefined,
+    conn: proto.Conn = undefined,
+    channel: Channel = undefined,
+    sess: proto.SessionCtx = undefined,
+
+    fn init(self: *TestSession, input: []const u8) void {
+        self.reader = .fixed(input);
+        self.writer = .fixed(&self.output);
+        self.conn = .{
+            .io = std.testing.io,
+            .allocator = std.testing.allocator,
+            .reader = &self.reader,
+            .writer = &self.writer,
+            .cs_cipher = proto.Cipher.init(&key, 0),
+            .sc_cipher = proto.Cipher.init(&key, 0),
+            .rekey = undefined,
+        };
+        self.channel = .{ .local_id = 0, .remote_id = 7, .local_window = 1 << 20, .remote_window = 32768, .max_packet = 32768 };
+        self.sess = .{ .conn = &self.conn, .channel = &self.channel, .fingerprint = undefined };
+    }
+
+    fn deinit(self: *TestSession) void {
+        self.sess.deinit();
+    }
+};
+
+test "nextEvent restores credit after a full background input buffer" {
+    const allocator = std.testing.allocator;
+    var ctx: TestSession = .{};
+    ctx.init(&.{});
+    defer ctx.deinit();
+    // state left by writeBytes when it fills the input buffer while waiting
+    // for send credit. the next event must let the peer send again.
+    try ctx.sess.incoming_buffer.appendNTimes(allocator, 'x', 1 << 20);
+    ctx.channel.local_window = 0;
+    const event = try ctx.sess.nextEvent();
+    defer allocator.free(event.data);
+    try std.testing.expectEqual(1 << 20, event.data.len);
+    try std.testing.expectEqual(1 << 20, ctx.channel.local_window);
+
+    var output = std.Io.Reader.fixed(ctx.writer.buffered());
+    var receiver = proto.Cipher.init(&TestSession.key, 0);
+    const adjust = try receiver.readPacket(allocator, &output);
+    defer allocator.free(adjust);
+    try std.testing.expectEqualSlices(u8, &.{ proto.SSH_MSG_CHANNEL_WINDOW_ADJUST, 0, 0, 0, 7, 0, 0x10, 0, 0 }, adjust);
+}
+
+test "channel close is acknowledged once, unlike channel EOF or transport EOF" {
+    for ([_]?u8{ proto.SSH_MSG_CHANNEL_CLOSE, proto.SSH_MSG_CHANNEL_EOF, null }) |message| {
+        var encoded: [128]u8 = undefined;
+        var encoded_writer = std.Io.Writer.fixed(&encoded);
+        var sender = proto.Cipher.init(&TestSession.key, 0);
+        if (message) |msg| try sender.writePacket(std.testing.io, &encoded_writer, &.{ msg, 0, 0, 0, 0 });
+        var ctx: TestSession = .{};
+        ctx.init(encoded_writer.buffered());
+        defer ctx.deinit();
+        const event = try ctx.sess.nextEvent();
+        if (message == proto.SSH_MSG_CHANNEL_EOF) {
+            try std.testing.expectEqual(.eof, std.meta.activeTag(event));
+            try ctx.sess.writeBytes("remaining output");
+            continue;
+        }
+        try std.testing.expectEqual(.close, std.meta.activeTag(event));
+        try std.testing.expectError(error.RemoteClosed, ctx.sess.writeBytes("late output"));
+        try ctx.sess.exit(0);
+        try ctx.sess.exit(0);
+        var output = std.Io.Reader.fixed(ctx.writer.buffered());
+        var receiver = proto.Cipher.init(&TestSession.key, 0);
+        if (message != null) {
+            const reply = try receiver.readPacket(std.testing.allocator, &output);
+            defer std.testing.allocator.free(reply);
+            try std.testing.expectEqualSlices(u8, &.{ proto.SSH_MSG_CHANNEL_CLOSE, 0, 0, 0, 7 }, reply);
+        }
+        try std.testing.expectEqual(0, output.buffered().len);
+    }
+}
+
+test "Escape timeout preserves partial SSH packets and fragmented arrow keys" {
+    const io = std.testing.io;
+    var pipe_buffer: [256]u8 = undefined;
+    var pipe = Pipe.init(&pipe_buffer);
+    defer pipe.close(io);
+    var read_buffer: [256]u8 = undefined;
+    var pipe_reader = PipeReader.init(io, &pipe, &read_buffer);
+    var ctx: TestSession = .{};
+    ctx.init(&.{});
+    defer ctx.deinit();
+    ctx.conn.reader = &pipe_reader.interface;
+    var terminal_output: [1024]u8 = undefined;
+    var terminal_writer = std.Io.Writer.fixed(&terminal_output);
+    var terminal = try StreamTerminal.init(std.testing.allocator, &terminal_writer, .{ .width = 80, .height = 24 });
+    defer terminal.deinit();
+    try terminal.writeBytes("\x1b");
+
+    var encoded: [128]u8 = undefined;
+    var encoded_writer = std.Io.Writer.fixed(&encoded);
+    var sender = proto.Cipher.init(&TestSession.key, 0);
+    try sender.writePacket(io, &encoded_writer, &.{ proto.SSH_MSG_CHANNEL_DATA, 0, 0, 0, 0, 0, 0, 0, 1, 'x' });
+    // let the read consume only part of the encrypted length field
+    try pipe.putAll(io, encoded_writer.buffered()[0..2]);
+    try std.testing.expectEqual(null, try server_impl.nextTuiEvent(&ctx.sess, &terminal));
+    try std.testing.expectEqual(.escape, std.meta.activeTag(terminal.popKey().?));
+    try std.testing.expectEqual(null, terminal.popKey());
+    // rendering is allowed before the rest of the packet arrives
+    try ctx.sess.writeBytes("render");
+    try pipe.putAll(io, encoded_writer.buffered()[2..]);
+    const event = (try server_impl.nextTuiEvent(&ctx.sess, &terminal)).?;
+    defer std.testing.allocator.free(event.data);
+    try std.testing.expectEqualStrings("x", event.data);
+    try std.testing.expectEqual(1, ctx.conn.cs_cipher.seq);
+
+    encoded_writer = .fixed(&encoded);
+    try sender.writePacket(io, &encoded_writer, &.{ proto.SSH_MSG_CHANNEL_DATA, 0, 0, 0, 0, 0, 0, 0, 1, '[' });
+    try sender.writePacket(io, &encoded_writer, &.{ proto.SSH_MSG_CHANNEL_DATA, 0, 0, 0, 0, 0, 0, 0, 1, 'A' });
+    try pipe.putAll(io, encoded_writer.buffered());
+    try terminal.writeBytes("\x1b");
+    for (0..2) |_| {
+        const fragment = (try server_impl.nextTuiEvent(&ctx.sess, &terminal)).?;
+        defer std.testing.allocator.free(fragment.data);
+        try terminal.writeBytes(fragment.data);
+    }
+    try std.testing.expectEqual(.arrow_up, std.meta.activeTag(terminal.popKey().?));
+    try std.testing.expectEqual(null, terminal.popKey());
 }
 
 test "fingerprint format matches openssh layout" {

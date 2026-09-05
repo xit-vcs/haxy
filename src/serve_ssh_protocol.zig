@@ -40,10 +40,14 @@ pub const server_version = "SSH-2.0-haxy_0.0";
 pub const host_key_file_name = "ssh_host_ed25519_key";
 
 const max_packet_len: u32 = 35000; // RFC 4253 §6.1 — minimum implementations must support
+pub const packet_buffer_size = 4 + max_packet_len + Poly1305.mac_length;
 const max_name_list_len: u32 = 4096;
 const max_auth_attempts: u32 = 20;
 const max_exit_drain_packets: u32 = 32;
 const max_banner_lines: u32 = 32;
+// terminal grids can have several live copies during layout and rendering
+const max_pty_width: u32 = 512;
+const max_pty_height: u32 = 128;
 
 // SSH message type bytes (RFC 4250 §4.1)
 pub const SSH_MSG_DISCONNECT: u8 = 1;
@@ -185,6 +189,29 @@ pub const Conn = struct {
     sc_cipher: Cipher,
     rekey: RekeyState,
     idle: ?*IdleState = null,
+    // set only while the TUI waits to resolve a lone escape key
+    read_timeout: std.Io.Timeout = .none,
+
+    fn readPacket(self: *Conn) ![]u8 {
+        if (self.read_timeout != .none) {
+            // peek keeps partial packets in the reader if the timer wins.
+            // join both tasks before consuming bytes or changing cipher state.
+            const Result = union(enum) { ready: anyerror!void, timeout: std.Io.Cancelable!void };
+            var results: [2]Result = undefined;
+            var select = std.Io.Select(Result).init(self.io, &results);
+            defer select.cancelDiscard();
+            try select.concurrent(.ready, Cipher.peekPacket, .{ &self.cs_cipher, self.reader });
+            try select.concurrent(.timeout, std.Io.Timeout.sleep, .{ self.read_timeout, self.io });
+            switch (try select.await()) {
+                .ready => |result| try result,
+                .timeout => |result| {
+                    try result;
+                    return error.Timeout;
+                },
+            }
+        }
+        return self.cs_cipher.readPacket(self.allocator, self.reader);
+    }
 };
 
 /// session bridge handed to the consumer's handleSession callback. exposes a
@@ -267,7 +294,9 @@ pub const SessionCtx = struct {
             if (self.incomingBytes().len > 0) {
                 // hand the buffered bytes to the caller (caller owns)
                 const payload = try self.conn.allocator.dupe(u8, self.incomingBytes());
+                errdefer self.conn.allocator.free(payload);
                 self.consumeIncoming(payload.len);
+                try self.maybeRefillRecvWindowForBufferedInput();
                 return .{ .data = payload };
             }
             if (self.remote_closed) return .close;
@@ -301,6 +330,7 @@ pub const SessionCtx = struct {
         const conn = self.conn;
         var rest = bytes;
         while (rest.len > 0) {
+            if (self.closed or self.remote_closed) return error.RemoteClosed;
             while (self.channel.remote_window == 0) {
                 if (self.remote_closed) return error.RemoteClosed;
                 try self.processOneBackgroundPacket();
@@ -382,6 +412,7 @@ pub const SessionCtx = struct {
                 try parseChannelId(packet, self.channel.local_id);
                 self.incoming_eof = true;
                 self.remote_closed = true;
+                try sendChannelClose(conn, self.channel);
             },
             SSH_MSG_GLOBAL_REQUEST => try handleGlobalRequest(conn, packet),
             else => try sendUnimplemented(conn),
@@ -389,6 +420,7 @@ pub const SessionCtx = struct {
     }
 
     fn maybeRefillRecvWindowForBufferedInput(self: *SessionCtx) !void {
+        if (self.remote_closed or self.closed) return;
         // credit only what the incoming buffer can still take
         const buffered: u32 = @intCast(self.incomingBytes().len);
         try maybeRefillRecvWindow(self.conn, self.channel, max_incoming_buffered - buffered);
@@ -401,8 +433,8 @@ pub const SessionCtx = struct {
         const conn = self.conn;
         if (conn.idle) |idle| idle.closing.store(true, .release);
 
-        // once the peer has sent CHANNEL_CLOSE the channel is gone on its
-        // side, and these would be addressed to an id it no longer knows.
+        // a peer CLOSE is acknowledged by the packet pump. don't send data,
+        // exit-status, or EOF after that acknowledgement.
         if (!self.remote_closed) {
             // exit-status request (informational; client uses it as the
             // command's exit code)
@@ -425,30 +457,28 @@ pub const SessionCtx = struct {
                 try writeU32(&eof, conn.allocator, self.channel.remote_id);
                 try conn.sc_cipher.writePacket(conn.io, conn.writer, eof.items);
             }
-            {
-                var close: std.ArrayList(u8) = .empty;
-                defer close.deinit(conn.allocator);
-                try close.append(conn.allocator, SSH_MSG_CHANNEL_CLOSE);
-                try writeU32(&close, conn.allocator, self.channel.remote_id);
-                try conn.sc_cipher.writePacket(conn.io, conn.writer, close.items);
-            }
+            try sendChannelClose(conn, self.channel);
         }
-
-        // read and discard until the peer closes (TCP FIN) before letting the
-        // caller close the socket. a git client, after our CHANNEL_CLOSE, still
-        // sends its own CHANNEL_CLOSE and SSH_MSG_DISCONNECT before closing; if
-        // we close with those unread, Linux sends RST instead of FIN, which the
-        // client reports as "Connection reset by peer" and treats as a failed
-        // push even though the ref updated. draining to EOF leaves nothing
-        // unread, so we send a clean FIN. we're tearing down, so the packet
-        // contents don't matter — just get them off the socket.
-        var drain_packets: u32 = 0;
-        while (drain_packets < max_exit_drain_packets) : (drain_packets += 1) {
-            const packet = conn.cs_cipher.readPacket(conn.allocator, conn.reader) catch break;
-            conn.allocator.free(packet);
-        }
+        drainConnection(conn);
     }
 };
+
+fn drainConnection(conn: *Conn) void {
+    if (conn.idle) |idle| idle.closing.store(true, .release);
+    // read and discard until the peer closes (TCP FIN) before letting the
+    // caller close the socket. a git client, after our CHANNEL_CLOSE, still
+    // sends its own CHANNEL_CLOSE and SSH_MSG_DISCONNECT before closing; if
+    // we close with those unread, Linux sends RST instead of FIN, which the
+    // client reports as "Connection reset by peer" and treats as a failed
+    // push even though the ref updated. draining to EOF leaves nothing
+    // unread, so we send a clean FIN. we're tearing down, so the packet
+    // contents don't matter — just get them off the socket.
+    var drain_packets: u32 = 0;
+    while (drain_packets < max_exit_drain_packets) : (drain_packets += 1) {
+        const packet = conn.cs_cipher.readPacket(conn.allocator, conn.reader) catch break;
+        conn.allocator.free(packet);
+    }
+}
 
 /// std.Io.Writer adapter that ships bytes to a SessionCtx as CHANNEL_DATA.
 /// useful for plugging the session into anything that wants a *std.Io.Writer
@@ -762,7 +792,7 @@ pub const KexTransport = union(enum) {
 // skipping ignorable messages and servicing client-initiated rekeys.
 pub fn readSessionPacket(conn: *Conn) ![]u8 {
     while (true) {
-        const packet = try conn.cs_cipher.readPacket(conn.allocator, conn.reader);
+        const packet = try conn.readPacket();
         if (packet.len >= 1 and isIgnorableMsg(packet[0])) {
             conn.allocator.free(packet);
             continue;
@@ -1385,6 +1415,20 @@ pub const Cipher = struct {
         return nonce;
     }
 
+    fn bodyLength(self: *const Cipher, enc_length: *const [4]u8) !u32 {
+        var plain: [4]u8 = undefined;
+        ChaCha20.xor(&plain, enc_length, 0, self.header_key, makeNonce(self.seq));
+        const len = std.mem.readInt(u32, &plain, .big);
+        if (len < 8 or len > max_packet_len or len % 8 != 0) return error.InvalidPacketLength;
+        return len;
+    }
+
+    fn peekPacket(self: *const Cipher, reader: *std.Io.Reader) !void {
+        const len = 4 + (try self.bodyLength(try reader.peekArray(4))) + Poly1305.mac_length;
+        if (len > reader.buffer.len) return error.ReadBufferTooSmall;
+        _ = try reader.peek(len);
+    }
+
     pub fn writePacket(
         self: *Cipher,
         io: std.Io,
@@ -1445,10 +1489,7 @@ pub const Cipher = struct {
         var enc_length: [4]u8 = undefined;
         try reader.readSliceAll(&enc_length);
 
-        var length_plain: [4]u8 = undefined;
-        ChaCha20.xor(&length_plain, &enc_length, 0, self.header_key, nonce);
-        const body_len = std.mem.readInt(u32, &length_plain, .big);
-        if (body_len < 8 or body_len > max_packet_len or body_len % 8 != 0) return error.InvalidPacketLength;
+        const body_len = try self.bodyLength(&enc_length);
 
         // the body allocation becomes the returned payload, so a packet only
         // ever costs one allocation
@@ -1706,13 +1747,14 @@ const Channel = struct {
 pub const PtySize = struct { width_cells: u16, height_cells: u16 };
 
 // take the uint32 width/height cell counts of a pty-req or window-change,
-// clamped to u16
+// bounded before either initial rendering or a resize can allocate grids.
+// keep zero dimensions intact (unspecified at startup, minimized on resize).
 fn takePtySize(r: *std.Io.Reader) !PtySize {
-    const width = try r.takeInt(u32, .big);
-    const height = try r.takeInt(u32, .big);
+    const width = @min(try r.takeInt(u32, .big), max_pty_width);
+    const height = @min(try r.takeInt(u32, .big), max_pty_height);
     return .{
-        .width_cells = @intCast(@min(width, 0xFFFF)),
-        .height_cells = @intCast(@min(height, 0xFFFF)),
+        .width_cells = @intCast(width),
+        .height_cells = @intCast(height),
     };
 }
 
@@ -1782,7 +1824,11 @@ fn runChannelLayer(
             },
 
             SSH_MSG_CHANNEL_CLOSE => {
-                if (channel) |*c| try parseChannelId(packet, c.local_id);
+                if (channel) |*c| {
+                    try parseChannelId(packet, c.local_id);
+                    try sendChannelClose(conn, c);
+                    drainConnection(conn);
+                }
                 return;
             },
 
@@ -1943,6 +1989,13 @@ fn replyChannelRequest(conn: *Conn, ch: *Channel, want_reply: bool, success: boo
     try conn.sc_cipher.writePacket(conn.io, conn.writer, reply.items);
 }
 
+fn sendChannelClose(conn: *Conn, ch: *Channel) !void {
+    var packet: [5]u8 = undefined;
+    packet[0] = SSH_MSG_CHANNEL_CLOSE;
+    std.mem.writeInt(u32, packet[1..5], ch.remote_id, .big);
+    try conn.sc_cipher.writePacket(conn.io, conn.writer, &packet);
+}
+
 fn handleWindowAdjust(ch: *Channel, packet: []const u8) !void {
     // byte SSH_MSG_CHANNEL_WINDOW_ADJUST
     // uint32 recipient_channel
@@ -2012,4 +2065,64 @@ pub fn writeU32(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, value: u3
     var bytes: [4]u8 = undefined;
     std.mem.writeInt(u32, &bytes, value, .big);
     try buf.appendSlice(allocator, &bytes);
+}
+
+test "pty dimensions have bounded axes and area, preserving normal and zero sizes" {
+    for ([_]struct { width: u32, height: u32, expected: PtySize }{
+        .{ .width = 80, .height = 24, .expected = .{ .width_cells = 80, .height_cells = 24 } },
+        .{ .width = 0, .height = 0, .expected = .{ .width_cells = 0, .height_cells = 0 } },
+        .{ .width = 0xffffffff, .height = 0xffffffff, .expected = .{ .width_cells = 512, .height_cells = 128 } },
+    }) |case| {
+        var bytes: [8]u8 = undefined;
+        std.mem.writeInt(u32, bytes[0..4], case.width, .big);
+        std.mem.writeInt(u32, bytes[4..8], case.height, .big);
+        var reader = std.Io.Reader.fixed(&bytes);
+        try std.testing.expectEqual(case.expected, try takePtySize(&reader));
+    }
+}
+
+test "channel close before shell or exec is acknowledged" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    const key = [_]u8{0x5a} ** 64;
+    var encoded: [256]u8 = undefined;
+    var encoded_writer = std.Io.Writer.fixed(&encoded);
+    var sender = Cipher.init(&key, 0);
+    var open: std.ArrayList(u8) = .empty;
+    defer open.deinit(allocator);
+    try open.append(allocator, SSH_MSG_CHANNEL_OPEN);
+    try writeStringField(&open, allocator, "session");
+    try writeU32(&open, allocator, 7);
+    try writeU32(&open, allocator, 32768);
+    try writeU32(&open, allocator, 32768);
+    try sender.writePacket(io, &encoded_writer, open.items);
+    try sender.writePacket(io, &encoded_writer, &.{ SSH_MSG_CHANNEL_CLOSE, 0, 0, 0, 0 });
+    var reader = std.Io.Reader.fixed(encoded_writer.buffered());
+    var output: [256]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&output);
+    var conn = Conn{
+        .io = io,
+        .allocator = allocator,
+        .reader = &reader,
+        .writer = &writer,
+        .cs_cipher = Cipher.init(&key, 0),
+        .sc_cipher = Cipher.init(&key, 0),
+        .rekey = undefined,
+    };
+    const Handler = struct {
+        pub fn handleSession(_: *@This(), _: *SessionCtx, _: Request) !void {
+            return error.UnexpectedSession;
+        }
+    };
+    var handler = Handler{};
+    try runChannelLayer(&conn, &([_]u8{0} ** fingerprint_len), &handler);
+    var output_reader = std.Io.Reader.fixed(writer.buffered());
+    var receiver = Cipher.init(&key, 0);
+    const confirmation = try receiver.readPacket(allocator, &output_reader);
+    defer allocator.free(confirmation);
+    try std.testing.expectEqual(SSH_MSG_CHANNEL_OPEN_CONFIRMATION, confirmation[0]);
+    const close = try receiver.readPacket(allocator, &output_reader);
+    defer allocator.free(close);
+    try std.testing.expectEqualSlices(u8, &.{ SSH_MSG_CHANNEL_CLOSE, 0, 0, 0, 7 }, close);
+    try std.testing.expectEqual(0, output_reader.buffered().len);
 }

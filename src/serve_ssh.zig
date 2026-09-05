@@ -19,6 +19,7 @@ const watchdog_interval = std.Io.Duration.fromSeconds(5);
 const preauth_timeout_ticks: u32 = 6; // 30 seconds
 const idle_timeout_ticks: u32 = 24; // 120 seconds
 const close_drain_timeout_ticks: u32 = 2; // 5-10 seconds
+const escape_timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(25), .clock = .awake } };
 
 var active_connections: std.atomic.Value(u32) = .init(0);
 
@@ -88,7 +89,8 @@ pub fn runListener(
             };
             defer watchdog_future.cancel(ctx.io);
 
-            var recv_buf: [4096]u8 = undefined;
+            // timed peeks need room for a complete encrypted packet
+            var recv_buf: [ssh.packet_buffer_size]u8 = undefined;
             var send_buf: [4096]u8 = undefined;
             var stream_reader = stream.reader(ctx.io, &recv_buf);
             var stream_writer = stream.writer(ctx.io, &send_buf);
@@ -228,27 +230,24 @@ fn runTui(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh.PtySiz
     // for each event, rebuild the widget tree and re-render so the user
     // sees the effect of their input on the same iteration.
     event_loop: while (true) {
-        const event = try sess.nextEvent();
+        const event = try nextTuiEvent(sess, if (terminal_maybe) |*terminal| terminal else null);
         if (terminal_maybe) |*terminal| {
-            switch (event) {
+            if (event) |ev| switch (ev) {
                 .data => |payload| {
                     defer allocator.free(payload);
                     try terminal.writeBytes(payload);
-                    while (terminal.popKey()) |key| {
-                        try ui.inputKey(allocator, &nav.root, key, &ui_session);
-                    }
                 },
                 .resize => |sz| {
                     terminal_size = .{ .width = sz.width_cells, .height = sz.height_cells };
                     terminal.pushResize(terminal_size);
-                    while (terminal.popKey()) |key| {
-                        try ui.inputKey(allocator, &nav.root, key, &ui_session);
-                    }
                 },
                 .eof, .close => break :event_loop,
+            };
+            while (terminal.popKey()) |key| {
+                try ui.inputKey(allocator, &nav.root, key, &ui_session);
             }
         } else {
-            switch (event) {
+            switch (event.?) {
                 .data => |payload| {
                     defer allocator.free(payload);
                     if (std.mem.indexOfAny(u8, payload, "\r\n") == null) continue;
@@ -294,6 +293,25 @@ fn runTui(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh.PtySiz
         }, nav.root.getFocus());
         if (terminal_maybe) |*terminal| _ = try terminal.render(&nav.root);
     }
+}
+
+// only a lone ESC needs a deadline; longer CSI/SS3 fragments must remain
+// buffered until complete. a timeout leaves partial SSH packets in the reader.
+pub fn nextTuiEvent(sess: *ssh.SessionCtx, terminal: ?*StreamTerminal) !?ssh.Event {
+    if (terminal) |t| {
+        if (t.parser.esc_len == 1) {
+            sess.conn.read_timeout = escape_timeout.toDeadline(sess.conn.io);
+            defer sess.conn.read_timeout = .none;
+            return sess.nextEvent() catch |err| switch (err) {
+                error.Timeout => {
+                    try t.flushEscape();
+                    return null;
+                },
+                else => return err,
+            };
+        }
+    }
+    return try sess.nextEvent();
 }
 
 // ---------------------------------------------------------------------------
