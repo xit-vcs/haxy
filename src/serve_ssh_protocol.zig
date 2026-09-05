@@ -193,7 +193,7 @@ pub const Conn = struct {
     read_timeout: std.Io.Timeout = .none,
 
     fn readPacket(self: *Conn) ![]u8 {
-        if (self.read_timeout != .none) {
+        if (self.read_timeout != .none and !try self.cs_cipher.hasBufferedPacket(self.reader)) {
             // peek keeps partial packets in the reader if the timer wins.
             // join both tasks before consuming bytes or changing cipher state.
             const Result = union(enum) { ready: anyerror!void, timeout: std.Io.Cancelable!void };
@@ -412,7 +412,7 @@ pub const SessionCtx = struct {
                 try parseChannelId(packet, self.channel.local_id);
                 self.incoming_eof = true;
                 self.remote_closed = true;
-                try sendChannelClose(conn, self.channel);
+                try sendChannelMessage(conn, self.channel, SSH_MSG_CHANNEL_CLOSE);
             },
             SSH_MSG_GLOBAL_REQUEST => try handleGlobalRequest(conn, packet),
             else => try sendUnimplemented(conn),
@@ -450,14 +450,8 @@ pub const SessionCtx = struct {
             }
 
             // EOF then CLOSE
-            {
-                var eof: std.ArrayList(u8) = .empty;
-                defer eof.deinit(conn.allocator);
-                try eof.append(conn.allocator, SSH_MSG_CHANNEL_EOF);
-                try writeU32(&eof, conn.allocator, self.channel.remote_id);
-                try conn.sc_cipher.writePacket(conn.io, conn.writer, eof.items);
-            }
-            try sendChannelClose(conn, self.channel);
+            try sendChannelMessage(conn, self.channel, SSH_MSG_CHANNEL_EOF);
+            try sendChannelMessage(conn, self.channel, SSH_MSG_CHANNEL_CLOSE);
         }
         drainConnection(conn);
     }
@@ -1429,6 +1423,12 @@ pub const Cipher = struct {
         _ = try reader.peek(len);
     }
 
+    fn hasBufferedPacket(self: *const Cipher, reader: *std.Io.Reader) !bool {
+        const bytes = reader.buffered();
+        if (bytes.len < 4) return false;
+        return bytes.len >= 4 + (try self.bodyLength(bytes[0..4])) + Poly1305.mac_length;
+    }
+
     pub fn writePacket(
         self: *Cipher,
         io: std.Io,
@@ -1826,7 +1826,7 @@ fn runChannelLayer(
             SSH_MSG_CHANNEL_CLOSE => {
                 if (channel) |*c| {
                     try parseChannelId(packet, c.local_id);
-                    try sendChannelClose(conn, c);
+                    try sendChannelMessage(conn, c, SSH_MSG_CHANNEL_CLOSE);
                     drainConnection(conn);
                 }
                 return;
@@ -1982,16 +1982,12 @@ fn handleChannelRequest(conn: *Conn, ch: *Channel, packet: []const u8, pending_e
 
 fn replyChannelRequest(conn: *Conn, ch: *Channel, want_reply: bool, success: bool) !void {
     if (!want_reply) return;
-    var reply: std.ArrayList(u8) = .empty;
-    defer reply.deinit(conn.allocator);
-    try reply.append(conn.allocator, if (success) SSH_MSG_CHANNEL_SUCCESS else SSH_MSG_CHANNEL_FAILURE);
-    try writeU32(&reply, conn.allocator, ch.remote_id);
-    try conn.sc_cipher.writePacket(conn.io, conn.writer, reply.items);
+    try sendChannelMessage(conn, ch, if (success) SSH_MSG_CHANNEL_SUCCESS else SSH_MSG_CHANNEL_FAILURE);
 }
 
-fn sendChannelClose(conn: *Conn, ch: *Channel) !void {
+fn sendChannelMessage(conn: *Conn, ch: *Channel, msg_type: u8) !void {
     var packet: [5]u8 = undefined;
-    packet[0] = SSH_MSG_CHANNEL_CLOSE;
+    packet[0] = msg_type;
     std.mem.writeInt(u32, packet[1..5], ch.remote_id, .big);
     try conn.sc_cipher.writePacket(conn.io, conn.writer, &packet);
 }

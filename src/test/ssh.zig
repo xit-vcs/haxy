@@ -94,7 +94,7 @@ test "channel close is acknowledged once, unlike channel EOF or transport EOF" {
     }
 }
 
-test "Escape timeout preserves partial SSH packets and fragmented arrow keys" {
+test "Escape timeout preserves partial packets, arrow keys, and buffered input" {
     const io = std.testing.io;
     var pipe_buffer: [256]u8 = undefined;
     var pipe = Pipe.init(&pipe_buffer);
@@ -109,24 +109,27 @@ test "Escape timeout preserves partial SSH packets and fragmented arrow keys" {
     var terminal_writer = std.Io.Writer.fixed(&terminal_output);
     var terminal = try StreamTerminal.init(std.testing.allocator, &terminal_writer, .{ .width = 80, .height = 24 });
     defer terminal.deinit();
-    try terminal.writeBytes("\x1b");
-
     var encoded: [128]u8 = undefined;
     var encoded_writer = std.Io.Writer.fixed(&encoded);
     var sender = proto.Cipher.init(&TestSession.key, 0);
-    try sender.writePacket(io, &encoded_writer, &.{ proto.SSH_MSG_CHANNEL_DATA, 0, 0, 0, 0, 0, 0, 0, 1, 'x' });
-    // let the read consume only part of the encrypted length field
-    try pipe.putAll(io, encoded_writer.buffered()[0..2]);
-    try std.testing.expectEqual(null, try server_impl.nextTuiEvent(&ctx.sess, &terminal));
-    try std.testing.expectEqual(.escape, std.meta.activeTag(terminal.popKey().?));
-    try std.testing.expectEqual(null, terminal.popKey());
-    // rendering is allowed before the rest of the packet arrives
-    try ctx.sess.writeBytes("render");
-    try pipe.putAll(io, encoded_writer.buffered()[2..]);
-    const event = (try server_impl.nextTuiEvent(&ctx.sess, &terminal)).?;
-    defer std.testing.allocator.free(event.data);
-    try std.testing.expectEqualStrings("x", event.data);
-    try std.testing.expectEqual(1, ctx.conn.cs_cipher.seq);
+    // time out inside the length field and just before the tag is complete
+    for ([_]bool{ false, true }) |near_tag| {
+        encoded_writer = .fixed(&encoded);
+        try sender.writePacket(io, &encoded_writer, &.{ proto.SSH_MSG_CHANNEL_DATA, 0, 0, 0, 0, 0, 0, 0, 1, 'x' });
+        const split = if (near_tag) encoded_writer.buffered().len - 1 else 2;
+        try terminal.writeBytes("\x1b");
+        try pipe.putAll(io, encoded_writer.buffered()[0..split]);
+        try std.testing.expectEqual(null, try server_impl.nextTuiEvent(&ctx.sess, &terminal));
+        try std.testing.expectEqual(.escape, std.meta.activeTag(terminal.popKey().?));
+        try std.testing.expectEqual(null, terminal.popKey());
+        // rendering is allowed before the rest of the packet arrives
+        try ctx.sess.writeBytes("render");
+        try pipe.putAll(io, encoded_writer.buffered()[split..]);
+        const event = (try server_impl.nextTuiEvent(&ctx.sess, &terminal)).?;
+        defer std.testing.allocator.free(event.data);
+        try std.testing.expectEqualStrings("x", event.data);
+        try std.testing.expectEqual(sender.seq, ctx.conn.cs_cipher.seq);
+    }
 
     encoded_writer = .fixed(&encoded);
     try sender.writePacket(io, &encoded_writer, &.{ proto.SSH_MSG_CHANNEL_DATA, 0, 0, 0, 0, 0, 0, 0, 1, '[' });
@@ -140,6 +143,15 @@ test "Escape timeout preserves partial SSH packets and fragmented arrow keys" {
     }
     try std.testing.expectEqual(.arrow_up, std.meta.activeTag(terminal.popKey().?));
     try std.testing.expectEqual(null, terminal.popKey());
+
+    // a complete buffered packet needs neither a clock nor concurrent tasks
+    encoded_writer = .fixed(&encoded);
+    try sender.writePacket(io, &encoded_writer, &.{ proto.SSH_MSG_CHANNEL_EOF, 0, 0, 0, 0 });
+    ctx.reader = .fixed(encoded_writer.buffered());
+    ctx.conn.reader = &ctx.reader;
+    ctx.conn.io = .failing;
+    ctx.conn.read_timeout = .{ .deadline = .{ .raw = .zero, .clock = .awake } };
+    try std.testing.expectEqual(.eof, std.meta.activeTag(try ctx.sess.nextEvent()));
 }
 
 test "fingerprint format matches openssh layout" {
