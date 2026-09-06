@@ -11,28 +11,16 @@ const author = evt.CommitAuthor{ .name = "haxy", .email = "user@haxy" };
 test "user and repo" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    const temp_dir_name = "temp-event-user-and-repo";
 
     // create the temp dir
-    const cwd = std.Io.Dir.cwd();
-    var temp_dir_or_err = cwd.openDir(io, temp_dir_name, .{});
-    if (temp_dir_or_err) |*temp_dir| {
-        temp_dir.close(io);
-        try cwd.deleteTree(io, temp_dir_name);
-    } else |_| {}
-    var temp_dir = try cwd.createDirPathOpen(io, temp_dir_name, .{});
-    defer cwd.deleteTree(io, temp_dir_name) catch {};
-    defer temp_dir.close(io);
-
-    const cwd_path = try std.process.currentPathAlloc(io, allocator);
-    defer allocator.free(cwd_path);
-
-    const work_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name });
-    defer allocator.free(work_path);
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(temp_path);
 
     const repo_opts: rp.RepoOpts(.xit) = .{ .is_test = true };
     const Repo = rp.Repo(.xit, repo_opts);
-    var repo = try Repo.init(io, allocator, .{ .path = work_path });
+    var repo = try Repo.init(io, allocator, .{ .path = temp_path });
     defer repo.deinit(io, allocator);
 
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -234,26 +222,15 @@ test "user and repo" {
 test "repos and users paginate newest first" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    const temp_dir_name = "temp-event-order";
 
-    const cwd = std.Io.Dir.cwd();
-    var temp_dir_or_err = cwd.openDir(io, temp_dir_name, .{});
-    if (temp_dir_or_err) |*temp_dir| {
-        temp_dir.close(io);
-        try cwd.deleteTree(io, temp_dir_name);
-    } else |_| {}
-    var temp_dir = try cwd.createDirPathOpen(io, temp_dir_name, .{});
-    defer cwd.deleteTree(io, temp_dir_name) catch {};
-    defer temp_dir.close(io);
-
-    const cwd_path = try std.process.currentPathAlloc(io, allocator);
-    defer allocator.free(cwd_path);
-    const work_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name });
-    defer allocator.free(work_path);
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(temp_path);
 
     const repo_opts: rp.RepoOpts(.xit) = .{ .is_test = true };
     const Repo = rp.Repo(.xit, repo_opts);
-    var repo = try Repo.init(io, allocator, .{ .path = work_path });
+    var repo = try Repo.init(io, allocator, .{ .path = temp_path });
     defer repo.deinit(io, allocator);
 
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -339,25 +316,15 @@ test "repos and users paginate newest first" {
 test "fork query and removal lifecycle" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    const temp_dir_name = "temp-fork-event";
-    const cwd = std.Io.Dir.cwd();
 
-    if (cwd.openDir(io, temp_dir_name, .{})) |dir_value| {
-        var dir = dir_value;
-        dir.close(io);
-        try cwd.deleteTree(io, temp_dir_name);
-    } else |_| {}
-    var temp_dir = try cwd.createDirPathOpen(io, temp_dir_name, .{});
-    defer cwd.deleteTree(io, temp_dir_name) catch {};
-    defer temp_dir.close(io);
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(temp_path);
 
-    const cwd_path = try std.process.currentPathAlloc(io, allocator);
-    defer allocator.free(cwd_path);
-    const root = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name });
-    defer allocator.free(root);
-    const repos_dir = try std.fs.path.join(allocator, &.{ root, "repos" });
+    const repos_dir = try std.fs.path.join(allocator, &.{ temp_path, "repos" });
     defer allocator.free(repos_dir);
-    const admin_path = try std.fs.path.join(allocator, &.{ root, "admin" });
+    const admin_path = try std.fs.path.join(allocator, &.{ temp_path, "admin" });
     defer allocator.free(admin_path);
 
     var prng = std.Random.DefaultPrng.init(std.testing.random_seed);

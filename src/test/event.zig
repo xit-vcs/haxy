@@ -10,28 +10,16 @@ const author = evt.CommitAuthor{ .name = "haxy", .email = "user@haxy" };
 test "rebase" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    const temp_dir_name = "temp-event-rebase";
 
     // create the temp dir
-    const cwd = std.Io.Dir.cwd();
-    var temp_dir_or_err = cwd.openDir(io, temp_dir_name, .{});
-    if (temp_dir_or_err) |*temp_dir| {
-        temp_dir.close(io);
-        try cwd.deleteTree(io, temp_dir_name);
-    } else |_| {}
-    var temp_dir = try cwd.createDirPathOpen(io, temp_dir_name, .{});
-    defer cwd.deleteTree(io, temp_dir_name) catch {};
-    defer temp_dir.close(io);
-
-    const cwd_path = try std.process.currentPathAlloc(io, allocator);
-    defer allocator.free(cwd_path);
-
-    const work_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name });
-    defer allocator.free(work_path);
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(temp_path);
 
     const repo_opts: rp.RepoOpts(.xit) = .{ .is_test = true };
     const Repo = rp.Repo(.xit, repo_opts);
-    var repo = try Repo.init(io, allocator, .{ .path = work_path });
+    var repo = try Repo.init(io, allocator, .{ .path = temp_path });
     defer repo.deinit(io, allocator);
 
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -278,30 +266,18 @@ test "rebase" {
 test "merge" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    const temp_dir_name = "temp-event-merge";
 
     const other_events_ref: rf.Ref = .{ .kind = .head, .name = "haxy/other" };
 
     // create the temp dir
-    const cwd = std.Io.Dir.cwd();
-    var temp_dir_or_err = cwd.openDir(io, temp_dir_name, .{});
-    if (temp_dir_or_err) |*temp_dir| {
-        temp_dir.close(io);
-        try cwd.deleteTree(io, temp_dir_name);
-    } else |_| {}
-    var temp_dir = try cwd.createDirPathOpen(io, temp_dir_name, .{});
-    defer cwd.deleteTree(io, temp_dir_name) catch {};
-    defer temp_dir.close(io);
-
-    const cwd_path = try std.process.currentPathAlloc(io, allocator);
-    defer allocator.free(cwd_path);
-
-    const work_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name });
-    defer allocator.free(work_path);
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(temp_path);
 
     const repo_opts: rp.RepoOpts(.xit) = .{ .is_test = true };
     const Repo = rp.Repo(.xit, repo_opts);
-    var repo = try Repo.init(io, allocator, .{ .path = work_path });
+    var repo = try Repo.init(io, allocator, .{ .path = temp_path });
     defer repo.deinit(io, allocator);
 
     var arena = std.heap.ArenaAllocator.init(allocator);

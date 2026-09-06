@@ -67,26 +67,18 @@ fn consumePatchWithRevision(
 test "patch event conflicts, stacking, and gc" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    const temp_dir_name = "temp-event-patch";
-    const cwd = std.Io.Dir.cwd();
 
     // create the temp dir
-    if (cwd.openDir(io, temp_dir_name, .{})) |dir_value| {
-        var dir = dir_value;
-        dir.close(io);
-        try cwd.deleteTree(io, temp_dir_name);
-    } else |_| {}
-    var temp_dir = try cwd.createDirPathOpen(io, temp_dir_name, .{});
-    defer cwd.deleteTree(io, temp_dir_name) catch {};
-    defer temp_dir.close(io);
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(temp_path);
 
-    const cwd_path = try std.process.currentPathAlloc(io, allocator);
-    defer allocator.free(cwd_path);
-    const upstream_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "upstream" });
+    const upstream_path = try std.fs.path.join(allocator, &.{ temp_path, "upstream" });
     defer allocator.free(upstream_path);
-    const target_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "target" });
+    const target_path = try std.fs.path.join(allocator, &.{ temp_path, "target" });
     defer allocator.free(target_path);
-    const source_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "source" });
+    const source_path = try std.fs.path.join(allocator, &.{ temp_path, "source" });
     defer allocator.free(source_path);
 
     //
@@ -488,35 +480,26 @@ test "patch event conflicts, stacking, and gc" {
 }
 
 test "patch lifecycle" {
-    try patchLifecycle("temp-patch-lifecycle-squash", .squash);
-    try patchLifecycle("temp-patch-lifecycle-source", .source);
+    try patchLifecycle(.squash);
+    try patchLifecycle(.source);
 }
 
-fn patchLifecycle(temp_dir_name: []const u8, merge_revision: pch.MergeRevision) !void {
+fn patchLifecycle(merge_revision: pch.MergeRevision) !void {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    const cwd = std.Io.Dir.cwd();
 
-    if (cwd.openDir(io, temp_dir_name, .{})) |dir_value| {
-        var dir = dir_value;
-        dir.close(io);
-        try cwd.deleteTree(io, temp_dir_name);
-    } else |_| {}
-    var temp_dir = try cwd.createDirPathOpen(io, temp_dir_name, .{});
-    defer cwd.deleteTree(io, temp_dir_name) catch {};
-    defer temp_dir.close(io);
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(temp_path);
 
-    const cwd_path = try std.process.currentPathAlloc(io, allocator);
-    defer allocator.free(cwd_path);
-    const root = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name });
-    defer allocator.free(root);
-    const repos_dir = try std.fs.path.join(allocator, &.{ root, "repos" });
+    const repos_dir = try std.fs.path.join(allocator, &.{ temp_path, "repos" });
     defer allocator.free(repos_dir);
-    const admin_path = try std.fs.path.join(allocator, &.{ root, "admin" });
+    const admin_path = try std.fs.path.join(allocator, &.{ temp_path, "admin" });
     defer allocator.free(admin_path);
-    const upstream_path = try std.fs.path.join(allocator, &.{ root, "upstream" });
+    const upstream_path = try std.fs.path.join(allocator, &.{ temp_path, "upstream" });
     defer allocator.free(upstream_path);
-    const source_path = try std.fs.path.join(allocator, &.{ root, "source" });
+    const source_path = try std.fs.path.join(allocator, &.{ temp_path, "source" });
     defer allocator.free(source_path);
 
     var prng = std.Random.DefaultPrng.init(std.testing.random_seed);

@@ -74,19 +74,15 @@ test "encoded ref name survives the commits url round-trip" {
 test "sync creates missing event branches and preserves head" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    const cwd = std.Io.Dir.cwd();
-    const temp_dir_name = "temp-ui-sync";
 
-    cwd.deleteTree(io, temp_dir_name) catch {};
-    var temp_dir = try cwd.createDirPathOpen(io, temp_dir_name, .{});
-    defer cwd.deleteTree(io, temp_dir_name) catch {};
-    defer temp_dir.close(io);
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(temp_path);
 
-    const cwd_path = try std.process.currentPathAlloc(io, allocator);
-    defer allocator.free(cwd_path);
-    const local_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "local" });
+    const local_path = try std.fs.path.join(allocator, &.{ temp_path, "local" });
     defer allocator.free(local_path);
-    const remote_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "remote" });
+    const remote_path = try std.fs.path.join(allocator, &.{ temp_path, "remote" });
     defer allocator.free(remote_path);
 
     const Repo = xit.repo.Repo(.git, .{});
