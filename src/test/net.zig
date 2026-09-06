@@ -7,7 +7,6 @@ const fork = hx.fork;
 const pch = hx.pch;
 const rp = xit.repo;
 const rf = xit.ref;
-const work = xit.workdir;
 const hash = xit.hash;
 const net = xit.net;
 
@@ -171,17 +170,11 @@ fn testFetch(
     const server_path = (try repoOnDiskPath(io, allocator, temp_dir_name, "testrepo", true)).?;
     defer allocator.free(server_path);
 
-    var server_repo = try rp.Repo(.xit, .{ .is_test = true }).init(io, allocator, .{ .path = server_path });
+    var server_repo = try rp.Repo(.xit, .{ .is_test = true }).init(io, allocator, .{ .bare = true, .path = server_path });
     defer server_repo.deinit(io, allocator);
 
     // make a commit
-    const commit1 = blk: {
-        const hello_txt = try server_repo.core.work_dir.createFile(io, "hello.txt", .{ .truncate = true });
-        defer hello_txt.close(io);
-        try hello_txt.writeStreamingAll(io, "hello, world!");
-        try server_repo.add(io, allocator, &.{"hello.txt"});
-        break :blk try server_repo.commit(io, allocator, .{ .message = "let there be light" });
-    };
+    const commit1 = try commitServer(&server_repo, io, allocator, .{ .files = &.{.{ .path = "hello.txt", .content = "hello, world!" }} }, .{ .message = "let there be light" });
 
     // export server repo
     {
@@ -253,13 +246,7 @@ fn testFetch(
     }
 
     // make another commit
-    const commit2 = blk: {
-        const goodbye_txt = try server_repo.core.work_dir.createFile(io, "goodbye.txt", .{ .truncate = true });
-        defer goodbye_txt.close(io);
-        try goodbye_txt.writeStreamingAll(io, "goodbye, world!");
-        try server_repo.add(io, allocator, &.{"goodbye.txt"});
-        break :blk try server_repo.commit(io, allocator, .{ .message = "goodbye" });
-    };
+    const commit2 = try commitServer(&server_repo, io, allocator, .{ .files = &.{.{ .path = "goodbye.txt", .content = "goodbye, world!" }} }, .{ .message = "goodbye" });
 
     try client_repo.fetch(
         io,
@@ -311,12 +298,10 @@ fn testPush(
     const server_path = (try repoOnDiskPath(io, allocator, temp_dir_name, "testrepo", true)).?;
     defer allocator.free(server_path);
 
-    var server_repo = try rp.Repo(.xit, .{ .is_test = true }).init(io, allocator, .{ .path = server_path });
+    var server_repo = try rp.Repo(.xit, .{ .is_test = true }).init(io, allocator, .{ .bare = true, .path = server_path });
     defer server_repo.deinit(io, allocator);
 
     // add config
-    try server_repo.addConfig(io, allocator, .{ .name = "core.bare", .value = "false" });
-    try server_repo.addConfig(io, allocator, .{ .name = "receive.denycurrentbranch", .value = "updateinstead" });
     try server_repo.addConfig(io, allocator, .{ .name = "http.receivepack", .value = "true" });
 
     // export server repo
@@ -386,13 +371,7 @@ fn testPush(
     }
 
     // make a commit on the server
-    {
-        const hello_txt = try server_repo.core.work_dir.createFile(io, "hello.txt", .{ .truncate = true });
-        defer hello_txt.close(io);
-        try hello_txt.writeStreamingAll(io, "hello, world from the server!");
-        try server_repo.add(io, allocator, &.{"hello.txt"});
-        _ = try server_repo.commit(io, allocator, .{ .message = "new commit from the server" });
-    }
+    _ = try commitServer(&server_repo, io, allocator, .{ .files = &.{.{ .path = "hello.txt", .content = "hello, world from the server!" }} }, .{ .message = "new commit from the server" });
 
     // make another commit
     const commit2 = blk: {
@@ -416,13 +395,7 @@ fn testPush(
     ));
 
     // make a commit on the server with no parents, thus creating an incompatible git history
-    {
-        const hello_txt = try server_repo.core.work_dir.createFile(io, "hello.txt", .{ .truncate = true });
-        defer hello_txt.close(io);
-        try hello_txt.writeStreamingAll(io, "hello, world from the server again!");
-        try server_repo.add(io, allocator, &.{"hello.txt"});
-        _ = try server_repo.commit(io, allocator, .{ .message = "new git history on the server", .parent_oids = &.{} });
-    }
+    _ = try commitServer(&server_repo, io, allocator, .{ .files = &.{.{ .path = "hello.txt", .content = "hello, world from the server again!" }} }, .{ .message = "new git history on the server", .parent_oids = &.{} });
 
     // can't push because commit doesn't exist locally
     try std.testing.expectError(error.RemoteRefContainsCommitsNotFoundLocally, client_repo.push(
@@ -544,14 +517,9 @@ fn testPushFork(
     const target_path = (try repoOnDiskPath(io, allocator, temp_dir_name, "target", true)).?;
     defer allocator.free(target_path);
     {
-        var target_repo = try rp.Repo(.xit, .{}).init(io, allocator, .{ .path = target_path });
+        var target_repo = try rp.Repo(.xit, .{}).init(io, allocator, .{ .bare = true, .path = target_path });
         defer target_repo.deinit(io, allocator);
-        const file = try target_repo.core.work_dir.createFile(io, "main.txt", .{ .truncate = true });
-        defer file.close(io);
-        try file.writeStreamingAll(io, "base contents\n");
-        try target_repo.add(io, allocator, &.{"main.txt"});
-        _ = try target_repo.commit(io, allocator, .{ .author = "admin <admin@example.test>", .message = "initial code" });
-        try target_repo.addConfig(io, allocator, .{ .name = "receive.denycurrentbranch", .value = "updateinstead" });
+        _ = try commitServer(&target_repo, io, allocator, .{ .files = &.{.{ .path = "main.txt", .content = "base contents\n" }} }, .{ .author = "admin <admin@example.test>", .message = "initial code" });
     }
 
     const other_path = (try repoOnDiskPath(io, allocator, temp_dir_name, "other", true)).?;
@@ -603,7 +571,7 @@ fn testPushFork(
         client_path,
         client_path,
         null,
-        .{ .wire = .{ .ssh = .{ .command = ssh_cmd } } },
+        .{ .transport = .{ .wire = .{ .ssh = .{ .command = ssh_cmd } } } },
     );
     defer client.deinit(io, allocator);
 
@@ -624,6 +592,7 @@ fn testPushFork(
     {
         var draft = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = draft_path });
         defer draft.deinit(io, allocator);
+        try std.testing.expect(try draft.isBare(io, allocator));
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
         const moment = try evt.currentMoment(.{}, &draft);
@@ -821,7 +790,7 @@ fn testPushFork(
         clone_path,
         clone_path,
         null,
-        .{ .wire = .{ .ssh = .{ .command = ssh_cmd } } },
+        .{ .transport = .{ .wire = .{ .ssh = .{ .command = ssh_cmd } } } },
     );
     defer fork_clone.deinit(io, allocator);
     try std.testing.expectEqualStrings(&third_source_oid, &(try fork_clone.readRef(io, fork.ref) orelse return error.NotFound));
@@ -936,6 +905,7 @@ fn testPushCreatesMissingRepo(
 
     var server_repo = try rp.Repo(.xit, .{ .is_test = true }).open(io, allocator, .{ .path = server_path });
     defer server_repo.deinit(io, allocator);
+    try std.testing.expect(try server_repo.isBare(io, allocator));
 
     try std.testing.expect(null != try server_repo.readRef(io, .{ .kind = .tag, .name = "1.0.0" }));
 
@@ -973,7 +943,7 @@ fn testPushEvents(
 
     const repo_opts: rp.RepoOpts(.xit) = .{ .is_test = true };
     const ServerRepo = rp.Repo(.xit, repo_opts);
-    var server_repo = try ServerRepo.init(io, allocator, .{ .path = server_path });
+    var server_repo = try ServerRepo.init(io, allocator, .{ .bare = true, .path = server_path });
     defer server_repo.deinit(io, allocator);
 
     const cwd_path = try std.process.currentPathAlloc(io, allocator);
@@ -1132,7 +1102,7 @@ fn testClone(
 
     // init server repo with default branch name as main
     // is_test must be false when shell_out_to_git so commits get real timestamps (needed for --shallow-since)
-    var server_repo = try rp.Repo(.xit, .{ .is_test = !shell_out_to_git }).init(io, allocator, .{ .path = server_path, .create_default_branch = "main" });
+    var server_repo = try rp.Repo(.xit, .{ .is_test = !shell_out_to_git }).init(io, allocator, .{ .bare = true, .path = server_path, .create_default_branch = "main" });
     defer server_repo.deinit(io, allocator);
 
     if (shell_out_to_git) {
@@ -1142,25 +1112,13 @@ fn testClone(
     }
 
     // make a commit
-    {
-        const hello_txt = try server_repo.core.work_dir.createFile(io, "hello.txt", .{ .truncate = true });
-        defer hello_txt.close(io);
-        try hello_txt.writeStreamingAll(io, "hello, world!");
-        try server_repo.add(io, allocator, &.{"hello.txt"});
-        _ = try server_repo.commit(io, allocator, .{ .message = "let there be light" });
-    }
+    _ = try commitServer(&server_repo, io, allocator, .{ .files = &.{.{ .path = "hello.txt", .content = "hello, world!" }} }, .{ .message = "let there be light" });
 
     // tag first commit
     _ = try server_repo.addTag(io, allocator, .{ .name = "v1", .message = "first" });
 
     // make a commit
-    {
-        const goodbye_txt = try server_repo.core.work_dir.createFile(io, "goodbye.txt", .{ .truncate = true });
-        defer goodbye_txt.close(io);
-        try goodbye_txt.writeStreamingAll(io, "goodbye, world!");
-        try server_repo.add(io, allocator, &.{"goodbye.txt"});
-        _ = try server_repo.commit(io, allocator, .{ .message = "add goodbye file" });
-    }
+    _ = try commitServer(&server_repo, io, allocator, .{ .files = &.{.{ .path = "goodbye.txt", .content = "goodbye, world!" }} }, .{ .message = "add goodbye file" });
 
     // export server repo
     {
@@ -1210,13 +1168,7 @@ fn testClone(
         }
 
         // make a third commit on the server
-        {
-            const extra_txt = try server_repo.core.work_dir.createFile(io, "extra.txt", .{ .truncate = true });
-            defer extra_txt.close(io);
-            try extra_txt.writeStreamingAll(io, "extra content");
-            try server_repo.add(io, allocator, &.{"extra.txt"});
-            _ = try server_repo.commit(io, allocator, .{ .message = "add extra file" });
-        }
+        _ = try commitServer(&server_repo, io, allocator, .{ .files = &.{.{ .path = "extra.txt", .content = "extra content" }} }, .{ .message = "add extra file" });
 
         // pull --unshallow to deepen the clone and get the new commit
         {
@@ -1357,9 +1309,9 @@ fn testClone(
             temp_path,
             client_path,
             null,
-            .{ .wire = .{ .ssh = .{
+            .{ .transport = .{ .wire = .{ .ssh = .{
                 .command = ssh_cmd_maybe,
-            } } },
+            } } } },
         );
         defer client_repo.deinit(io, allocator);
 
@@ -1406,27 +1358,11 @@ fn testFetchLarge(
     const server_path = (try repoOnDiskPath(io, allocator, temp_dir_name, "testrepo", true)).?;
     defer allocator.free(server_path);
 
-    var server_repo = try rp.Repo(.xit, .{ .is_test = true }).init(io, allocator, .{ .path = server_path });
+    var server_repo = try rp.Repo(.xit, .{ .is_test = true }).init(io, allocator, .{ .bare = true, .path = server_path });
     defer server_repo.deinit(io, allocator);
 
-    var server_dir = try cwd.openDir(io, server_path, .{});
-    defer server_dir.close(io);
-
-    // copy files from current repo into server dir
-    for (&[_][]const u8{"src"}) |dir_name| {
-        var src_repo_dir = try cwd.openDir(io, dir_name, .{ .iterate = true });
-        defer src_repo_dir.close(io);
-
-        var dest_repo_dir = try server_dir.createDirPathOpen(io, dir_name, .{});
-        defer dest_repo_dir.close(io);
-
-        try copyDir(io, src_repo_dir, dest_repo_dir);
-
-        try server_repo.add(io, allocator, &.{dir_name});
-    }
-
-    // make a commit
-    const commit1 = try server_repo.commit(io, allocator, .{ .message = "let there be light" });
+    // make a commit with files from the current repo
+    const commit1 = try commitServer(&server_repo, io, allocator, .{ .dirs = &.{"src"} }, .{ .message = "let there be light" });
 
     // export server repo
     {
@@ -1488,13 +1424,7 @@ fn testFetchLarge(
         }
 
         // make another commit on the server
-        const commit2 = blk: {
-            const extra_txt = try server_repo.core.work_dir.createFile(io, "extra.txt", .{ .truncate = true });
-            defer extra_txt.close(io);
-            try extra_txt.writeStreamingAll(io, "extra content");
-            try server_repo.add(io, allocator, &.{"extra.txt"});
-            break :blk try server_repo.commit(io, allocator, .{ .message = "add extra file" });
-        };
+        const commit2 = try commitServer(&server_repo, io, allocator, .{ .files = &.{.{ .path = "extra.txt", .content = "extra content" }} }, .{ .message = "add extra file" });
 
         // fetch with ref-in-want (git uses want-ref in protocol v2 when fetching named refs)
         {
@@ -1579,12 +1509,10 @@ fn testPushLarge(
     const server_path = (try repoOnDiskPath(io, allocator, temp_dir_name, "testrepo", true)).?;
     defer allocator.free(server_path);
 
-    var server_repo = try rp.Repo(.xit, .{ .is_test = true }).init(io, allocator, .{ .path = server_path });
+    var server_repo = try rp.Repo(.xit, .{ .is_test = true }).init(io, allocator, .{ .bare = true, .path = server_path });
     defer server_repo.deinit(io, allocator);
 
     // add config
-    try server_repo.addConfig(io, allocator, .{ .name = "core.bare", .value = "false" });
-    try server_repo.addConfig(io, allocator, .{ .name = "receive.denycurrentbranch", .value = "updateinstead" });
     try server_repo.addConfig(io, allocator, .{ .name = "http.receivepack", .value = "true" });
 
     // export server repo
@@ -1705,8 +1633,7 @@ fn testPushLarge(
         const oid_master = (try server_repo.readRef(io, .{ .kind = .head, .name = "master" })).?;
         try std.testing.expectEqualStrings(&commit2, &oid_master);
 
-        const hello_txt = try server_repo.core.work_dir.openFile(io, "hello.txt", .{});
-        defer hello_txt.close(io);
+        try std.testing.expectError(error.FileNotFound, server_repo.core.work_dir.openFile(io, "hello.txt", .{}));
     }
 }
 
@@ -1739,7 +1666,7 @@ fn setupAdmin(io: std.Io, allocator: std.mem.Allocator, data_dir_name: []const u
     const admin_repo_path = try std.fs.path.join(allocator, &.{ cwd_path, data_dir_name, "admin" });
     defer allocator.free(admin_repo_path);
 
-    var repo = try rp.Repo(.xit, evt.admin_repo_opts).init(io, allocator, .{ .path = admin_repo_path });
+    var repo = try rp.Repo(.xit, evt.admin_repo_opts).init(io, allocator, .{ .bare = true, .path = admin_repo_path });
     defer repo.deinit(io, allocator);
 
     try repo.addConfig(io, allocator, .{ .name = "user.name", .value = "haxy" });
@@ -1822,4 +1749,83 @@ fn sshCommand(
     defer allocator.free(priv_key_path);
 
     return try std.fmt.allocPrint(allocator, "ssh -p {} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o IdentitiesOnly=yes -o IdentityFile=\"{s}\"", .{ port + 1, priv_key_path });
+}
+
+const ServerFiles = union(enum) {
+    files: []const struct { path: []const u8, content: []const u8 },
+    dirs: []const []const u8,
+};
+
+/// commit files without writing the server's index or worktree.
+fn commitServer(repo: anytype, io: std.Io, allocator: std.mem.Allocator, files: ServerFiles, metadata: xit.object.CommitMetadata(repo.self_repo_opts.hash)) ![xit.hash.hexLen(repo.self_repo_opts.hash)]u8 {
+    const R = @TypeOf(repo.*);
+    const opts = repo.self_repo_opts;
+    const Index = xit.index.Index(.xit, opts);
+    var result: [xit.hash.hexLen(opts.hash)]u8 = undefined;
+    const Ctx = struct {
+        core: *R.Core,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        files: ServerFiles,
+        metadata: xit.object.CommitMetadata(opts.hash),
+        result: *[xit.hash.hexLen(opts.hash)]u8,
+
+        fn addFile(ctx: @This(), state: R.State(.read_write), index: *Index, path: []const u8, content: []const u8) !void {
+            var reader = std.Io.Reader.fixed(content);
+            var oid: [xit.hash.byteLen(opts.hash)]u8 = undefined;
+            try xit.object.writeObject(.xit, opts, state, ctx.io, ctx.allocator, &reader, .{ .kind = .blob, .size = content.len }, &oid);
+            const path_parts = try xit.fs.splitPath(ctx.allocator, path);
+            defer ctx.allocator.free(path_parts);
+            try index.addTreeEntryFile(&.{ .oid = oid, .mode = @bitCast(@as(u32, 0o100644)) }, path_parts, content.len, 0);
+        }
+
+        fn addDir(ctx: @This(), state: R.State(.read_write), index: *Index, path: []const u8) anyerror!void {
+            var dir = try std.Io.Dir.cwd().openDir(ctx.io, path, .{ .iterate = true });
+            defer dir.close(ctx.io);
+            var entries = dir.iterate();
+            while (try entries.next(ctx.io)) |entry| {
+                const child = try std.fs.path.join(ctx.allocator, &.{ path, entry.name });
+                defer ctx.allocator.free(child);
+                switch (entry.kind) {
+                    .directory => try ctx.addDir(state, index, child),
+                    .file => {
+                        const content = try dir.readFileAlloc(ctx.io, entry.name, ctx.allocator, .unlimited);
+                        defer ctx.allocator.free(content);
+                        try ctx.addFile(state, index, child, content);
+                    },
+                    else => {},
+                }
+            }
+        }
+
+        pub fn run(ctx: @This(), cursor: *R.DB.Cursor(.read_write)) !void {
+            var moment = try R.DB.HashMap(.read_write).init(cursor.*);
+            const state = R.State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
+            const head_oid = try rf.readHeadRecurMaybe(.xit, opts, state.readOnly(), ctx.io);
+            var index = if (head_oid) |oid| try Index.initFromCommit(state.readOnly(), ctx.io, ctx.allocator, &oid) else try Index.init(state.readOnly(), ctx.io, ctx.allocator);
+            defer index.deinit();
+            switch (ctx.files) {
+                .files => |updates| for (updates) |file| try ctx.addFile(state, &index, file.path, file.content),
+                .dirs => |dirs| for (dirs) |dir| try ctx.addDir(state, &index, dir),
+            }
+            var tree = try xit.object.Tree.initFromIndex(.xit, opts, state, ctx.io, ctx.allocator, &index);
+            defer tree.deinit();
+            var head_buffer: [rf.MAX_REF_CONTENT_SIZE]u8 = undefined;
+            const head = try rf.readHead(.xit, opts, state.readOnly(), ctx.io, &head_buffer) orelse return error.HeadNotFound;
+            ctx.result.* = try xit.object.writeCommit(.xit, opts, state, ctx.io, ctx.allocator, ctx.metadata, &tree, head.ref);
+            try xit.undo.writeMessage(opts, state, .{ .commit = ctx.metadata });
+        }
+    };
+    try repo.core.db_file.lock(io, .exclusive);
+    defer repo.core.db_file.unlock(io);
+    const history = try R.DB.ArrayList(.read_write).init(repo.core.db.rootCursor());
+    try history.appendContext(.{ .slot = try history.getSlot(-1) }, Ctx{
+        .core = &repo.core,
+        .io = io,
+        .allocator = allocator,
+        .files = files,
+        .metadata = metadata,
+        .result = &result,
+    });
+    return result;
 }

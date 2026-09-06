@@ -162,7 +162,7 @@ pub fn create(
         );
     }
 
-    try fork_repo.addConfig(io, allocator, .{ .name = "receive.denycurrentbranch", .value = "updateinstead" });
+    try fork_repo.addConfig(io, allocator, .{ .name = "core.bare", .value = "true" });
     try fork_repo.addConfig(io, allocator, .{ .name = "receive.denydeletes", .value = "true" });
 
     // create the patch event

@@ -463,11 +463,10 @@ fn createRepo(
     allocator: std.mem.Allocator,
     repo_path: []const u8,
 ) !rp.Repo(.xit, repo_opts) {
-    var repo = try rp.Repo(.xit, repo_opts).init(io, allocator, .{ .path = repo_path });
+    var repo = try rp.Repo(.xit, repo_opts).init(io, allocator, .{ .path = repo_path, .bare = true });
     errdefer repo.deinit(io, allocator);
     try repo.setMergeAlgorithm(io, allocator, .diff3);
     try repo.addConfig(io, allocator, .{ .name = "http.receivepack", .value = "true" });
-    try repo.addConfig(io, allocator, .{ .name = "receive.denycurrentbranch", .value = "updateinstead" });
     return repo;
 }
 

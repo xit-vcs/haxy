@@ -99,7 +99,7 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(work_path);
 
     const Repo = rp.Repo(.xit, evt.admin_repo_opts);
-    var repo = try Repo.init(io, allocator, .{ .path = work_path });
+    var repo = try Repo.init(io, allocator, .{ .path = work_path, .bare = true });
     defer repo.deinit(io, allocator);
 
     var session_arena = std.heap.ArenaAllocator.init(allocator);
@@ -256,7 +256,6 @@ pub fn main(init: std.process.Init) !void {
             try template_repo.setMergeAlgorithm(io, allocator, .diff3);
             try template_repo.addConfig(io, allocator, .{ .name = "user.name", .value = "haxy" });
             try template_repo.addConfig(io, allocator, .{ .name = "user.email", .value = "admin@example.test" });
-            try template_repo.addConfig(io, allocator, .{ .name = "receive.denycurrentbranch", .value = "updateinstead" });
 
             // a README plus a nested doc so the file tree has a directory to
             // descend into
@@ -815,14 +814,17 @@ pub fn main(init: std.process.Init) !void {
                 };
             }
             try evt.consume(.repo, .xit, .{}, io, allocator, &template_repo, evt.events_ref, &discussion_comment_events);
+            try template_repo.addConfig(io, allocator, .{ .name = "core.bare", .value = "true" });
         }
 
         // copy the template to each repo's on-disk location, named by its
         // hex-encoded event id. the template repo is deinitialized above, so its
         // db file is fully written before we copy it.
         {
-            var template_dir = try cwd.openDir(io, template_path, .{ .iterate = true });
+            var template_dir = try cwd.openDir(io, template_path, .{});
             defer template_dir.close(io);
+            var template_repo_dir = try template_dir.openDir(io, ".xit", .{ .iterate = true });
+            defer template_repo_dir.close(io);
 
             for (repo_event_ids, 0..) |id_bytes, repo_index| {
                 const repo_id = std.fmt.bytesToHex(id_bytes, .lower);
@@ -830,7 +832,9 @@ pub fn main(init: std.process.Init) !void {
                 {
                     var dest_dir = try cwd.createDirPathOpen(io, repo_path, .{});
                     defer dest_dir.close(io);
-                    try copyDir(io, template_dir, dest_dir);
+                    var dest_repo_dir = try dest_dir.createDirPathOpen(io, ".xit", .{});
+                    defer dest_repo_dir.close(io);
+                    try copyDir(io, template_repo_dir, dest_repo_dir);
                 }
 
                 if (repo_index + 1 == repo_data.len) {
@@ -1017,6 +1021,7 @@ fn seedPatchRevision(
 
     const base_oid = (try fork_repo.readRef(io, fork.ref)) orelse return error.NotFound;
     const base_tree_oid = try commitTree(io, allocator, &fork_repo, &base_oid);
+    try fork_repo.addConfig(io, allocator, .{ .name = "core.bare", .value = "false" });
     var source_oid = base_oid;
     var fork_dir = try std.Io.Dir.cwd().openDir(io, fork_path, .{});
     defer fork_dir.close(io);
@@ -1035,6 +1040,8 @@ fn seedPatchRevision(
         try writer.writer.print("{s} ({d}/3)", .{ title, i + 1 });
         source_oid = try fork_repo.commit(io, allocator, .{ .message = writer.written(), .timestamp = timestamp + i });
     }
+    try fork_repo.addConfig(io, allocator, .{ .name = "core.bare", .value = "true" });
+    try fork_dir.deleteFile(io, "patch.txt");
     const revision_id = evt.EventWithId.randomId(random);
     const head_tree_oid = try commitTree(io, allocator, &fork_repo, &source_oid);
     const revision: evt.PatchRev = .{
@@ -1267,17 +1274,9 @@ fn seedPatches(
         }, null, other_ref);
     }
     {
-        var to_events = try target_repo.switchDir(io, allocator, .{ .target = .{ .ref = evt.events_ref } });
-        defer to_events.deinit();
-    }
-    {
-        var merge = try target_repo.merge(io, allocator, .{ .kind = .full, .action = .{ .new = .{ .source = &.{.{ .ref = other_ref }} } } }, null);
+        var merge = try target_repo.mergeAtRef(io, allocator, .{ .kind = .full, .action = .{ .new = .{ .source = &.{.{ .ref = other_ref }} } } }, evt.events_ref, null);
         defer merge.deinit();
         if (merge.result != .success) return error.MergeFailed;
-    }
-    {
-        var to_master = try target_repo.switchDir(io, allocator, .{ .target = .{ .ref = .{ .kind = .head, .name = "master" } } });
-        defer to_master.deinit();
     }
     try target_repo.removeBranch(io, .{ .name = other_ref.name });
     try evt.consume(.repo, .xit, .{}, io, allocator, target_repo, evt.events_ref, &.{});
