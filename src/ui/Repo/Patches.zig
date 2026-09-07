@@ -729,7 +729,8 @@ pub fn appendDetails(self: *const Self, allocator: std.mem.Allocator, box: *wgt.
             try std.fmt.allocPrint(aa, "git clone {s}", .{url})
         else
             try std.fmt.allocPrint(aa, "git clone {s} {s}", .{ url, clone_name });
-        const choices: [2]ui.widget.CopyableText.Choice = .{
+        const merge_command = try std.fmt.allocPrint(aa, "git fetch '{s}' refs/heads/patch && git merge FETCH_HEAD", .{url});
+        const choices: [3]ui.widget.CopyableText.Choice = .{
             .{
                 .selector = "push",
                 .text = push_command,
@@ -741,6 +742,12 @@ pub fn appendDetails(self: *const Self, allocator: std.mem.Allocator, box: *wgt.
                 .text = clone_command,
                 .copyable_text = try std.fmt.allocPrint(aa, "{s}{s}", .{ session.data.git_ssh_prefix, clone_command }),
                 .label = " clone this patch ",
+            },
+            .{
+                .selector = "merge",
+                .text = merge_command,
+                .copyable_text = try std.fmt.allocPrint(aa, "{s}{s}", .{ session.data.git_ssh_prefix, merge_command }),
+                .label = " merge this patch locally ",
             },
         };
         var copyable_text = try ui.widget.CopyableText.init(allocator, session, &choices);
