@@ -36,6 +36,7 @@ pub const Commit = struct {
     // whether `message` is a shortened preview.
     message_truncated: bool = false,
     author: ui.Author = .unknown,
+    stats: ?xit.patch.CommitStats = null,
     hunks: []const Hunk,
     // the hunk index this window starts at (0 = the first window).
     window_start: usize,
@@ -144,6 +145,7 @@ pub fn init(
                 .message = text,
                 .message_truncated = truncated,
                 .author = try ui.Author.init(admin_moment, arena, md.author orelse ""),
+                .stats = if (repo_kind == .xit) try repo.commitStats(io, gpa, .{ .oid = &commit_object.oid }) else null,
                 .hunks = &.{},
                 .window_start = 0,
                 .has_prev = false,
@@ -705,6 +707,14 @@ pub const View = struct {
         for (inner.children.values()) |*child| child.widget.deinit(allocator);
         inner.children.clearAndFree(allocator);
         inner.getFocus().child_id = null;
+
+        if (commit.stats) |stats| {
+            const text = try std.fmt.allocPrint(self.session.page_arena.allocator(), "+{d}, -{d}", .{ stats.lines_added, stats.lines_removed });
+            var tb = try wgt.TextBox.init(allocator, text, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none, .label = " lines changed " });
+            errdefer tb.deinit(allocator);
+            tb.getFocus().mode = .all;
+            try inner.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
+        }
 
         switch (self.paneContent(sel)) {
             .message => {

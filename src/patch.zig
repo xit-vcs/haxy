@@ -253,7 +253,7 @@ pub fn merge(
                 {
                     var merge_result = try mrg.Merge(.xit, repo_opts).init(state, ctx.io, ctx.allocator, .{
                         .kind = .full,
-                        .action = .{ .new = .{ .source = &.{.{ .oid = &ctx.merge_oid }}, .algo = .diff3 } },
+                        .action = .{ .new = .{ .source = &.{.{ .oid = &ctx.merge_oid }}, .algo = .patch } },
                         .commit_metadata = .{
                             .author = ctx.identity,
                             .committer = ctx.identity,

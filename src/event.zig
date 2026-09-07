@@ -562,6 +562,63 @@ pub fn commitEvents(
     }
 }
 
+pub const PushProgress = struct {
+    response: *xit.net_server_receive_pack.Response,
+    writer: *std.Io.Writer,
+    count: usize = 0,
+    total: usize = 0,
+
+    pub fn run(self: *PushProgress, _: std.Io, event: rp.ProgressEvent) !void {
+        switch (event) {
+            .start => |start| {
+                if (start.kind != .writing_patch) return;
+                self.total = start.estimated_total_items;
+                self.count = 0;
+            },
+            .complete_one => |kind| {
+                if (kind != .writing_patch) return;
+                self.count += 1;
+            },
+            .end => |kind| {
+                if (kind != .writing_patch) return;
+            },
+            else => return,
+        }
+        var buffer: [128]u8 = undefined;
+        const percent = if (self.total == 0) 100 else @as(u128, self.count) * 100 / self.total;
+        const text = try std.fmt.bufPrint(&buffer, "Processing commits: {d}% ({d}/{d}){s}", .{ percent, self.count, self.total, if (event == .end) "\n" else "\r" });
+        try self.response.progress(self.writer, text);
+    }
+};
+
+// prepare all reachable commits, including history received before patch
+// generation was enabled. this shares the receive-pack transaction.
+pub fn writeReceivedPatches(
+    comptime repo_opts: rp.RepoOpts(.xit),
+    state: rp.Repo(.xit, repo_opts).State(.read_write),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    response: *xit.net_server_receive_pack.Response,
+    writer: *std.Io.Writer,
+) !void {
+    try response.progress(writer, "Processing commits...\n");
+    var config = try xit.config.Config(.xit, repo_opts).init(state.readOnly(), io, allocator);
+    defer config.deinit();
+    try config.add(state, io, .{ .name = "merge.algorithm", .value = "patch" });
+
+    var iter = try obj.ObjectIterator(.xit, repo_opts).init(state.readOnly(), io, allocator, .{ .kind = .commit });
+    defer iter.deinit();
+    var refs = try rf.AllRefIterator(.xit, repo_opts).init(state.readOnly(), allocator);
+    defer refs.deinit();
+    while (try refs.next()) |ref| {
+        if (try rf.readRecur(.xit, repo_opts, state.readOnly(), io, .{ .ref = ref })) |oid| {
+            try iter.include(&oid);
+        }
+    }
+    var progress = PushProgress{ .response = response, .writer = writer };
+    try xit.patch.writePatches(repo_opts, state, io, allocator, &iter, &progress);
+}
+
 // serve a receive-pack and consume any events it pushed to the events branch,
 // all in one transaction: the push and the views derived from it commit
 // atomically, and a failed consume cancels the push
@@ -579,6 +636,9 @@ pub fn receivePackAndConsume(
     const DB = rp.Repo(.xit, repo_opts).DB;
     const State = rp.Repo(.xit, repo_opts).State;
 
+    var response = xit.net_server_receive_pack.Response.init(allocator);
+    defer response.deinit();
+
     const Ctx = struct {
         core: *rp.Repo(.xit, repo_opts).Core,
         io: std.Io,
@@ -586,6 +646,7 @@ pub fn receivePackAndConsume(
         reader: *std.Io.Reader,
         writer: *std.Io.Writer,
         options: xit.net_server_receive_pack.Options,
+        response: *xit.net_server_receive_pack.Response,
         repo_root_path: []const u8,
         error_writer: *std.Io.Writer,
 
@@ -596,7 +657,9 @@ pub fn receivePackAndConsume(
             defer updates.deinit();
             var receive_options = ctx.options;
             receive_options.applied_ref_updates = &updates;
+            receive_options.deferred_response = ctx.response;
             try xit.net_server_receive_pack.run(.xit, repo_opts, state, ctx.io, ctx.allocator, ctx.reader, ctx.writer, receive_options);
+            try writeReceivedPatches(repo_opts, state, ctx.io, ctx.allocator, ctx.response, ctx.writer);
 
             // a repo without an events branch has no events to consume. a
             // no-op consume must not cancel here, since the push shares the
@@ -622,17 +685,17 @@ pub fn receivePackAndConsume(
             .reader = reader,
             .writer = writer,
             .options = options,
+            .response = &response,
             .repo_root_path = repo_root_path,
             .error_writer = error_writer,
         },
-    ) catch |err| switch (err) {
-        error.CancelTransaction => {},
-        else => |e| return e,
+    ) catch |err| {
+        response.finish(writer, @errorName(err)) catch {};
+        if (err == error.CancelTransaction) return;
+        return err;
     };
 
-    // pkt-line writes are buffered until the transaction settles, so the
-    // report-status reaches the client only after the push truly committed
-    try writer.flush();
+    try response.finish(writer, null);
 }
 
 // a standalone event db holding events consumed from a local repo's events

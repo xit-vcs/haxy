@@ -237,6 +237,8 @@ pub fn receivePack(
 
     // execute a transaction that receives the push and materializes its revision
     {
+        var response = xit.net_server_receive_pack.Response.init(allocator);
+        defer response.deinit();
         const DB = rp.Repo(.xit, repo_opts).DB;
         const State = rp.Repo(.xit, repo_opts).State;
         const Ctx = struct {
@@ -246,6 +248,7 @@ pub fn receivePack(
             allocator: std.mem.Allocator,
             reader: *std.Io.Reader,
             writer: *std.Io.Writer,
+            response: *xit.net_server_receive_pack.Response,
             patch_id: [evt.event_id_size * 2]u8,
             patch: evt.Patch.Record,
             published: bool,
@@ -260,7 +263,8 @@ pub fn receivePack(
                 // receive the branch update
                 var moment = try DB.HashMap(.read_write).init(cursor.*);
                 const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
-                try xit.net_server_receive_pack.run(.xit, repo_opts, state, ctx.io, ctx.allocator, ctx.reader, ctx.writer, .{ .allowed_ref = ref_path });
+                try xit.net_server_receive_pack.run(.xit, repo_opts, state, ctx.io, ctx.allocator, ctx.reader, ctx.writer, .{ .allowed_ref = ref_path, .deferred_response = ctx.response });
+                try evt.writeReceivedPatches(repo_opts, state, ctx.io, ctx.allocator, ctx.response, ctx.writer);
 
                 // copy the target history needed to preserve the merge base
                 const source_oid = (try rf.readRecur(.xit, repo_opts, state.readOnly(), ctx.io, .{ .ref = ref })) orelse return error.CancelTransaction;
@@ -378,6 +382,7 @@ pub fn receivePack(
             .allocator = allocator,
             .reader = reader,
             .writer = writer,
+            .response = &response,
             .patch_id = id.*,
             .patch = fork_patch,
             .published = published,
@@ -387,11 +392,12 @@ pub fn receivePack(
             .timestamp = timestamp,
             .newest = newest,
             .revision_id_maybe = &revision_id_maybe,
-        }) catch |err| switch (err) {
-            error.CancelTransaction => {},
-            else => |other| return other,
+        }) catch |err| {
+            response.finish(writer, @errorName(err)) catch {};
+            if (err == error.CancelTransaction) return;
+            return err;
         };
-        try writer.flush();
+        try response.finish(writer, null);
     }
 
     // best-effort update the published patch so it has the new revision
