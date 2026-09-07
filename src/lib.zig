@@ -2,6 +2,7 @@ pub const xit = @import("xit");
 pub const command = @import("./command.zig");
 pub const main = @import("./main.zig");
 pub const event = @import("./event.zig");
+pub const push = @import("./push.zig");
 pub const fork = @import("./fork.zig");
 pub const pch = @import("./patch.zig");
 pub const serve = @import("./serve.zig");

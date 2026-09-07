@@ -1,4 +1,5 @@
 const std = @import("std");
+const push = @import("push.zig");
 const xit = @import("xit");
 const rp = xit.repo;
 const xitui = xit.xitui;
@@ -359,7 +360,7 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, command:
 
         const draft_path = try fork.forkPath(allocator, handler.repo_root_path, &route.id);
         defer allocator.free(draft_path);
-        var draft = rp.AnyRepo(.xit, .{ .ProgressCtx = *evt.PushProgress }).open(io, allocator, .{ .path = draft_path }) catch
+        var draft = rp.AnyRepo(.xit, .{ .ProgressCtx = *push.PushProgress }).open(io, allocator, .{ .path = draft_path }) catch
             return writeError(sess, "patch draft not found");
         defer draft.deinit(io, allocator);
         var reader_buf: [4096]u8 = undefined;
@@ -384,7 +385,7 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, command:
                     var target_repo = rp.Repo(.xit, repo.self_repo_opts).open(io, allocator, .{ .path = target_path }) catch
                         return writeError(sess, "repo not found or has the wrong hash");
                     defer target_repo.deinit(io, allocator);
-                    try fork.receivePack(repo.self_repo_opts, io, allocator, repo, &target_repo, &route.id, author, timestamp, &reader.interface, &writer.interface, handler.err);
+                    try push.receiveFork(repo.self_repo_opts, io, allocator, repo, &target_repo, &route.id, author, timestamp, &reader.interface, &writer.interface, handler.err);
                 },
             }
         }
@@ -397,7 +398,7 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, command:
     const repo_identity = if (std.mem.startsWith(u8, path, repo_prefix)) path[repo_prefix.len..] else path;
 
     const create_if_missing = parsed.service == .receive_pack;
-    const any_repo_opts: rp.AnyRepoOpts(.xit) = .{ .ProgressCtx = *evt.PushProgress };
+    const any_repo_opts: rp.AnyRepoOpts(.xit) = .{ .ProgressCtx = *push.PushProgress };
 
     const owner_repo = evt.parseOwnerRepoPath(repo_identity) orelse return writeError(sess, "repo path must be <owner>/<repo>");
     switch (try authorizeRepoKey(io, allocator, handler.admin_repo_path, owner_repo.owner, owner_repo.name, parsed.service, &sess.fingerprint)) {
@@ -444,7 +445,7 @@ fn serveIfExists(
     // attempt it when the path already exists
     std.Io.Dir.accessAbsolute(io, repo_path, .{}) catch return false;
 
-    const any_repo_opts: rp.AnyRepoOpts(.xit) = .{ .ProgressCtx = *evt.PushProgress };
+    const any_repo_opts: rp.AnyRepoOpts(.xit) = .{ .ProgressCtx = *push.PushProgress };
     var any_repo = rp.AnyRepo(.xit, any_repo_opts).open(io, allocator, .{ .path = repo_path }) catch |err| switch (err) {
         error.RepoNotFound => return false,
         else => |e| return e,
@@ -490,7 +491,7 @@ fn servePack(
 
     switch (service) {
         .upload_pack => try repo.uploadPack(io, allocator, &session_reader.interface, &session_writer.interface, .{}),
-        .receive_pack => try evt.receivePackAndConsume(repo_opts, io, allocator, repo, &session_reader.interface, &session_writer.interface, .{}, repo_root_path, error_writer),
+        .receive_pack => try push.receivePackAndConsume(repo_opts, io, allocator, repo, &session_reader.interface, &session_writer.interface, .{}, repo_root_path, error_writer),
     }
 
     // flush whatever the pack op buffered into our writer adapter
