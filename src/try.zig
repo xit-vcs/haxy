@@ -953,11 +953,21 @@ fn longDescription(allocator: std.mem.Allocator, initial: []const u8) ![]u8 {
 // lines stay byte-identical across revisions, so a bump in `c` is a scatter of
 // small hunks rather than a full rewrite.
 fn writeScatterFile(io: std.Io, allocator: std.mem.Allocator, repo_dir: std.Io.Dir, path: []const u8, fi: usize, c: usize) !void {
+    const content = try scatterContent(allocator, fi, c, null);
+    defer allocator.free(content);
     const file = try repo_dir.createFile(io, path, .{});
     defer file.close(io);
+    try file.writeStreamingAll(io, content);
+}
+
+fn scatterContent(allocator: std.mem.Allocator, fi: usize, c: usize, replacement: ?struct { line: usize, text: []const u8 }) ![]u8 {
     var writer = std.Io.Writer.Allocating.init(allocator);
     defer writer.deinit();
     for (0..40) |line| {
+        if (replacement) |edit| if (line == edit.line) {
+            try writer.writer.print("{s}\n", .{edit.text});
+            continue;
+        };
         const start = writer.written().len;
         if ((line + fi + c) % 8 == 0) {
             const tag = scatter_words[(line + fi + c * 3) % scatter_words.len];
@@ -976,7 +986,7 @@ fn writeScatterFile(io: std.Io, allocator: std.mem.Allocator, repo_dir: std.Io.D
         }
         try writer.writer.writeByte('\n');
     }
-    try file.writeStreamingAll(io, writer.written());
+    return writer.toOwnedSlice();
 }
 
 // tag the current HEAD as the next sequential version: v1, v2, and so on
@@ -1012,6 +1022,9 @@ fn seedPatchRevision(
     author: evt.CommitAuthor,
     timestamp: u64,
     random: std.Random,
+    base_oid: [hash.hexLen(.sha1)]u8,
+    path: []const u8,
+    contents: []const []const u8,
 ) !void {
     const patch_hex = std.fmt.bytesToHex(patch_id.*, .lower);
     const fork_path = try fork.forkPath(allocator, repos_path, &patch_hex);
@@ -1019,29 +1032,31 @@ fn seedPatchRevision(
     var fork_repo = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = fork_path, .require_repo_root = true });
     defer fork_repo.deinit(io, allocator);
 
-    const base_oid = (try fork_repo.readRef(io, fork.ref)) orelse return error.NotFound;
-    const base_tree_oid = try commitTree(io, allocator, &fork_repo, &base_oid);
     try fork_repo.addConfig(io, allocator, .{ .name = "core.bare", .value = "false" });
+    {
+        var reset = try fork_repo.reset(io, allocator, .{ .target = .{ .oid = &base_oid } });
+        defer reset.deinit();
+    }
+    const base_tree_oid = try commitTree(io, allocator, &fork_repo, &base_oid);
     var source_oid = base_oid;
     var fork_dir = try std.Io.Dir.cwd().openDir(io, fork_path, .{});
     defer fork_dir.close(io);
     var writer = std.Io.Writer.Allocating.init(allocator);
     defer writer.deinit();
-    for (0..3) |i| {
-        writer.clearRetainingCapacity();
-        for (0..i + 1) |line| try writer.writer.print("{s}: part {d}\n", .{ title, line + 1 });
+    if (std.fs.path.dirname(path)) |dir| try fork_dir.createDirPath(io, dir);
+    for (contents, 0..) |content, i| {
         {
-            const file = try fork_dir.createFile(io, "patch.txt", .{});
+            const file = try fork_dir.createFile(io, path, .{});
             defer file.close(io);
-            try file.writeStreamingAll(io, writer.written());
+            try file.writeStreamingAll(io, content);
         }
-        try fork_repo.add(io, allocator, &.{"patch.txt"});
+        try fork_repo.add(io, allocator, &.{path});
         writer.clearRetainingCapacity();
-        try writer.writer.print("{s} ({d}/3)", .{ title, i + 1 });
+        try writer.writer.print("{s} ({d}/{d})", .{ title, i + 1, contents.len });
         source_oid = try fork_repo.commit(io, allocator, .{ .message = writer.written(), .timestamp = timestamp + i });
     }
     try fork_repo.addConfig(io, allocator, .{ .name = "core.bare", .value = "true" });
-    try fork_dir.deleteFile(io, "patch.txt");
+    try fork_dir.deleteFile(io, path);
     const revision_id = evt.EventWithId.randomId(random);
     const head_tree_oid = try commitTree(io, allocator, &fork_repo, &source_oid);
     const revision: evt.PatchRev = .{
@@ -1092,6 +1107,7 @@ fn seedPatches(
         description: []const u8,
         tags: []const u8,
         status: ?evt.Patch.StatusKind,
+        adjacent_edit: bool = false,
     }{
         .{
             .title = "Draft a faster dependency scanner",
@@ -1116,6 +1132,13 @@ fn seedPatches(
             .description = "Add a stable JSON representation of inspect results for scripts and editor integrations.",
             .tags = "enhancement cli",
             .status = .open,
+        },
+        .{
+            .title = "Edit an adjacent line in alpha.txt",
+            .description = "This patch can be cleanly merged by haxy, while git throws a merge conflict!",
+            .tags = "merge",
+            .status = .open,
+            .adjacent_edit = true,
         },
         .{
             .title = "Preserve file permissions during export",
@@ -1146,7 +1169,38 @@ fn seedPatches(
         });
         allocator.free(path);
 
-        try seedPatchRevision(io, allocator, repos_path, &patch_ids[i], patch.title, patch_author, timestamp + 1, random);
+        // prepare the patch's base and file contents, then seed its commits and revision
+        {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            defer arena.deinit();
+            const aa = arena.allocator();
+            var base_oid = (try target_repo.readRef(io, .{ .kind = .head, .name = "master" })) orelse return error.NotFound;
+            var contents: [3][]const u8 = undefined;
+            const file_path: []const u8, const count: usize = if (patch.adjacent_edit) blk: {
+                // v30 precedes the last scatter commit, even after the sample merge
+                const tag_oid = (try target_repo.readRef(io, .{ .kind = .tag, .name = "v30" })) orelse return error.NotFound;
+                var moment = try target_repo.core.latestMoment();
+                const state = rp.Repo(.xit, .{}).State(.read_only){ .core = &target_repo.core, .extra = .{ .moment = &moment } };
+                var tag = try obj.Object(.xit, .{}).init(state, io, allocator, &tag_oid);
+                defer tag.deinit();
+                base_oid = switch (tag.content) {
+                    .tag => |value| value.target,
+                    else => return error.InvalidObject,
+                };
+                // rev 29 first changes line 4; edit the line above it in rev 28
+                contents[0] = try scatterContent(aa, 0, 28, .{ .line = 2, .text = "adjust alpha beside the latest scatter edit" });
+                break :blk .{ "src/alpha.txt", 1 };
+            } else blk: {
+                var writer = std.Io.Writer.Allocating.init(allocator);
+                defer writer.deinit();
+                for (&contents, 0..) |*content, part| {
+                    try writer.writer.print("{s}: part {d}\n", .{ patch.title, part + 1 });
+                    content.* = try aa.dupe(u8, writer.written());
+                }
+                break :blk .{ "patch.txt", contents.len };
+            };
+            try seedPatchRevision(io, allocator, repos_path, &patch_ids[i], patch.title, patch_author, timestamp + 1, random, base_oid, file_path, contents[0..count]);
+        }
         const status = patch.status orelse continue;
         const fork_path = try fork.forkPath(allocator, repos_path, &patch_hex);
         defer allocator.free(fork_path);
