@@ -1560,10 +1560,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     if (win.prev_id) |prev|
                         try addRow(allocator, &list_box, "← previous", "", try windowLink(session.page_arena, data, status_maybe, drafts, prev));
                     for (win.items) |entry| {
-                        // conflicts take precedence over the comment count
-                        const label: []const u8 = if (entryConflicted(entry) and status_maybe != null)
-                            " conflict "
-                        else if (entry.comments.count > 0)
+                        const label: []const u8 = if (entry.comments.count > 0)
                             try std.fmt.allocPrint(session.page_arena.allocator(), " {d} comments ", .{entry.comments.count})
                         else
                             "";
