@@ -4,7 +4,7 @@ const evt = @import("../../event.zig");
 const ui = @import("../../ui.zig");
 const xit = @import("xit");
 const rp = xit.repo;
-const df = xit.diff;
+pub const Diff = @import("Diff.zig");
 const xitui = xit.xitui;
 const wgt = xitui.widget;
 const layout = xitui.layout;
@@ -17,15 +17,9 @@ const inp = @import("../input.zig");
 const page_size = 20;
 // how many diff hunks one window of a commit's diff shows; "next"/"previous"
 // move to the adjacent window.
-const diff_page = 10;
 // the largest message read even when it has fewer than the preview's line
 // limit.
 const max_message_size = 100 * 1024;
-
-pub const Hunk = struct {
-    path: ?[]const u8 = null, // the file this hunk belongs to
-    lines: []const []const u8,
-};
 
 // one commit on the current page, with its diff against its first parent
 // pre-rendered up to the budget so the web client can show it without a repo.
@@ -37,12 +31,7 @@ pub const Commit = struct {
     message_truncated: bool = false,
     author: ui.Author = .unknown,
     stats: ?xit.patch.CommitStats = null,
-    hunks: []const Hunk,
-    // the hunk index this window starts at (0 = the first window).
-    window_start: usize,
-    // whether hunks exist before this window / after it.
-    has_prev: bool,
-    has_more: bool,
+    window: Diff.Window = .{},
 };
 
 // where links and clone commands for this repository are rooted.
@@ -146,10 +135,6 @@ pub fn init(
                 .message_truncated = truncated,
                 .author = try ui.Author.init(admin_moment, arena, md.author orelse ""),
                 .stats = if (repo_kind == .xit) try repo.commitStats(io, gpa, .{ .oid = &commit_object.oid }) else null,
-                .hunks = &.{},
-                .window_start = 0,
-                .has_prev = false,
-                .has_more = false,
             };
             count += 1;
         }
@@ -164,12 +149,7 @@ pub fn init(
             // the walk root shows the window the url asks for and its filter;
             // the rest show their first window, unfiltered.
             const window_start = if (i == 0) root_start else 0;
-            const rendered = renderCommitDiff(repo_kind, repo_opts, io, gpa, aa, repo, oid, window_start, diff_page, if (i == 0) root_path else "") catch
-                RenderedDiff{ .hunks = &.{}, .has_prev = false, .has_more = false };
-            commit.hunks = rendered.hunks;
-            commit.window_start = window_start;
-            commit.has_prev = rendered.has_prev;
-            commit.has_more = rendered.has_more;
+            commit.window = renderCommitDiff(repo_kind, repo_opts, io, gpa, aa, repo, oid, window_start, if (i == 0) root_path else "") catch .{ .start = window_start };
         }
     }
 
@@ -210,7 +190,7 @@ pub fn emptyResult(aa: std.mem.Allocator, location: ui.RoutablePage.RepoLocation
 }
 
 // the page's content for a route's, duped into `aa`. the diff window doesn't
-// carry over: each commit holds the one its pane shows as `window_start`.
+// carry over: each commit holds the one its pane shows as `window.start`.
 fn pageContent(aa: std.mem.Allocator, content: ui.RoutablePage.RepoCommitsRoute.Content) !Content {
     return switch (content) {
         .diff => |d| .{ .diff = .{ .path = try aa.dupe(u8, d.path.slice()) } },
@@ -218,14 +198,8 @@ fn pageContent(aa: std.mem.Allocator, content: ui.RoutablePage.RepoCommitsRoute.
     };
 }
 
-const RenderedDiff = struct {
-    hunks: []const Hunk,
-    has_prev: bool,
-    has_more: bool,
-};
-
 // render the window [start, start+len) of a commit's diff against its first
-// parent into `arena`-owned hunks. has_prev/has_more flag adjacent windows.
+// parent into `arena`-owned hunks. start/has_more identify adjacent windows.
 // a non-empty `path` filters to that file, so the window indexes its hunks.
 fn renderCommitDiff(
     comptime repo_kind: rp.RepoKind,
@@ -236,10 +210,9 @@ fn renderCommitDiff(
     repo: *rp.Repo(repo_kind, repo_opts),
     oid: [xit.hash.hexLen(repo_opts.hash)]u8,
     start: usize,
-    len: usize,
     path: []const u8,
-) !RenderedDiff {
-    const empty = RenderedDiff{ .hunks = &.{}, .has_prev = false, .has_more = false };
+) !Diff.Window {
+    const empty = Diff.Window{ .start = start };
 
     // load the commit so we can diff it against its first parent.
     var start_oids = [_][xit.hash.hexLen(repo_opts.hash)]u8{oid};
@@ -250,100 +223,7 @@ fn renderCommitDiff(
 
     const parent_maybe = commit_object.content.commit.metadata.firstParent();
 
-    var tree_diff = repo.treeDiff(io, gpa, parent_maybe, &commit_object.oid) catch return empty;
-    defer tree_diff.deinit();
-
-    var file_iter = repo.filePairs(io, gpa, .{ .tree = .{ .tree_diff = &tree_diff } }) catch return empty;
-
-    var hunks: std.ArrayList(Hunk) = .empty;
-    var index: usize = 0; // running hunk index across all files
-    var has_more = false;
-
-    file_loop: while (file_iter.next() catch null) |pair_val| {
-        var pair = pair_val;
-        defer pair.deinit();
-
-        if (path.len != 0 and !std.mem.eql(u8, pair.path, path)) continue;
-
-        var hunk_iter = df.HunkIterator(repo_kind, repo_opts).init(gpa, &pair.a, &pair.b) catch continue;
-        defer hunk_iter.deinit(gpa);
-
-        // the path label rides on the first of this file's hunks we actually show.
-        var path_attached = false;
-        while (try hunk_iter.next(gpa)) |hunk_val| {
-            var hunk = hunk_val;
-            defer hunk.deinit(gpa);
-
-            const i = index;
-            index += 1;
-            if (i < start) continue; // before this window
-            if (hunks.items.len >= len) {
-                has_more = true;
-                break :file_loop;
-            }
-            var lines: std.ArrayList([]const u8) = .empty;
-            try appendHunkLines(repo_kind, repo_opts, arena, &lines, &hunk_iter, &hunk);
-            try hunks.append(arena, .{
-                .path = if (path_attached) null else try arena.dupe(u8, pair.path),
-                .lines = try lines.toOwnedSlice(arena),
-            });
-            path_attached = true;
-        }
-    }
-
-    return .{ .hunks = try hunks.toOwnedSlice(arena), .has_prev = start > 0, .has_more = has_more };
-}
-
-// append a hunk's header and its edit lines, each prefixed with a right-aligned
-// line number in a column wide enough for the hunk's largest number, then a space
-fn appendHunkLines(
-    comptime repo_kind: rp.RepoKind,
-    comptime repo_opts: rp.RepoOpts(repo_kind),
-    arena: std.mem.Allocator,
-    lines: *std.ArrayList([]const u8),
-    hunk_iter: *df.HunkIterator(repo_kind, repo_opts),
-    hunk: *df.Hunk(repo_kind, repo_opts),
-) !void {
-    var max_num: usize = 1;
-    for (hunk.edits.items) |edit| {
-        const n = editLineNum(edit) + 1;
-        if (n > max_num) max_num = n;
-    }
-    const width = std.fmt.count("{d}", .{max_num});
-    // a run of spaces sliced to each line's leading pad.
-    const indent = try arena.alloc(u8, width);
-    @memset(indent, ' ');
-
-    for (hunk.edits.items) |edit| {
-        const text = switch (edit) {
-            .eql => |e| try hunk_iter.line_iter_b.get(e.new_line.num),
-            .ins => |e| try hunk_iter.line_iter_b.get(e.new_line.num),
-            .del => |e| try hunk_iter.line_iter_a.get(e.old_line.num),
-        };
-        defer switch (edit) {
-            .eql, .ins => hunk_iter.line_iter_b.free(text),
-            .del => hunk_iter.line_iter_a.free(text),
-        };
-        const prefix: u8 = switch (edit) {
-            .eql => ' ',
-            .ins => '+',
-            .del => '-',
-        };
-        const num_str = try std.fmt.allocPrint(arena, "{d}", .{editLineNum(edit) + 1});
-        try lines.append(arena, try std.fmt.allocPrint(arena, "{s}{s} {c}{s}", .{
-            indent[0 .. width - num_str.len], num_str, prefix, text,
-        }));
-    }
-}
-
-// the line number to show for an edit: the new-side number for kept and inserted
-// lines, the old-side number for deletions (0-based in the diff machinery).
-fn editLineNum(edit: df.Edit) usize {
-    return switch (edit) {
-        .eql => |e| e.new_line.num,
-        .ins => |e| e.new_line.num,
-        .del => |e| e.old_line.num,
-    };
+    return Diff.render(repo_kind, repo_opts, io, gpa, arena, repo, parent_maybe, oid, start, path);
 }
 
 // "YYYY-MM-DD" for a unix timestamp.
@@ -474,13 +354,7 @@ pub const View = struct {
         // the diff pane — a frame around a scroll of the hunks
         {
             var diff_outer = blk: {
-                var diff_scroll = blk2: {
-                    var diff_inner = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert });
-                    errdefer diff_inner.deinit(allocator);
-                    // fill the pane (content top-left, scroll bars pinned to the
-                    // edges) rather than shrinking to the diff content.
-                    break :blk2 try wgt.Scroll(ui.Widget).init(allocator, .{ .box = diff_inner }, .{ .direction = .both, .web_native = !session.is_terminal, .fill = true });
-                };
+                var diff_scroll = try Diff.View.initEmpty(allocator, session);
                 errdefer diff_scroll.deinit(allocator);
                 var frame = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = .hidden, .direction = .vert });
                 errdefer frame.deinit(allocator);
@@ -489,7 +363,7 @@ pub const View = struct {
                 // one), letting focus recovery descend into the diff pane after
                 // it's laid out beside a too-narrow list.
                 frame.getFocus().child_id = diff_scroll.getFocus().id;
-                try frame.children.put(allocator, diff_scroll.getFocus().id, .{ .widget = .{ .scroll = diff_scroll }, .rect = null, .min_size = null });
+                try frame.children.put(allocator, diff_scroll.getFocus().id, .{ .widget = .{ .diff_view = diff_scroll }, .rect = null, .min_size = null });
                 break :blk frame;
             };
             errdefer diff_outer.deinit(allocator);
@@ -517,30 +391,6 @@ pub const View = struct {
         row.getFocus().mode = .all;
         if (link.len != 0) row.getFocus().kind = .{ .custom = link };
         try box.children.put(allocator, row.getFocus().id, .{ .widget = .{ .text_box = row }, .rect = null, .min_size = null, .max_size = .{ .width = null, .height = 5 } });
-    }
-
-    // one hunk as a focusable multi-line text box. its lines sit flush (the
-    // inner Text rows have no border). `lines` are joined into the page arena
-    // (text_box borrows it).
-    fn addHunkBox(self: *View, allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), lines: []const []const u8) !void {
-        if (lines.len == 0) return;
-        const text = try std.mem.join(self.session.page_arena.allocator(), "\n", lines);
-        var tb = try wgt.TextBox.init(allocator, text, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
-        errdefer tb.deinit(allocator);
-        tb.getFocus().mode = .all;
-        try box.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
-    }
-
-    // a focusable file-path label shown above the first hunk of each file. it
-    // links to this page filtered to that file, so activating it navigates
-    // there.
-    fn addPathBox(self: *View, allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), path: []const u8, oid: []const u8) !void {
-        const link = try commitsLink(self.session.page_arena, self.data.location, oid, 0, path);
-        var tb = try wgt.TextBox.init(allocator, path, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
-        errdefer tb.deinit(allocator);
-        tb.getFocus().mode = .all;
-        tb.getFocus().kind = .{ .custom = link };
-        try box.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
     }
 
     // a focusable window-navigation row ("previous"/"next"). it's a link to this
@@ -611,7 +461,7 @@ pub const View = struct {
     }
 
     fn diffScroll(self: *View) *wgt.Scroll(ui.Widget) {
-        return &self.diffOuter().children.values()[0].widget.scroll;
+        return &self.diffOuter().children.values()[0].widget.diff_view.scroll;
     }
 
     fn diffInner(self: *View) *wgt.Box(ui.Widget) {
@@ -722,14 +572,7 @@ pub const View = struct {
                 try self.addMessageBox(allocator, inner, commit, .whole);
             },
             .diff => |d| {
-                if (d.path.len != 0) {
-                    // the file's path, then a row returning to this commit's unfiltered diff.
-                    var label = try wgt.TextBox.init(allocator, d.path, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
-                    errdefer label.deinit(allocator);
-                    label.getFocus().mode = .all;
-                    try inner.children.put(allocator, label.getFocus().id, .{ .widget = .{ .text_box = label }, .rect = null, .min_size = null });
-                    try self.addNavLink(allocator, inner, "← all files", commit.oid, 0, "");
-                } else {
+                if (d.path.len == 0) {
                     try self.addMessageBox(allocator, inner, commit, .preview);
                     if (commit.author != .unknown) {
                         var tb = try ui.authorBox(allocator, self.session.page_arena, commit.author);
@@ -739,14 +582,11 @@ pub const View = struct {
                     try self.addViewFilesLink(allocator, inner, commit.oid);
                 }
 
-                // a "previous" row and a "next" row at the bottom reload the page
-                // on the adjacent diff window.
-                if (commit.has_prev) try self.addNavLink(allocator, inner, "← previous", commit.oid, commit.window_start -| diff_page, d.path);
-                for (commit.hunks) |hunk| {
-                    if (d.path.len == 0) if (hunk.path) |hunk_path| try self.addPathBox(allocator, inner, hunk_path, commit.oid);
-                    try self.addHunkBox(allocator, inner, hunk.lines);
-                }
-                if (commit.has_more) try self.addNavLink(allocator, inner, "next →", commit.oid, commit.window_start + diff_page, d.path);
+                try (Diff{
+                    .route = .{ .commit = .{ .location = self.data.location, .oid = commit.oid } },
+                    .path = d.path,
+                    .window = commit.window,
+                }).appendWindow(allocator, self.session, inner);
             },
         }
 
@@ -773,7 +613,11 @@ pub const View = struct {
         }
         if (key == .arrow_up and self.contentAtTop() and self.header().focusCloneUrl(root_focus)) return;
         if (self.diffActive()) {
-            try self.diffInput(key, root_focus);
+            if (key == .arrow_left and self.diffScroll().x == 0) {
+                self.focusList(root_focus);
+            } else {
+                try self.diffOuter().children.values()[0].widget.diff_view.input(allocator, key, root_focus);
+            }
         } else {
             try self.listInput(key, root_focus);
         }
@@ -789,152 +633,27 @@ pub const View = struct {
         }
         switch (key) {
             .enter => if (self.selectedCommitIndex() != null)
-                try self.focusDiff(root_focus)
+                self.focusDiff(root_focus)
             else if (self.data.next_start) |next| {
                 if (self.data.location.commitsRoute(.object, next, 0, "")) |route|
                     try self.session.navigate(route);
             },
-            .arrow_right => try self.focusDiff(root_focus),
+            .arrow_right => self.focusDiff(root_focus),
             else => {},
         }
-    }
-
-    fn diffInput(self: *View, key: Key, root_focus: *Focus) !void {
-        const sc = self.diffScroll();
-        switch (key) {
-            // left scrolls horizontally, then leaves for the list once flush left.
-            .arrow_left => {
-                if (sc.x > 0) {
-                    sc.x -= 1;
-                    self.diffScroll().clampToContent();
-                } else try self.focusList(root_focus);
-            },
-            .arrow_right => {
-                sc.x += 1;
-                self.diffScroll().clampToContent();
-            },
-            .arrow_up => try self.moveDiff(root_focus, -1),
-            .arrow_down => try self.moveDiff(root_focus, 1),
-            .page_up => try self.pageDiff(root_focus, -10),
-            .page_down => try self.pageDiff(root_focus, 10),
-            .home => try self.jumpDiff(root_focus, false),
-            .end => try self.jumpDiff(root_focus, true),
-            // Enter / a click on a "previous"/"next" row follow its "a:" link in
-            // the host (it reloads the adjacent window), so they don't reach here.
-            .mouse => |mouse| switch (mouse.action) {
-                .scroll => |dir| try self.moveDiff(root_focus, if (dir == .up) -1 else 1),
-                else => {},
-            },
-            else => {},
-        }
-    }
-
-    // move one step in `delta` (+ down, - up). in the terminal, `delta` is a
-    // line count unless there is a new hunk visible (in which case it is a
-    // hunk count). on the web `delta` is always a hunk count.
-    fn moveDiff(self: *View, root_focus: *Focus, delta: isize) !void {
-        const inner = self.diffInner();
-        const keys = inner.children.keys();
-        if (keys.len == 0) return;
-        const cur: usize = if (root_focus.grandchild_id) |g| (inner.children.getIndex(g) orelse 0) else 0;
-        const target = @as(isize, @intCast(cur)) + delta;
-        const in_range = target >= 0 and target < @as(isize, @intCast(keys.len));
-
-        if (self.session.is_terminal) {
-            if (in_range and self.hunkVisible(@intCast(target))) {
-                root_focus.setFocus(keys[@intCast(target)]);
-                return;
-            }
-
-            const sc = self.diffScroll();
-            sc.y += delta * 5; // magnify because it's a line count
-            self.diffScroll().clampToContent();
-            if (in_range and self.hunkVisible(@intCast(target))) {
-                root_focus.setFocus(keys[@intCast(target)]);
-            }
-        } else {
-            if (in_range) {
-                root_focus.setFocus(keys[@intCast(target)]);
-            }
-        }
-    }
-
-    // page a fixed number of lines, then focus the leading visible hunk
-    // (bottom-most when paging down, top-most when paging up). in the
-    // terminal, `delta` is a line count, and on the web it's a hunk count.
-    fn pageDiff(self: *View, root_focus: *Focus, delta: isize) !void {
-        if (self.session.is_terminal) {
-            const sc = self.diffScroll();
-            sc.y += delta * 5; // magnify because it's a line count
-            self.diffScroll().clampToContent();
-            try self.focusVisible(root_focus, delta > 0);
-        } else {
-            const inner = self.diffInner();
-            const keys = inner.children.keys();
-            if (keys.len == 0) return;
-            const cur: isize = if (root_focus.grandchild_id) |g| @intCast(inner.children.getIndex(g) orelse 0) else 0;
-            const target: usize = @intCast(std.math.clamp(cur + delta, 0, @as(isize, @intCast(keys.len - 1))));
-            root_focus.setFocus(keys[target]);
-        }
-    }
-
-    // jump to the first or last hunk. on the web the browser scrolls to the
-    // focused hunk; on the terminal pin the scroll to the top/bottom too.
-    fn jumpDiff(self: *View, root_focus: *Focus, to_end: bool) !void {
-        const inner = self.diffInner();
-        const keys = inner.children.keys();
-        if (keys.len == 0) return;
-        if (self.session.is_terminal) {
-            const sc = self.diffScroll();
-            sc.y = if (to_end) std.math.maxInt(isize) else 0;
-            self.diffScroll().clampToContent();
-        }
-        root_focus.setFocus(if (to_end) keys[keys.len - 1] else keys[0]);
-    }
-
-    // whether hunk `index` is at least partly within the diff viewport, per the
-    // last build's layout rects (content space) and the current scroll offset.
-    fn hunkVisible(self: *View, index: usize) bool {
-        const inner = self.diffInner();
-        const sc = self.diffScroll();
-        const vp = sc.grid orelse return false;
-        const r = inner.children.values()[index].rect orelse return false;
-        const top = sc.y;
-        const bottom = sc.y + @as(isize, @intCast(vp.size.height - sc.bar_h));
-        return (r.y + @as(isize, @intCast(r.size.height))) > top and r.y < bottom;
-    }
-
-    // focus the visible hunk at the scroll's leading edge. `prefer_last` picks
-    // the bottom-most visible (for downward motion), else the top-most.
-    fn focusVisible(self: *View, root_focus: *Focus, prefer_last: bool) !void {
-        const inner = self.diffInner();
-        const sc = self.diffScroll();
-        const vp = sc.grid orelse return;
-        const top = sc.y;
-        const bottom = sc.y + @as(isize, @intCast(vp.size.height - sc.bar_h));
-        var chosen: ?usize = null;
-        for (inner.children.keys(), inner.children.values()) |id, *child| {
-            const r = child.rect orelse continue; // content-space layout rect
-            const r_top = r.y;
-            const r_bot = r.y + @as(isize, @intCast(r.size.height));
-            if (r_bot <= top or r_top >= bottom) continue; // not visible
-            chosen = id;
-            if (!prefer_last) break; // first visible
-        }
-        if (chosen) |id| root_focus.setFocus(id);
     }
 
     // enter the diff pane. the host arrives here on right-arrow or Enter from the
     // list. a diff with no rows can't be entered. setFocus handles the too-narrow
     // case where the pane isn't laid out yet (it gets selected, then focused after
     // the next build, landing on its remembered hunk).
-    fn focusDiff(self: *View, root_focus: *Focus) !void {
+    fn focusDiff(self: *View, root_focus: *Focus) void {
         if (self.diffInner().children.count() == 0) return;
         root_focus.setFocus(self.diffOuter().getFocus().id);
     }
 
     // return to the list.
-    fn focusList(self: *View, root_focus: *Focus) !void {
+    fn focusList(self: *View, root_focus: *Focus) void {
         root_focus.setFocus(self.listScroll().getFocus().id);
     }
 
@@ -994,7 +713,7 @@ fn filesObjectLink(page_arena: *std.heap.ArenaAllocator, location: ui.RoutablePa
 fn commitRowLink(page_arena: *std.heap.ArenaAllocator, location: ui.RoutablePage.RepoLocation, commit: Commit, content: Content) ![]const u8 {
     const route = (switch (content) {
         .message => location.commitMessageRoute(.object, commit.oid),
-        .diff => |diff| location.commitsRoute(.object, commit.oid, commit.window_start, diff.path),
+        .diff => |diff| location.commitsRoute(.object, commit.oid, commit.window.start, diff.path),
     }) orelse return error.RouteTooLong;
     const url = try route.toUrl(page_arena);
     return std.fmt.allocPrint(page_arena.allocator(), "ai:{s}", .{url});

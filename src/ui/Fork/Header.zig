@@ -91,11 +91,12 @@ pub const View = struct {
         const current_tag = std.meta.activeTag(session.data.current_page);
         const routes = [_]ui.RoutablePage{
             ui.RoutablePage.forkPatchRoute(identity, data.id) orelse return error.RouteTooLong,
+            ui.RoutablePage.forkDiffRoute(identity, data.id, 0, "") orelse return error.RouteTooLong,
             ui.RoutablePage.forkFilesRoute(identity, data.id, data.oid, "", 0) orelse return error.RouteTooLong,
             ui.RoutablePage.forkCommitsRoute(identity, data.id, data.oid, 0, "") orelse return error.RouteTooLong,
         };
-        const tags = [_]std.meta.Tag(ui.RoutablePage){ .fork_patch, .fork_files, .fork_commits };
-        const labels = [_][]const u8{ "patch", "files", commits_label };
+        const tags = [_]std.meta.Tag(ui.RoutablePage){ .fork_patch, .fork_diff, .fork_files, .fork_commits };
+        const labels = [_][]const u8{ "patch", "diff", "files", commits_label };
         var selected_tab: ?usize = null;
 
         for (routes, tags, labels) |route, tag, label| {

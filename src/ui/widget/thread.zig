@@ -534,6 +534,8 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                 if (entryHasFork(entry) and self.session.data.current_page.parent() != .fork) {
                     const route = forkRoute(self.data.identity, entry.id) orelse return error.RouteTooLong;
                     try addToolButton(allocator, row, "view fork", try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}));
+                    const diff_route = ui.RoutablePage.forkDiffRoute(self.data.identity, entry.id, 0, "") orelse return error.RouteTooLong;
+                    try addToolButton(allocator, row, "view diff", try std.fmt.allocPrint(pa, "a:{s}", .{try diff_route.toUrl(self.session.page_arena)}));
                 }
 
                 {

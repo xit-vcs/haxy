@@ -15,6 +15,7 @@ const inp = @import("./input.zig");
 pub const Header = @import("./Fork/Header.zig");
 pub const Files = @import("./Repo/Files.zig");
 pub const Commits = @import("./Repo/Commits.zig");
+pub const Diff = @import("./Repo/Diff.zig");
 pub const Patches = @import("./Repo/Patches.zig");
 pub const Settings = @import("./Settings.zig");
 pub const Auth = @import("./Auth.zig");
@@ -24,6 +25,7 @@ header: Header,
 files: Files,
 commits: Commits,
 patch: Patches,
+diff: Diff,
 settings: Settings,
 auth: Auth,
 quit: Quit,
@@ -125,12 +127,25 @@ pub fn init(arena: *std.heap.ArenaAllocator, session: *ui.Session, route: ui.Rou
     } };
     const files = try Files.init(.xit, .{}, arena, &fork_repo, io, arena.child_allocator, location, requested_ref, requested_value, files_path, files_line);
     const commits = try Commits.init(.xit, .{}, arena, &fork_repo, io, arena.child_allocator, haxy_moment, location, requested_ref, requested_value, commits_content, commits_base_oid);
+    const diff_start: usize = switch (route) {
+        .fork_diff => |d| d.start,
+        else => 0,
+    };
+    const diff_path = switch (route) {
+        .fork_diff => |*d| try aa.dupe(u8, d.path.slice()),
+        else => "",
+    };
 
     return .{
         .header = try Header.init(arena, target_record.event.name, owner.event.name, &id_hex, requested_value),
         .files = files,
         .commits = commits,
         .patch = patch_data,
+        .diff = .{
+            .route = .{ .fork = .{ .identity = try aa.dupe(u8, identity.identity), .id = try aa.dupe(u8, &id_hex) } },
+            .path = diff_path,
+            .window = try Diff.render(.xit, .{}, io, arena.child_allocator, aa, &fork_repo, &commits_base_oid, fork_oid, diff_start, diff_path),
+        },
         .settings = Settings.init(),
         .auth = Auth.init(),
         .quit = Quit.init(),
@@ -158,6 +173,11 @@ pub const View = struct {
             var patch_detail = try Patches.Detail.init(allocator, &data.patch, session, selected.*, .{ .actions = data.patch.repo_source != null });
             errdefer patch_detail.deinit(allocator);
             try stack.children.put(allocator, patch_detail.getFocus().id, .{ .repo_patch_detail = patch_detail });
+            {
+                var diff = try Diff.View.init(allocator, &data.diff, session);
+                errdefer diff.deinit(allocator);
+                try stack.children.put(allocator, diff.getFocus().id, .{ .diff_view = diff });
+            }
             {
                 var files = try Files.View.init(allocator, &data.files, session);
                 errdefer files.deinit(allocator);

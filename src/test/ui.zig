@@ -5,6 +5,73 @@ const Commits = @import("../ui/Repo/Commits.zig");
 const Events = @import("../ui/Repo/Events.zig");
 const xit = @import("xit");
 
+test "diff windows span the net changes across commits" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    const Diff = Commits.Diff;
+    const opts: xit.repo.RepoOpts(.xit) = .{ .is_test = true };
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const path = try temp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(path);
+    var repo = try xit.repo.Repo(.xit, opts).init(io, allocator, .{ .path = path });
+    defer repo.deinit(io, allocator);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    // the shared base is absent from the diff
+    {
+        const file = try repo.core.work_dir.createFile(io, "shared.txt", .{});
+        defer file.close(io);
+        try file.writeStreamingAll(io, "shared\n");
+    }
+    try repo.add(io, allocator, &.{"shared.txt"});
+    const base = try repo.commit(io, allocator, .{ .message = "base" });
+
+    // changes from earlier commits must survive into the combined diff
+    var head = base;
+    for (0..Diff.page_size + 1) |i| {
+        var name_buf: [32]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buf, "file-{d:0>2}.txt", .{i});
+        {
+            const file = try repo.core.work_dir.createFile(io, name, .{});
+            defer file.close(io);
+            try file.writeStreamingAll(io, "added\n");
+        }
+        try repo.add(io, allocator, &.{name});
+        head = try repo.commit(io, allocator, .{ .message = "add file" });
+    }
+    const first = try Diff.render(.xit, opts, io, allocator, arena.allocator(), &repo, &base, head, 0, "");
+    try std.testing.expectEqual(Diff.page_size, first.hunks.len);
+    try std.testing.expect(first.start == 0 and first.has_more);
+    try std.testing.expectEqualStrings("file-00.txt", first.hunks[0].path orelse return error.MissingPath);
+    const last = try Diff.render(.xit, opts, io, allocator, arena.allocator(), &repo, &base, head, Diff.page_size, "");
+    try std.testing.expectEqual(1, last.hunks.len);
+    try std.testing.expect(last.start > 0 and !last.has_more);
+    try std.testing.expectEqualStrings("file-10.txt", last.hunks[0].path orelse return error.MissingPath);
+    const filtered = try Diff.render(.xit, opts, io, allocator, arena.allocator(), &repo, &base, head, 0, "file-00.txt");
+    try std.testing.expectEqual(1, filtered.hunks.len);
+    try std.testing.expect(!filtered.has_more);
+
+    // the standalone pane links to the next fork diff window in both clients
+    const id = "11111111111111111111111111111111";
+    const data = Diff{ .route = .{ .fork = .{ .identity = "alice/project", .id = id } }, .window = first };
+    for ([_]bool{ true, false }) |terminal| {
+        var session = ui.Session{ .arena = &arena, .page_arena = &arena, .is_terminal = terminal };
+        session.data.current_page = ui.RoutablePage.forkDiffRoute("alice/project", id, 0, "") orelse return error.BadRoute;
+        var view = try Diff.View.init(allocator, &data, &session);
+        defer view.deinit(allocator);
+        const focus = view.getFocus();
+        try view.build(allocator, .{ .min_size = .{ .width = null, .height = null }, .max_size = .{ .width = 100, .height = 30 } }, focus);
+        const box = &view.scroll.child.box;
+        try std.testing.expectEqual(first.hunks.len * 2 + 1, box.children.count());
+        const file = ui.crossPageLink(focus, box.children.keys()[0], session.data) orelse return error.MissingFileLink;
+        try std.testing.expectEqualStrings("file-00.txt", file.fork_diff.path.slice());
+        const next = ui.crossPageLink(focus, box.children.keys()[box.children.count() - 1], session.data) orelse return error.MissingLink;
+        try std.testing.expectEqual(Diff.page_size, next.fork_diff.start);
+    }
+}
+
 // the "next" row at the bottom of the commits list must be recognized as a
 // cross-page link (so a click navigates), exactly like the diff pane's "next".
 test "commits list next row is a cross-page link" {
@@ -21,7 +88,7 @@ test "commits list next row is a cross-page link" {
         .ref_or_oid = .object,
         .ref_or_oid_value = oid0,
         .commits = &.{
-            .{ .oid = oid0, .date = "2024-01-01", .message = "first", .hunks = &.{}, .window_start = 0, .has_prev = false, .has_more = false },
+            .{ .oid = oid0, .date = "2024-01-01", .message = "first", .window = .{} },
         },
         .next_start = next_oid,
         .header = try Commits.Header.init(arena.allocator(), .object, oid0),
