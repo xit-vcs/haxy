@@ -558,14 +558,6 @@ pub const View = struct {
         inner.children.clearAndFree(allocator);
         inner.getFocus().child_id = null;
 
-        if (commit.stats) |stats| {
-            const text = try std.fmt.allocPrint(self.session.page_arena.allocator(), "+{d}, -{d}", .{ stats.lines_added, stats.lines_removed });
-            var tb = try wgt.TextBox.init(allocator, text, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none, .label = " lines changed " });
-            errdefer tb.deinit(allocator);
-            tb.getFocus().mode = .all;
-            try inner.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
-        }
-
         switch (self.paneContent(sel)) {
             .message => {
                 try self.addNavLink(allocator, inner, "← back to diff", commit.oid, 0, "");
@@ -577,6 +569,22 @@ pub const View = struct {
                     if (commit.author != .unknown) {
                         var tb = try ui.authorBox(allocator, self.session.page_arena, commit.author);
                         errdefer tb.deinit(allocator);
+                        try inner.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
+                    }
+                    if (commit.stats) |stats| {
+                        var text: std.Io.Writer.Allocating = .init(allocator);
+                        defer text.deinit();
+                        try text.writer.print("lines changed: {d}", .{stats.lines_added + stats.lines_changed});
+                        if (stats.lines_removed != 0) try text.writer.print("\nlines removed: {d}", .{stats.lines_removed});
+                        const bytes_added = stats.bytes_added >= stats.bytes_removed;
+                        const bytes = if (bytes_added) stats.bytes_added - stats.bytes_removed else stats.bytes_removed - stats.bytes_added;
+                        try text.writer.print("\nbytes {s}: {d}\nfiles changed: {d}", .{
+                            if (bytes_added) "added" else "removed", bytes, stats.files_added + stats.files_changed,
+                        });
+                        if (stats.files_removed != 0) try text.writer.print("\nfiles removed: {d}", .{stats.files_removed});
+                        var tb = try wgt.TextBox.init(allocator, text.written(), .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none, .label = " stats " });
+                        errdefer tb.deinit(allocator);
+                        tb.getFocus().mode = .all;
                         try inner.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
                     }
                     try self.addViewFilesLink(allocator, inner, commit.oid);

@@ -814,6 +814,7 @@ pub fn main(init: std.process.Init) !void {
                 };
             }
             try evt.consume(.repo, .xit, .{}, io, allocator, &template_repo, evt.events_ref, &discussion_comment_events);
+            try template_repo.patchAll(io, allocator, null);
             try template_repo.addConfig(io, allocator, .{ .name = "core.bare", .value = "true" });
         }
 
@@ -1055,6 +1056,7 @@ fn seedPatchRevision(
         try writer.writer.print("{s} ({d}/{d})", .{ title, i + 1, contents.len });
         source_oid = try fork_repo.commit(io, allocator, .{ .message = writer.written(), .timestamp = timestamp + i });
     }
+    try fork_repo.patchAll(io, allocator, null);
     try fork_repo.addConfig(io, allocator, .{ .name = "core.bare", .value = "true" });
     try fork_dir.deleteFile(io, path);
     const revision_id = evt.EventWithId.randomId(random);
