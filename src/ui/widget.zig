@@ -1291,7 +1291,7 @@ pub const CopyableText = struct {
         errdefer box.deinit(allocator);
 
         if (choices.len > 1) for (choices) |choice| {
-            var selector_box = try wgt.TextBox.init(allocator, choice.selector, .{ .border_style = .hidden, .wrap_kind = .none });
+            var selector_box = try wgt.TextBox.init(allocator, choice.selector, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .none });
             errdefer selector_box.deinit(allocator);
             selector_box.getFocus().mode = .all;
             try box.children.put(allocator, selector_box.getFocus().id, .{ .widget = .{ .text_box = selector_box }, .rect = null, .min_size = .{ .width = choice.selector.len + 2, .height = 3 } });
@@ -1299,6 +1299,7 @@ pub const CopyableText = struct {
 
         var text_input = try wgt.TextInput.init(allocator, .{
             .border_style = .single,
+            .rounded_corners = true,
             .label = choices[0].label,
             .bottom_label = choices[0].bottom_label,
             .read_only = true,
