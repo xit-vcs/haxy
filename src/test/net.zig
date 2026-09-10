@@ -13,9 +13,11 @@ const net = xit.net;
 test "fetch small" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    try testFetch(.xit, .{ .wire = .http }, 3000, io, allocator);
+    try testFetch(.xit, .{ .wire = .http }, .sha1, 3001, io, allocator);
+    try testFetch(.xit, .{ .wire = .http }, .sha256, 3003, io, allocator);
     if (.windows != builtin.os.tag) {
-        try testFetch(.xit, .{ .wire = .ssh }, 3002, io, allocator);
+        try testFetch(.xit, .{ .wire = .ssh }, .sha1, 3005, io, allocator);
+        try testFetch(.xit, .{ .wire = .ssh }, .sha256, 3007, io, allocator);
     }
 }
 
@@ -23,7 +25,8 @@ test "push small" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
     if (.windows != builtin.os.tag) {
-        try testPush(.xit, .{ .wire = .ssh }, 3004, io, allocator);
+        try testPush(.xit, .{ .wire = .ssh }, .sha1, 3101, io, allocator);
+        try testPush(.xit, .{ .wire = .ssh }, .sha256, 3103, io, allocator);
     }
 }
 
@@ -31,7 +34,8 @@ test "push creates missing repo under serve" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
     if (.windows != builtin.os.tag) {
-        try testPushCreatesMissingRepo(.xit, .{ .wire = .ssh }, 3006, io, allocator);
+        // the server creates missing repositories as sha1
+        try testPushCreatesMissingRepo(.xit, .{ .wire = .ssh }, 3201, io, allocator);
     }
 }
 
@@ -39,34 +43,41 @@ test "push events" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
     if (.windows != builtin.os.tag) {
-        try testPushEvents(.xit, .{ .wire = .ssh }, 3008, io, allocator);
+        try testPushEvents(.xit, .{ .wire = .ssh }, .sha1, 3301, io, allocator);
+        try testPushEvents(.xit, .{ .wire = .ssh }, .sha256, 3303, io, allocator);
     }
 }
 
 test "clone small" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    try testClone(.xit, .{ .wire = .http }, false, 3010, io, allocator);
+    try testClone(.xit, .{ .wire = .http }, false, .sha1, 3401, io, allocator);
+    try testClone(.xit, .{ .wire = .http }, false, .sha256, 3403, io, allocator);
     if (.windows != builtin.os.tag) {
-        try testClone(.xit, .{ .wire = .ssh }, false, 3012, io, allocator);
+        try testClone(.xit, .{ .wire = .ssh }, false, .sha1, 3405, io, allocator);
+        try testClone(.xit, .{ .wire = .ssh }, false, .sha256, 3407, io, allocator);
     }
 }
 
 test "clone small subprocess" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    try testClone(.git, .{ .wire = .http }, true, 3014, io, allocator);
+    try testClone(.git, .{ .wire = .http }, true, .sha1, 3501, io, allocator);
+    try testClone(.git, .{ .wire = .http }, true, .sha256, 3503, io, allocator);
     if (.windows != builtin.os.tag) {
-        try testClone(.git, .{ .wire = .ssh }, true, 3016, io, allocator);
+        try testClone(.git, .{ .wire = .ssh }, true, .sha1, 3505, io, allocator);
+        try testClone(.git, .{ .wire = .ssh }, true, .sha256, 3507, io, allocator);
     }
 }
 
 test "fetch large subprocess" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    try testFetchLarge(.git, .{ .wire = .http }, true, 3018, io, allocator);
+    try testFetchLarge(.git, .{ .wire = .http }, true, .sha1, 3601, io, allocator);
+    try testFetchLarge(.git, .{ .wire = .http }, true, .sha256, 3603, io, allocator);
     if (.windows != builtin.os.tag) {
-        try testFetchLarge(.git, .{ .wire = .ssh }, true, 3020, io, allocator);
+        try testFetchLarge(.git, .{ .wire = .ssh }, true, .sha1, 3605, io, allocator);
+        try testFetchLarge(.git, .{ .wire = .ssh }, true, .sha256, 3607, io, allocator);
     }
 }
 
@@ -74,7 +85,8 @@ test "push large subprocess" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
     if (.windows != builtin.os.tag) {
-        try testPushLarge(.git, .{ .wire = .ssh }, true, 3022, io, allocator);
+        try testPushLarge(.git, .{ .wire = .ssh }, true, .sha1, 3701, io, allocator);
+        try testPushLarge(.git, .{ .wire = .ssh }, true, .sha256, 3703, io, allocator);
     }
 }
 
@@ -82,7 +94,8 @@ test "push fork" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
     if (.windows != builtin.os.tag) {
-        try testPushFork(3024, io, allocator);
+        try testPushFork(.sha1, 3801, io, allocator);
+        try testPushFork(.sha256, 3803, io, allocator);
     }
 }
 
@@ -147,6 +160,7 @@ fn runServer(
 fn testFetch(
     comptime repo_kind: rp.RepoKind,
     comptime transport_def: net.TransportDefinition,
+    comptime hash_kind: hash.HashKind,
     comptime port: u16,
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -165,7 +179,7 @@ fn testFetch(
     const server_path = (try repoOnDiskPath(io, allocator, temp_path, "testrepo", true)).?;
     defer allocator.free(server_path);
 
-    var server_repo = try rp.Repo(.xit, .{ .is_test = true }).init(io, allocator, .{ .bare = true, .path = server_path });
+    var server_repo = try rp.Repo(.xit, .{ .hash = hash_kind, .is_test = true }).init(io, allocator, .{ .bare = true, .path = server_path });
     defer server_repo.deinit(io, allocator);
 
     // make a commit
@@ -185,7 +199,7 @@ fn testFetch(
     const client_path = try std.fs.path.join(allocator, &.{ temp_path, "client" });
     defer allocator.free(client_path);
 
-    var client_repo = try rp.Repo(repo_kind, .{ .is_test = true }).init(io, allocator, .{ .path = client_path });
+    var client_repo = try rp.Repo(repo_kind, .{ .hash = hash_kind, .is_test = true }).init(io, allocator, .{ .path = client_path });
     defer client_repo.deinit(io, allocator);
 
     // add remote
@@ -265,6 +279,7 @@ fn testFetch(
 fn testPush(
     comptime repo_kind: rp.RepoKind,
     comptime transport_def: net.TransportDefinition,
+    comptime hash_kind: hash.HashKind,
     comptime port: u16,
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -283,7 +298,7 @@ fn testPush(
     const server_path = (try repoOnDiskPath(io, allocator, temp_path, "testrepo", true)).?;
     defer allocator.free(server_path);
 
-    var server_repo = try rp.Repo(.xit, .{ .is_test = true }).init(io, allocator, .{ .bare = true, .path = server_path });
+    var server_repo = try rp.Repo(.xit, .{ .hash = hash_kind, .is_test = true }).init(io, allocator, .{ .bare = true, .path = server_path });
     defer server_repo.deinit(io, allocator);
 
     // add config
@@ -298,7 +313,7 @@ fn testPush(
     const client_path = try std.fs.path.join(allocator, &.{ temp_path, "client" });
     defer allocator.free(client_path);
 
-    var client_repo = try rp.Repo(repo_kind, .{ .is_test = true }).init(io, allocator, .{ .path = client_path });
+    var client_repo = try rp.Repo(repo_kind, .{ .hash = hash_kind, .is_test = true }).init(io, allocator, .{ .path = client_path });
     defer client_repo.deinit(io, allocator);
 
     // make a commit
@@ -478,10 +493,13 @@ fn testPush(
 }
 
 fn testPushFork(
+    comptime hash_kind: hash.HashKind,
     comptime port: u16,
     io: std.Io,
     allocator: std.mem.Allocator,
 ) !void {
+    const repo_opts: rp.RepoOpts(.xit) = .{ .hash = hash_kind };
+
     var temp = std.testing.tmpDir(.{});
     defer temp.cleanup();
     const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
@@ -493,7 +511,7 @@ fn testPushFork(
     const target_path = (try repoOnDiskPath(io, allocator, temp_path, "target", true)).?;
     defer allocator.free(target_path);
     {
-        var target_repo = try rp.Repo(.xit, .{}).init(io, allocator, .{ .bare = true, .path = target_path });
+        var target_repo = try rp.Repo(.xit, repo_opts).init(io, allocator, .{ .bare = true, .path = target_path });
         defer target_repo.deinit(io, allocator);
         _ = try commitServer(&target_repo, io, allocator, .{ .files = &.{.{ .path = "main.txt", .content = "base contents\n" }} }, .{ .author = "admin <admin@example.test>", .message = "initial code" });
     }
@@ -520,7 +538,7 @@ fn testPushFork(
         const target = (try evt.Repo.readByOwnerAndName(evt.AdminDB, evt.admin_repo_opts.hash, moment, &arena, "admin", "target")) orelse return error.NotFound;
         repo_id = target.event_id;
         @memcpy(&user_id, target.repo.event.user_id);
-        break :blk try fork.create(.{}, io, allocator, repos_dir, &admin, .{
+        break :blk try fork.create(repo_opts, io, allocator, repos_dir, &admin, .{
             .id = fork_id_hex,
             .user_id = user_id,
             .repo_id = repo_id,
@@ -538,7 +556,7 @@ fn testPushFork(
     defer allocator.free(client_path);
     const ssh_cmd = (try sshCommand(true, allocator, temp_path, port)).?;
     defer allocator.free(ssh_cmd);
-    var client = try rp.Repo(.xit, .{ .is_test = true }).clone(
+    var client = try rp.Repo(.xit, .{ .hash = hash_kind, .is_test = true }).clone(
         io,
         allocator,
         "git@localhost:admin/target",
@@ -564,20 +582,20 @@ fn testPushFork(
 
     var first_revision_id: [evt.event_id_size]u8 = undefined;
     {
-        var draft = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = draft_path });
+        var draft = try rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = draft_path });
         defer draft.deinit(io, allocator);
         try std.testing.expect(try draft.isBare(io, allocator));
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
-        const moment = try evt.currentMoment(.{}, &draft);
-        const patch = (try evt.Patch.readById(evt.EventDB(.sha1), .sha1, moment, &arena, &fork_id)) orelse return error.NotFound;
+        const moment = try evt.currentMoment(repo_opts, &draft);
+        const patch = (try evt.Patch.readById(evt.EventDB(hash_kind), hash_kind, moment, &arena, &fork_id)) orelse return error.NotFound;
         try std.testing.expect(!patch.removed);
         try std.testing.expectEqualStrings(&source_oid, &(try draft.readRef(io, fork.ref) orelse return error.NotFound));
         const selected = patch.event.revision orelse return error.NotFound;
         try std.testing.expectEqualStrings("master", patch.event.target_branch);
         try std.testing.expectEqualStrings(&source_oid, selected.source_oid);
         first_revision_id = try evt.parseEventId(&selected.id);
-        const revision = (try evt.PatchRev.readById(evt.EventDB(.sha1), .sha1, moment, &arena, &first_revision_id)) orelse return error.NotFound;
+        const revision = (try evt.PatchRev.readById(evt.EventDB(hash_kind), hash_kind, moment, &arena, &first_revision_id)) orelse return error.NotFound;
         try std.testing.expectEqualStrings(&source_oid, revision.event.source_oid);
     }
 
@@ -588,10 +606,10 @@ fn testPushFork(
     {
         var admin = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = admin_path });
         defer admin.deinit(io, allocator);
-        var target = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = target_path });
+        var target = try rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = target_path });
         defer target.deinit(io, allocator);
         try target.addBranch(io, .{ .name = "feature" });
-        try pch.publish(.{}, io, allocator, &admin, &target, draft_path, .{
+        try pch.publish(repo_opts, io, allocator, &admin, &target, draft_path, .{
             .id = fork_id_hex,
             .user_id = user_id,
             .repo_id = repo_id,
@@ -600,9 +618,9 @@ fn testPushFork(
         });
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
-        const moment = try evt.currentMoment(.{}, &target);
-        const patch = (try evt.Patch.readById(evt.EventDB(.sha1), .sha1, moment, &arena, &fork_id)) orelse return error.NotFound;
-        try evt.Patch.update(.xit, .{}, io, allocator, &target, &fork_id, .{ .fields = .{
+        const moment = try evt.currentMoment(repo_opts, &target);
+        const patch = (try evt.Patch.readById(evt.EventDB(hash_kind), hash_kind, moment, &arena, &fork_id)) orelse return error.NotFound;
+        try evt.Patch.update(.xit, repo_opts, io, allocator, &target, &fork_id, .{ .fields = .{
             .title = "edited feature",
             .description = patch.event.description,
             .tags = patch.event.tags,
@@ -624,16 +642,16 @@ fn testPushFork(
     try client.push(io, allocator, "patch-to-feature", "master:patch", false, .{ .wire = .{ .ssh = .{ .command = ssh_cmd } } });
 
     var second_revision_id: [evt.event_id_size]u8 = undefined;
-    var second_patch_oid: [hash.hexLen(.sha1)]u8 = undefined;
+    var second_patch_oid: [hash.hexLen(hash_kind)]u8 = undefined;
     {
-        var draft = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = draft_path });
+        var draft = try rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = draft_path });
         defer draft.deinit(io, allocator);
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
-        const moment = try evt.currentMoment(.{}, &draft);
-        const patch = (try evt.Patch.readById(evt.EventDB(.sha1), .sha1, moment, &arena, &fork_id)) orelse return error.NotFound;
+        const moment = try evt.currentMoment(repo_opts, &draft);
+        const patch = (try evt.Patch.readById(evt.EventDB(hash_kind), hash_kind, moment, &arena, &fork_id)) orelse return error.NotFound;
         try std.testing.expect(patch.removed);
-        const newest = (try evt.PatchRev.readNewest(evt.EventDB(.sha1), .sha1, moment, &arena)) orelse return error.NotFound;
+        const newest = (try evt.PatchRev.readNewest(evt.EventDB(hash_kind), hash_kind, moment, &arena)) orelse return error.NotFound;
         second_revision_id = newest.id;
         @memcpy(&second_patch_oid, newest.record.patch_oid);
         try std.testing.expect(!std.mem.eql(u8, &first_revision_id, &second_revision_id));
@@ -641,12 +659,12 @@ fn testPushFork(
         try std.testing.expectEqualStrings("edited feature", newest.record.event.message);
     }
     {
-        var target = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = target_path });
+        var target = try rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = target_path });
         defer target.deinit(io, allocator);
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
-        const moment = try evt.currentMoment(.{}, &target);
-        const patch = (try evt.Patch.readById(evt.EventDB(.sha1), .sha1, moment, &arena, &fork_id)) orelse return error.NotFound;
+        const moment = try evt.currentMoment(repo_opts, &target);
+        const patch = (try evt.Patch.readById(evt.EventDB(hash_kind), hash_kind, moment, &arena, &fork_id)) orelse return error.NotFound;
         try std.testing.expectEqualStrings("edited feature", patch.event.title);
         const selected = patch.event.revision orelse return error.NotFound;
         try std.testing.expectEqualStrings(&std.fmt.bytesToHex(second_revision_id, .lower), &selected.id);
@@ -671,14 +689,14 @@ fn testPushFork(
     })) |_| false else |_| true;
     try std.testing.expect(extra_ref_rejected);
     {
-        var draft = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = draft_path });
+        var draft = try rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = draft_path });
         defer draft.deinit(io, allocator);
         try std.testing.expectEqualStrings(&second_source_oid, &(try draft.readRef(io, fork.ref) orelse return error.NotFound));
         try std.testing.expectEqual(null, try draft.readRef(io, .{ .kind = .head, .name = "extra" }));
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
-        const moment = try evt.currentMoment(.{}, &draft);
-        const newest = (try evt.PatchRev.readNewest(evt.EventDB(.sha1), .sha1, moment, &arena)) orelse return error.NotFound;
+        const moment = try evt.currentMoment(repo_opts, &draft);
+        const newest = (try evt.PatchRev.readNewest(evt.EventDB(hash_kind), hash_kind, moment, &arena)) orelse return error.NotFound;
         try std.testing.expectEqualSlices(u8, &second_revision_id, &newest.id);
     }
 
@@ -687,18 +705,18 @@ fn testPushFork(
     //
 
     {
-        var target = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = target_path });
+        var target = try rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = target_path });
         defer target.deinit(io, allocator);
-        try evt.remove(.repo, .xit, .{}, io, allocator, &target, &fork_id, .patch, .{ .name = "admin", .email = "admin@example.test" });
+        try evt.remove(.repo, .xit, repo_opts, io, allocator, &target, &fork_id, .patch, .{ .name = "admin", .email = "admin@example.test" });
     }
     try client.push(io, allocator, "patch-to-feature", "master:patch", false, .{ .wire = .{ .ssh = .{ .command = ssh_cmd } } });
     {
-        var target = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = target_path });
+        var target = try rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = target_path });
         defer target.deinit(io, allocator);
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
-        const moment = try evt.currentMoment(.{}, &target);
-        const patch = (try evt.Patch.readById(evt.EventDB(.sha1), .sha1, moment, &arena, &fork_id)) orelse return error.NotFound;
+        const moment = try evt.currentMoment(repo_opts, &target);
+        const patch = (try evt.Patch.readById(evt.EventDB(hash_kind), hash_kind, moment, &arena, &fork_id)) orelse return error.NotFound;
         try std.testing.expect(patch.removed);
     }
 
@@ -707,36 +725,36 @@ fn testPushFork(
     //
 
     {
-        var target = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = target_path });
+        var target = try rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = target_path });
         defer target.deinit(io, allocator);
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
-        const moment = try evt.currentMoment(.{}, &target);
-        const removed = (try evt.Patch.readById(evt.EventDB(.sha1), .sha1, moment, &arena, &fork_id)) orelse return error.NotFound;
-        try evt.consume(.repo, .xit, .{}, io, allocator, &target, evt.events_ref, &.{.{
+        const moment = try evt.currentMoment(repo_opts, &target);
+        const removed = (try evt.Patch.readById(evt.EventDB(hash_kind), hash_kind, moment, &arena, &fork_id)) orelse return error.NotFound;
+        try evt.consume(.repo, .xit, repo_opts, io, allocator, &target, evt.events_ref, &.{.{
             .id = fork_id_hex,
             .timestamp = 4,
             .author = .{ .name = "admin", .email = "admin@example.test" },
             .event = .{ .patch = removed.event },
         }});
     }
-    const merge_parents = [_][hash.hexLen(.sha1)]u8{ third_source_oid, second_source_oid };
+    const merge_parents = [_][hash.hexLen(hash_kind)]u8{ third_source_oid, second_source_oid };
     _ = try client.commit(io, allocator, .{ .message = "merge patch", .parent_oids = &merge_parents });
     try client.push(io, allocator, "origin", "master:feature", false, .{ .wire = .{ .ssh = .{ .command = ssh_cmd } } });
     {
-        var target = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = target_path });
+        var target = try rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = target_path });
         defer target.deinit(io, allocator);
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
-        const moment = try evt.currentMoment(.{}, &target);
-        const patch = (try evt.Patch.readById(evt.EventDB(.sha1), .sha1, moment, &arena, &fork_id)) orelse return error.NotFound;
+        const moment = try evt.currentMoment(repo_opts, &target);
+        const patch = (try evt.Patch.readById(evt.EventDB(hash_kind), hash_kind, moment, &arena, &fork_id)) orelse return error.NotFound;
         try std.testing.expectEqual(.merged, patch.event.status.kind());
         const merged_oid = switch (patch.event.status) {
             .merged => |oid| oid,
             else => return error.InvalidPatch,
         };
         try std.testing.expectEqualStrings(&second_source_oid, merged_oid);
-        const imported = (try evt.PatchRev.readById(evt.EventDB(.sha1), .sha1, moment, &arena, &second_revision_id)) orelse return error.NotFound;
+        const imported = (try evt.PatchRev.readById(evt.EventDB(hash_kind), hash_kind, moment, &arena, &second_revision_id)) orelse return error.NotFound;
         try std.testing.expectEqualStrings(&second_patch_oid, imported.patch_oid);
     }
 
@@ -757,7 +775,7 @@ fn testPushFork(
     }
     const clone_path = try std.fs.path.join(allocator, &.{ temp_path, "fork-clone" });
     defer allocator.free(clone_path);
-    var fork_clone = try rp.Repo(.xit, .{ .is_test = true }).clone(
+    var fork_clone = try rp.Repo(.xit, .{ .hash = hash_kind, .is_test = true }).clone(
         io,
         allocator,
         remote_url,
@@ -880,6 +898,7 @@ fn testPushCreatesMissingRepo(
 fn testPushEvents(
     comptime repo_kind: rp.RepoKind,
     comptime transport_def: net.TransportDefinition,
+    comptime hash_kind: hash.HashKind,
     comptime port: u16,
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -898,7 +917,7 @@ fn testPushEvents(
     const server_path = (try repoOnDiskPath(io, allocator, temp_path, "testrepo", true)).?;
     defer allocator.free(server_path);
 
-    const repo_opts: rp.RepoOpts(.xit) = .{ .is_test = true };
+    const repo_opts: rp.RepoOpts(.xit) = .{ .hash = hash_kind, .is_test = true };
     const ServerRepo = rp.Repo(.xit, repo_opts);
     var server_repo = try ServerRepo.init(io, allocator, .{ .bare = true, .path = server_path });
     defer server_repo.deinit(io, allocator);
@@ -906,7 +925,7 @@ fn testPushEvents(
     const client_path = try std.fs.path.join(allocator, &.{ temp_path, "client" });
     defer allocator.free(client_path);
 
-    var client_repo = try rp.Repo(repo_kind, .{ .is_test = true }).init(io, allocator, .{ .path = client_path });
+    var client_repo = try rp.Repo(repo_kind, .{ .hash = hash_kind, .is_test = true }).init(io, allocator, .{ .path = client_path });
     defer client_repo.deinit(io, allocator);
 
     // add remote
@@ -949,7 +968,7 @@ fn testPushEvents(
     };
 
     // commit the issue on the client and push it to the server
-    try evt.consume(.repo, repo_kind, .{ .is_test = true }, io, allocator, &client_repo, evt.events_ref, &events_to_push);
+    try evt.consume(.repo, repo_kind, .{ .hash = hash_kind, .is_test = true }, io, allocator, &client_repo, evt.events_ref, &events_to_push);
     try client_repo.push(
         io,
         allocator,
@@ -993,7 +1012,7 @@ fn testPushEvents(
     };
 
     // commit the edit on the client and push it to the server
-    try evt.consume(.repo, repo_kind, .{ .is_test = true }, io, allocator, &client_repo, evt.events_ref, &events_to_push2);
+    try evt.consume(.repo, repo_kind, .{ .hash = hash_kind, .is_test = true }, io, allocator, &client_repo, evt.events_ref, &events_to_push2);
     try client_repo.push(
         io,
         allocator,
@@ -1023,6 +1042,7 @@ fn testClone(
     comptime repo_kind: rp.RepoKind,
     comptime transport_def: net.TransportDefinition,
     comptime shell_out_to_git: bool,
+    comptime hash_kind: hash.HashKind,
     comptime port: u16,
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -1043,7 +1063,7 @@ fn testClone(
 
     // init server repo with default branch name as main
     // is_test must be false when shell_out_to_git so commits get real timestamps (needed for --shallow-since)
-    var server_repo = try rp.Repo(.xit, .{ .is_test = !shell_out_to_git }).init(io, allocator, .{ .bare = true, .path = server_path, .create_default_branch = "main" });
+    var server_repo = try rp.Repo(.xit, .{ .hash = hash_kind, .is_test = !shell_out_to_git }).init(io, allocator, .{ .bare = true, .path = server_path, .create_default_branch = "main" });
     defer server_repo.deinit(io, allocator);
 
     if (shell_out_to_git) {
@@ -1243,7 +1263,7 @@ fn testClone(
         defer if (ssh_cmd_maybe) |ssh_cmd| allocator.free(ssh_cmd);
 
         // clone repo
-        var client_repo = try rp.Repo(repo_kind, .{ .is_test = true }).clone(
+        var clone_result = try rp.AnyRepo(repo_kind, .{ .is_test = true }).clone(
             io,
             allocator,
             remote_url,
@@ -1254,7 +1274,8 @@ fn testClone(
                 .command = ssh_cmd_maybe,
             } } } },
         );
-        defer client_repo.deinit(io, allocator);
+        defer clone_result.deinit(io, allocator);
+        const client_repo = &@field(clone_result, @tagName(hash_kind));
 
         // make sure HEAD points to the right default branch
         var current_branch_buffer = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
@@ -1271,6 +1292,7 @@ fn testFetchLarge(
     comptime repo_kind: rp.RepoKind,
     comptime transport_def: net.TransportDefinition,
     comptime shell_out_to_git: bool,
+    comptime hash_kind: hash.HashKind,
     comptime port: u16,
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -1289,7 +1311,7 @@ fn testFetchLarge(
     const server_path = (try repoOnDiskPath(io, allocator, temp_path, "testrepo", true)).?;
     defer allocator.free(server_path);
 
-    var server_repo = try rp.Repo(.xit, .{ .is_test = true }).init(io, allocator, .{ .bare = true, .path = server_path });
+    var server_repo = try rp.Repo(.xit, .{ .hash = hash_kind, .is_test = true }).init(io, allocator, .{ .bare = true, .path = server_path });
     defer server_repo.deinit(io, allocator);
 
     // make a commit with files from the current repo
@@ -1308,7 +1330,7 @@ fn testFetchLarge(
     const client_path = try std.fs.path.join(allocator, &.{ temp_path, "client" });
     defer allocator.free(client_path);
 
-    var client_repo = try rp.Repo(repo_kind, .{ .is_test = true }).init(io, allocator, .{ .path = client_path });
+    var client_repo = try rp.Repo(repo_kind, .{ .hash = hash_kind, .is_test = true }).init(io, allocator, .{ .path = client_path });
     defer client_repo.deinit(io, allocator);
 
     // add remote
@@ -1412,6 +1434,7 @@ fn testPushLarge(
     comptime repo_kind: rp.RepoKind,
     comptime transport_def: net.TransportDefinition,
     comptime shell_out_to_git: bool,
+    comptime hash_kind: hash.HashKind,
     comptime port: u16,
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -1430,7 +1453,7 @@ fn testPushLarge(
     const server_path = (try repoOnDiskPath(io, allocator, temp_path, "testrepo", true)).?;
     defer allocator.free(server_path);
 
-    var server_repo = try rp.Repo(.xit, .{ .is_test = true }).init(io, allocator, .{ .bare = true, .path = server_path });
+    var server_repo = try rp.Repo(.xit, .{ .hash = hash_kind, .is_test = true }).init(io, allocator, .{ .bare = true, .path = server_path });
     defer server_repo.deinit(io, allocator);
 
     // add config
@@ -1445,7 +1468,7 @@ fn testPushLarge(
     const client_path = try std.fs.path.join(allocator, &.{ temp_path, "client" });
     defer allocator.free(client_path);
 
-    var client_repo = try rp.Repo(repo_kind, .{ .is_test = true }).init(io, allocator, .{ .path = client_path });
+    var client_repo = try rp.Repo(repo_kind, .{ .hash = hash_kind, .is_test = true }).init(io, allocator, .{ .path = client_path });
     defer client_repo.deinit(io, allocator);
 
     var client_dir = try temp.dir.openDir(io, "client", .{});
