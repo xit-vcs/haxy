@@ -120,24 +120,27 @@ pub fn receivePackAndConsume(
         }
     };
 
-    try repo.core.db_file.lock(io, .exclusive);
-    defer repo.core.db_file.unlock(io);
+    const result = blk: {
+        try repo.core.db_file.lock(io, .exclusive);
+        defer repo.core.db_file.unlock(io);
 
-    const history = try DB.ArrayList(.read_write).init(repo.core.db.rootCursor());
-    history.appendContext(
-        .{ .slot = try history.getSlot(-1) },
-        Ctx{
-            .core = &repo.core,
-            .io = io,
-            .allocator = allocator,
-            .reader = reader,
-            .writer = writer,
-            .options = options,
-            .response = &response,
-            .repo_root_path = repo_root_path,
-            .error_writer = error_writer,
-        },
-    ) catch |err| {
+        const history = try DB.ArrayList(.read_write).init(repo.core.db.rootCursor());
+        break :blk history.appendContext(
+            .{ .slot = try history.getSlot(-1) },
+            Ctx{
+                .core = &repo.core,
+                .io = io,
+                .allocator = allocator,
+                .reader = reader,
+                .writer = writer,
+                .options = options,
+                .response = &response,
+                .repo_root_path = repo_root_path,
+                .error_writer = error_writer,
+            },
+        );
+    };
+    result catch |err| {
         response.finish(writer, @errorName(err)) catch {};
         if (err == error.CancelTransaction) return;
         return err;
@@ -188,11 +191,11 @@ pub fn receiveFork(
     const target_oid = (try target_repo.readRef(io, .{ .kind = .head, .name = target_branch })) orelse return error.TargetNotFound;
     const newest = try evt.PatchRev.readNewest(evt.EventDB(repo_opts.hash), repo_opts.hash, fork_moment, &arena);
     var revision_id_maybe: ?[evt.event_id_size]u8 = null;
+    var response = xit.net_server_receive_pack.Response.init(allocator);
+    defer response.deinit();
 
     // execute a transaction that receives the push and materializes its revision
-    {
-        var response = xit.net_server_receive_pack.Response.init(allocator);
-        defer response.deinit();
+    const result = blk: {
         const DB = rp.Repo(.xit, repo_opts).DB;
         const State = rp.Repo(.xit, repo_opts).State;
         const Ctx = struct {
@@ -329,7 +332,7 @@ pub fn receiveFork(
         defer fork_repo.core.db_file.unlock(io);
 
         const history = try DB.ArrayList(.read_write).init(fork_repo.core.db.rootCursor());
-        history.appendContext(.{ .slot = try history.getSlot(-1) }, Ctx{
+        break :blk history.appendContext(.{ .slot = try history.getSlot(-1) }, Ctx{
             .core = &fork_repo.core,
             .target_core = &target_repo.core,
             .io = io,
@@ -346,29 +349,29 @@ pub fn receiveFork(
             .timestamp = timestamp,
             .newest = newest,
             .revision_id_maybe = &revision_id_maybe,
-        }) catch |err| {
-            response.finish(writer, @errorName(err)) catch {};
-            if (err == error.CancelTransaction) return;
-            return err;
-        };
-        try response.finish(writer, null);
-    }
+        });
+    };
+    result catch |err| {
+        response.finish(writer, @errorName(err)) catch {};
+        if (err == error.CancelTransaction) return;
+        return err;
+    };
 
     // best-effort update the published patch so it has the new revision
-    {
-        const revision_id = revision_id_maybe orelse return;
-        if (!published) return;
+    update: {
+        const revision_id = revision_id_maybe orelse break :update;
+        if (!published) break :update;
         var update_arena = std.heap.ArenaAllocator.init(allocator);
         defer update_arena.deinit();
-        const target_update_moment = evt.currentMoment(repo_opts, target_repo) catch return;
-        const published_patch = (evt.Patch.readById(evt.EventDB(repo_opts.hash), repo_opts.hash, target_update_moment, &update_arena, &patch_id) catch return) orelse return;
-        if (published_patch.removed) return;
-        const fork_update_moment = evt.currentMoment(repo_opts, fork_repo) catch return;
-        const revision = (evt.PatchRev.readById(evt.EventDB(repo_opts.hash), repo_opts.hash, fork_update_moment, &update_arena, &revision_id) catch return) orelse return;
-        if (revision.removed) return;
+        const target_update_moment = evt.currentMoment(repo_opts, target_repo) catch break :update;
+        const published_patch = (evt.Patch.readById(evt.EventDB(repo_opts.hash), repo_opts.hash, target_update_moment, &update_arena, &patch_id) catch break :update) orelse break :update;
+        if (published_patch.removed) break :update;
+        const fork_update_moment = evt.currentMoment(repo_opts, fork_repo) catch break :update;
+        const revision = (evt.PatchRev.readById(evt.EventDB(repo_opts.hash), repo_opts.hash, fork_update_moment, &update_arena, &revision_id) catch break :update) orelse break :update;
+        if (revision.removed) break :update;
         const selected = evt.Patch.Revision.fromRecord(revision_id, revision);
         if (published_patch.event.revision) |current| {
-            if (evt.fieldEqual(evt.Patch.Revision, current, selected)) return;
+            if (evt.fieldEqual(evt.Patch.Revision, current, selected)) break :update;
         }
         var patch = published_patch.event;
         patch.revision = selected;
@@ -381,4 +384,7 @@ pub fn receiveFork(
             serve_common.logError(io, error_writer, "failed to update published patch {s}: {s}\n", .{ id, @errorName(update_err) });
         };
     }
+
+    // the client may read either repo as soon as it gets the final response.
+    try response.finish(writer, null);
 }
