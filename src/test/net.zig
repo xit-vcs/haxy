@@ -15,37 +15,29 @@ test "fetch small" {
     const allocator = std.testing.allocator;
     try testFetch(.xit, .{ .wire = .http }, .sha1, 3001, io, allocator);
     try testFetch(.xit, .{ .wire = .http }, .sha256, 3003, io, allocator);
-    if (.windows != builtin.os.tag) {
-        try testFetch(.xit, .{ .wire = .ssh }, .sha1, 3005, io, allocator);
-        try testFetch(.xit, .{ .wire = .ssh }, .sha256, 3007, io, allocator);
-    }
+    try testFetch(.xit, .{ .wire = .ssh }, .sha1, 3005, io, allocator);
+    try testFetch(.xit, .{ .wire = .ssh }, .sha256, 3007, io, allocator);
 }
 
 test "push small" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    if (.windows != builtin.os.tag) {
-        try testPush(.xit, .{ .wire = .ssh }, .sha1, 3101, io, allocator);
-        try testPush(.xit, .{ .wire = .ssh }, .sha256, 3103, io, allocator);
-    }
+    try testPush(.xit, .{ .wire = .ssh }, .sha1, 3101, io, allocator);
+    try testPush(.xit, .{ .wire = .ssh }, .sha256, 3103, io, allocator);
 }
 
 test "push creates missing repo under serve" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    if (.windows != builtin.os.tag) {
-        // the server creates missing repositories as sha1
-        try testPushCreatesMissingRepo(.xit, .{ .wire = .ssh }, 3201, io, allocator);
-    }
+    // the server creates missing repositories as sha1
+    try testPushCreatesMissingRepo(.xit, .{ .wire = .ssh }, 3201, io, allocator);
 }
 
 test "push events" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    if (.windows != builtin.os.tag) {
-        try testPushEvents(.xit, .{ .wire = .ssh }, .sha1, 3301, io, allocator);
-        try testPushEvents(.xit, .{ .wire = .ssh }, .sha256, 3303, io, allocator);
-    }
+    try testPushEvents(.xit, .{ .wire = .ssh }, .sha1, 3301, io, allocator);
+    try testPushEvents(.xit, .{ .wire = .ssh }, .sha256, 3303, io, allocator);
 }
 
 test "clone small" {
@@ -53,10 +45,8 @@ test "clone small" {
     const allocator = std.testing.allocator;
     try testClone(.xit, .{ .wire = .http }, false, .sha1, 3401, io, allocator);
     try testClone(.xit, .{ .wire = .http }, false, .sha256, 3403, io, allocator);
-    if (.windows != builtin.os.tag) {
-        try testClone(.xit, .{ .wire = .ssh }, false, .sha1, 3405, io, allocator);
-        try testClone(.xit, .{ .wire = .ssh }, false, .sha256, 3407, io, allocator);
-    }
+    try testClone(.xit, .{ .wire = .ssh }, false, .sha1, 3405, io, allocator);
+    try testClone(.xit, .{ .wire = .ssh }, false, .sha256, 3407, io, allocator);
 }
 
 test "clone small subprocess" {
@@ -64,10 +54,8 @@ test "clone small subprocess" {
     const allocator = std.testing.allocator;
     try testClone(.git, .{ .wire = .http }, true, .sha1, 3501, io, allocator);
     try testClone(.git, .{ .wire = .http }, true, .sha256, 3503, io, allocator);
-    if (.windows != builtin.os.tag) {
-        try testClone(.git, .{ .wire = .ssh }, true, .sha1, 3505, io, allocator);
-        try testClone(.git, .{ .wire = .ssh }, true, .sha256, 3507, io, allocator);
-    }
+    try testClone(.git, .{ .wire = .ssh }, true, .sha1, 3505, io, allocator);
+    try testClone(.git, .{ .wire = .ssh }, true, .sha256, 3507, io, allocator);
 }
 
 test "fetch large subprocess" {
@@ -75,28 +63,22 @@ test "fetch large subprocess" {
     const allocator = std.testing.allocator;
     try testFetchLarge(.git, .{ .wire = .http }, true, .sha1, 3601, io, allocator);
     try testFetchLarge(.git, .{ .wire = .http }, true, .sha256, 3603, io, allocator);
-    if (.windows != builtin.os.tag) {
-        try testFetchLarge(.git, .{ .wire = .ssh }, true, .sha1, 3605, io, allocator);
-        try testFetchLarge(.git, .{ .wire = .ssh }, true, .sha256, 3607, io, allocator);
-    }
+    try testFetchLarge(.git, .{ .wire = .ssh }, true, .sha1, 3605, io, allocator);
+    try testFetchLarge(.git, .{ .wire = .ssh }, true, .sha256, 3607, io, allocator);
 }
 
 test "push large subprocess" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    if (.windows != builtin.os.tag) {
-        try testPushLarge(.git, .{ .wire = .ssh }, true, .sha1, 3701, io, allocator);
-        try testPushLarge(.git, .{ .wire = .ssh }, true, .sha256, 3703, io, allocator);
-    }
+    try testPushLarge(.git, .{ .wire = .ssh }, true, .sha1, 3701, io, allocator);
+    try testPushLarge(.git, .{ .wire = .ssh }, true, .sha256, 3703, io, allocator);
 }
 
 test "push fork" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    if (.windows != builtin.os.tag) {
-        try testPushFork(.sha1, 3801, io, allocator);
-        try testPushFork(.sha256, 3803, io, allocator);
-    }
+    try testPushFork(.sha1, 3801, io, allocator);
+    try testPushFork(.sha256, 3803, io, allocator);
 }
 
 fn runServer(
@@ -123,6 +105,32 @@ fn runServer(
         if (.windows != builtin.os.tag) {
             try priv_key_file.setPermissions(io, @enumFromInt(0o600));
         }
+    }
+
+    if (builtin.os.tag == .windows) {
+        // openssh needs an acl granting access only to the current user.
+        // use cwd so the temp path doesn't need powershell quoting.
+        var permissions_process = try std.process.spawn(io, .{
+            .argv = &.{
+                "powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+                \\$ErrorActionPreference = 'Stop'
+                \\$user = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+                \\$acl = [System.Security.AccessControl.FileSecurity]::new()
+                \\$acl.SetOwner($user)
+                \\$acl.SetAccessRuleProtection($true, $false)
+                \\$rule = [System.Security.AccessControl.FileSystemAccessRule]::new($user, 'FullControl', 'Allow')
+                \\$acl.AddAccessRule($rule)
+                \\Set-Acl -LiteralPath .\key -AclObject $acl
+                ,
+            },
+            .cwd = .{ .path = temp_path },
+            .stdin = .ignore,
+            .stdout = .ignore,
+            .stderr = .inherit,
+        });
+        defer permissions_process.kill(io);
+        const term = try permissions_process.wait(io);
+        if (term != .exited or term.exited != 0) return error.SshKeyPermissionsFailed;
     }
 
     // seed the admin event store so the server can resolve <owner>/<repo> paths
@@ -761,8 +769,11 @@ fn testPushFork(
     const other_url = try std.fmt.allocPrint(allocator, "git@localhost:fork/admin/other/patch:{s}", .{&fork_id_hex});
     defer allocator.free(other_url);
     try client.addRemote(io, allocator, .{ .name = "other", .value = other_url });
-    const wrong_repo_rejected = if (client.push(io, allocator, "other", "master:patch", false, .{ .wire = .{ .ssh = .{ .command = ssh_cmd } } })) |_| false else |_| true;
-    try std.testing.expect(wrong_repo_rejected);
+    // early rejections need no input. give ssh eof so windows openssh
+    // doesn't hang closing stdin before forwarding the error.
+    const reject_ssh_cmd = try std.fmt.allocPrint(allocator, "{s} -n", .{ssh_cmd});
+    defer allocator.free(reject_ssh_cmd);
+    try std.testing.expectError(error.ServerReportedError, client.push(io, allocator, "other", "master:patch", false, .{ .wire = .{ .ssh = .{ .command = reject_ssh_cmd } } }));
 
     //
     // the fork remains cloneable after the target repo is removed
@@ -818,8 +829,7 @@ fn testPushFork(
     const denied_url = try std.fmt.allocPrint(allocator, "git@localhost:fork/admin/target/patch:{s}", .{&fork_id_hex});
     defer allocator.free(denied_url);
     try client.addRemote(io, allocator, .{ .name = "denied", .value = denied_url });
-    const unauthorized_rejected = if (client.push(io, allocator, "denied", "master:patch", false, .{ .wire = .{ .ssh = .{ .command = ssh_cmd } } })) |_| false else |_| true;
-    try std.testing.expect(unauthorized_rejected);
+    try std.testing.expectError(error.ServerReportedError, client.push(io, allocator, "denied", "master:patch", false, .{ .wire = .{ .ssh = .{ .command = reject_ssh_cmd } } }));
 }
 
 fn testPushCreatesMissingRepo(
@@ -1100,26 +1110,25 @@ fn testClone(
     };
 
     if (shell_out_to_git) {
-        const priv_key_path = try std.fs.path.join(allocator, &.{ temp_path, "key" });
-        defer allocator.free(priv_key_path);
-        const ssh_config_arg = try std.fmt.allocPrint(allocator, "core.sshCommand=ssh -p {} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o IdentityFile={s}", .{ port + 1, priv_key_path });
+        const ssh_cmd = (try sshCommand(true, allocator, temp_path, port)).?;
+        defer allocator.free(ssh_cmd);
+        const ssh_config_arg = try std.fmt.allocPrint(allocator, "core.sshCommand={s}", .{ssh_cmd});
         defer allocator.free(ssh_config_arg);
 
         {
             var process = try std.process.spawn(io, .{
                 .argv = if (is_ssh)
-                    &.{ "git", "-c", ssh_config_arg, "clone", "--depth", "1", remote_url, "client" }
+                    &.{ "git", "-c", ssh_config_arg, "clone", "--quiet", "--depth", "1", remote_url, "client" }
                 else
-                    &.{ "git", "clone", "--depth", "1", remote_url, "client" },
+                    &.{ "git", "clone", "--quiet", "--depth", "1", remote_url, "client" },
                 .cwd = .{ .path = temp_path },
                 .stdin = .ignore,
                 .stdout = .ignore,
-                .stderr = .ignore,
+                .stderr = .inherit,
             });
+            defer process.kill(io);
             const term = try process.wait(io);
-            if (term != .exited or term.exited != 0) {
-                return error.GitCommandFailed;
-            }
+            if (term != .exited or term.exited != 0) return error.GitCommandFailed;
         }
 
         // make sure shallow clone was successful
@@ -1135,18 +1144,17 @@ fn testClone(
         {
             var process = try std.process.spawn(io, .{
                 .argv = if (is_ssh)
-                    &.{ "git", "-c", ssh_config_arg, "pull", "--unshallow" }
+                    &.{ "git", "-c", ssh_config_arg, "pull", "--quiet", "--unshallow" }
                 else
-                    &.{ "git", "pull", "--unshallow" },
+                    &.{ "git", "pull", "--quiet", "--unshallow" },
                 .cwd = .{ .path = client_path },
                 .stdin = .ignore,
                 .stdout = .ignore,
-                .stderr = .ignore,
+                .stderr = .inherit,
             });
+            defer process.kill(io);
             const term = try process.wait(io);
-            if (term != .exited or term.exited != 0) {
-                return error.GitCommandFailed;
-            }
+            if (term != .exited or term.exited != 0) return error.GitCommandFailed;
         }
 
         // make sure unshallow pull was successful
@@ -1161,18 +1169,17 @@ fn testClone(
         {
             var process = try std.process.spawn(io, .{
                 .argv = if (is_ssh)
-                    &.{ "git", "-c", ssh_config_arg, "clone", "--shallow-since=2000-01-01", remote_url, "client" }
+                    &.{ "git", "-c", ssh_config_arg, "clone", "--quiet", "--shallow-since=2000-01-01", remote_url, "client" }
                 else
-                    &.{ "git", "clone", "--shallow-since=2000-01-01", remote_url, "client" },
+                    &.{ "git", "clone", "--quiet", "--shallow-since=2000-01-01", remote_url, "client" },
                 .cwd = .{ .path = temp_path },
                 .stdin = .ignore,
                 .stdout = .ignore,
-                .stderr = .ignore,
+                .stderr = .inherit,
             });
+            defer process.kill(io);
             const term = try process.wait(io);
-            if (term != .exited or term.exited != 0) {
-                return error.GitCommandFailed;
-            }
+            if (term != .exited or term.exited != 0) return error.GitCommandFailed;
         }
 
         // make sure shallow clone was successful
@@ -1187,18 +1194,17 @@ fn testClone(
         {
             var process = try std.process.spawn(io, .{
                 .argv = if (is_ssh)
-                    &.{ "git", "-c", ssh_config_arg, "clone", "--shallow-exclude=v1", remote_url, "client" }
+                    &.{ "git", "-c", ssh_config_arg, "clone", "--quiet", "--shallow-exclude=v1", remote_url, "client" }
                 else
-                    &.{ "git", "clone", "--shallow-exclude=v1", remote_url, "client" },
+                    &.{ "git", "clone", "--quiet", "--shallow-exclude=v1", remote_url, "client" },
                 .cwd = .{ .path = temp_path },
                 .stdin = .ignore,
                 .stdout = .ignore,
-                .stderr = .ignore,
+                .stderr = .inherit,
             });
+            defer process.kill(io);
             const term = try process.wait(io);
-            if (term != .exited or term.exited != 0) {
-                return error.GitCommandFailed;
-            }
+            if (term != .exited or term.exited != 0) return error.GitCommandFailed;
         }
 
         // make sure shallow clone was successful
@@ -1213,18 +1219,17 @@ fn testClone(
         {
             var process = try std.process.spawn(io, .{
                 .argv = if (is_ssh)
-                    &.{ "git", "-c", ssh_config_arg, "clone", "--filter=blob:none", remote_url, "client" }
+                    &.{ "git", "-c", ssh_config_arg, "clone", "--quiet", "--filter=blob:none", remote_url, "client" }
                 else
-                    &.{ "git", "clone", "--filter=blob:none", remote_url, "client" },
+                    &.{ "git", "clone", "--quiet", "--filter=blob:none", remote_url, "client" },
                 .cwd = .{ .path = temp_path },
                 .stdin = .ignore,
                 .stdout = .ignore,
-                .stderr = .ignore,
+                .stderr = .inherit,
             });
+            defer process.kill(io);
             const term = try process.wait(io);
-            if (term != .exited or term.exited != 0) {
-                return error.GitCommandFailed;
-            }
+            if (term != .exited or term.exited != 0) return error.GitCommandFailed;
         }
 
         // make sure partial clone was successful
@@ -1239,18 +1244,17 @@ fn testClone(
         {
             var process = try std.process.spawn(io, .{
                 .argv = if (is_ssh)
-                    &.{ "git", "-c", ssh_config_arg, "clone", "--filter=tree:0", remote_url, "client" }
+                    &.{ "git", "-c", ssh_config_arg, "clone", "--quiet", "--filter=tree:0", remote_url, "client" }
                 else
-                    &.{ "git", "clone", "--filter=tree:0", remote_url, "client" },
+                    &.{ "git", "clone", "--quiet", "--filter=tree:0", remote_url, "client" },
                 .cwd = .{ .path = temp_path },
                 .stdin = .ignore,
                 .stdout = .ignore,
-                .stderr = .ignore,
+                .stderr = .inherit,
             });
+            defer process.kill(io);
             const term = try process.wait(io);
-            if (term != .exited or term.exited != 0) {
-                return error.GitCommandFailed;
-            }
+            if (term != .exited or term.exited != 0) return error.GitCommandFailed;
         }
 
         // make sure treeless clone was successful
@@ -1348,26 +1352,25 @@ fn testFetchLarge(
     };
 
     if (shell_out_to_git) {
-        const priv_key_path = try std.fs.path.join(allocator, &.{ temp_path, "key" });
-        defer allocator.free(priv_key_path);
-        const ssh_config_arg = try std.fmt.allocPrint(allocator, "core.sshCommand=ssh -p {} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o IdentityFile={s}", .{ port + 1, priv_key_path });
+        const ssh_cmd = (try sshCommand(true, allocator, temp_path, port)).?;
+        defer allocator.free(ssh_cmd);
+        const ssh_config_arg = try std.fmt.allocPrint(allocator, "core.sshCommand={s}", .{ssh_cmd});
         defer allocator.free(ssh_config_arg);
 
         {
             var process = try std.process.spawn(io, .{
                 .argv = if (is_ssh)
-                    &.{ "git", "-c", ssh_config_arg, "pull", "origin", "master" }
+                    &.{ "git", "-c", ssh_config_arg, "pull", "--quiet", "origin", "master" }
                 else
-                    &.{ "git", "pull", "origin", "master" },
+                    &.{ "git", "pull", "--quiet", "origin", "master" },
                 .cwd = .{ .path = client_path },
                 .stdin = .ignore,
                 .stdout = .ignore,
-                .stderr = .ignore,
+                .stderr = .inherit,
             });
+            defer process.kill(io);
             const term = try process.wait(io);
-            if (term != .exited or term.exited != 0) {
-                return error.GitCommandFailed;
-            }
+            if (term != .exited or term.exited != 0) return error.GitCommandFailed;
         }
 
         // make sure pull was successful
@@ -1383,18 +1386,17 @@ fn testFetchLarge(
         {
             var process = try std.process.spawn(io, .{
                 .argv = if (is_ssh)
-                    &.{ "git", "-c", ssh_config_arg, "fetch", "origin", "master" }
+                    &.{ "git", "-c", ssh_config_arg, "fetch", "--quiet", "origin", "master" }
                 else
-                    &.{ "git", "fetch", "origin", "master" },
+                    &.{ "git", "fetch", "--quiet", "origin", "master" },
                 .cwd = .{ .path = client_path },
                 .stdin = .ignore,
                 .stdout = .ignore,
-                .stderr = .ignore,
+                .stderr = .inherit,
             });
+            defer process.kill(io);
             const term = try process.wait(io);
-            if (term != .exited or term.exited != 0) {
-                return error.GitCommandFailed;
-            }
+            if (term != .exited or term.exited != 0) return error.GitCommandFailed;
         }
 
         // make sure fetch with want-ref was successful
@@ -1537,26 +1539,25 @@ fn testPushLarge(
     };
 
     if (shell_out_to_git) {
-        const priv_key_path = try std.fs.path.join(allocator, &.{ temp_path, "key" });
-        defer allocator.free(priv_key_path);
-        const ssh_config_arg = try std.fmt.allocPrint(allocator, "core.sshCommand=ssh -p {} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o IdentityFile={s}", .{ port + 1, priv_key_path });
+        const ssh_cmd = (try sshCommand(true, allocator, temp_path, port)).?;
+        defer allocator.free(ssh_cmd);
+        const ssh_config_arg = try std.fmt.allocPrint(allocator, "core.sshCommand={s}", .{ssh_cmd});
         defer allocator.free(ssh_config_arg);
 
         // shell out to git so it will send delta objects
         var process = try std.process.spawn(io, .{
             .argv = if (is_ssh)
-                &.{ "git", "-c", ssh_config_arg, "push", "origin", "master" }
+                &.{ "git", "-c", ssh_config_arg, "push", "--quiet", "origin", "master" }
             else
-                &.{ "git", "push", "origin", "master" },
+                &.{ "git", "push", "--quiet", "origin", "master" },
             .cwd = .{ .path = client_path },
             .stdin = .ignore,
             .stdout = .ignore,
-            .stderr = .ignore,
+            .stderr = .inherit,
         });
+        defer process.kill(io);
         const term = try process.wait(io);
-        if (term != .exited or term.exited != 0) {
-            return error.GitCommandFailed;
-        }
+        if (term != .exited or term.exited != 0) return error.GitCommandFailed;
     } else {
         const ssh_cmd_maybe = try sshCommand(is_ssh, allocator, temp_path, port);
         defer if (ssh_cmd_maybe) |ssh_cmd| allocator.free(ssh_cmd);
@@ -1686,7 +1687,9 @@ fn sshCommand(
     const priv_key_path = try std.fs.path.join(allocator, &.{ temp_path, "key" });
     defer allocator.free(priv_key_path);
 
-    return try std.fmt.allocPrint(allocator, "ssh -p {} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o IdentitiesOnly=yes -o IdentityFile=\"{s}\"", .{ port + 1, priv_key_path });
+    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, priv_key_path, '\\', '/');
+    const null_path = if (builtin.os.tag == .windows) "NUL" else "/dev/null";
+    return try std.fmt.allocPrint(allocator, "ssh -p {} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile={s} -o LogLevel=ERROR -o IdentitiesOnly=yes -i \"{s}\"", .{ port + 1, null_path, priv_key_path });
 }
 
 const ServerFiles = union(enum) {
