@@ -325,14 +325,14 @@ pub fn publish(
         }
         if (existing == null) patch.status = .open;
 
-        try evt.consume(.repo, .xit, repo_opts, io, allocator, target_repo, evt.events_ref, &.{.{
+        try evt.consume(.server, .repo, .xit, repo_opts, io, allocator, target_repo, evt.events_ref, &.{.{
             .id = input.id,
             .timestamp = input.timestamp,
             .author = input.author,
             .event = .{ .patch = patch },
         }});
 
-        try evt.consume(.fork, .xit, repo_opts, io, allocator, &fork_repo, evt.events_ref, &.{.{
+        try evt.consume(.server, .fork, .xit, repo_opts, io, allocator, &fork_repo, evt.events_ref, &.{.{
             .id = input.id,
             .timestamp = input.timestamp,
             .author = input.author,
@@ -343,14 +343,13 @@ pub fn publish(
     if (fork_record.event.stage == .draft) {
         var published = fork_record.event;
         published.stage = .publish;
-        try evt.consume(.admin, .xit, evt.admin_repo_opts, io, allocator, admin_repo, evt.events_ref, &.{.{
+        try evt.consume(.server, .admin, .xit, evt.admin_repo_opts, io, allocator, admin_repo, evt.events_ref, &.{.{
             .id = input.id,
             .timestamp = input.timestamp,
             .author = input.author,
             .event = .{ .fork = published },
         }});
     }
-    refreshMergeability(repo_opts, io, allocator, target_repo, patch_id);
 }
 
 pub fn editDraft(
@@ -389,7 +388,7 @@ pub fn editDraft(
     patch.description = input.description;
     if (!std.mem.eql(u8, patch.target_branch, input.target_branch)) patch.revision = null;
     patch.target_branch = input.target_branch;
-    try evt.consume(.fork, .xit, repo_opts, io, allocator, &fork_repo, evt.events_ref, &.{.{
+    try evt.consume(.server, .fork, .xit, repo_opts, io, allocator, &fork_repo, evt.events_ref, &.{.{
         .id = input.id,
         .timestamp = input.timestamp,
         .author = input.author,
@@ -408,6 +407,11 @@ pub fn merge(
     input: MergeInput,
 ) !void {
     const patch_id = try evt.parseEventId(&input.id);
+    errdefer |err| {
+        if (err == error.PatchDataUnavailable or err == error.PatchOutOfDate) {
+            refreshMergeability(repo_opts, io, allocator, target_repo, patch_id);
+        }
+    }
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
@@ -421,24 +425,12 @@ pub fn merge(
         .merged => return error.PatchAlreadyMerged,
     }
     const selected = patch_record.event.revision orelse return error.PatchNotPushed;
-    const revision_id = try evt.parseEventId(&selected.id);
     const target_ref = rf.Ref{ .kind = .head, .name = patch_record.event.target_branch };
 
-    // open and lock the fork
+    // open the fork
     const fork_path = try fork.forkPath(arena.allocator(), repo_root_path, &input.id);
     var fork_repo = rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = fork_path, .require_repo_root = true }) catch return error.PatchDataUnavailable;
     defer fork_repo.deinit(io, allocator);
-    try fork_repo.core.db_file.lock(io, .shared);
-    defer fork_repo.core.db_file.unlock(io);
-
-    // require the fork's newest revision
-    {
-        const fork_moment = try evt.currentMoment(repo_opts, &fork_repo);
-        const newest = (try evt.PatchRev.readNewest(evt.EventDB(repo_opts.hash), repo_opts.hash, fork_moment, &arena)) orelse return error.PatchDataUnavailable;
-        if (!std.mem.eql(u8, &newest.id, &revision_id) or
-            !selected.matches(newest.record)) return error.PatchOutOfDate;
-    }
-
     // select the commit and merge identity
     const merge_oid = oidArray(repo_opts.hash, switch (input.revision) {
         .squash => selected.squash_oid,
@@ -470,6 +462,15 @@ pub fn merge(
 
                 var check_arena = std.heap.ArenaAllocator.init(ctx.allocator);
                 defer check_arena.deinit();
+
+                // require the fork's newest revision while both repos are locked
+                const selected_revision = ctx.expected_patch.revision.?;
+                const revision_id = try evt.parseEventId(&selected_revision.id);
+                const fork_moment = try evt.currentMoment(repo_opts, ctx.fork_repo);
+                const newest = (try evt.PatchRev.readNewest(evt.EventDB(repo_opts.hash), repo_opts.hash, fork_moment, &check_arena)) orelse return error.PatchDataUnavailable;
+                if (!std.mem.eql(u8, &newest.id, &revision_id) or
+                    !selected_revision.matches(newest.record)) return error.PatchOutOfDate;
+
                 const availability = try readMergeability(repo_opts, state.readOnly(), ctx.io, &check_arena, &ctx.patch_id, ctx.expected_patch);
                 switch (availability.get(ctx.revision)) {
                     .clean => {},
@@ -514,6 +515,8 @@ pub fn merge(
             }
         };
 
+        try fork_repo.core.db_file.lock(io, .shared);
+        defer fork_repo.core.db_file.unlock(io);
         try target_repo.core.db_file.lock(io, .exclusive);
         defer target_repo.core.db_file.unlock(io);
 
@@ -533,6 +536,7 @@ pub fn merge(
             .timestamp = input.timestamp,
         });
     }
+    refreshMergeability(repo_opts, io, allocator, target_repo, null);
 }
 
 // merge a published patch and remove its fork
@@ -545,15 +549,8 @@ pub fn mergeAndRemoveFork(
     target_repo: *rp.Repo(.xit, repo_opts),
     input: MergeInput,
 ) !void {
-    merge(repo_opts, io, allocator, repo_root_path, target_repo, input) catch |err| {
-        if (err == error.PatchDataUnavailable or err == error.PatchOutOfDate) {
-            const id = evt.parseEventId(&input.id) catch return err;
-            refreshMergeability(repo_opts, io, allocator, target_repo, id);
-        }
-        return err;
-    };
+    try merge(repo_opts, io, allocator, repo_root_path, target_repo, input);
     try fork.remove(io, allocator, repo_root_path, admin_repo, &input.id, null, input.author);
-    refreshMergeability(repo_opts, io, allocator, target_repo, null);
 }
 
 fn commitAuthor(line: []const u8) !evt.CommitAuthor {

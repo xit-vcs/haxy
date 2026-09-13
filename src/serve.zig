@@ -138,7 +138,7 @@ pub fn run(
     try err.print("serving web UI on http://{s}:{d}/\n", .{ wui_listen_address.host, wui_server.socket.address.getPort() });
     try err.flush();
 
-    runWebListener(io, allocator, &wui_server, &tasks, .{ .remote = .{
+    runWebListener(io, allocator, &wui_server, &tasks, .{ .server = .{
         .admin_repo_path = admin_repo_path,
         .session_store = session_store,
         .git_http_port = git_http_port,

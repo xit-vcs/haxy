@@ -115,6 +115,7 @@ pub fn consume(
 // attach `blob` to a parent event and return the event id. `repo` must be
 // writable.
 pub fn create(
+    host_kind: evt.HostKind,
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     io: std.Io,
@@ -145,7 +146,7 @@ pub fn create(
     var id_bytes: [evt.event_id_size]u8 = undefined;
     io.random(&id_bytes);
     const event_id = std.fmt.bytesToHex(id_bytes, .lower);
-    try evt.consume(.repo, repo_kind, repo_opts, io, allocator, repo, evt.events_ref, &.{.{
+    try evt.consume(host_kind, .repo, repo_kind, repo_opts, io, allocator, repo, evt.events_ref, &.{.{
         .id = event_id,
         .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
         .author = author,

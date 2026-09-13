@@ -166,7 +166,7 @@ pub fn canMerge(entry: Entry, session: *const ui.Session) bool {
         !entry.conflicted and
         entry.record.event.revision != null and
         entry.record.event.status.kind() == .open and
-        !session.data.is_local and
+        session.data.host_kind == .server and
         session.data.user_id != null;
 }
 

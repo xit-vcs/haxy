@@ -243,7 +243,7 @@ pub fn main(init: std.process.Init) !void {
         }
 
         // commit the seed events and consume them into the database
-        try evt.consume(.admin, .xit, evt.admin_repo_opts, io, allocator, &repo, evt.events_ref, &events_to_consume);
+        try evt.consume(.server, .admin, .xit, evt.admin_repo_opts, io, allocator, &repo, evt.events_ref, &events_to_consume);
 
         // every repo gets the same generated history, so build it once into a
         // template repo and copy that to each repo's location below rather than
@@ -590,7 +590,7 @@ pub fn main(init: std.process.Init) !void {
                     },
                 };
             }
-            try evt.consume(.repo, .xit, .{}, io, allocator, &template_repo, evt.events_ref, &issue_events);
+            try evt.consume(.local, .repo, .xit, .{}, io, allocator, &template_repo, evt.events_ref, &issue_events);
             // the tip is the branch point for the conflicting edits below
             const seed_tip = (try template_repo.readRef(io, evt.events_ref)) orelse unreachable;
 
@@ -670,7 +670,7 @@ pub fn main(init: std.process.Init) !void {
                     } },
                 } };
 
-                try evt.consume(.repo, .xit, .{}, io, allocator, &template_repo, evt.events_ref, &ours);
+                try evt.consume(.local, .repo, .xit, .{}, io, allocator, &template_repo, evt.events_ref, &ours);
 
                 // consume can't root a new branch, so theirs commits by hand
                 var json: std.Io.Writer.Allocating = .init(allocator);
@@ -705,7 +705,7 @@ pub fn main(init: std.process.Init) !void {
                 try template_repo.removeBranch(io, .{ .name = other_ref.name });
             }
 
-            try evt.consume(.repo, .xit, .{}, io, allocator, &template_repo, evt.events_ref, &.{});
+            try evt.consume(.local, .repo, .xit, .{}, io, allocator, &template_repo, evt.events_ref, &.{});
 
             // seed a small comment tree on the newest issue
             var comment_ids: [5][evt.event_id_size]u8 = undefined;
@@ -737,7 +737,7 @@ pub fn main(init: std.process.Init) !void {
                     } },
                 };
             }
-            try evt.consume(.repo, .xit, .{}, io, allocator, &template_repo, evt.events_ref, &comment_events);
+            try evt.consume(.local, .repo, .xit, .{}, io, allocator, &template_repo, evt.events_ref, &comment_events);
 
             const discussion_data = [_]struct {
                 title: []const u8,
@@ -784,7 +784,7 @@ pub fn main(init: std.process.Init) !void {
                     } },
                 };
             }
-            try evt.consume(.repo, .xit, .{}, io, allocator, &template_repo, evt.events_ref, &discussion_events);
+            try evt.consume(.local, .repo, .xit, .{}, io, allocator, &template_repo, evt.events_ref, &discussion_events);
 
             var discussion_comment_ids: [discussion_data.len][3][evt.event_id_size]u8 = undefined;
             for (&discussion_comment_ids) |*ids| {
@@ -813,7 +813,7 @@ pub fn main(init: std.process.Init) !void {
                     } },
                 };
             }
-            try evt.consume(.repo, .xit, .{}, io, allocator, &template_repo, evt.events_ref, &discussion_comment_events);
+            try evt.consume(.local, .repo, .xit, .{}, io, allocator, &template_repo, evt.events_ref, &discussion_comment_events);
             try template_repo.patchAll(io, allocator, null);
             try template_repo.addConfig(io, allocator, .{ .name = "core.bare", .value = "true" });
         }
@@ -1073,7 +1073,7 @@ fn seedPatchRevision(
         .{ .tree = .{ .name = "base", .oid = &base_tree_oid } },
         .{ .tree = .{ .name = "head", .oid = &head_tree_oid } },
     };
-    try evt.consume(.fork, .xit, .{}, io, allocator, &fork_repo, evt.events_ref, &.{.{
+    try evt.consume(.server, .fork, .xit, .{}, io, allocator, &fork_repo, evt.events_ref, &.{.{
         .id = std.fmt.bytesToHex(revision_id, .lower),
         .timestamp = revision_timestamp,
         .author = author,
@@ -1088,7 +1088,7 @@ fn seedPatchRevision(
     const patch_record = (try evt.Patch.readById(evt.EventDB(.sha1), .sha1, moment, &arena, patch_id)) orelse return error.NotFound;
     var patch = patch_record.event;
     patch.revision = evt.Patch.Revision.fromRecord(revision_id, revision_record);
-    try evt.consume(.fork, .xit, .{}, io, allocator, &fork_repo, evt.events_ref, &.{.{
+    try evt.consume(.server, .fork, .xit, .{}, io, allocator, &fork_repo, evt.events_ref, &.{.{
         .id = patch_hex,
         .timestamp = revision_timestamp + 1,
         .author = author,
@@ -1225,7 +1225,7 @@ fn seedPatches(
                 .timestamp = timestamp + 7,
             });
         } else if (status != .open) {
-            try evt.Patch.update(.xit, .{}, io, allocator, target_repo, &patch_ids[i], .{ .status = status }, patch_author);
+            try evt.Patch.update(.server, .xit, .{}, io, allocator, target_repo, &patch_ids[i], .{ .status = status }, patch_author);
         }
     }
 
@@ -1257,7 +1257,7 @@ fn seedPatches(
             } },
         };
     }
-    try evt.consume(.repo, .xit, .{}, io, allocator, target_repo, evt.events_ref, &comments);
+    try evt.consume(.server, .repo, .xit, .{}, io, allocator, target_repo, evt.events_ref, &comments);
 
     // create divergent metadata edits on the next three patches
     var patch_arena = std.heap.ArenaAllocator.init(allocator);
@@ -1317,7 +1317,7 @@ fn seedPatches(
     theirs[2].author = .{ .name = "bob", .email = "bob@example.test" };
     theirs[2].event.patch = theirs_values[2];
 
-    try evt.consume(.repo, .xit, .{}, io, allocator, target_repo, evt.events_ref, &ours);
+    try evt.consume(.server, .repo, .xit, .{}, io, allocator, target_repo, evt.events_ref, &ours);
     var json: std.Io.Writer.Allocating = .init(allocator);
     defer json.deinit();
     for (theirs, 0..) |event, i| {
@@ -1338,8 +1338,7 @@ fn seedPatches(
         if (merge.result != .success) return error.MergeFailed;
     }
     try target_repo.removeBranch(io, .{ .name = other_ref.name });
-    try evt.consume(.repo, .xit, .{}, io, allocator, target_repo, evt.events_ref, &.{});
-    pch.refreshMergeability(.{}, io, allocator, target_repo, null);
+    try evt.consume(.server, .repo, .xit, .{}, io, allocator, target_repo, evt.events_ref, &.{});
 }
 
 // recursively copy the contents of src_dir into dest_dir

@@ -37,18 +37,18 @@ const embeds = [_]Embed{
 
 // what a web request is served from: the multi-user server (admin repo +
 // login sessions) or a single local repo.
-pub const Host = union(enum) {
-    remote: struct {
+pub const Host = union(evt.HostKind) {
+    local: ui.RepoSource,
+    server: struct {
         admin_repo_path: []const u8,
         session_store: SessionStore,
         git_http_port: ?u16,
         git_ssh_port: ?u16,
         git_ssh_prefix: []const u8,
     },
-    local: ui.RepoSource,
 };
 
-// an on-disk repo resolved from a request url. remote paths are owned.
+// an on-disk repo resolved from a request url. server paths are owned.
 const RequestRepoSource = struct {
     source: ui.RepoSource,
     owned_path: ?[]const u8 = null,
@@ -60,12 +60,12 @@ const RequestRepoSource = struct {
 
 fn requestRepoSource(io: std.Io, allocator: std.mem.Allocator, host: Host, repo_base: []const u8) !?RequestRepoSource {
     return switch (host) {
-        .remote => |remote| blk: {
+        .server => |server| blk: {
             const repo_prefix = "/repo/";
             if (!std.mem.startsWith(u8, repo_base, repo_prefix)) break :blk null;
-            const repos_dir = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(remote.admin_repo_path) orelse ".", "repos" });
+            const repos_dir = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(server.admin_repo_path) orelse ".", "repos" });
             defer allocator.free(repos_dir);
-            const path = switch (try serve_common.resolveRepoPath(io, allocator, repos_dir, remote.admin_repo_path, repo_base[repo_prefix.len..], false)) {
+            const path = switch (try serve_common.resolveRepoPath(io, allocator, repos_dir, server.admin_repo_path, repo_base[repo_prefix.len..], false)) {
                 .ok => |value| value,
                 .invalid, .not_found => break :blk null,
             };
@@ -132,16 +132,16 @@ fn handleRequest(
     // you were on. local mode has no accounts, so only the repo routes.
     if (method == .POST) {
         switch (host) {
-            .remote => |remote| {
+            .server => |server| {
                 const PostRoute = enum { login, logout, ansi, new, edit, remove, open, close, resolve, publish, merge, squash, attach };
                 inline for (@typeInfo(PostRoute).@"enum".fields) |field| {
                     const suffix = "/" ++ field.name;
                     if (std.mem.endsWith(u8, path, suffix)) {
                         const base = path[0 .. path.len - suffix.len];
                         return switch (@field(PostRoute, field.name)) {
-                            .login => handleLogin(io, request, allocator, base, remote.admin_repo_path, remote.session_store),
-                            .logout => handleLogout(request, base, remote.session_store),
-                            .ansi => handleAnsi(io, request, allocator, base, remote.admin_repo_path, remote.session_store),
+                            .login => handleLogin(io, request, allocator, base, server.admin_repo_path, server.session_store),
+                            .logout => handleLogout(request, base, server.session_store),
+                            .ansi => handleAnsi(io, request, allocator, base, server.admin_repo_path, server.session_store),
                             .new => handleNew(io, request, allocator, base, host),
                             .edit => handleEdit(io, request, allocator, base, host),
                             .remove => handleRemove(io, request, allocator, base, host),
@@ -200,7 +200,7 @@ fn handleRequest(
     if (attachmentRequest(path)) |attachment| return serveAttachment(io, request, allocator, attachment, host);
 
     const current_page_maybe = switch (host) {
-        .remote => ui.RoutablePage.fromUrl(path),
+        .server => ui.RoutablePage.fromUrl(path),
         .local => ui.RoutablePage.fromUrlLocal(path),
     };
     if (current_page_maybe) |current_page| {
@@ -222,23 +222,23 @@ fn handleRequest(
         var cookie_buf: [256]u8 = undefined;
         var session_cookie: ?[]const u8 = null;
         switch (host) {
-            .remote => |remote| {
+            .server => |server| {
                 user_id = blk: {
                     const token = getCookieValue(request, cookie_name) orelse break :blk null;
-                    if (!remote.session_store.lookup(token, &user_id_buf)) break :blk null;
+                    if (!server.session_store.lookup(token, &user_id_buf)) break :blk null;
                     break :blk user_id_buf[0..evt.event_id_size];
                 };
                 // whoever seeded the store may have left a session to claim
                 if (user_id == null) {
                     var token: [SessionStore.token_hex_len]u8 = undefined;
-                    if (remote.session_store.autoLogin(&token) and remote.session_store.lookup(&token, &user_id_buf)) {
+                    if (server.session_store.autoLogin(&token) and server.session_store.lookup(&token, &user_id_buf)) {
                         session_cookie = try std.fmt.bufPrint(&cookie_buf, session_cookie_fmt, .{token});
                         user_id = user_id_buf[0..evt.event_id_size];
                     }
                 }
                 if (getCookieValue(request, form_flash_cookie)) |token| {
                     form_cookie_seen = true;
-                    form_feedback = remote.session_store.takeFlash(form_arena.allocator(), token);
+                    form_feedback = server.session_store.takeFlash(form_arena.allocator(), token);
                 }
             },
             .local => {
@@ -262,7 +262,7 @@ fn handleRequest(
         }
 
         const git_http_port: ?u16, const git_ssh_port: ?u16, const git_ssh_prefix: []const u8 = switch (host) {
-            .remote => |remote| .{ remote.git_http_port, remote.git_ssh_port, remote.git_ssh_prefix },
+            .server => |server| .{ server.git_http_port, server.git_ssh_port, server.git_ssh_prefix },
             .local => .{ null, null, "" },
         };
         const html = renderIndexHtml(io, allocator, host, .{
@@ -270,7 +270,7 @@ fn handleRequest(
             .form_feedback = form_feedback,
             .sync_failure = sync_failure,
             .current_page = current_page,
-            .is_local = host == .local,
+            .host_kind = std.meta.activeTag(host),
             .git_http_port = git_http_port,
             .git_ssh_port = git_ssh_port,
             .git_ssh_prefix = git_ssh_prefix,
@@ -383,7 +383,7 @@ fn respondFormFailure(request: *std.http.Server.Request, allocator: std.mem.Allo
 
 fn respondThreadFormFailure(request: *std.http.Server.Request, allocator: std.mem.Allocator, host: Host, location: []const u8, feedback: ui.Session.FormFeedback) !void {
     return switch (host) {
-        .remote => |remote| respondFormFailure(request, allocator, remote.session_store, location, feedback),
+        .server => |server| respondFormFailure(request, allocator, server.session_store, location, feedback),
         .local => {
             const tag = std.meta.activeTag(feedback);
             const required_title = switch (feedback) {
@@ -508,15 +508,15 @@ fn eventAuthor(
     request: *std.http.Server.Request,
     host: Host,
 ) !?RequestAuthor {
-    const remote = switch (host) {
-        .remote => |remote| remote,
+    const server = switch (host) {
+        .server => |server| server,
         .local => |src| return .{ .author = try ui.localAuthor(src, io, allocator, arena) },
     };
     const token = getCookieValue(request, cookie_name) orelse return null;
     var user_id: [evt.event_id_size]u8 = undefined;
-    if (!remote.session_store.lookup(token, &user_id)) return null;
+    if (!server.session_store.lookup(token, &user_id)) return null;
 
-    var repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = remote.admin_repo_path });
+    var repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = server.admin_repo_path });
     defer repo.deinit(io, allocator);
     const moment = try evt.currentMoment(evt.admin_repo_opts, &repo);
     const user = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, &user_id)) orelse return null;
@@ -622,8 +622,8 @@ fn handleThreadNew(
     const event_id_hex = std.fmt.bytesToHex(id_bytes, .lower);
 
     if (kind == .patch) {
-        const remote = switch (host) {
-            .remote => |remote| remote,
+        const server = switch (host) {
+            .server => |server| server,
             .local => return respondRemoveNotFound(request),
         };
         const user_id = request_author.user_id orelse return respondLoginRequired(request);
@@ -635,9 +635,9 @@ fn handleThreadNew(
             return respondThreadFormFailure(request, allocator, host, form_location, invalidTargetBranchFeedback(title, tags, description, target_branch));
         }
         const repo_id = evt.parseEventId(std.fs.path.basename(request_repo.source.path)) catch return respondRemoveNotFound(request);
-        var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = remote.admin_repo_path });
+        var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = server.admin_repo_path });
         defer admin_repo.deinit(io, allocator);
-        const repos_dir = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(remote.admin_repo_path) orelse ".", "repos" });
+        const repos_dir = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(server.admin_repo_path) orelse ".", "repos" });
         defer allocator.free(repos_dir);
         const fork_path = try fork.create(.{}, io, allocator, repos_dir, &admin_repo, .{
             .id = event_id_hex,
@@ -684,7 +684,7 @@ fn handleThreadNew(
             var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, source.localInitOpts());
             defer any_repo.deinit(io, allocator);
             switch (any_repo) {
-                inline else => |*repo| try evt.consume(.repo, repo_kind, repo.self_repo_opts, io, allocator, repo, evt.events_ref, &[_]evt.EventWithId{event}),
+                inline else => |*repo| try evt.consume(std.meta.activeTag(host), .repo, repo_kind, repo.self_repo_opts, io, allocator, repo, evt.events_ref, &[_]evt.EventWithId{event}),
             }
         },
     }
@@ -727,8 +727,8 @@ fn handlePatchPublish(
 ) !void {
     const parts = commentBaseParts(base) orelse return respondRemoveNotFound(request);
     if (parts.thread_kind != .patch or parts.comment_id != null) return respondRemoveNotFound(request);
-    const remote = switch (host) {
-        .remote => |remote| remote,
+    const server = switch (host) {
+        .server => |server| server,
         .local => return respondRemoveNotFound(request),
     };
     var author_arena = std.heap.ArenaAllocator.init(allocator);
@@ -742,10 +742,10 @@ fn handlePatchPublish(
     const repo_id = evt.parseEventId(std.fs.path.basename(request_repo.source.path)) catch return respondRemoveNotFound(request);
     var target_repo = try rp.Repo(.xit, .{}).open(io, allocator, request_repo.source.localInitOpts());
     defer target_repo.deinit(io, allocator);
-    var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = remote.admin_repo_path });
+    var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = server.admin_repo_path });
     defer admin_repo.deinit(io, allocator);
     const id = std.fmt.bytesToHex(parts.thread_id, .lower);
-    const repos_dir = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(remote.admin_repo_path) orelse ".", "repos" });
+    const repos_dir = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(server.admin_repo_path) orelse ".", "repos" });
     defer allocator.free(repos_dir);
     const fork_path = try fork.forkPath(allocator, repos_dir, &id);
     defer allocator.free(fork_path);
@@ -772,8 +772,8 @@ fn handlePatchMerge(
 ) !void {
     const parts = commentBaseParts(base) orelse return respondRemoveNotFound(request);
     if (parts.thread_kind != .patch or parts.comment_id != null) return respondRemoveNotFound(request);
-    const remote = switch (host) {
-        .remote => |remote| remote,
+    const server = switch (host) {
+        .server => |server| server,
         .local => return respondRemoveNotFound(request),
     };
     var author_arena = std.heap.ArenaAllocator.init(allocator);
@@ -784,11 +784,11 @@ fn handlePatchMerge(
     defer request_repo.deinit(allocator);
     var target_repo = try rp.Repo(.xit, .{}).open(io, allocator, request_repo.source.localInitOpts());
     defer target_repo.deinit(io, allocator);
-    var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = remote.admin_repo_path });
+    var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = server.admin_repo_path });
     defer admin_repo.deinit(io, allocator);
 
     const id = std.fmt.bytesToHex(parts.thread_id, .lower);
-    const repos_dir = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(remote.admin_repo_path) orelse ".", "repos" });
+    const repos_dir = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(server.admin_repo_path) orelse ".", "repos" });
     defer allocator.free(repos_dir);
     pch.mergeAndRemoveFork(.{}, io, allocator, repos_dir, &admin_repo, &target_repo, .{
         .id = id,
@@ -870,7 +870,7 @@ fn handleCommentNew(
             var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, source.localInitOpts());
             defer any_repo.deinit(io, allocator);
             switch (any_repo) {
-                inline else => |*repo| event_id_hex = try evt.Comment.create(repo_kind, repo.self_repo_opts, io, allocator, repo, &thread_id_hex, &parent_id_hex, body, author),
+                inline else => |*repo| event_id_hex = try evt.Comment.create(std.meta.activeTag(host), repo_kind, repo.self_repo_opts, io, allocator, repo, &thread_id_hex, &parent_id_hex, body, author),
             }
         },
     }
@@ -1061,7 +1061,7 @@ fn handleAttach(
             var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, source.localInitOpts());
             defer any_repo.deinit(io, allocator);
             switch (any_repo) {
-                inline else => |*repo| _ = evt.Attachment.create(repo_kind, repo.self_repo_opts, io, allocator, repo, &parent_id_hex, blob, author) catch |err| switch (err) {
+                inline else => |*repo| _ = evt.Attachment.create(std.meta.activeTag(host), repo_kind, repo.self_repo_opts, io, allocator, repo, &parent_id_hex, blob, author) catch |err| switch (err) {
                     error.ParentNotFound => return respondAttachmentParentNotFound(request),
                     else => return err,
                 },
@@ -1113,7 +1113,7 @@ fn updateComment(
             var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, source.localInitOpts());
             defer any_repo.deinit(io, allocator);
             switch (any_repo) {
-                inline else => |*repo| try evt.Comment.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &thread_id, &comment_id, body, author),
+                inline else => |*repo| try evt.Comment.update(std.meta.activeTag(host), repo_kind, repo.self_repo_opts, io, allocator, repo, &thread_id, &comment_id, body, author),
             }
         },
     }
@@ -1199,12 +1199,7 @@ fn updateThread(
             var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, source.localInitOpts());
             defer any_repo.deinit(io, allocator);
             switch (any_repo) {
-                inline else => |*repo| {
-                    try Event.update(repo_kind, repo.self_repo_opts, io, allocator, repo, id, update, author);
-                    if (comptime Event == evt.Patch and repo_kind == .xit) {
-                        if (host == .remote) pch.refreshMergeability(repo.self_repo_opts, io, allocator, repo, id.*);
-                    }
-                },
+                inline else => |*repo| try Event.update(std.meta.activeTag(host), repo_kind, repo.self_repo_opts, io, allocator, repo, id, update, author),
             }
         },
     }
@@ -1254,10 +1249,10 @@ fn handleRemove(
     const source = request_repo.source;
 
     if (parts.kind == .patch) switch (host) {
-        .remote => |remote| {
+        .server => |server| {
             const user_id = request_author.user_id orelse return respondLoginRequired(request);
 
-            var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = remote.admin_repo_path });
+            var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = server.admin_repo_path });
             defer admin_repo.deinit(io, allocator);
             const moment = try evt.currentMoment(evt.admin_repo_opts, &admin_repo);
             const record = try evt.Fork.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, &author_arena, &parts.id);
@@ -1265,7 +1260,7 @@ fn handleRemove(
                 const repo_id = evt.parseEventId(std.fs.path.basename(source.path)) catch return respondRemoveNotFound(request);
                 if (!fork_record.removed and fork_record.event.stage == .draft and std.mem.eql(u8, fork_record.event.repo_id, &repo_id)) {
                     const id = std.fmt.bytesToHex(parts.id, .lower);
-                    const repos_dir = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(remote.admin_repo_path) orelse ".", "repos" });
+                    const repos_dir = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(server.admin_repo_path) orelse ".", "repos" });
                     defer allocator.free(repos_dir);
                     try fork.remove(io, allocator, repos_dir, &admin_repo, &id, &user_id, author);
 
@@ -1288,7 +1283,7 @@ fn handleRemove(
             var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, source.localInitOpts());
             defer any_repo.deinit(io, allocator);
             switch (any_repo) {
-                inline else => |*repo| evt.remove(.repo, repo_kind, repo.self_repo_opts, io, allocator, repo, &parts.id, parts.kind, author) catch |err| switch (err) {
+                inline else => |*repo| evt.remove(std.meta.activeTag(host), .repo, repo_kind, repo.self_repo_opts, io, allocator, repo, &parts.id, parts.kind, author) catch |err| switch (err) {
                     error.EventNotFound => return respondRemoveNotFound(request),
                     else => |e| return e,
                 },
@@ -1332,7 +1327,7 @@ fn updateDiscussion(
             var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, source.localInitOpts());
             defer any_repo.deinit(io, allocator);
             switch (any_repo) {
-                inline else => |*repo| try evt.Discussion.update(repo_kind, repo.self_repo_opts, io, allocator, repo, id, title, tags, description, author),
+                inline else => |*repo| try evt.Discussion.update(std.meta.activeTag(host), repo_kind, repo.self_repo_opts, io, allocator, repo, id, title, tags, description, author),
             }
         },
     }
@@ -1438,8 +1433,8 @@ fn handleThreadEdit(
 
     const draft_user_id = if (parts.thread_kind == .patch) request_author.user_id else null;
     if (draft_user_id) |user_id| {
-        const remote = switch (host) {
-            .remote => |remote| remote,
+        const server = switch (host) {
+            .server => |server| server,
             .local => unreachable,
         };
         const request_repo = (try requestRepoSource(io, allocator, host, parts.repo_base)) orelse return respondRemoveNotFound(request);
@@ -1450,10 +1445,10 @@ fn handleThreadEdit(
             return respondThreadFormFailure(request, allocator, host, form_location, invalidTargetBranchFeedback(title, tags, description, target_branch));
         }
         const repo_id = evt.parseEventId(std.fs.path.basename(request_repo.source.path)) catch return respondRemoveNotFound(request);
-        var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = remote.admin_repo_path });
+        var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = server.admin_repo_path });
         defer admin_repo.deinit(io, allocator);
         const id = std.fmt.bytesToHex(parts.thread_id, .lower);
-        const repos_dir = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(remote.admin_repo_path) orelse ".", "repos" });
+        const repos_dir = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(server.admin_repo_path) orelse ".", "repos" });
         defer allocator.free(repos_dir);
         const fork_path = try fork.forkPath(allocator, repos_dir, &id);
         defer allocator.free(fork_path);
@@ -1677,21 +1672,21 @@ fn renderIndexHtml(
     var page_arena = std.heap.ArenaAllocator.init(allocator);
     defer page_arena.deinit();
 
-    // the remote admin repo must outlive the page build, since the session's
+    // the server admin repo must outlive the page build, since the session's
     // moment reads from it.
     var repo_maybe: ?rp.Repo(.xit, evt.admin_repo_opts) = null;
     defer if (repo_maybe) |*repo| repo.deinit(io, allocator);
 
     var session = switch (host) {
-        .remote => |remote| blk: {
+        .server => |server| blk: {
             // open the admin repo to read live user/repo data.
-            repo_maybe = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = remote.admin_repo_path });
+            repo_maybe = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = server.admin_repo_path });
             const repo = if (repo_maybe) |*repo| repo else unreachable;
             var session = try ui.Session.init(&page_arena, repo, session_data);
             // give the page builders filesystem access to the on-disk repos (a
             // sibling "repos" dir next to the admin repo) so the Repo page can
             // read its files.
-            session.repos_dir = try std.fs.path.join(page_arena.allocator(), &.{ std.fs.path.dirname(remote.admin_repo_path) orelse ".", "repos" });
+            session.repos_dir = try std.fs.path.join(page_arena.allocator(), &.{ std.fs.path.dirname(server.admin_repo_path) orelse ".", "repos" });
             break :blk session;
         },
         .local => |local| ui.Session{

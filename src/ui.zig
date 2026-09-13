@@ -1764,11 +1764,11 @@ pub const Session = struct {
         git_http_port: ?u16 = null,
         git_ssh_port: ?u16 = null,
         git_ssh_prefix: []const u8 = "",
-        // true when this session views a single local repo. unlike `local`
+        // whether this session views a local repo or the server. unlike `local`
         // (the host-side filesystem source) this travels in the snapshot, so
         // the wasm side also parses elided link urls and hides the multi-user
         // chrome.
-        is_local: bool = false,
+        host_kind: evt.HostKind = .server,
     };
 
     // a user-initiated state change. widgets enqueue these on the session during
@@ -1830,7 +1830,7 @@ pub const Session = struct {
     // the commit author for an event this session creates, or null when it may
     // not create one
     pub fn eventAuthor(self: *Self) !?evt.CommitAuthor {
-        if (self.data.is_local) {
+        if (self.data.host_kind == .local) {
             const src = self.local orelse return local_author_fallback;
             const io = self.io orelse return local_author_fallback;
             return try localAuthor(src, io, self.page_arena.child_allocator, self.page_arena);
@@ -2147,7 +2147,7 @@ fn pageLink(root_focus: *Focus, focus_id: usize, data: Session.Data, prefix: []c
     if (!std.mem.startsWith(u8, custom, prefix)) return null;
     const path = custom[prefix.len..];
     // local sessions build (and parse) links with the repo identity elided
-    return if (data.is_local) RoutablePage.fromUrlLocal(path) else RoutablePage.fromUrl(path);
+    return if (data.host_kind == .local) RoutablePage.fromUrlLocal(path) else RoutablePage.fromUrl(path);
 }
 
 // a display author, resolved against the admin db at read time

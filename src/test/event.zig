@@ -109,7 +109,7 @@ test "rebase" {
     //
 
     {
-        try evt.consume(.repo, .xit, repo_opts, io, allocator, &repo, evt.events_ref, &.{});
+        try evt.consume(.local, .repo, .xit, repo_opts, io, allocator, &repo, evt.events_ref, &.{});
 
         const haxy_moment = try evt.currentMoment(repo_opts, &repo);
 
@@ -148,7 +148,7 @@ test "rebase" {
     };
 
     // commit and consume the new event
-    try evt.consume(.repo, .xit, repo_opts, io, allocator, &repo, evt.events_ref, &events_to_consume2);
+    try evt.consume(.local, .repo, .xit, repo_opts, io, allocator, &repo, evt.events_ref, &events_to_consume2);
 
     //
     // rebase the branch so it no longer includes the edit event
@@ -191,7 +191,7 @@ test "rebase" {
     //
 
     {
-        try evt.consume(.repo, .xit, repo_opts, io, allocator, &repo, evt.events_ref, &.{});
+        try evt.consume(.local, .repo, .xit, repo_opts, io, allocator, &repo, evt.events_ref, &.{});
 
         const haxy_moment = try evt.currentMoment(repo_opts, &repo);
 
@@ -250,7 +250,7 @@ test "rebase" {
     //
 
     {
-        try evt.consume(.repo, .xit, repo_opts, io, allocator, &repo, evt.events_ref, &.{});
+        try evt.consume(.local, .repo, .xit, repo_opts, io, allocator, &repo, evt.events_ref, &.{});
 
         const haxy_moment = try evt.currentMoment(repo_opts, &repo);
 
@@ -353,7 +353,7 @@ test "merge" {
     //
 
     {
-        try evt.consume(.repo, .xit, repo_opts, io, allocator, &repo, evt.events_ref, &.{});
+        try evt.consume(.local, .repo, .xit, repo_opts, io, allocator, &repo, evt.events_ref, &.{});
 
         const haxy_moment = try evt.currentMoment(repo_opts, &repo);
 
@@ -458,7 +458,7 @@ test "merge" {
     //
 
     {
-        try evt.consume(.repo, .xit, repo_opts, io, allocator, &repo, evt.events_ref, &.{});
+        try evt.consume(.local, .repo, .xit, repo_opts, io, allocator, &repo, evt.events_ref, &.{});
 
         const haxy_moment = try evt.currentMoment(repo_opts, &repo);
 
@@ -550,7 +550,7 @@ test "merge" {
     //
 
     {
-        try evt.consume(.repo, .xit, repo_opts, io, allocator, &repo, evt.events_ref, &.{});
+        try evt.consume(.local, .repo, .xit, repo_opts, io, allocator, &repo, evt.events_ref, &.{});
 
         const haxy_moment = try evt.currentMoment(repo_opts, &repo);
 
@@ -652,10 +652,10 @@ test "merge" {
     _ = try std.fmt.hexToBytes(&issue_id, &events_to_consume[0].id);
 
     {
-        try evt.consume(.repo, .xit, repo_opts, io, allocator, &repo, evt.events_ref, &.{});
+        try evt.consume(.local, .repo, .xit, repo_opts, io, allocator, &repo, evt.events_ref, &.{});
 
         // consuming the merge again must be a no-op rather than replaying it
-        try evt.consume(.repo, .xit, repo_opts, io, allocator, &repo, evt.events_ref, &.{});
+        try evt.consume(.local, .repo, .xit, repo_opts, io, allocator, &repo, evt.events_ref, &.{});
 
         const haxy_moment = try evt.currentMoment(repo_opts, &repo);
 
@@ -737,7 +737,7 @@ test "merge" {
             try std.testing.expect(.success == merge.result);
         }
 
-        try evt.consume(.repo, .xit, repo_opts, io, allocator, &repo, evt.events_ref, &.{});
+        try evt.consume(.local, .repo, .xit, repo_opts, io, allocator, &repo, evt.events_ref, &.{});
 
         const haxy_moment = try evt.currentMoment(repo_opts, &repo);
 
@@ -757,7 +757,7 @@ test "merge" {
     //
 
     {
-        try evt.Issue.update(.xit, repo_opts, io, allocator, &repo, &issue_id, .{ .status = .closed }, author);
+        try evt.Issue.update(.local, .xit, repo_opts, io, allocator, &repo, &issue_id, .{ .status = .closed }, author);
 
         const haxy_moment = try evt.currentMoment(repo_opts, &repo);
         const conflicts_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Issue.conflicts_key)) orelse return error.NotFound;
@@ -770,7 +770,7 @@ test "merge" {
     //
 
     {
-        try evt.Issue.update(.xit, repo_opts, io, allocator, &repo, &issue_id, .{ .fields = .{
+        try evt.Issue.update(.local, .xit, repo_opts, io, allocator, &repo, &issue_id, .{ .fields = .{
             .title = "Login form clears password on validation error",
             .tags = "bug priority-medium ui",
             .description = "Submitting an invalid email address resets the password field.",
@@ -809,7 +809,7 @@ test "merge" {
             try std.testing.expect(.success == merge.result);
         }
 
-        try evt.consume(.repo, .xit, repo_opts, io, allocator, &repo, evt.events_ref, &.{});
+        try evt.consume(.local, .repo, .xit, repo_opts, io, allocator, &repo, evt.events_ref, &.{});
 
         const haxy_moment = try evt.currentMoment(repo_opts, &repo);
 
@@ -887,7 +887,7 @@ test "merge" {
     }
 
     {
-        try evt.consume(.repo, .xit, repo_opts, io, allocator, &repo, evt.events_ref, &.{});
+        try evt.consume(.local, .repo, .xit, repo_opts, io, allocator, &repo, evt.events_ref, &.{});
 
         const haxy_moment = try evt.currentMoment(repo_opts, &repo);
 
@@ -972,7 +972,7 @@ test "merge" {
             try std.testing.expect(.success == merge.result);
         }
 
-        try evt.consume(.repo, .xit, repo_opts, io, allocator, &repo, evt.events_ref, &.{});
+        try evt.consume(.local, .repo, .xit, repo_opts, io, allocator, &repo, evt.events_ref, &.{});
 
         const haxy_moment = try evt.currentMoment(repo_opts, &repo);
 

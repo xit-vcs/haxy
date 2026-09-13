@@ -300,6 +300,7 @@ pub fn resolveMerge(
 }
 
 pub fn update(
+    host_kind: evt.HostKind,
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     io: std.Io,
@@ -339,7 +340,7 @@ pub fn update(
     }
     if (!fieldsValid(updated.title, updated.tags)) return error.InvalidFields;
 
-    try evt.consume(.repo, repo_kind, repo_opts, io, allocator, repo, evt.events_ref, &.{.{
+    try evt.consume(host_kind, .repo, repo_kind, repo_opts, io, allocator, repo, evt.events_ref, &.{.{
         .id = std.fmt.bytesToHex(id.*, .lower),
         .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
         .author = author,

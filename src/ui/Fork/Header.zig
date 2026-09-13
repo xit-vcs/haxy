@@ -138,7 +138,7 @@ pub const View = struct {
         }
 
         // keep authentication within the fork page.
-        if (!session.data.is_local) {
+        if (session.data.host_kind == .server) {
             var auth_tab = try AuthTab.View.init(allocator, session);
             errdefer auth_tab.deinit(allocator);
             auth_tab.text_box.getFocus().kind = .{ .custom = auth_link };

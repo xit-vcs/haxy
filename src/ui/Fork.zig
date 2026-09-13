@@ -193,7 +193,7 @@ pub const View = struct {
                 errdefer settings.deinit(allocator);
                 try stack.children.put(allocator, settings.getFocus().id, .{ .home_settings = settings });
             }
-            if (!session.data.is_local) {
+            if (session.data.host_kind == .server) {
                 var auth = try Auth.View.init(allocator, &data.auth, session);
                 errdefer auth.deinit(allocator);
                 try stack.children.put(allocator, auth.getFocus().id, .{ .home_auth = auth });

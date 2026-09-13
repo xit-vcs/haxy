@@ -76,7 +76,7 @@ pub const View = struct {
         try ui.widget.addBackButton(allocator, &title_box, session);
 
         // the user's name (local mode has no user pages to link to)
-        if (!session.data.is_local) {
+        if (session.data.host_kind == .server) {
             var text_buf: [evt.User.name_max_len + 1]u8 = undefined;
             const text = try std.fmt.bufPrint(&text_buf, "{s}/", .{data.owner_name});
             const link = try std.fmt.allocPrint(aa, "a:/user/{s}", .{data.owner_name});
@@ -94,7 +94,7 @@ pub const View = struct {
         }
 
         // local routes carry no identity, so their urls come out elided
-        const identity = if (session.data.is_local) "" else try std.fmt.allocPrint(aa, "{s}/{s}", .{ data.owner_name, data.name });
+        const identity = if (session.data.host_kind == .local) "" else try std.fmt.allocPrint(aa, "{s}/{s}", .{ data.owner_name, data.name });
 
         // title links to the repo's files root (the bare route, so it resolves
         // to the default branch).
@@ -293,7 +293,7 @@ pub const View = struct {
         // auth tab (login / logout). AuthTab defaults to the global ai:/auth
         // link; repoint its instance at this repo's auth route so it stays on
         // this page. local mode has no accounts, so it has no auth tab.
-        if (!session.data.is_local) {
+        if (session.data.host_kind == .server) {
             var auth_tab = try AuthTab.View.init(allocator, session);
             errdefer auth_tab.deinit(allocator);
             auth_tab.text_box.getFocus().kind = .{ .custom = auth_link };

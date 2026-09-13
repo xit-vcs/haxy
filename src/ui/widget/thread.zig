@@ -570,7 +570,7 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                         try addToolButton(allocator, row, "✕", "", try std.fmt.allocPrint(pa, "a:{s}", .{try remove_route.toUrl(self.session.page_arena)}));
                     }
                 } else {
-                    if (!self.session.is_terminal and !entryConflicted(entry) and (self.session.data.is_local or self.session.data.user_id != null)) {
+                    if (!self.session.is_terminal and !entryConflicted(entry) and (self.session.data.host_kind == .local or self.session.data.user_id != null)) {
                         const label = "add attachment";
                         const action = if (self.data.identity.len == 0)
                             try std.fmt.allocPrint(pa, "{s}/{s}:{s}/attach", .{ ui.file_input_prefix, @tagName(kind), entry.id })
@@ -583,7 +583,7 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                         const route = resolveRoute(self.data.identity, entry.id, "") orelse return error.RouteTooLong;
                         try addToolButton(allocator, row, "resolve conflict", "", try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}));
                     } else {
-                        if (has_status and (self.session.data.is_local or self.session.data.user_id != null)) {
+                        if (has_status and (self.session.data.host_kind == .local or self.session.data.user_id != null)) {
                             if (statusChange(entryStatus(entry))) |change| {
                                 const route = ui.RoutablePage.repoThreadCommentsRoute(kind, self.data.identity, entry.id, 0) orelse return error.RouteTooLong;
                                 row.getFocus().kind = .{ .custom = try std.fmt.allocPrint(pa, "form:{s}/{s}", .{ try route.toUrl(self.session.page_arena), change.action }) };
@@ -595,7 +595,7 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                         try addToolButton(allocator, row, "edit", "", try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}));
                     }
 
-                    if (self.session.data.is_local or self.session.data.user_id != null) {
+                    if (self.session.data.host_kind == .local or self.session.data.user_id != null) {
                         const route = ui.RoutablePage.repoThreadRemoveRoute(kind, self.data.identity, entry.id, "") orelse return error.RouteTooLong;
                         try addToolButton(allocator, row, "✕", "", try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}));
                     }
@@ -1182,7 +1182,7 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                     var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, source.localInitOpts());
                     defer any_repo.deinit(io, allocator);
                     switch (any_repo) {
-                        inline else => |*repo| try evt.remove(.repo, repo_kind, repo.self_repo_opts, io, allocator, repo, &id, event_kind, author),
+                        inline else => |*repo| try evt.remove(self.session.data.host_kind, .repo, repo_kind, repo.self_repo_opts, io, allocator, repo, &id, event_kind, author),
                     }
                 },
             }
@@ -1206,12 +1206,7 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                     var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, source.localInitOpts());
                     defer any_repo.deinit(io, allocator);
                     switch (any_repo) {
-                        inline else => |*repo| {
-                            try Event.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &id, .{ .status = status }, author);
-                            if (comptime kind == .patch and repo_kind == .xit) {
-                                if (!self.session.data.is_local) pch.refreshMergeability(repo.self_repo_opts, io, allocator, repo, id);
-                            }
-                        },
+                        inline else => |*repo| try Event.update(self.session.data.host_kind, repo_kind, repo.self_repo_opts, io, allocator, repo, &id, .{ .status = status }, author),
                     }
                 },
             }
@@ -1428,7 +1423,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             // its place, prefilled with the selected thread's content. a
             // logged-out session can't create events, so the unauthorized view
             // stands in.
-            if (session.data.is_local or session.data.user_id != null) {
+            if (session.data.host_kind == .local or session.data.user_id != null) {
                 if (confirmation(data.view)) |confirmation_kind| {
                     const aa = session.page_arena.allocator();
                     const route = switch (confirmation_kind) {
@@ -2440,14 +2435,11 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                             };
                             if (comptime @hasField(Event.Resolve, "theirs")) resolution.theirs = self.data.theirs_picks;
                             const change = Event.Update{ .resolve = resolution };
-                            Event.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &id_bytes, change, author) catch |err| switch (err) {
+                            Event.update(self.session.data.host_kind, repo_kind, repo.self_repo_opts, io, allocator, repo, &id_bytes, change, author) catch |err| switch (err) {
                                 // leave the form up for correction
                                 error.InvalidFields => return,
                                 else => |e| return e,
                             };
-                            if (comptime kind == .patch and repo_kind == .xit) {
-                                if (!self.session.data.is_local) pch.refreshMergeability(repo.self_repo_opts, io, allocator, repo, id_bytes);
-                            }
                         },
                     }
                 },
@@ -2486,10 +2478,10 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     switch (any_repo) {
                         inline else => |*repo| if (editing) {
                             const comment_id = evt.parseEventId(self.data.comment_id) catch return;
-                            try evt.Comment.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &thread_id, &comment_id, body, author);
+                            try evt.Comment.update(self.session.data.host_kind, repo_kind, repo.self_repo_opts, io, allocator, repo, &thread_id, &comment_id, body, author);
                             event_id_hex = std.fmt.bytesToHex(comment_id, .lower);
                         } else {
-                            event_id_hex = try evt.Comment.create(repo_kind, repo.self_repo_opts, io, allocator, repo, &thread_id, &parent_id, body, author);
+                            event_id_hex = try evt.Comment.create(self.session.data.host_kind, repo_kind, repo.self_repo_opts, io, allocator, repo, &thread_id, &parent_id, body, author);
                         },
                     }
                 },
@@ -2576,7 +2568,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, src.localInitOpts());
                     defer any_repo.deinit(io, allocator);
                     switch (any_repo) {
-                        inline else => |*repo| try evt.consume(.repo, repo_kind, repo.self_repo_opts, io, allocator, repo, evt.events_ref, &.{event}),
+                        inline else => |*repo| try evt.consume(self.session.data.host_kind, .repo, repo_kind, repo.self_repo_opts, io, allocator, repo, evt.events_ref, &.{event}),
                     }
                 },
             }
@@ -2642,7 +2634,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     defer any_repo.deinit(io, allocator);
                     switch (any_repo) {
                         inline else => |*repo| if (supports_drafts) {
-                            Event.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &id_bytes, .{ .fields = .{
+                            Event.update(self.session.data.host_kind, repo_kind, repo.self_repo_opts, io, allocator, repo, &id_bytes, .{ .fields = .{
                                 .title = title,
                                 .tags = tags,
                                 .description = description,
@@ -2654,17 +2646,14 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                                 },
                                 else => |other| return other,
                             };
-                            if (comptime kind == .patch and repo_kind == .xit) {
-                                if (!self.session.data.is_local) pch.refreshMergeability(repo.self_repo_opts, io, allocator, repo, id_bytes);
-                            }
                         } else if (has_status)
-                            try Event.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &id_bytes, .{ .fields = .{
+                            try Event.update(self.session.data.host_kind, repo_kind, repo.self_repo_opts, io, allocator, repo, &id_bytes, .{ .fields = .{
                                 .title = title,
                                 .tags = tags,
                                 .description = description,
                             } }, author)
                         else
-                            try Event.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &id_bytes, title, tags, description, author),
+                            try Event.update(self.session.data.host_kind, repo_kind, repo.self_repo_opts, io, allocator, repo, &id_bytes, title, tags, description, author),
                     }
                 },
             }
@@ -2750,7 +2739,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, src.localInitOpts());
                     defer any_repo.deinit(io, allocator);
                     switch (any_repo) {
-                        inline else => |*repo| try evt.remove(.repo, repo_kind, repo.self_repo_opts, io, allocator, repo, &id, event_kind, author),
+                        inline else => |*repo| try evt.remove(self.session.data.host_kind, .repo, repo_kind, repo.self_repo_opts, io, allocator, repo, &id, event_kind, author),
                     }
                 },
             }

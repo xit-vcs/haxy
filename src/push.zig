@@ -359,6 +359,8 @@ pub fn receiveFork(
         return err;
     };
 
+    response.progress(writer, "Checking merges...\n") catch {};
+
     // best-effort update the published patch so it has the new revision
     update: {
         const revision_id = revision_id_maybe orelse break :update;
@@ -377,17 +379,19 @@ pub fn receiveFork(
         }
         var patch = published_patch.event;
         patch.revision = selected;
-        evt.consume(.repo, .xit, repo_opts, io, allocator, target_repo, evt.events_ref, &.{.{
+        evt.consume(.server, .repo, .xit, repo_opts, io, allocator, target_repo, evt.events_ref, &.{.{
             .id = id.*,
             .timestamp = timestamp,
             .author = author,
             .event = .{ .patch = patch },
         }}) catch |update_err| {
             serve_common.logError(io, error_writer, "failed to update published patch {s}: {s}\n", .{ id, @errorName(update_err) });
+            break :update;
         };
+        // consume refreshed the published patch before acknowledging the push
+        return response.finish(writer, null);
     }
 
-    response.progress(writer, "Checking merges...\n") catch {};
     pch.refreshMergeability(repo_opts, io, allocator, target_repo, patch_id);
 
     // the client may read either repo as soon as it gets the final response.

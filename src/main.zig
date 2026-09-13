@@ -132,7 +132,7 @@ pub fn run(
                 .data = .{
                     // the files root; local routes carry no identity
                     .current_page = .{ .repo_files = .{ .name = .{} } },
-                    .is_local = true,
+                    .host_kind = .local,
                 },
             };
 

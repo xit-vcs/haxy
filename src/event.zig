@@ -126,6 +126,11 @@ pub const EventTreeEntry = union(enum) {
     },
 };
 
+pub const HostKind = enum {
+    local,
+    server,
+};
+
 // who a commit is attributed to
 pub const CommitAuthor = struct {
     name: []const u8,
@@ -240,6 +245,7 @@ pub const EventWithId = struct {
 
 // remove an event by emitting a null payload
 pub fn remove(
+    host_kind: HostKind,
     comptime role: RepoRole,
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
@@ -277,7 +283,7 @@ pub fn remove(
         .patchrev => .{ .patchrev = null },
         .patch => .{ .patch = null },
     };
-    try consume(role, repo_kind, repo_opts, io, allocator, repo, events_ref, &.{.{
+    try consume(host_kind, role, repo_kind, repo_opts, io, allocator, repo, events_ref, &.{.{
         .id = std.fmt.bytesToHex(id.*, .lower),
         .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
         .author = author,
@@ -288,8 +294,10 @@ pub fn remove(
 // commit `events` (if any) as JSON commit messages on `ref`, then consume the
 // events on `ref` into the db the repo's views read: the repo's own db for a
 // xit repo, or the standalone event db next to a git repo. for a xit repo the
-// commits and the consume run in one transaction.
+// commits and the consume run in one transaction. server writes refresh
+// mergeability after the transaction releases its lock.
 pub fn consume(
+    host_kind: HostKind,
     comptime role: RepoRole,
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
@@ -372,10 +380,25 @@ pub fn consume(
                 .events = events,
                 .first_parent_oids = first_parent_oids,
             }) catch |err| switch (err) {
-                error.CancelTransaction => {},
+                error.CancelTransaction => return,
                 else => |e| return e,
             };
         },
+    }
+
+    if (role == .repo and repo_kind == .xit and host_kind == .server) {
+        // syncing history may affect several patches
+        if (events.len == 0) {
+            pch.refreshMergeability(repo_opts, io, allocator, repo, null);
+            return;
+        }
+
+        // ordinary edits only need to refresh the patches they change
+        for (events) |event| {
+            if (event.event != .patch) continue;
+            const id = parseEventId(&event.id) catch continue;
+            pch.refreshMergeability(repo_opts, io, allocator, repo, id);
+        }
     }
 }
 
@@ -1533,7 +1556,7 @@ pub fn resolveOrCreateRepo(
     io.random(&id_bytes);
     const event_id_hex = std.fmt.bytesToHex(id_bytes, .lower);
 
-    try consume(.admin, .xit, admin_repo_opts, io, allocator, &repo, events_ref, &[_]EventWithId{.{
+    try consume(.server, .admin, .xit, admin_repo_opts, io, allocator, &repo, events_ref, &[_]EventWithId{.{
         .id = event_id_hex,
         .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
         .author = .{ .name = owner.event.name, .email = owner.event.email },

@@ -628,7 +628,7 @@ fn testPushFork(
         defer arena.deinit();
         const moment = try evt.currentMoment(repo_opts, &target);
         const patch = (try evt.Patch.readById(evt.EventDB(hash_kind), hash_kind, moment, &arena, &fork_id)) orelse return error.NotFound;
-        try evt.Patch.update(.xit, repo_opts, io, allocator, &target, &fork_id, .{ .fields = .{
+        try evt.Patch.update(.server, .xit, repo_opts, io, allocator, &target, &fork_id, .{ .fields = .{
             .title = "edited feature",
             .description = patch.event.description,
             .tags = patch.event.tags,
@@ -715,7 +715,7 @@ fn testPushFork(
     {
         var target = try rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = target_path });
         defer target.deinit(io, allocator);
-        try evt.remove(.repo, .xit, repo_opts, io, allocator, &target, &fork_id, .patch, .{ .name = "admin", .email = "admin@example.test" });
+        try evt.remove(.server, .repo, .xit, repo_opts, io, allocator, &target, &fork_id, .patch, .{ .name = "admin", .email = "admin@example.test" });
     }
     try client.push(io, allocator, "patch-to-feature", "master:patch", false, .{ .wire = .{ .ssh = .{ .command = ssh_cmd } } });
     {
@@ -739,7 +739,7 @@ fn testPushFork(
         defer arena.deinit();
         const moment = try evt.currentMoment(repo_opts, &target);
         const removed = (try evt.Patch.readById(evt.EventDB(hash_kind), hash_kind, moment, &arena, &fork_id)) orelse return error.NotFound;
-        try evt.consume(.repo, .xit, repo_opts, io, allocator, &target, evt.events_ref, &.{.{
+        try evt.consume(.server, .repo, .xit, repo_opts, io, allocator, &target, evt.events_ref, &.{.{
             .id = fork_id_hex,
             .timestamp = 4,
             .author = .{ .name = "admin", .email = "admin@example.test" },
@@ -782,7 +782,7 @@ fn testPushFork(
     {
         var admin = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = admin_path });
         defer admin.deinit(io, allocator);
-        try evt.remove(.admin, .xit, evt.admin_repo_opts, io, allocator, &admin, &repo_id, .repo, .{ .name = "admin", .email = "admin@example.test" });
+        try evt.remove(.server, .admin, .xit, evt.admin_repo_opts, io, allocator, &admin, &repo_id, .repo, .{ .name = "admin", .email = "admin@example.test" });
     }
     const clone_path = try std.fs.path.join(allocator, &.{ temp_path, "fork-clone" });
     defer allocator.free(clone_path);
@@ -801,7 +801,7 @@ fn testPushFork(
     {
         var admin = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = admin_path });
         defer admin.deinit(io, allocator);
-        try evt.consume(.admin, .xit, evt.admin_repo_opts, io, allocator, &admin, evt.events_ref, &.{
+        try evt.consume(.server, .admin, .xit, evt.admin_repo_opts, io, allocator, &admin, evt.events_ref, &.{
             .{
                 .id = std.fmt.bytesToHex(repo_id, .lower),
                 .timestamp = 2,
@@ -978,7 +978,7 @@ fn testPushEvents(
     };
 
     // commit the issue on the client and push it to the server
-    try evt.consume(.repo, repo_kind, .{ .hash = hash_kind, .is_test = true }, io, allocator, &client_repo, evt.events_ref, &events_to_push);
+    try evt.consume(.local, .repo, repo_kind, .{ .hash = hash_kind, .is_test = true }, io, allocator, &client_repo, evt.events_ref, &events_to_push);
     try client_repo.push(
         io,
         allocator,
@@ -1022,7 +1022,7 @@ fn testPushEvents(
     };
 
     // commit the edit on the client and push it to the server
-    try evt.consume(.repo, repo_kind, .{ .hash = hash_kind, .is_test = true }, io, allocator, &client_repo, evt.events_ref, &events_to_push2);
+    try evt.consume(.local, .repo, repo_kind, .{ .hash = hash_kind, .is_test = true }, io, allocator, &client_repo, evt.events_ref, &events_to_push2);
     try client_repo.push(
         io,
         allocator,
@@ -1621,7 +1621,7 @@ fn setupAdmin(io: std.Io, allocator: std.mem.Allocator, data_path: []const u8) !
     var password_hash_buf: [evt.User.password_hash_max_len]u8 = undefined;
     const password_hash = try evt.User.hashPassword("password", &password_hash_buf, io);
 
-    try evt.consume(.admin, .xit, evt.admin_repo_opts, io, allocator, &repo, evt.events_ref, &[_]evt.EventWithId{.{
+    try evt.consume(.server, .admin, .xit, evt.admin_repo_opts, io, allocator, &repo, evt.events_ref, &[_]evt.EventWithId{.{
         .id = std.fmt.bytesToHex(user_id, .lower),
         .author = .{ .name = "admin", .email = "admin@example.test" },
         .event = .{ .user = .{

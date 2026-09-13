@@ -42,7 +42,7 @@ fn consumePatchWithRevision(
     patch_value: evt.Patch,
     patch_timestamp: u64,
 ) !void {
-    try evt.consume(role, .xit, repo_opts, io, allocator, repo, ref, &.{.{
+    try evt.consume(.local, role, .xit, repo_opts, io, allocator, repo, ref, &.{.{
         .id = std.fmt.bytesToHex(revision_id, .lower),
         .timestamp = revision_timestamp,
         .author = author,
@@ -56,7 +56,7 @@ fn consumePatchWithRevision(
     const record = (try evt.PatchRev.readById(Repo.DB, repo_opts.hash, moment, &arena, &revision_id)) orelse return error.NotFound;
     var patch = patch_value;
     patch.revision = evt.Patch.Revision.fromRecord(revision_id, record);
-    try evt.consume(role, .xit, repo_opts, io, allocator, repo, ref, &.{.{
+    try evt.consume(.local, role, .xit, repo_opts, io, allocator, repo, ref, &.{.{
         .id = std.fmt.bytesToHex(patch_id, .lower),
         .timestamp = patch_timestamp,
         .author = author,
@@ -220,7 +220,7 @@ test "patch event conflicts, stacking, and gc" {
     };
     updated_patch.title = "add a reusable answer";
     {
-        try evt.consume(.repo, .xit, repo_opts, io, allocator, &target, evt.events_ref, &.{.{
+        try evt.consume(.local, .repo, .xit, repo_opts, io, allocator, &target, evt.events_ref, &.{.{
             .id = std.fmt.bytesToHex(patch_id, .lower),
             .timestamp = 5,
             .author = author,
@@ -317,7 +317,7 @@ test "patch event conflicts, stacking, and gc" {
 
     {
         try evt.mergeEvents(.xit, repo_opts, io, allocator, &target, side_events_ref);
-        try evt.consume(.repo, .xit, repo_opts, io, allocator, &target, evt.events_ref, &.{});
+        try evt.consume(.local, .repo, .xit, repo_opts, io, allocator, &target, evt.events_ref, &.{});
     }
 
     //
@@ -409,7 +409,7 @@ test "patch event conflicts, stacking, and gc" {
     }
     var closed_child = child.event;
     closed_child.status = .closed;
-    try evt.consume(.repo, .xit, repo_opts, io, allocator, &target, evt.events_ref, &.{.{
+    try evt.consume(.local, .repo, .xit, repo_opts, io, allocator, &target, evt.events_ref, &.{.{
         .id = std.fmt.bytesToHex(child_id, .lower),
         .timestamp = 14,
         .author = author,
@@ -417,14 +417,14 @@ test "patch event conflicts, stacking, and gc" {
     }});
     var merged_child = child.event;
     merged_child.status = .{ .merged = (child.event.revision orelse return error.NotFound).source_oid };
-    try evt.consume(.repo, .xit, repo_opts, io, allocator, &target, status_side_ref, &.{.{
+    try evt.consume(.local, .repo, .xit, repo_opts, io, allocator, &target, status_side_ref, &.{.{
         .id = std.fmt.bytesToHex(child_id, .lower),
         .timestamp = 15,
         .author = author,
         .event = .{ .patch = merged_child },
     }});
     try evt.mergeEvents(.xit, repo_opts, io, allocator, &target, status_side_ref);
-    try evt.consume(.repo, .xit, repo_opts, io, allocator, &target, evt.events_ref, &.{});
+    try evt.consume(.local, .repo, .xit, repo_opts, io, allocator, &target, evt.events_ref, &.{});
 
     _ = arena.reset(.retain_capacity);
     const status_moment = try evt.currentMoment(repo_opts, &target);
@@ -441,7 +441,7 @@ test "patch event conflicts, stacking, and gc" {
 
     var reopened_child = merged_child_record.event;
     reopened_child.status = .open;
-    try std.testing.expectError(error.PatchAlreadyMerged, evt.consume(.repo, .xit, repo_opts, io, allocator, &target, evt.events_ref, &.{.{
+    try std.testing.expectError(error.PatchAlreadyMerged, evt.consume(.local, .repo, .xit, repo_opts, io, allocator, &target, evt.events_ref, &.{.{
         .id = std.fmt.bytesToHex(child_id, .lower),
         .timestamp = 16,
         .author = author,
@@ -449,7 +449,7 @@ test "patch event conflicts, stacking, and gc" {
     }}));
 
     const invalid_merged_id = evt.EventWithId.randomId(prng.random());
-    try std.testing.expectError(error.InvalidPatch, evt.consume(.repo, .xit, repo_opts, io, allocator, &target, evt.events_ref, &.{.{
+    try std.testing.expectError(error.InvalidPatch, evt.consume(.local, .repo, .xit, repo_opts, io, allocator, &target, evt.events_ref, &.{.{
         .id = std.fmt.bytesToHex(invalid_merged_id, .lower),
         .timestamp = 16,
         .author = author,
@@ -511,7 +511,7 @@ fn patchLifecycle(merge_revision: pch.MergeRevision) !void {
 
     var admin = try rp.Repo(.xit, evt.admin_repo_opts).init(io, allocator, .{ .path = admin_path });
     defer admin.deinit(io, allocator);
-    try evt.consume(.admin, .xit, evt.admin_repo_opts, io, allocator, &admin, evt.events_ref, &.{
+    try evt.consume(.server, .admin, .xit, evt.admin_repo_opts, io, allocator, &admin, evt.events_ref, &.{
         .{
             .id = std.fmt.bytesToHex(user_id, .lower),
             .timestamp = 1,
@@ -748,14 +748,14 @@ fn patchLifecycle(merge_revision: pch.MergeRevision) !void {
     // merge the selected revision into the target
     //
 
-    try evt.Patch.update(.xit, repo_opts, io, allocator, &target, &patch_id, .{ .status = .closed }, author);
+    try evt.Patch.update(.local, .xit, repo_opts, io, allocator, &target, &patch_id, .{ .status = .closed }, author);
     try std.testing.expectError(error.PatchClosed, pch.merge(repo_opts, io, allocator, repos_dir, &target, .{
         .id = patch_id_hex,
         .revision = merge_revision,
         .author = author,
         .timestamp = 5,
     }));
-    try evt.Patch.update(.xit, repo_opts, io, allocator, &target, &patch_id, .{ .status = .open }, author);
+    try evt.Patch.update(.local, .xit, repo_opts, io, allocator, &target, &patch_id, .{ .status = .open }, author);
 
     // run the cache scenario once; both lifecycle runs still perform a merge
     if (merge_revision == .source) {
@@ -864,7 +864,6 @@ fn testMergeability(
         const state = Repo.State(.read_only){ .core = &target.core, .extra = .{ .moment = &moment } };
         try std.testing.expectError(error.ObjectNotFound, obj.Object(.xit, repo_opts).initCommit(state, io, allocator, source));
     }
-    const events_before = try target.readRef(io, evt.events_ref);
 
     // a target update invalidates the old result before refresh
     {
@@ -880,7 +879,23 @@ fn testMergeability(
     try std.testing.expectEqualDeep(pch.Mergeability{}, try readMergeability(target, io, allocator, id, patch));
     try std.testing.expectError(error.MergeCheckUnavailable, pch.merge(repo_opts, io, allocator, repos_dir, target, input));
     try std.testing.expectError(error.MergeCheckUnavailable, pch.merge(repo_opts, io, allocator, repos_dir, target, squash_input));
-    pch.refreshMergeability(repo_opts, io, allocator, target, null);
+
+    // local edits and server comments leave checks alone
+    var edit = evt.Patch.Update{ .fields = .{
+        .title = "edit the answer",
+        .tags = patch.tags,
+        .description = patch.description,
+        .target_branch = patch.target_branch,
+    } };
+    try evt.Patch.update(.local, .xit, repo_opts, io, allocator, target, id, edit, author);
+    try std.testing.expectEqualDeep(pch.Mergeability{}, try readMergeability(target, io, allocator, id, patch));
+    _ = try evt.Comment.create(.server, .xit, repo_opts, io, allocator, target, &input.id, &input.id, "reviewing the answer", author);
+    try std.testing.expectEqualDeep(pch.Mergeability{}, try readMergeability(target, io, allocator, id, patch));
+
+    // a server patch edit refreshes its mergeability
+    edit.fields.title = patch.title;
+    try evt.Patch.update(.server, .xit, repo_opts, io, allocator, target, id, edit, author);
+    const events_before = try target.readRef(io, evt.events_ref);
     try std.testing.expectEqualDeep(pch.Mergeability{ .source = .conflict, .squash = .conflict }, try readMergeability(target, io, allocator, id, patch));
     try expectMergeabilityShortBytes(try target.core.latestMoment(), id);
     try std.testing.expectError(error.MergeConflict, pch.merge(repo_opts, io, allocator, repos_dir, target, input));
@@ -914,7 +929,7 @@ fn testMergeability(
     {
         try std.Io.Dir.renameAbsolute(draft_path, away_path, io);
         defer std.Io.Dir.renameAbsolute(away_path, draft_path, io) catch {};
-        pch.refreshMergeability(repo_opts, io, allocator, target, id.*);
+        try std.testing.expectError(error.PatchDataUnavailable, pch.merge(repo_opts, io, allocator, repos_dir, target, input));
         try std.testing.expectEqualDeep(pch.Mergeability{}, try readMergeability(target, io, allocator, id, patch));
         try std.testing.expectEqual(events_before, try target.readRef(io, evt.events_ref));
     }

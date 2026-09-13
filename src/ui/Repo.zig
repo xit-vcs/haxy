@@ -229,7 +229,7 @@ pub fn init(
                     switch (any_repo) {
                         inline else => |*opened| {
                             // local mode: bring the event db up to date with the events branch
-                            if (session.local != null) try evt.consume(.repo, repo_kind, opened.self_repo_opts, io, gpa, opened, evt.events_ref, &.{});
+                            if (session.local != null) try evt.consume(.local, .repo, repo_kind, opened.self_repo_opts, io, gpa, opened, evt.events_ref, &.{});
                             const files_data = try Files.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, location, requested_ref_or_oid, requested_ref_value, files_dir, files_line);
                             const target_branch = if (files_data.ref_or_oid == .branch) files_data.ref_or_oid_value else "";
                             break :blk .{
@@ -359,7 +359,7 @@ pub const View = struct {
                 try stack.children.put(allocator, settings_view.getFocus().id, .{ .home_settings = settings_view });
             }
 
-            if (!session.data.is_local) {
+            if (session.data.host_kind == .server) {
                 var auth_view = try Auth.View.init(allocator, &data.auth, session);
                 errdefer auth_view.deinit(allocator);
                 try stack.children.put(allocator, auth_view.getFocus().id, .{ .home_auth = auth_view });

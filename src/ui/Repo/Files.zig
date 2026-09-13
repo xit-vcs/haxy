@@ -855,7 +855,7 @@ pub const Header = struct {
             var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
             errdefer box.deinit(allocator);
 
-            if (!session.data.is_local) {
+            if (session.data.host_kind == .server) {
                 if (try ui.widget.CopyableText.initClone(allocator, session, location)) |value| {
                     var clone_url = value;
                     errdefer clone_url.deinit(allocator);

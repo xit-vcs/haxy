@@ -162,7 +162,7 @@ pub fn create(
     try fork_repo.addConfig(io, allocator, .{ .name = "receive.denydeletes", .value = "true" });
 
     // create the patch event
-    try evt.consume(.fork, .xit, repo_opts, io, allocator, &fork_repo, evt.events_ref, &.{.{
+    try evt.consume(.server, .fork, .xit, repo_opts, io, allocator, &fork_repo, evt.events_ref, &.{.{
         .id = input.id,
         .timestamp = input.timestamp,
         .author = input.author,
@@ -175,7 +175,7 @@ pub fn create(
     }});
 
     // create the fork event
-    try evt.consume(.admin, .xit, evt.admin_repo_opts, io, allocator, admin_repo, evt.events_ref, &.{.{
+    try evt.consume(.server, .admin, .xit, evt.admin_repo_opts, io, allocator, admin_repo, evt.events_ref, &.{.{
         .id = input.id,
         .timestamp = input.timestamp,
         .author = input.author,
@@ -206,7 +206,7 @@ pub fn remove(
     if (expected_user_id) |user_id| {
         if (!std.mem.eql(u8, record.event.user_id, user_id)) return error.InvalidPatchDraft;
     }
-    if (!record.removed) try evt.remove(.admin, .xit, evt.admin_repo_opts, io, allocator, admin_repo, &fork_id, .fork, author);
+    if (!record.removed) try evt.remove(.server, .admin, .xit, evt.admin_repo_opts, io, allocator, admin_repo, &fork_id, .fork, author);
 
     const path = try forkPath(allocator, repo_root_path, id);
     defer allocator.free(path);
