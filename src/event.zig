@@ -1873,11 +1873,7 @@ fn upsertBytes(
         }
     }
 
-    var value_cursor = try map.putCursor(key);
-    var write_buffer: [1024]u8 = undefined;
-    var writer = try value_cursor.writer(&write_buffer);
-    try writer.interface.writeAll(value);
-    try writer.finish();
+    try map.put(key, .{ .bytes = value });
 }
 
 fn bytesEqual(
