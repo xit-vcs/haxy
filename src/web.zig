@@ -790,12 +790,20 @@ fn handlePatchMerge(
     const id = std.fmt.bytesToHex(parts.thread_id, .lower);
     const repos_dir = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(remote.admin_repo_path) orelse ".", "repos" });
     defer allocator.free(repos_dir);
-    try pch.mergeAndRemoveFork(.{}, io, allocator, repos_dir, &admin_repo, &target_repo, .{
+    pch.mergeAndRemoveFork(.{}, io, allocator, repos_dir, &admin_repo, &target_repo, .{
         .id = id,
         .revision = revision,
         .author = author,
         .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
-    });
+    }) catch |err| switch (err) {
+        error.MergeConflict => return request.respond("merge conflict", .{
+            .status = .conflict,
+            .keep_alive = false,
+            .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+        }),
+        error.MergeCheckUnavailable, error.PatchOutOfDate, error.PatchDataUnavailable => {},
+        else => return err,
+    };
 
     const location = try std.fmt.allocPrint(allocator, "{s}/patch:{s}", .{ parts.repo_base, &id });
     defer allocator.free(location);
@@ -1191,7 +1199,12 @@ fn updateThread(
             var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, source.localInitOpts());
             defer any_repo.deinit(io, allocator);
             switch (any_repo) {
-                inline else => |*repo| try Event.update(repo_kind, repo.self_repo_opts, io, allocator, repo, id, update, author),
+                inline else => |*repo| {
+                    try Event.update(repo_kind, repo.self_repo_opts, io, allocator, repo, id, update, author);
+                    if (comptime Event == evt.Patch and repo_kind == .xit) {
+                        if (host == .remote) pch.refreshMergeability(repo.self_repo_opts, io, allocator, repo, id.*);
+                    }
+                },
             }
         },
     }

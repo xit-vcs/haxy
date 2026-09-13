@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const pch = @import("../../patch.zig");
 const evt = @import("../../event.zig");
 const ui = @import("../../ui.zig");
 const widget = @import("../widget.zig");
@@ -25,6 +26,14 @@ const Spacer = widget.Spacer;
 const SectionLabel = widget.SectionLabel;
 const moveRowFocus = widget.moveRowFocus;
 const wasm = builtin.target.cpu.arch == .wasm32;
+
+fn mergeBottomLabel(status: pch.Mergeability.Status) []const u8 {
+    return switch (status) {
+        .clean => "",
+        .conflict => " conflict ",
+        .unknown => " unavailable ",
+    };
+}
 
 // read the selected thread's conflicted fields and attribute each side to its
 // event commit author
@@ -502,12 +511,12 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
             return listLink(page_arena, identity, status, encoded, "");
         }
 
-        fn addToolButton(allocator: std.mem.Allocator, row: *wgt.Box(Widget), label: []const u8, action: []const u8) !void {
-            var button = try wgt.TextBox.init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+        fn addToolButton(allocator: std.mem.Allocator, row: *wgt.Box(Widget), label: []const u8, bottom_label: []const u8, action: []const u8) !void {
+            var button = try wgt.TextBox.init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none, .bottom_label = bottom_label });
             errdefer button.deinit(allocator);
             button.getFocus().mode = .all;
             button.getFocus().kind = .{ .custom = action };
-            try row.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = .{ .width = try xitui.width.displayWidth(label) + 2, .height = null } });
+            try row.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = .{ .width = @max(try xitui.width.displayWidth(label), try xitui.width.displayWidth(bottom_label)) + 2, .height = null } });
         }
 
         pub fn setEntry(self: *This, allocator: std.mem.Allocator, entry: Entry) !void {
@@ -533,9 +542,9 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
 
                 if (entryHasFork(entry) and self.session.data.current_page.parent() != .fork) {
                     const route = forkRoute(self.data.identity, entry.id) orelse return error.RouteTooLong;
-                    try addToolButton(allocator, row, "view fork", try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}));
+                    try addToolButton(allocator, row, "view fork", "", try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}));
                     const diff_route = ui.RoutablePage.forkDiffRoute(self.data.identity, entry.id, 0, "") orelse return error.RouteTooLong;
-                    try addToolButton(allocator, row, "view diff", try std.fmt.allocPrint(pa, "a:{s}", .{try diff_route.toUrl(self.session.page_arena)}));
+                    try addToolButton(allocator, row, "view diff", "", try std.fmt.allocPrint(pa, "a:{s}", .{try diff_route.toUrl(self.session.page_arena)}));
                 }
 
                 {
@@ -547,18 +556,18 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                 if (comptime supports_merge) {
                     if (Data.canMerge(entry, self.session)) {
                         const route = mergeRoute(self.data.identity, entry.id) orelse return error.RouteTooLong;
-                        try addToolButton(allocator, row, "merge", try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}));
+                        try addToolButton(allocator, row, "merge", mergeBottomLabel(entry.mergeability.status()), try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}));
                     }
                 }
 
                 if (supports_drafts and entryDraft(entry)) {
                     const route = publishRoute(self.data.identity, entry.id) orelse return error.RouteTooLong;
-                    try addToolButton(allocator, row, "publish", try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}));
+                    try addToolButton(allocator, row, "publish", "", try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}));
                     if (self.session.data.user_id != null) {
                         const edit_route = ui.RoutablePage.repoThreadEditRoute(kind, self.data.identity, entry.id) orelse return error.RouteTooLong;
-                        try addToolButton(allocator, row, "edit", try std.fmt.allocPrint(pa, "a:{s}", .{try edit_route.toUrl(self.session.page_arena)}));
+                        try addToolButton(allocator, row, "edit", "", try std.fmt.allocPrint(pa, "a:{s}", .{try edit_route.toUrl(self.session.page_arena)}));
                         const remove_route = ui.RoutablePage.repoThreadRemoveRoute(kind, self.data.identity, entry.id, "") orelse return error.RouteTooLong;
-                        try addToolButton(allocator, row, "✕", try std.fmt.allocPrint(pa, "a:{s}", .{try remove_route.toUrl(self.session.page_arena)}));
+                        try addToolButton(allocator, row, "✕", "", try std.fmt.allocPrint(pa, "a:{s}", .{try remove_route.toUrl(self.session.page_arena)}));
                     }
                 } else {
                     if (!self.session.is_terminal and !entryConflicted(entry) and (self.session.data.is_local or self.session.data.user_id != null)) {
@@ -567,28 +576,28 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                             try std.fmt.allocPrint(pa, "{s}/{s}:{s}/attach", .{ ui.file_input_prefix, @tagName(kind), entry.id })
                         else
                             try std.fmt.allocPrint(pa, "{s}/repo/{s}/{s}:{s}/attach", .{ ui.file_input_prefix, self.data.identity, @tagName(kind), entry.id });
-                        try addToolButton(allocator, row, label, action);
+                        try addToolButton(allocator, row, label, "", action);
                     }
 
                     if (supports_conflicts and entryConflicted(entry)) {
                         const route = resolveRoute(self.data.identity, entry.id, "") orelse return error.RouteTooLong;
-                        try addToolButton(allocator, row, "resolve conflict", try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}));
+                        try addToolButton(allocator, row, "resolve conflict", "", try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}));
                     } else {
                         if (has_status and (self.session.data.is_local or self.session.data.user_id != null)) {
                             if (statusChange(entryStatus(entry))) |change| {
                                 const route = ui.RoutablePage.repoThreadCommentsRoute(kind, self.data.identity, entry.id, 0) orelse return error.RouteTooLong;
                                 row.getFocus().kind = .{ .custom = try std.fmt.allocPrint(pa, "form:{s}/{s}", .{ try route.toUrl(self.session.page_arena), change.action }) };
-                                try addToolButton(allocator, row, change.action, "submit");
+                                try addToolButton(allocator, row, change.action, "", "submit");
                             }
                         }
 
                         const route = ui.RoutablePage.repoThreadEditRoute(kind, self.data.identity, entry.id) orelse return error.RouteTooLong;
-                        try addToolButton(allocator, row, "edit", try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}));
+                        try addToolButton(allocator, row, "edit", "", try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}));
                     }
 
                     if (self.session.data.is_local or self.session.data.user_id != null) {
                         const route = ui.RoutablePage.repoThreadRemoveRoute(kind, self.data.identity, entry.id, "") orelse return error.RouteTooLong;
-                        try addToolButton(allocator, row, "✕", try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}));
+                        try addToolButton(allocator, row, "✕", "", try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}));
                     }
                 }
 
@@ -1197,7 +1206,12 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                     var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, source.localInitOpts());
                     defer any_repo.deinit(io, allocator);
                     switch (any_repo) {
-                        inline else => |*repo| try Event.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &id, .{ .status = status }, author),
+                        inline else => |*repo| {
+                            try Event.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &id, .{ .status = status }, author);
+                            if (comptime kind == .patch and repo_kind == .xit) {
+                                if (!self.session.data.is_local) pch.refreshMergeability(repo.self_repo_opts, io, allocator, repo, id);
+                            }
+                        },
                     }
                 },
             }
@@ -1435,9 +1449,16 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     var button_count: usize = 1;
                     if (confirmation_kind == .merge) {
                         if (comptime supports_merge) {
+                            const availability = if (data.selectedThread()) |entry|
+                                if (Data.canMerge(entry.*, session)) entry.mergeability else pch.Mergeability{}
+                            else
+                                pch.Mergeability{};
+                            buttons[0].bottom_label = mergeBottomLabel(availability.source);
+                            if (availability.source != .clean) buttons[0].action = "";
                             buttons[1] = .{
                                 .label = "squash and merge patch",
-                                .action = try std.fmt.allocPrint(aa, "{s}{s}/squash", .{ ui.submit_action_prefix, page_url }),
+                                .bottom_label = mergeBottomLabel(availability.squash),
+                                .action = if (availability.squash == .clean) try std.fmt.allocPrint(aa, "{s}{s}/squash", .{ ui.submit_action_prefix, page_url }) else "",
                             };
                             button_count += 1;
                         } else unreachable;
@@ -1694,6 +1715,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
 
         const ConfirmationButton = struct {
             label: []const u8,
+            bottom_label: []const u8 = "",
             action: []const u8 = "submit",
         };
 
@@ -1707,7 +1729,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             try box.children.put(allocator, prompt.getFocus().id, .{ .widget = .{ .text = prompt }, .rect = null, .min_size = null });
 
             for (buttons, 0..) |options, index| {
-                var button = try wgt.TextBox.init(allocator, options.label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+                var button = try wgt.TextBox.init(allocator, options.label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none, .bottom_label = options.bottom_label });
                 errdefer button.deinit(allocator);
                 button.getFocus().mode = .all;
                 button.getFocus().kind = .{ .custom = options.action };
@@ -2423,6 +2445,9 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                                 error.InvalidFields => return,
                                 else => |e| return e,
                             };
+                            if (comptime kind == .patch and repo_kind == .xit) {
+                                if (!self.session.data.is_local) pch.refreshMergeability(repo.self_repo_opts, io, allocator, repo, id_bytes);
+                            }
                         },
                     }
                 },
@@ -2629,6 +2654,9 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                                 },
                                 else => |other| return other,
                             };
+                            if (comptime kind == .patch and repo_kind == .xit) {
+                                if (!self.session.data.is_local) pch.refreshMergeability(repo.self_repo_opts, io, allocator, repo, id_bytes);
+                            }
                         } else if (has_status)
                             try Event.update(repo_kind, repo.self_repo_opts, io, allocator, repo, &id_bytes, .{ .fields = .{
                                 .title = title,
@@ -2675,7 +2703,16 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 .merge => if (comptime supports_merge) {
                     if (comptime wasm) return;
                     const entry = self.data.selectedThread() orelse return;
-                    try self.data.mergePatch(self.session, allocator, entry.id, button_index > 1);
+                    const revision: pch.MergeRevision = if (button_index > 1) .squash else .source;
+                    if (!Data.canMerge(entry.*, self.session) or entry.mergeability.get(revision) != .clean) return;
+                    self.data.mergePatch(self.session, allocator, entry.id, revision) catch |err| switch (err) {
+                        error.MergeConflict, error.MergeCheckUnavailable, error.PatchOutOfDate, error.PatchDataUnavailable => {
+                            const route = listRoute(self.data.identity, entryStatus(entry.*), "", entry.id) orelse return;
+                            try self.session.navigate(route);
+                            return;
+                        },
+                        else => return err,
+                    };
                     const merged = std.meta.stringToEnum(Status, "merged") orelse return;
                     const route = listRoute(self.data.identity, merged, "", entry.id) orelse return;
                     try self.session.navigate(route);

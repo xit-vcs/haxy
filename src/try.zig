@@ -961,7 +961,9 @@ fn writeScatterFile(io: std.Io, allocator: std.mem.Allocator, repo_dir: std.Io.D
     try file.writeStreamingAll(io, content);
 }
 
-fn scatterContent(allocator: std.mem.Allocator, fi: usize, c: usize, replacement: ?struct { line: usize, text: []const u8 }) ![]u8 {
+const ScatterEdit = struct { line: usize, text: []const u8 };
+
+fn scatterContent(allocator: std.mem.Allocator, fi: usize, c: usize, replacement: ?ScatterEdit) ![]u8 {
     var writer = std.Io.Writer.Allocating.init(allocator);
     defer writer.deinit();
     for (0..40) |line| {
@@ -1109,7 +1111,7 @@ fn seedPatches(
         description: []const u8,
         tags: []const u8,
         status: ?evt.Patch.StatusKind,
-        adjacent_edit: bool = false,
+        alpha_edit: ?ScatterEdit = null,
     }{
         .{
             .title = "Draft a faster dependency scanner",
@@ -1140,13 +1142,14 @@ fn seedPatches(
             .description = "This patch can be cleanly merged by haxy, while git throws a merge conflict!",
             .tags = "merge",
             .status = .open,
-            .adjacent_edit = true,
+            .alpha_edit = .{ .line = 2, .text = "adjust alpha beside the latest scatter edit" },
         },
         .{
-            .title = "Preserve file permissions during export",
-            .description = "Carry executable bits through archive exports so unpacked command-line tools remain runnable without a manual chmod step.",
-            .tags = "bug export permissions",
+            .title = "Edit a conflicting line in alpha.txt",
+            .description = "Both source and squash merges conflict with a different edit to the same line on master.",
+            .tags = "merge",
             .status = .open,
+            .alpha_edit = .{ .line = 3, .text = "replace alpha with a conflicting edit" },
         },
     };
 
@@ -1178,7 +1181,7 @@ fn seedPatches(
             const aa = arena.allocator();
             var base_oid = (try target_repo.readRef(io, .{ .kind = .head, .name = "master" })) orelse return error.NotFound;
             var contents: [3][]const u8 = undefined;
-            const file_path: []const u8, const count: usize = if (patch.adjacent_edit) blk: {
+            const file_path: []const u8, const count: usize = if (patch.alpha_edit) |edit| blk: {
                 // v30 precedes the last scatter commit, even after the sample merge
                 const tag_oid = (try target_repo.readRef(io, .{ .kind = .tag, .name = "v30" })) orelse return error.NotFound;
                 var moment = try target_repo.core.latestMoment();
@@ -1189,8 +1192,8 @@ fn seedPatches(
                     .tag => |value| value.target,
                     else => return error.InvalidObject,
                 };
-                // rev 29 first changes line 4; edit the line above it in rev 28
-                contents[0] = try scatterContent(aa, 0, 28, .{ .line = 2, .text = "adjust alpha beside the latest scatter edit" });
+                // rev 29 first changes line 4; edit that line or the one above it
+                contents[0] = try scatterContent(aa, 0, 28, edit);
                 break :blk .{ "src/alpha.txt", 1 };
             } else blk: {
                 var writer = std.Io.Writer.Allocating.init(allocator);
@@ -1336,6 +1339,7 @@ fn seedPatches(
     }
     try target_repo.removeBranch(io, .{ .name = other_ref.name });
     try evt.consume(.repo, .xit, .{}, io, allocator, target_repo, evt.events_ref, &.{});
+    pch.refreshMergeability(.{}, io, allocator, target_repo, null);
 }
 
 // recursively copy the contents of src_dir into dest_dir

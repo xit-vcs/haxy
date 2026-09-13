@@ -146,6 +146,8 @@ pub fn receivePackAndConsume(
         return err;
     };
 
+    response.progress(writer, "Checking merges...\n") catch {};
+    pch.refreshMergeability(repo_opts, io, allocator, repo, null);
     try response.finish(writer, null);
 }
 
@@ -384,6 +386,9 @@ pub fn receiveFork(
             serve_common.logError(io, error_writer, "failed to update published patch {s}: {s}\n", .{ id, @errorName(update_err) });
         };
     }
+
+    response.progress(writer, "Checking merges...\n") catch {};
+    pch.refreshMergeability(repo_opts, io, allocator, target_repo, patch_id);
 
     // the client may read either repo as soon as it gets the final response.
     try response.finish(writer, null);

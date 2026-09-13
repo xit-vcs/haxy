@@ -757,6 +757,11 @@ fn patchLifecycle(merge_revision: pch.MergeRevision) !void {
     }));
     try evt.Patch.update(.xit, repo_opts, io, allocator, &target, &patch_id, .{ .status = .open }, author);
 
+    // run the cache scenario once; both lifecycle runs still perform a merge
+    if (merge_revision == .source) {
+        try testMergeability(&target, io, allocator, repos_dir, &patch_id, &base_oid, &source_oid);
+    }
+
     const selected_oid = switch (merge_revision) {
         .squash => squash_oid,
         .source => source_oid,
@@ -813,4 +818,111 @@ fn patchTagStatusCount(moment: Repo.DB.HashMap(.read_only), tag: []const u8, sta
     const ids_cursor = try tags.getCursor(try evt.Patch.tagStatusKey(&key_buffer, tag, status)) orelse return 0;
     const ids = try Repo.DB.SortedSet(.read_only).init(ids_cursor);
     return try ids.count();
+}
+
+fn readMergeability(repo: *Repo, io: std.Io, allocator: std.mem.Allocator, id: *const [evt.event_id_size]u8, patch: evt.Patch) !pch.Mergeability {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var moment = try repo.core.latestMoment();
+    return pch.readMergeability(repo_opts, .{ .core = &repo.core, .extra = .{ .moment = &moment } }, io, &arena, id, patch);
+}
+
+fn expectMergeabilityShortBytes(moment: Repo.DB.HashMap(.read_only), id: *const [evt.event_id_size]u8) !void {
+    const checks = try Repo.DB.HashMap(.read_only).init((try moment.getCursor(hash.hashInt(repo_opts.hash, "patch-id->mergeability"))) orelse return error.NotFound);
+    const entry = try Repo.DB.HashMap(.read_only).init((try checks.getCursor(hash.hashInt(repo_opts.hash, id))) orelse return error.NotFound);
+    const result = try Repo.DB.HashMap(.read_only).init((try entry.getCursor(hash.hashInt(repo_opts.hash, "result"))) orelse return error.NotFound);
+    for ([_][]const u8{ "source", "squash" }) |field| {
+        const cursor = (try result.getCursor(hash.hashInt(repo_opts.hash, field))) orelse return error.NotFound;
+        try std.testing.expectEqual(.short_bytes, cursor.slot().tag);
+    }
+}
+
+fn testMergeability(
+    target: *Repo,
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    repos_dir: []const u8,
+    id: *const [evt.event_id_size]u8,
+    base: *const [hash.hexLen(repo_opts.hash)]u8,
+    source: *const [hash.hexLen(repo_opts.hash)]u8,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const events = try evt.currentMoment(repo_opts, target);
+    const record = (try evt.Patch.readById(Repo.DB, repo_opts.hash, events, &arena, id)) orelse return error.NotFound;
+    const patch = record.event;
+
+    // publication checks both methods, and reads and cache hits do no work
+    const clean = pch.Mergeability{ .source = .clean, .squash = .clean };
+    try std.testing.expectEqualDeep(clean, try readMergeability(target, io, allocator, id, patch));
+    try expectMergeabilityShortBytes(try target.core.latestMoment(), id);
+    const before = (try target.core.latestMoment()).cursor.slot();
+    pch.refreshMergeability(repo_opts, io, allocator, target, id.*);
+    try std.testing.expectEqualDeep(before, (try target.core.latestMoment()).cursor.slot());
+    {
+        var moment = try target.core.latestMoment();
+        const state = Repo.State(.read_only){ .core = &target.core, .extra = .{ .moment = &moment } };
+        try std.testing.expectError(error.ObjectNotFound, obj.Object(.xit, repo_opts).initCommit(state, io, allocator, source));
+    }
+    const events_before = try target.readRef(io, evt.events_ref);
+
+    // a target update invalidates the old result before refresh
+    {
+        const file = try target.core.work_dir.createFile(io, "feature.zig", .{ .truncate = true });
+        defer file.close(io);
+        try file.writeStreamingAll(io, "pub const answer = 99;\n");
+    }
+    try target.add(io, allocator, &.{"feature.zig"});
+    const conflicting_target = try target.commit(io, allocator, .{ .message = "different answer", .timestamp = 20 });
+    const input = pch.MergeInput{ .id = std.fmt.bytesToHex(id.*, .lower), .revision = .source, .author = author, .timestamp = 21 };
+    var squash_input = input;
+    squash_input.revision = .squash;
+    try std.testing.expectEqualDeep(pch.Mergeability{}, try readMergeability(target, io, allocator, id, patch));
+    try std.testing.expectError(error.MergeCheckUnavailable, pch.merge(repo_opts, io, allocator, repos_dir, target, input));
+    try std.testing.expectError(error.MergeCheckUnavailable, pch.merge(repo_opts, io, allocator, repos_dir, target, squash_input));
+    pch.refreshMergeability(repo_opts, io, allocator, target, null);
+    try std.testing.expectEqualDeep(pch.Mergeability{ .source = .conflict, .squash = .conflict }, try readMergeability(target, io, allocator, id, patch));
+    try expectMergeabilityShortBytes(try target.core.latestMoment(), id);
+    try std.testing.expectError(error.MergeConflict, pch.merge(repo_opts, io, allocator, repos_dir, target, input));
+    try std.testing.expectError(error.MergeConflict, pch.merge(repo_opts, io, allocator, repos_dir, target, squash_input));
+    try std.testing.expectEqual(events_before, try target.readRef(io, evt.events_ref));
+    try std.testing.expectEqual(conflicting_target, (try target.readRef(io, .{ .kind = .head, .name = "master" })).?);
+    try std.testing.expectEqual(null, try target.readRef(io, .{ .kind = .none, .name = "MERGE_HEAD" }));
+
+    // deleting and restoring the target cannot reuse the conflict result
+    {
+        var detached = try target.switchDir(io, allocator, .{ .target = .{ .oid = base } });
+        defer detached.deinit();
+    }
+    try target.removeBranch(io, .{ .name = "master" });
+    pch.refreshMergeability(repo_opts, io, allocator, target, null);
+    try std.testing.expectEqualDeep(pch.Mergeability{}, try readMergeability(target, io, allocator, id, patch));
+    try expectMergeabilityShortBytes(try target.core.latestMoment(), id);
+    try target.addBranch(io, .{ .name = "master" });
+    {
+        var restored = try target.switchDir(io, allocator, .{ .target = .{ .ref = .{ .kind = .head, .name = "master" } } });
+        defer restored.deinit();
+    }
+    pch.refreshMergeability(repo_opts, io, allocator, target, null);
+    try std.testing.expectEqualDeep(clean, try readMergeability(target, io, allocator, id, patch));
+
+    // a missing fork disables merging without changing the accepted events
+    const draft_path = try fork.forkPath(allocator, repos_dir, &std.fmt.bytesToHex(id.*, .lower));
+    defer allocator.free(draft_path);
+    const away_path = try std.fmt.allocPrint(allocator, "{s}.away", .{draft_path});
+    defer allocator.free(away_path);
+    {
+        try std.Io.Dir.renameAbsolute(draft_path, away_path, io);
+        defer std.Io.Dir.renameAbsolute(away_path, draft_path, io) catch {};
+        pch.refreshMergeability(repo_opts, io, allocator, target, id.*);
+        try std.testing.expectEqualDeep(pch.Mergeability{}, try readMergeability(target, io, allocator, id, patch));
+        try std.testing.expectEqual(events_before, try target.readRef(io, evt.events_ref));
+    }
+    pch.refreshMergeability(repo_opts, io, allocator, target, id.*);
+    try std.testing.expectEqualDeep(clean, try readMergeability(target, io, allocator, id, patch));
+
+    // a changed revision is unknown even if its target has not moved
+    var changed = patch;
+    changed.revision.?.id[0] = if (changed.revision.?.id[0] == 'a') 'b' else 'a';
+    try std.testing.expectEqualDeep(pch.Mergeability{}, try readMergeability(target, io, allocator, id, changed));
 }

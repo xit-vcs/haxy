@@ -37,6 +37,7 @@ pub const PatchWithId = struct {
     fork_oid: []const u8 = "",
     no_changes: bool = false,
     fork_exists: bool = false,
+    mergeability: pch.Mergeability = .{},
 };
 
 pub const Entry = PatchWithId;
@@ -230,7 +231,7 @@ pub fn publishDraft(data: *const Self, session: *ui.Session, allocator: std.mem.
     });
 }
 
-pub fn mergePatch(data: *const Self, session: *ui.Session, allocator: std.mem.Allocator, id: []const u8, squash: bool) !void {
+pub fn mergePatch(data: *const Self, session: *ui.Session, allocator: std.mem.Allocator, id: []const u8, revision: pch.MergeRevision) !void {
     const io = session.io orelse return error.NotFound;
     const repos_dir = session.repos_dir orelse return error.NotFound;
     const admin_repo = session.admin_repo orelse return error.NotFound;
@@ -244,7 +245,7 @@ pub fn mergePatch(data: *const Self, session: *ui.Session, allocator: std.mem.Al
     defer target_repo.deinit(io, allocator);
     try pch.mergeAndRemoveFork(.{}, io, allocator, repos_dir, admin_repo, &target_repo, .{
         .id = id_hex,
-        .revision = if (squash) .squash else .source,
+        .revision = revision,
         .author = author,
         .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
     });
@@ -603,6 +604,12 @@ fn setForkDetails(
             else => revision.source_oid,
         };
         if (item.record.event.status.kind() == .merged) continue;
+        if (comptime repo_kind == .xit) {
+            var moment = try repo.core.latestMoment();
+            const state = rp.Repo(.xit, repo_opts).State(.read_only){ .core = &repo.core, .extra = .{ .moment = &moment } };
+            const id = try evt.parseEventId(item.id);
+            item.mergeability = pch.readMergeability(repo_opts, state, io, arena, &id, item.record.event) catch .{};
+        }
         const target_oid = try repo.readRef(io, .{ .kind = .head, .name = target_branch });
         item.no_changes = if (target_oid) |oid| std.mem.eql(u8, &oid, revision.source_oid) else false;
     }
