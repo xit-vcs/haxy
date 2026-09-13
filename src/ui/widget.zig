@@ -1252,7 +1252,7 @@ pub const AnsiBackground = struct {
                 const wide = x + 1 < art_grid.size.width and (try art_grid.cell(x + 1, y)).continuation;
                 const next_dst = if (wide) try out.cell(anchor_x + x + 1, y) else null;
                 // blank cells take the art; occupied cells take its background
-                if (cellIsBlank(dst.*) and (next_dst == null or cellIsBlank(next_dst.?.*))) {
+                if (cellIsBlank(dst.*) and (if (next_dst) |next| cellIsBlank(next.*) else true)) {
                     dst.style = src.style;
                     dst.style.fg = sgrSafe(dst.style.fg);
                     dst.style.bg = sgrSafe(dst.style.bg);

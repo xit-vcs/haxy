@@ -212,7 +212,7 @@ fn refreshMergeCheck(
         const history = try DB.ArrayList(.read_write).init(target_repo.core.db.rootCursor());
         history.appendContext(.{ .slot = try history.getSlot(-1) }, Ctx{
             .repo = target_repo,
-            .fork_repo = &fork_repo_maybe.?,
+            .fork_repo = if (fork_repo_maybe) |*repo| repo else unreachable,
             .io = io,
             .allocator = allocator,
             .check = &check,
@@ -464,7 +464,7 @@ pub fn merge(
                 defer check_arena.deinit();
 
                 // require the fork's newest revision while both repos are locked
-                const selected_revision = ctx.expected_patch.revision.?;
+                const selected_revision = ctx.expected_patch.revision orelse unreachable;
                 const revision_id = try evt.parseEventId(&selected_revision.id);
                 const fork_moment = try evt.currentMoment(repo_opts, ctx.fork_repo);
                 const newest = (try evt.PatchRev.readNewest(evt.EventDB(repo_opts.hash), repo_opts.hash, fork_moment, &check_arena)) orelse return error.PatchDataUnavailable;

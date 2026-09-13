@@ -248,7 +248,7 @@ fn runTui(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh.PtySiz
                 try ui.inputKey(allocator, &nav.root, key, &ui_session);
             }
         } else {
-            switch (event.?) {
+            switch (event orelse unreachable) {
                 .data => |payload| {
                     defer allocator.free(payload);
                     if (std.mem.indexOfAny(u8, payload, "\r\n") == null) continue;
