@@ -387,17 +387,18 @@ pub fn consume(
     }
 
     if (role == .repo and repo_kind == .xit and host_kind == .server) {
-        // syncing history may affect several patches
+        // since patches may have been updated, we need to recheck their mergeability
         if (events.len == 0) {
+            // we consumed events already on the ref, and we don't know what specific
+            // patches may have been updated, so refresh all of them
             pch.refreshMergeability(repo_opts, io, allocator, repo, null);
-            return;
-        }
-
-        // ordinary edits only need to refresh the patches they change
-        for (events) |event| {
-            if (event.event != .patch) continue;
-            const id = parseEventId(&event.id) catch continue;
-            pch.refreshMergeability(repo_opts, io, allocator, repo, id);
+        } else {
+            // we consumed specific events so we can refresh only the patches that were updated
+            for (events) |event| {
+                if (event.event != .patch) continue;
+                const id = parseEventId(&event.id) catch continue;
+                pch.refreshMergeability(repo_opts, io, allocator, repo, id);
+            }
         }
     }
 }
