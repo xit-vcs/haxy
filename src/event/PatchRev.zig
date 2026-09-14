@@ -27,6 +27,40 @@ pub const merge_policy: evt.MergePolicy = .target_wins;
 pub const record_map_key = "event-id->patchrev";
 pub const all_id_set_key = "patchrev-id-set";
 
+// prepare a revision event and its patch reference in the caller's arena
+pub fn prepare(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+    io: std.Io,
+    arena: *std.heap.ArenaAllocator,
+    base_oid: *const [hash.hexLen(repo_opts.hash)]u8,
+    source_oid: *const [hash.hexLen(repo_opts.hash)]u8,
+    message: []const u8,
+    author: evt.CommitAuthor,
+    timestamp: u64,
+) !struct { event: evt.EventWithId, revision: evt.Patch.Revision } {
+    const allocator = arena.allocator();
+    var base_object = try obj.Object(repo_kind, repo_opts).initCommit(state.readOnly(), io, allocator, base_oid);
+    defer base_object.deinit();
+    var source_object = try obj.Object(repo_kind, repo_opts).initCommit(state.readOnly(), io, allocator, source_oid);
+    defer source_object.deinit();
+    const revision = Self{ .base_oid = try allocator.dupe(u8, base_oid), .source_oid = try allocator.dupe(u8, source_oid), .message = message };
+    const identity = try std.fmt.allocPrint(allocator, "{s} <{s}>", .{ author.name, author.email });
+    defer allocator.free(identity);
+    const squash = try writeSquashCommit(repo_kind, repo_opts, state, io, allocator, revision, &source_object.content.commit.tree, identity, identity, timestamp);
+    var id: [evt.event_id_size]u8 = undefined;
+    io.random(&id);
+    const id_hex = std.fmt.bytesToHex(id, .lower);
+    const entries = try allocator.alloc(evt.EventTreeEntry, 2);
+    entries[0] = .{ .tree = .{ .name = "base", .oid = try allocator.dupe(u8, &base_object.content.commit.tree) } };
+    entries[1] = .{ .tree = .{ .name = "head", .oid = try allocator.dupe(u8, &source_object.content.commit.tree) } };
+    return .{
+        .event = .{ .id = id_hex, .author = author, .timestamp = timestamp, .tree_entries = entries, .event = .{ .patchrev = revision } },
+        .revision = .{ .id = id_hex, .source_oid = revision.source_oid, .squash_oid = try allocator.dupe(u8, &squash) },
+    };
+}
+
 // create the mergeable squash commit represented by this patch revision
 pub fn writeSquashCommit(
     comptime repo_kind: rp.RepoKind,

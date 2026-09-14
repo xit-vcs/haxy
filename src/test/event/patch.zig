@@ -12,6 +12,167 @@ const repo_opts: rp.RepoOpts(.xit) = .{ .is_test = true };
 const Repo = rp.Repo(.xit, repo_opts);
 const author = evt.CommitAuthor{ .name = "alice", .email = "alice@example.test" };
 
+test "branch patch lifecycle" {
+    try testBranchPatch(.git, .sha1);
+    try testBranchPatch(.git, .sha256);
+    try testBranchPatch(.xit, .sha1);
+    try testBranchPatch(.xit, .sha256);
+}
+
+fn testBranchPatch(comptime kind: rp.RepoKind, comptime hash_kind: hash.HashKind) !void {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    const opts: rp.RepoOpts(kind) = .{ .is_test = true, .hash = hash_kind };
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const path = try temp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(path);
+    var repo = try rp.Repo(kind, opts).init(io, allocator, .{ .path = path });
+    defer repo.deinit(io, allocator);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    // create two branches with a shared base
+    {
+        const file = try repo.core.work_dir.createFile(io, "base.txt", .{});
+        defer file.close(io);
+        try file.writeStreamingAll(io, "base\n");
+    }
+    try repo.add(io, allocator, &.{"base.txt"});
+    const base = try repo.commit(io, allocator, .{ .message = "base" });
+    try repo.addBranch(io, .{ .name = "feature" });
+    const source = try repo.commitAtRef(io, allocator, .{ .message = "feature" }, null, .{ .kind = .head, .name = "feature" });
+    const id = [_]u8{7} ** evt.event_id_size;
+    const patch = evt.Patch{ .title = "branch patch", .tags = "feature", .description = "existing branch", .source_branch = "feature", .target_branch = "master" };
+
+    // submission stores the patch and revision in this repo
+    try pch.writeBranchPatch(.local, kind, opts, io, allocator, &repo, std.fmt.bytesToHex(id, .lower), patch, null, author);
+    const first = (try evt.Patch.readFromRepo(kind, opts, io, allocator, &arena, &repo, &id)) orelse return error.NotFound;
+    const first_revision = first.event.revision orelse return error.NotFound;
+    try std.testing.expectEqualStrings(&source, first_revision.source_oid);
+    try std.testing.expectEqualStrings(&base, &(try repo.readRef(io, .{ .kind = .head, .name = "master" }) orelse return error.NotFound));
+
+    // an unchanged refresh does not add events
+    const event_tip = (try repo.readRef(io, evt.events_ref)) orelse return error.NotFound;
+    try pch.refreshBranches(.local, kind, opts, io, allocator, &repo, null);
+    try std.testing.expectEqualStrings(&event_tip, &(try repo.readRef(io, evt.events_ref) orelse return error.NotFound));
+
+    // a source update replaces the revision, not the patch metadata
+    const next = try repo.commitAtRef(io, allocator, .{ .message = "next feature" }, null, .{ .kind = .head, .name = "feature" });
+    try pch.refreshBranches(.local, kind, opts, io, allocator, &repo, null);
+    const updated = (try evt.Patch.readFromRepo(kind, opts, io, allocator, &arena, &repo, &id)) orelse return error.NotFound;
+    const revision = updated.event.revision orelse return error.NotFound;
+    try std.testing.expectEqualStrings(&next, revision.source_oid);
+    try std.testing.expect(!std.mem.eql(u8, &first_revision.id, &revision.id));
+    try std.testing.expectEqualStrings(patch.title, updated.event.title);
+
+    // changing the target captures a fresh revision, without changing the source
+    try repo.addBranch(io, .{ .name = "other-target" });
+    try evt.Patch.update(.local, kind, opts, io, allocator, &repo, &id, .{ .fields = .{
+        .title = patch.title,
+        .tags = patch.tags,
+        .description = patch.description,
+        .target_branch = "other-target",
+    } }, author);
+    const retargeted = (try evt.Patch.readFromRepo(kind, opts, io, allocator, &arena, &repo, &id)) orelse return error.NotFound;
+    try std.testing.expectEqualStrings("other-target", retargeted.event.target_branch);
+    try std.testing.expectEqualStrings("feature", retargeted.event.source_branch orelse return error.NotFound);
+    try std.testing.expect(retargeted.event.revision != null);
+
+    // clearing the revision must not let a stale edit overwrite a newer patch
+    var stale_edit = updated.event;
+    stale_edit.revision = null;
+    const before_stale = (try repo.readRef(io, evt.events_ref)) orelse return error.NotFound;
+    try std.testing.expectError(error.PatchOutOfDate, pch.writeBranchPatch(.local, kind, opts, io, allocator, &repo, std.fmt.bytesToHex(id, .lower), stale_edit, updated.event, author));
+    try std.testing.expectEqualStrings(&before_stale, &(try repo.readRef(io, evt.events_ref) orelse return error.NotFound));
+
+    // an unrelated target leaves the patch and its revision intact
+    _ = try repo.commitAtRef(io, allocator, .{ .message = "unrelated", .parent_oids = &.{} }, null, .{ .kind = .head, .name = "unrelated" });
+    const before_edit = (try repo.readRef(io, evt.events_ref)) orelse return error.NotFound;
+    try std.testing.expectError(error.UnrelatedBranches, evt.Patch.update(.local, kind, opts, io, allocator, &repo, &id, .{ .fields = .{
+        .title = "edited title",
+        .tags = patch.tags,
+        .description = patch.description,
+        .target_branch = "unrelated",
+    } }, author));
+    try std.testing.expectEqualStrings(&before_edit, &(try repo.readRef(io, evt.events_ref) orelse return error.NotFound));
+
+    // missing branches fail without writing events
+    var invalid = patch;
+    invalid.source_branch = "missing";
+    try std.testing.expectError(error.InvalidSourceBranch, pch.writeBranchPatch(.local, kind, opts, io, allocator, &repo, std.fmt.bytesToHex(id, .lower), invalid, retargeted.event, author));
+    invalid = patch;
+    invalid.target_branch = "missing";
+    try std.testing.expectError(error.InvalidTargetBranch, pch.writeBranchPatch(.local, kind, opts, io, allocator, &repo, std.fmt.bytesToHex(id, .lower), invalid, retargeted.event, author));
+
+    // removing the patch leaves its branch intact
+    try evt.remove(.local, .repo, kind, opts, io, allocator, &repo, &id, .patch, author);
+    try pch.refreshBranches(.local, kind, opts, io, allocator, &repo, null);
+    const removed = (try evt.Patch.readFromRepo(kind, opts, io, allocator, &arena, &repo, &id)) orelse return error.NotFound;
+    try std.testing.expect(removed.removed);
+    try std.testing.expectEqualStrings(&next, &(try repo.readRef(io, .{ .kind = .head, .name = "feature" }) orelse return error.NotFound));
+
+    // an edit started before removal must not restore the patch
+    stale_edit = retargeted.event;
+    stale_edit.revision = null;
+    const before_restore = (try repo.readRef(io, evt.events_ref)) orelse return error.NotFound;
+    try std.testing.expectError(error.PatchOutOfDate, pch.writeBranchPatch(.local, kind, opts, io, allocator, &repo, std.fmt.bytesToHex(id, .lower), stale_edit, retargeted.event, author));
+    try std.testing.expectEqualStrings(&before_restore, &(try repo.readRef(io, evt.events_ref) orelse return error.NotFound));
+}
+
+test "branch patches merge without a fork" {
+    try testBranchMerge(.source);
+    try testBranchMerge(.squash);
+}
+
+fn testBranchMerge(selection: pch.MergeRevision) !void {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const path = try temp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(path);
+    var repo = try Repo.init(io, allocator, .{ .path = path });
+    defer repo.deinit(io, allocator);
+    {
+        const file = try repo.core.work_dir.createFile(io, "base.txt", .{});
+        defer file.close(io);
+        try file.writeStreamingAll(io, "base\n");
+    }
+    try repo.add(io, allocator, &.{"base.txt"});
+    _ = try repo.commit(io, allocator, .{ .message = "base" });
+    try repo.addBranch(io, .{ .name = "feature" });
+    _ = try repo.commitAtRef(io, allocator, .{ .message = "remove file" }, null, .{ .kind = .head, .name = "feature" });
+    const id = [_]u8{9} ** evt.event_id_size;
+    const id_hex = std.fmt.bytesToHex(id, .lower);
+    try pch.writeBranchPatch(.server, .xit, repo_opts, io, allocator, &repo, id_hex, .{
+        .title = "merge branch",
+        .description = "",
+        .tags = "",
+        .source_branch = "feature",
+        .target_branch = "master",
+    }, null, author);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const before = (try evt.Patch.readFromRepo(.xit, repo_opts, io, allocator, &arena, &repo, &id)) orelse return error.NotFound;
+    const revision = before.event.revision orelse return error.NotFound;
+
+    // both merge styles use the stored revision, without fork data
+    try pch.merge(repo_opts, io, allocator, path, &repo, .{ .id = id_hex, .revision = selection, .author = author, .timestamp = 100 });
+    const merged = (try evt.Patch.readFromRepo(.xit, repo_opts, io, allocator, &arena, &repo, &id)) orelse return error.NotFound;
+    const oid = switch (merged.event.status) {
+        .merged => |value| value,
+        else => return error.NotMerged,
+    };
+    try std.testing.expectEqualStrings(if (selection == .source) revision.source_oid else revision.squash_oid, oid);
+
+    // the source survives, and merged patches no longer follow it
+    _ = try repo.commitAtRef(io, allocator, .{ .message = "later" }, null, .{ .kind = .head, .name = "feature" });
+    const tip = (try repo.readRef(io, evt.events_ref)) orelse return error.NotFound;
+    try pch.refreshBranches(.server, .xit, repo_opts, io, allocator, &repo, null);
+    try std.testing.expectEqualStrings(&tip, &(try repo.readRef(io, evt.events_ref) orelse return error.NotFound));
+}
+
 fn commitTree(
     io: std.Io,
     allocator: std.mem.Allocator,

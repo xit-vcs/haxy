@@ -229,7 +229,10 @@ pub fn init(
                     switch (any_repo) {
                         inline else => |*opened| {
                             // local mode: bring the event db up to date with the events branch
-                            if (session.local != null) try evt.consume(.local, .repo, repo_kind, opened.self_repo_opts, io, gpa, opened, evt.events_ref, &.{});
+                            if (session.local != null) {
+                                try evt.consume(.local, .repo, repo_kind, opened.self_repo_opts, io, gpa, opened, evt.events_ref, &.{});
+                                try @import("../patch.zig").refreshBranches(.local, repo_kind, opened.self_repo_opts, io, gpa, opened, null);
+                            }
                             const files_data = try Files.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, location, requested_ref_or_oid, requested_ref_value, files_dir, files_line);
                             const target_branch = if (files_data.ref_or_oid == .branch) files_data.ref_or_oid_value else "";
                             break :blk .{

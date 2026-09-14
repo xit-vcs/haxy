@@ -1339,6 +1339,13 @@ fn seedPatches(
     }
     try target_repo.removeBranch(io, .{ .name = other_ref.name });
     try evt.consume(.server, .repo, .xit, .{}, io, allocator, target_repo, evt.events_ref, &.{});
+    try pch.writeBranchPatch(.server, .xit, .{}, io, allocator, target_repo, std.fmt.bytesToHex(evt.EventWithId.randomId(random), .lower), .{
+        .title = "Merge the existing feature branch",
+        .description = "This patch tracks the feature branch in this repo without creating a fork.",
+        .tags = "feature",
+        .source_branch = "feature",
+        .target_branch = "master",
+    }, null, patch_author);
 }
 
 // recursively copy the contents of src_dir into dest_dir

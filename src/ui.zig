@@ -1709,7 +1709,21 @@ pub const Session = struct {
     pub const FormFeedback = union(enum) {
         pub const LoginFailure = enum { unknown_user, wrong_password };
         pub const ThreadFailure = enum { required_title };
-        pub const PatchFailure = enum { required_title, invalid_target_branch };
+        pub const PatchFailure = enum {
+            required_title,
+            invalid_target_branch,
+            invalid_source_branch,
+            unrelated_branches,
+
+            pub fn fromError(err: anyerror) ?PatchFailure {
+                return switch (err) {
+                    error.InvalidTargetBranch => .invalid_target_branch,
+                    error.InvalidSourceBranch => .invalid_source_branch,
+                    error.UnrelatedBranches => .unrelated_branches,
+                    else => null,
+                };
+            }
+        };
 
         login: struct {
             failure: LoginFailure,
@@ -1730,6 +1744,8 @@ pub const Session = struct {
                 tags: []const u8,
                 description: []const u8,
                 target_branch: []const u8,
+                source_branch: []const u8 = "",
+                branch_source: bool = false,
             } = null,
         },
         discussion: struct {

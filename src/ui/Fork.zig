@@ -79,7 +79,7 @@ pub fn init(arena: *std.heap.ArenaAllocator, session: *ui.Session, route: ui.Rou
         .record = retained_patch,
         .author = try ui.Author.initFromEmail(haxy_moment, arena, retained_patch.author_email),
         .draft = fork_record.event.stage == .draft,
-        .fork_oid = try aa.dupe(u8, &fork_oid),
+        .revision_oid = try aa.dupe(u8, &fork_oid),
         .fork_exists = true,
     };
     var patch_data = try Patches.detailResult(aa, identity.identity, retained_entry);

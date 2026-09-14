@@ -9,6 +9,7 @@ const rf = xit.ref;
 title: []const u8,
 description: []const u8,
 tags: []const u8, // space-separated
+source_branch: ?[]const u8 = null,
 target_branch: []const u8,
 target_patch_id: ?[evt.event_id_size * 2]u8 = null,
 revision: ?Revision = null,
@@ -133,6 +134,7 @@ pub const target_patch_id_to_patch_id_set_key = "target-patch-id->patch-id-set";
 pub const status_to_id_set_key = "status->patch-id-set";
 pub const tag_status_to_id_set_key = "tag+status->patch-id-set";
 pub const revision_to_id_set_key = "target-branch+oid->patch-id-set";
+pub const source_to_id_set_key = "source-branch->patch-id-set";
 
 pub const TagStatusKey = [tag_max_len + 1 + StatusKind.longest_len]u8;
 
@@ -179,6 +181,10 @@ pub fn consume(
 
     if (!fieldsValid(record.event.title, record.event.tags)) return error.InvalidPatch;
     if (!rf.validateName(record.event.target_branch)) return error.InvalidTarget;
+    if (record.event.source_branch) |branch| {
+        if (!rf.validateName(branch) or std.mem.eql(u8, branch, evt.events_ref.name) or
+            std.mem.eql(u8, record.event.target_branch, evt.events_ref.name)) return error.InvalidSourceBranch;
+    }
     const revision_id = if (record.event.revision) |*revision| blk: {
         try evt.PatchRev.validateOid(hash_kind, revision.squash_oid);
         try evt.PatchRev.validateOid(hash_kind, revision.source_oid);
@@ -191,6 +197,7 @@ pub fn consume(
     const status_kind = record.event.status.kind();
 
     if (existing_maybe) |existing| {
+        if (!evt.fieldEqual(?[]const u8, existing.event.source_branch, record.event.source_branch)) return error.PatchSourceChanged;
         record.created_order = existing.created_order;
         record.author_email = existing.author_email;
         const existing_status_kind = existing.event.status.kind();
@@ -235,6 +242,18 @@ pub fn consume(
                     }
                 }
             }
+        }
+    }
+
+    if (record.event.source_branch) |branch| {
+        const sources = try DB.SortedMap(.read_write).init(try haxy_moment.putCursor(hash.hashInt(hash_kind, source_to_id_set_key)));
+        if (!record.removed and status_kind != .merged) {
+            const ids = try DB.CountedHashSet(.read_write).init(try sources.putCursor(branch));
+            try ids.put(record_key, .{ .bytes = event_id });
+        } else if (try sources.getCursor(branch) != null) {
+            const ids = try DB.CountedHashSet(.read_write).init(try sources.putCursor(branch));
+            _ = try ids.remove(record_key);
+            if (try ids.count() == 0) _ = try sources.remove(branch);
         }
     }
 
@@ -326,8 +345,8 @@ pub fn update(
             };
         },
         .fields => |fields| {
-            if (!rf.validateName(fields.target_branch)) return error.InvalidFields;
-            if ((try repo.readRef(io, .{ .kind = .head, .name = fields.target_branch })) == null) return error.InvalidFields;
+            if (!rf.validateName(fields.target_branch)) return error.InvalidTargetBranch;
+            if ((try repo.readRef(io, .{ .kind = .head, .name = fields.target_branch })) == null) return error.InvalidTargetBranch;
             updated.title = fields.title;
             updated.tags = fields.tags;
             updated.description = fields.description;
@@ -340,6 +359,7 @@ pub fn update(
     }
     if (!fieldsValid(updated.title, updated.tags)) return error.InvalidFields;
 
+    if (updated.source_branch != null and updated.revision == null) return @import("../patch.zig").writeBranchPatch(host_kind, repo_kind, repo_opts, io, allocator, repo, std.fmt.bytesToHex(id.*, .lower), updated, record.event, author);
     try evt.consume(host_kind, .repo, repo_kind, repo_opts, io, allocator, repo, evt.events_ref, &.{.{
         .id = std.fmt.bytesToHex(id.*, .lower),
         .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
@@ -416,7 +436,7 @@ fn fieldListed(fields: []const u8, delimiter: u8, name: []const u8) bool {
     return false;
 }
 
-fn readFromRepo(
+pub fn readFromRepo(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     io: std.Io,

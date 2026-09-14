@@ -406,19 +406,14 @@ fn respondThreadFormFailure(request: *std.http.Server.Request, allocator: std.me
     };
 }
 
-fn requiredTitleFeedback(kind: evt.EventKind, title: []const u8, tags: []const u8, description: []const u8, target_branch: []const u8) ui.Session.FormFeedback {
+fn requiredTitleFeedback(kind: evt.EventKind, title: []const u8, tags: []const u8, description: []const u8, target_branch: []const u8, source_branch: ?[]const u8) ui.Session.FormFeedback {
     return switch (kind) {
         .issue => .{ .issue = .{ .failure = .required_title, .fields = .{
             .title = title,
             .tags = tags,
             .description = description,
         } } },
-        .patch => .{ .patch = .{ .failure = .required_title, .fields = .{
-            .title = title,
-            .tags = tags,
-            .description = description,
-            .target_branch = target_branch,
-        } } },
+        .patch => patchFeedback(.required_title, title, tags, description, target_branch, source_branch),
         .discuss => .{ .discussion = .{ .failure = .required_title, .fields = .{
             .title = title,
             .tags = tags,
@@ -428,12 +423,14 @@ fn requiredTitleFeedback(kind: evt.EventKind, title: []const u8, tags: []const u
     };
 }
 
-fn invalidTargetBranchFeedback(title: []const u8, tags: []const u8, description: []const u8, target_branch: []const u8) ui.Session.FormFeedback {
-    return .{ .patch = .{ .failure = .invalid_target_branch, .fields = .{
+fn patchFeedback(failure: ui.Session.FormFeedback.PatchFailure, title: []const u8, tags: []const u8, description: []const u8, target_branch: []const u8, source_branch: ?[]const u8) ui.Session.FormFeedback {
+    return .{ .patch = .{ .failure = failure, .fields = .{
         .title = title,
         .tags = tags,
         .description = description,
         .target_branch = target_branch,
+        .source_branch = source_branch orelse "",
+        .branch_source = source_branch != null,
     } } };
 }
 
@@ -592,6 +589,9 @@ fn handleThreadNew(
     const target_branch = (try parseFormField(allocator, body, "target_branch")) orelse try allocator.dupe(u8, "");
     defer allocator.free(target_branch);
 
+    const source_branch = if (kind == .patch) try parseFormField(allocator, body, "source_branch") else null;
+    defer if (source_branch) |branch| allocator.free(branch);
+
     const valid = switch (kind) {
         .issue => evt.Issue.fieldsValid(title, tags),
         .patch => evt.Patch.fieldsValid(title, tags),
@@ -608,7 +608,7 @@ fn handleThreadNew(
         const form_location = try std.fmt.allocPrint(allocator, "{s}/{s}/new", .{ base, list_name });
         defer allocator.free(form_location);
         if (!evt.titleValid(title)) {
-            return respondThreadFormFailure(request, allocator, host, form_location, requiredTitleFeedback(kind, title, tags, description, target_branch));
+            return respondThreadFormFailure(request, allocator, host, form_location, requiredTitleFeedback(kind, title, tags, description, target_branch, source_branch));
         }
         try request.respond("", .{
             .status = .see_other,
@@ -621,18 +621,26 @@ fn handleThreadNew(
     io.random(&id_bytes);
     const event_id_hex = std.fmt.bytesToHex(id_bytes, .lower);
 
-    if (kind == .patch) {
+    const not_found = "repo not found";
+    const request_repo = (try requestRepoSource(io, allocator, host, base)) orelse {
+        try request.respond(not_found, .{
+            .status = .not_found,
+            .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+        });
+        return;
+    };
+    defer request_repo.deinit(allocator);
+    const source = request_repo.source;
+    if (kind == .patch and source_branch == null) {
         const server = switch (host) {
             .server => |server| server,
             .local => return respondRemoveNotFound(request),
         };
         const user_id = request_author.user_id orelse return respondLoginRequired(request);
-        const request_repo = (try requestRepoSource(io, allocator, host, base)) orelse return respondRemoveNotFound(request);
-        defer request_repo.deinit(allocator);
         if (!try request_repo.source.hasBranch(io, allocator, target_branch)) {
             const form_location = try std.fmt.allocPrint(allocator, "{s}/patches/new", .{base});
             defer allocator.free(form_location);
-            return respondThreadFormFailure(request, allocator, host, form_location, invalidTargetBranchFeedback(title, tags, description, target_branch));
+            return respondThreadFormFailure(request, allocator, host, form_location, patchFeedback(.invalid_target_branch, title, tags, description, target_branch, null));
         }
         const repo_id = evt.parseEventId(std.fs.path.basename(request_repo.source.path)) catch return respondRemoveNotFound(request);
         var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = server.admin_repo_path });
@@ -651,42 +659,40 @@ fn handleThreadNew(
             .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
         });
         defer allocator.free(fork_path);
-        const location = try std.fmt.allocPrint(allocator, "{s}/patch:{s}", .{ base, &event_id_hex });
-        defer allocator.free(location);
-        try request.respond("", .{ .status = .see_other, .extra_headers = &.{.{ .name = "location", .value = location }} });
-        return;
-    }
+    } else {
+        const event = evt.EventWithId{
+            .id = event_id_hex,
+            .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
+            .author = author,
+            .event = switch (kind) {
+                .issue => .{ .issue = .{ .title = title, .description = description, .tags = tags } },
+                .patch => .{ .patch = .{ .title = title, .description = description, .tags = tags, .target_branch = target_branch, .source_branch = source_branch } },
+                .discuss => .{ .discuss = .{ .title = title, .description = description, .tags = tags } },
+                else => unreachable,
+            },
+        };
 
-    const event = evt.EventWithId{
-        .id = event_id_hex,
-        .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
-        .author = author,
-        .event = switch (kind) {
-            .issue => .{ .issue = .{ .title = title, .description = description, .tags = tags } },
-            .patch => unreachable,
-            .discuss => .{ .discuss = .{ .title = title, .description = description, .tags = tags } },
-            else => unreachable,
-        },
-    };
-
-    const not_found = "repo not found";
-    const request_repo = (try requestRepoSource(io, allocator, host, base)) orelse {
-        try request.respond(not_found, .{
-            .status = .not_found,
-            .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
-        });
-        return;
-    };
-    defer request_repo.deinit(allocator);
-    const source = request_repo.source;
-    switch (source.repo_kind) {
-        inline else => |repo_kind| {
-            var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, source.localInitOpts());
-            defer any_repo.deinit(io, allocator);
-            switch (any_repo) {
-                inline else => |*repo| try evt.consume(std.meta.activeTag(host), .repo, repo_kind, repo.self_repo_opts, io, allocator, repo, evt.events_ref, &[_]evt.EventWithId{event}),
-            }
-        },
+        switch (source.repo_kind) {
+            inline else => |repo_kind| {
+                var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, source.localInitOpts());
+                defer any_repo.deinit(io, allocator);
+                switch (any_repo) {
+                    inline else => |*repo| {
+                        const result = if (kind == .patch)
+                            pch.writeBranchPatch(std.meta.activeTag(host), repo_kind, repo.self_repo_opts, io, allocator, repo, event_id_hex, event.event.patch orelse unreachable, null, author)
+                        else
+                            evt.consume(std.meta.activeTag(host), .repo, repo_kind, repo.self_repo_opts, io, allocator, repo, evt.events_ref, &.{event});
+                        result catch |err| {
+                            if (kind != .patch) return err;
+                            const failure = ui.Session.FormFeedback.PatchFailure.fromError(err) orelse return err;
+                            const form_location = try std.fmt.allocPrint(allocator, "{s}/patches/new", .{base});
+                            defer allocator.free(form_location);
+                            return respondThreadFormFailure(request, allocator, host, form_location, patchFeedback(failure, title, tags, description, target_branch, source_branch));
+                        };
+                    },
+                }
+            },
+        }
     }
 
     const location = try std.fmt.allocPrint(allocator, "{s}/{s}:{s}", .{ base, @tagName(kind), &event_id_hex });
@@ -1422,7 +1428,7 @@ fn handleThreadEdit(
         const form_location = try std.fmt.allocPrint(allocator, "{s}/edit", .{base});
         defer allocator.free(form_location);
         if (!evt.titleValid(title)) {
-            return respondThreadFormFailure(request, allocator, host, form_location, requiredTitleFeedback(parts.thread_kind, title, tags, description, target_branch));
+            return respondThreadFormFailure(request, allocator, host, form_location, requiredTitleFeedback(parts.thread_kind, title, tags, description, target_branch, null));
         }
         try request.respond("", .{
             .status = .see_other,
@@ -1442,7 +1448,7 @@ fn handleThreadEdit(
         if (!try request_repo.source.hasBranch(io, allocator, target_branch)) {
             const form_location = try std.fmt.allocPrint(allocator, "{s}/edit", .{base});
             defer allocator.free(form_location);
-            return respondThreadFormFailure(request, allocator, host, form_location, invalidTargetBranchFeedback(title, tags, description, target_branch));
+            return respondThreadFormFailure(request, allocator, host, form_location, patchFeedback(.invalid_target_branch, title, tags, description, target_branch, null));
         }
         const repo_id = evt.parseEventId(std.fs.path.basename(request_repo.source.path)) catch return respondRemoveNotFound(request);
         var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = server.admin_repo_path });
@@ -1499,7 +1505,13 @@ fn handleThreadEdit(
             });
             return;
         },
-        else => |e| return e,
+        else => {
+            if (parts.thread_kind != .patch) return err;
+            const failure = ui.Session.FormFeedback.PatchFailure.fromError(err) orelse return err;
+            const form_location = try std.fmt.allocPrint(allocator, "{s}/edit", .{base});
+            defer allocator.free(form_location);
+            return respondThreadFormFailure(request, allocator, host, form_location, patchFeedback(failure, title, tags, description, target_branch, null));
+        },
     };
 
     try request.respond("", .{
@@ -2046,6 +2058,8 @@ fn renderPanelControls(
         if (excluded.contains(id)) continue;
         const child = entry.value_ptr.*;
         const r = child.rect;
+
+        if (r.size.width == 0 or r.size.height == 0) continue; // not laid out, rather than merely off-screen
 
         switch (child.focus.kind) {
             .text_input, .text_input_password, .text_area => {

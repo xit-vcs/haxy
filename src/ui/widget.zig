@@ -57,6 +57,7 @@ pub const Widget = union(enum) {
     repo_events: ui.Repo.Events.View,
     repo_comment: ui.Repo.Comment.Item,
     copyable_text: CopyableText,
+    patch_source: ui.Repo.Patches.Source,
     home_users: ui.Home.Users.View,
     home_repos: ui.Home.Repos.View,
     auth_tab: ui.Home.Header.AuthTab.View,
@@ -827,6 +828,12 @@ pub const SubmitButton = struct {
 
     pub fn deinit(self: *SubmitButton, allocator: std.mem.Allocator) void {
         self.box.deinit(allocator);
+    }
+
+    pub fn setLabel(self: *SubmitButton, allocator: std.mem.Allocator, label: []const u8) !void {
+        const button = &self.box.children.values()[1];
+        try button.widget.text_box.setContent(allocator, label);
+        button.min_size = .{ .width = label.len + 2, .height = null };
     }
 
     pub fn build(self: *SubmitButton, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {

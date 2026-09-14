@@ -9,6 +9,170 @@ const mrg = xit.merge;
 const fork = @import("fork.zig");
 const serve_common = @import("serve_common.zig");
 
+// capture an existing branch without creating a fork
+pub fn writeBranchPatch(
+    host_kind: evt.HostKind,
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    repo: *rp.Repo(repo_kind, repo_opts),
+    id: [evt.event_id_size * 2]u8,
+    patch: evt.Patch,
+    expected_patch: ?evt.Patch,
+    author: evt.CommitAuthor,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    if (repo_kind == .git) {
+        if (expected_patch) |expected| {
+            const current = (try evt.Patch.readFromRepo(repo_kind, repo_opts, io, allocator, &arena, repo, &try evt.parseEventId(&id))) orelse return error.PatchOutOfDate;
+            if (current.removed or !evt.fieldEqual(evt.Patch, current.event, expected)) return error.PatchOutOfDate;
+        }
+        const events = try branchEvents(repo_kind, repo_opts, .{ .core = &repo.core, .extra = .{} }, io, &arena, id, patch, author);
+        try evt.consume(host_kind, .repo, repo_kind, repo_opts, io, allocator, repo, evt.events_ref, &events);
+    } else {
+        const DB = evt.EventDB(repo_opts.hash);
+        var first_parent: ?[1][hash.hexLen(repo_opts.hash)]u8 = null;
+        if (try repo.readRef(io, evt.events_ref) == null) {
+            var remotes = try repo.listRemotes(io, allocator);
+            defer remotes.deinit();
+            for (remotes.sections.keys()) |name| {
+                if (try repo.readRef(io, .{ .kind = .{ .remote = name }, .name = evt.events_ref.name })) |oid| {
+                    first_parent = .{oid};
+                    break;
+                }
+            }
+        }
+        const Ctx = struct {
+            repo: *rp.Repo(repo_kind, repo_opts),
+            io: std.Io,
+            arena: *std.heap.ArenaAllocator,
+            id: [evt.event_id_size * 2]u8,
+            patch: evt.Patch,
+            expected_patch: ?evt.Patch,
+            author: evt.CommitAuthor,
+            first_parent: ?[1][hash.hexLen(repo_opts.hash)]u8,
+
+            pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
+                var moment = try DB.HashMap(.read_write).init(cursor.*);
+                const state = rp.Repo(repo_kind, repo_opts).State(.read_write){ .core = &ctx.repo.core, .extra = .{ .moment = &moment } };
+                if (ctx.expected_patch) |expected| {
+                    const events_moment = try evt.currentMomentFromRepoMoment(repo_opts.hash, moment.readOnly());
+                    const current = (try evt.Patch.readById(DB, repo_opts.hash, events_moment, ctx.arena, &try evt.parseEventId(&ctx.id))) orelse return error.PatchOutOfDate;
+                    if (current.removed or !evt.fieldEqual(evt.Patch, current.event, expected)) return error.PatchOutOfDate;
+                }
+                const events = try branchEvents(repo_kind, repo_opts, state, ctx.io, ctx.arena, ctx.id, ctx.patch, ctx.author);
+                const parent = if (try rf.readRecur(repo_kind, repo_opts, state.readOnly(), ctx.io, .{ .ref = evt.events_ref }) == null) ctx.first_parent else null;
+                try evt.commitEvents(repo_kind, repo_opts, state, ctx.io, ctx.arena.child_allocator, evt.events_ref, &events, parent);
+                if (!try evt.consumeInTransaction(.repo, repo_kind, repo_opts, state, &ctx.repo.core.db, &moment, ctx.io, ctx.arena.child_allocator, evt.events_ref)) return error.CancelTransaction;
+                try xit.undo.writeMessage(repo_opts, state, .{ .custom = "update branch patch" });
+            }
+        };
+        {
+            try repo.core.db_file.lock(io, .exclusive);
+            defer repo.core.db_file.unlock(io);
+            const history = try DB.ArrayList(.read_write).init(repo.core.db.rootCursor());
+            try history.appendContext(.{ .slot = try history.getSlot(-1) }, Ctx{ .repo = repo, .io = io, .arena = &arena, .id = id, .patch = patch, .expected_patch = expected_patch, .author = author, .first_parent = first_parent });
+        }
+        if (host_kind == .server) refreshMergeability(repo_opts, io, allocator, repo, try evt.parseEventId(&id));
+    }
+}
+
+fn branchEvents(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+    io: std.Io,
+    arena: *std.heap.ArenaAllocator,
+    id: [evt.event_id_size * 2]u8,
+    patch: evt.Patch,
+    author: evt.CommitAuthor,
+) ![2]evt.EventWithId {
+    const branch = patch.source_branch orelse return error.InvalidSourceBranch;
+    if (!evt.Patch.fieldsValid(patch.title, patch.tags)) return error.InvalidFields;
+    if (!rf.validateName(branch) or std.mem.eql(u8, branch, evt.events_ref.name)) return error.InvalidSourceBranch;
+    if (!rf.validateName(patch.target_branch) or std.mem.eql(u8, patch.target_branch, evt.events_ref.name)) return error.InvalidTargetBranch;
+    const source = (try rf.readRecur(repo_kind, repo_opts, state.readOnly(), io, .{ .ref = .{ .kind = .head, .name = branch } })) orelse return error.InvalidSourceBranch;
+    const target = (try rf.readRecur(repo_kind, repo_opts, state.readOnly(), io, .{ .ref = .{ .kind = .head, .name = patch.target_branch } })) orelse return error.InvalidTargetBranch;
+    const base = mrg.commonAncestor(repo_kind, repo_opts, state.readOnly(), io, arena.allocator(), &target, &source) catch |err| switch (err) {
+        error.NoCommonAncestor => return error.UnrelatedBranches,
+        else => return err,
+    };
+    const timestamp: u64 = @intCast(std.Io.Timestamp.now(io, .real).toSeconds());
+    const prepared = try evt.PatchRev.prepare(repo_kind, repo_opts, state, io, arena, &base, &source, patch.title, author, timestamp);
+    var updated = patch;
+    updated.revision = prepared.revision;
+    return .{
+        prepared.event,
+        .{ .id = id, .author = author, .timestamp = timestamp, .event = .{ .patch = updated } },
+    };
+}
+
+// refresh tracked branches outside the caller's transaction
+pub fn refreshBranches(
+    host_kind: evt.HostKind,
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    repo: *rp.Repo(repo_kind, repo_opts),
+    updates: ?[]const xit.net_server_receive_pack.AppliedRefUpdate,
+) !void {
+    const DB = evt.EventDB(repo_opts.hash);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var patches: std.ArrayList(struct { id: [evt.event_id_size]u8, record: evt.Patch.Record }) = .empty;
+    defer patches.deinit(allocator);
+    {
+        var local_db: ?evt.LocalEventDB(repo_opts.hash) = if (repo_kind == .git) try evt.LocalEventDB(repo_opts.hash).openReadOnly(io, allocator, repo.core.repo_dir) else null;
+        defer if (local_db) |*db| db.deinit(io, allocator);
+        const moment = (if (local_db) |*db| evt.currentMomentFromDb(repo_opts.hash, db.db) else if (repo_kind == .git) return else evt.currentMoment(repo_opts, repo)) catch |err| switch (err) {
+            error.NotFound => return,
+            else => return err,
+        };
+        const source_cursor = try moment.getCursor(hash.hashInt(repo_opts.hash, evt.Patch.source_to_id_set_key)) orelse return;
+        const sources = try DB.SortedMap(.read_only).init(source_cursor);
+        const conflicts = if (try moment.getCursor(hash.hashInt(repo_opts.hash, evt.Patch.conflicts_key))) |cursor| try DB.SortedMap(.read_only).init(cursor) else null;
+        var iter = try sources.iterator();
+        while (try iter.next()) |cursor| {
+            const pair = try cursor.readKeyValuePair();
+            const branch = try pair.key_cursor.readBytesAlloc(arena.allocator(), null);
+            if (updates) |changed| {
+                var found = false;
+                for (changed) |update| {
+                    if (std.mem.startsWith(u8, update.ref_name, "refs/heads/") and std.mem.eql(u8, update.ref_name["refs/heads/".len..], branch)) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) continue;
+            }
+            const source = (try repo.readRef(io, .{ .kind = .head, .name = branch })) orelse {
+                std.log.warn("patch source branch missing: {s}", .{branch});
+                continue;
+            };
+            const ids = try DB.CountedHashSet(.read_only).init(pair.value_cursor);
+            var ids_iter = try ids.iterator();
+            while (try ids_iter.next()) |id_cursor| {
+                const id_pair = try id_cursor.readKeyValuePair();
+                var id: [evt.event_id_size]u8 = undefined;
+                if ((try id_pair.key_cursor.readBytes(&id)).len != id.len) return error.InvalidPatch;
+                const record = (try evt.Patch.readById(DB, repo_opts.hash, moment, &arena, &id)) orelse continue;
+                if (conflicts) |map| if (try map.getCursor(&evt.orderKeyDesc(record.created_order, &id)) != null) continue;
+                if (record.event.revision) |revision| if (std.mem.eql(u8, revision.source_oid, &source)) continue;
+                try patches.append(allocator, .{ .id = id, .record = record });
+            }
+        }
+    }
+    for (patches.items) |patch| {
+        const author = evt.CommitAuthor{ .name = "haxy", .email = patch.record.author_email orelse "user@haxy" };
+        writeBranchPatch(host_kind, repo_kind, repo_opts, io, allocator, repo, std.fmt.bytesToHex(patch.id, .lower), patch.record.event, patch.record.event, author) catch |err| {
+            std.log.warn("failed to refresh branch patch: {s}", .{@errorName(err)});
+        };
+    }
+}
+
 pub const PublishInput = struct {
     id: [evt.event_id_size * 2]u8,
     user_id: [evt.event_id_size]u8,
@@ -91,6 +255,7 @@ pub fn readMergeability(
     id: *const [evt.event_id_size]u8,
     patch: evt.Patch,
 ) !Mergeability {
+    if (patch.source_branch != null and !try branchCurrent(repo_opts, state, io, arena, patch)) return .{};
     const target_oid = try rf.readRecur(.xit, repo_opts, state, io, .{ .ref = .{ .kind = .head, .name = patch.target_branch } }) orelse return .{};
     const cached = try readMergeCheck(repo_opts, state.extra.moment.*, arena, id) orelse return .{};
     return if (cached.matches(patch, &target_oid)) cached.result else .{};
@@ -145,9 +310,12 @@ fn refreshMergeCheck(
     const DB = Repo.DB;
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
+    const initial = try evt.Patch.readFromRepo(.xit, repo_opts, io, allocator, &arena, target_repo, id);
+    if (initial) |record| if (record.removed or record.event.status.kind() != .open) return;
     const repo_root_path = std.fs.path.dirname(target_repo.core.work_path) orelse ".";
     const path = try fork.forkPath(arena.allocator(), repo_root_path, &std.fmt.bytesToHex(id.*, .lower));
-    var fork_repo_maybe: ?Repo = Repo.open(io, allocator, .{ .path = path, .require_repo_root = true }) catch |err| blk: {
+    const branch_backed = if (initial) |record| record.event.source_branch != null else false;
+    var fork_repo_maybe: ?Repo = if (branch_backed) null else Repo.open(io, allocator, .{ .path = path, .require_repo_root = true }) catch |err| blk: {
         std.log.warn("mergeability fork unavailable: {s}", .{@errorName(err)});
         break :blk null;
     };
@@ -181,12 +349,12 @@ fn refreshMergeCheck(
     const target_oid = try rf.readRecur(.xit, repo_opts, target_state, io, .{ .ref = .{ .kind = .head, .name = patch.target_branch } });
     var check = MergeCheck{ .revision = revision, .target_branch = patch.target_branch, .target_oid = if (target_oid) |*oid| oid else "" };
     const cached = try readMergeCheck(repo_opts, target_moment, &arena, id);
-    const current = if (newest) |latest| std.mem.eql(u8, &std.fmt.bytesToHex(latest.id, .lower), &revision.id) and revision.matches(latest.record) else false;
+    const current = if (patch.source_branch != null) try branchCurrent(repo_opts, target_state, io, &arena, patch) else if (newest) |latest| std.mem.eql(u8, &std.fmt.bytesToHex(latest.id, .lower), &revision.id) and revision.matches(latest.record) else false;
     if (current and target_oid != null) {
         if (cached) |value| if (value.matches(patch, check.target_oid) and value.result.source != .unknown and value.result.squash != .unknown) return;
         const Ctx = struct {
             repo: *Repo,
-            fork_repo: *Repo,
+            fork_repo: ?*Repo,
             io: std.Io,
             allocator: std.mem.Allocator,
             check: *MergeCheck,
@@ -194,15 +362,17 @@ fn refreshMergeCheck(
             pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
                 var moment = try DB.HashMap(.read_write).init(cursor.*);
                 const state = Repo.State(.read_write){ .core = &ctx.repo.core, .extra = .{ .moment = &moment } };
-                var fork_moment = try ctx.fork_repo.core.latestMoment();
-                const fork_state = Repo.State(.read_only){ .core = &ctx.fork_repo.core, .extra = .{ .moment = &fork_moment } };
-                var objects = try obj.ObjectIterator(.xit, repo_opts).init(fork_state, ctx.io, ctx.allocator, .{ .kind = .all });
-                defer objects.deinit();
                 const source = try oidArray(repo_opts.hash, ctx.check.revision.source_oid);
                 const squash = try oidArray(repo_opts.hash, ctx.check.revision.squash_oid);
-                try objects.include(&source);
-                try objects.include(&squash);
-                try obj.copyFromObjectIterator(.xit, repo_opts, state, .xit, repo_opts, &objects, ctx.io, null);
+                if (ctx.fork_repo) |repo| {
+                    var fork_moment = try repo.core.latestMoment();
+                    const fork_state = Repo.State(.read_only){ .core = &repo.core, .extra = .{ .moment = &fork_moment } };
+                    var objects = try obj.ObjectIterator(.xit, repo_opts).init(fork_state, ctx.io, ctx.allocator, .{ .kind = .all });
+                    defer objects.deinit();
+                    try objects.include(&source);
+                    try objects.include(&squash);
+                    try obj.copyFromObjectIterator(.xit, repo_opts, state, .xit, repo_opts, &objects, ctx.io, null);
+                }
                 const target = rf.Ref{ .kind = .head, .name = ctx.check.target_branch };
                 ctx.check.result.source = checkCommit(repo_opts, state, ctx.io, ctx.allocator, &source, target);
                 ctx.check.result.squash = checkCommit(repo_opts, state, ctx.io, ctx.allocator, &squash, target);
@@ -212,7 +382,7 @@ fn refreshMergeCheck(
         const history = try DB.ArrayList(.read_write).init(target_repo.core.db.rootCursor());
         history.appendContext(.{ .slot = try history.getSlot(-1) }, Ctx{
             .repo = target_repo,
-            .fork_repo = if (fork_repo_maybe) |*repo| repo else unreachable,
+            .fork_repo = if (fork_repo_maybe) |*repo| repo else null,
             .io = io,
             .allocator = allocator,
             .check = &check,
@@ -235,6 +405,16 @@ fn refreshMergeCheck(
     };
     const history = try DB.ArrayList(.read_write).init(target_repo.core.db.rootCursor());
     try history.appendContext(.{ .slot = try history.getSlot(-1) }, Save{ .id = id.*, .check = check });
+}
+
+fn branchCurrent(comptime repo_opts: rp.RepoOpts(.xit), state: rp.Repo(.xit, repo_opts).State(.read_only), io: std.Io, arena: *std.heap.ArenaAllocator, patch: evt.Patch) !bool {
+    const branch = patch.source_branch orelse return false;
+    const selected = patch.revision orelse return false;
+    const oid = (try rf.readRecur(.xit, repo_opts, state, io, .{ .ref = .{ .kind = .head, .name = branch } })) orelse return false;
+    if (!std.mem.eql(u8, &oid, selected.source_oid)) return false;
+    const events = try evt.currentMomentFromRepoMoment(repo_opts.hash, state.extra.moment.*);
+    const revision = (try evt.PatchRev.readById(evt.EventDB(repo_opts.hash), repo_opts.hash, events, arena, &try evt.parseEventId(&selected.id))) orelse return false;
+    return selected.matches(revision);
 }
 
 fn oidArray(comptime hash_kind: hash.HashKind, oid: []const u8) ![hash.hexLen(hash_kind)]u8 {
@@ -429,8 +609,8 @@ pub fn merge(
 
     // open the fork
     const fork_path = try fork.forkPath(arena.allocator(), repo_root_path, &input.id);
-    var fork_repo = rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = fork_path, .require_repo_root = true }) catch return error.PatchDataUnavailable;
-    defer fork_repo.deinit(io, allocator);
+    var fork_repo_maybe: ?rp.Repo(.xit, repo_opts) = if (patch_record.event.source_branch != null) null else rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = fork_path, .require_repo_root = true }) catch return error.PatchDataUnavailable;
+    defer if (fork_repo_maybe) |*repo| repo.deinit(io, allocator);
     // select the commit and merge identity
     const merge_oid = oidArray(repo_opts.hash, switch (input.revision) {
         .squash => selected.squash_oid,
@@ -444,7 +624,7 @@ pub fn merge(
         const State = rp.Repo(.xit, repo_opts).State;
         const Ctx = struct {
             core: *rp.Repo(.xit, repo_opts).Core,
-            fork_repo: *rp.Repo(.xit, repo_opts),
+            fork_repo: ?*rp.Repo(.xit, repo_opts),
             io: std.Io,
             allocator: std.mem.Allocator,
             patch_id: [evt.event_id_size]u8,
@@ -466,10 +646,11 @@ pub fn merge(
                 // require the fork's newest revision while both repos are locked
                 const selected_revision = ctx.expected_patch.revision orelse unreachable;
                 const revision_id = try evt.parseEventId(&selected_revision.id);
-                const fork_moment = try evt.currentMoment(repo_opts, ctx.fork_repo);
-                const newest = (try evt.PatchRev.readNewest(evt.EventDB(repo_opts.hash), repo_opts.hash, fork_moment, &check_arena)) orelse return error.PatchDataUnavailable;
-                if (!std.mem.eql(u8, &newest.id, &revision_id) or
-                    !selected_revision.matches(newest.record)) return error.PatchOutOfDate;
+                if (ctx.fork_repo) |repo| {
+                    const fork_moment = try evt.currentMoment(repo_opts, repo);
+                    const newest = (try evt.PatchRev.readNewest(evt.EventDB(repo_opts.hash), repo_opts.hash, fork_moment, &check_arena)) orelse return error.PatchDataUnavailable;
+                    if (!std.mem.eql(u8, &newest.id, &revision_id) or !selected_revision.matches(newest.record)) return error.PatchOutOfDate;
+                } else if (!try branchCurrent(repo_opts, state.readOnly(), ctx.io, &check_arena, ctx.expected_patch)) return error.PatchOutOfDate;
 
                 const availability = try readMergeability(repo_opts, state.readOnly(), ctx.io, &check_arena, &ctx.patch_id, ctx.expected_patch);
                 switch (availability.get(ctx.revision)) {
@@ -479,9 +660,9 @@ pub fn merge(
                 }
 
                 // copy the selected commit and its dependencies
-                {
-                    var fork_repo_moment = try ctx.fork_repo.core.latestMoment();
-                    const fork_state = State(.read_only){ .core = &ctx.fork_repo.core, .extra = .{ .moment = &fork_repo_moment } };
+                if (ctx.fork_repo) |repo| {
+                    var fork_repo_moment = try repo.core.latestMoment();
+                    const fork_state = State(.read_only){ .core = &repo.core, .extra = .{ .moment = &fork_repo_moment } };
                     var objects = try obj.ObjectIterator(.xit, repo_opts).init(fork_state, ctx.io, ctx.allocator, .{ .kind = .all });
                     defer objects.deinit();
                     try objects.include(&ctx.merge_oid);
@@ -489,7 +670,7 @@ pub fn merge(
                 }
 
                 // import the revision and mark the patch merged
-                if (!try importMergedFromFork(repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, ctx.fork_repo, &ctx.patch_id, &ctx.merge_oid, ctx.expected_patch, ctx.author, ctx.timestamp)) return error.PatchOutOfDate;
+                if (!try importMergedRevision(repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, ctx.fork_repo, &ctx.patch_id, &ctx.merge_oid, ctx.expected_patch, ctx.author, ctx.timestamp)) return error.PatchOutOfDate;
 
                 // merge the selected commit
                 {
@@ -515,15 +696,15 @@ pub fn merge(
             }
         };
 
-        try fork_repo.core.db_file.lock(io, .shared);
-        defer fork_repo.core.db_file.unlock(io);
+        if (fork_repo_maybe) |*repo| try repo.core.db_file.lock(io, .shared);
+        defer if (fork_repo_maybe) |*repo| repo.core.db_file.unlock(io);
         try target_repo.core.db_file.lock(io, .exclusive);
         defer target_repo.core.db_file.unlock(io);
 
         const history = try DB.ArrayList(.read_write).init(target_repo.core.db.rootCursor());
         try history.appendContext(.{ .slot = try history.getSlot(-1) }, Ctx{
             .core = &target_repo.core,
-            .fork_repo = &fork_repo,
+            .fork_repo = if (fork_repo_maybe) |*repo| repo else null,
             .io = io,
             .allocator = allocator,
             .patch_id = patch_id,
@@ -550,7 +731,10 @@ pub fn mergeAndRemoveFork(
     input: MergeInput,
 ) !void {
     try merge(repo_opts, io, allocator, repo_root_path, target_repo, input);
-    try fork.remove(io, allocator, repo_root_path, admin_repo, &input.id, null, input.author);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const record = (try evt.Patch.readFromRepo(.xit, repo_opts, io, allocator, &arena, target_repo, &try evt.parseEventId(&input.id))) orelse return error.InvalidPatch;
+    if (record.event.source_branch == null) try fork.remove(io, allocator, repo_root_path, admin_repo, &input.id, null, input.author);
 }
 
 fn commitAuthor(line: []const u8) !evt.CommitAuthor {
@@ -578,21 +762,23 @@ fn importMerged(
 
     const patch_hex = std.fmt.bytesToHex(patch_id.*, .lower);
     const fork_path = try fork.forkPath(arena.allocator(), repo_root_path, &patch_hex);
-    var fork_repo = try rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = fork_path, .require_repo_root = true });
-    defer fork_repo.deinit(io, allocator);
+    const events = try evt.currentMomentFromRepoMoment(repo_opts.hash, moment.readOnly());
+    const record = (try evt.Patch.readById(evt.EventDB(repo_opts.hash), repo_opts.hash, events, &arena, patch_id)) orelse return;
+    var fork_repo_maybe: ?rp.Repo(.xit, repo_opts) = if (record.event.source_branch != null) null else try rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = fork_path, .require_repo_root = true });
+    defer if (fork_repo_maybe) |*repo| repo.deinit(io, allocator);
 
-    _ = try importMergedFromFork(repo_opts, state, db, moment, io, allocator, &fork_repo, patch_id, merged_oid, null, null, 0);
+    _ = try importMergedRevision(repo_opts, state, db, moment, io, allocator, if (fork_repo_maybe) |*repo| repo else null, patch_id, merged_oid, null, null, 0);
 }
 
 // import the revision and mark its patch merged in the current transaction
-fn importMergedFromFork(
+fn importMergedRevision(
     comptime repo_opts: rp.RepoOpts(.xit),
     state: rp.Repo(.xit, repo_opts).State(.read_write),
     db: *evt.EventDB(repo_opts.hash),
     moment: *evt.EventDB(repo_opts.hash).HashMap(.read_write),
     io: std.Io,
     allocator: std.mem.Allocator,
-    fork_repo: *rp.Repo(.xit, repo_opts),
+    fork_repo: ?*rp.Repo(.xit, repo_opts),
     patch_id: *const [evt.event_id_size]u8,
     merged_oid: *const [hash.hexLen(repo_opts.hash)]u8,
     expected_patch: ?evt.Patch,
@@ -609,16 +795,23 @@ fn importMergedFromFork(
     if (patch_record.removed or patch_record.event.status.kind() == .merged) return false;
     if (expected_patch) |expected| {
         if (!evt.fieldEqual(evt.Patch, expected, patch_record.event)) return false;
+        if (try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Patch.conflicts_key))) |cursor| {
+            const conflicts = try DB.SortedMap(.read_only).init(cursor);
+            if (try conflicts.getCursor(&evt.orderKeyDesc(patch_record.created_order, patch_id)) != null) return false;
+        }
     }
     const revision_id = try evt.parseEventId(&selected.id);
     if (!selected.includesOid(merged_oid)) return false;
 
-    const fork_moment = try evt.currentMoment(repo_opts, fork_repo);
-    const revision = (try evt.PatchRev.readById(DB, repo_opts.hash, fork_moment, &arena, &revision_id)) orelse return false;
+    const current_revision = try evt.PatchRev.readById(DB, repo_opts.hash, haxy_moment, &arena, &revision_id);
+    const revision = (if (fork_repo) |repo|
+        try evt.PatchRev.readById(DB, repo_opts.hash, try evt.currentMoment(repo_opts, repo), &arena, &revision_id)
+    else
+        current_revision) orelse return false;
     if (!selected.matches(revision)) return false;
 
-    var fork_repo_moment = try fork_repo.core.latestMoment();
-    const fork_state = rp.Repo(.xit, repo_opts).State(.read_only){ .core = &fork_repo.core, .extra = .{ .moment = &fork_repo_moment } };
+    var fork_repo_moment = if (fork_repo) |repo| try repo.core.latestMoment() else moment.readOnly();
+    const fork_state = rp.Repo(.xit, repo_opts).State(.read_only){ .core = if (fork_repo) |repo| &repo.core else state.core, .extra = .{ .moment = &fork_repo_moment } };
     var event_oid: [hash.hexLen(repo_opts.hash)]u8 = undefined;
     if (revision.event_oid.len != event_oid.len) return false;
     @memcpy(&event_oid, revision.event_oid);
@@ -628,7 +821,6 @@ fn importMergedFromFork(
 
     var events: [2]evt.EventWithId = undefined;
     var event_count: usize = 0;
-    const current_revision = try evt.PatchRev.readById(DB, repo_opts.hash, haxy_moment, &arena, &revision_id);
     var tree_entries: [2]evt.EventTreeEntry = undefined;
     const needs_import = if (current_revision) |existing| existing.removed else true;
     if (needs_import) {

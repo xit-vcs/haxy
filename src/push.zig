@@ -87,7 +87,10 @@ pub fn receivePackAndConsume(
     var response = xit.net_server_receive_pack.Response.init(allocator);
     defer response.deinit();
 
+    var updates = xit.net_server_receive_pack.AppliedRefUpdates.init(allocator);
+    defer updates.deinit();
     const Ctx = struct {
+        updates: *xit.net_server_receive_pack.AppliedRefUpdates,
         core: *rp.Repo(.xit, repo_opts).Core,
         io: std.Io,
         allocator: std.mem.Allocator,
@@ -101,10 +104,9 @@ pub fn receivePackAndConsume(
         pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
             var moment = try DB.HashMap(.read_write).init(cursor.*);
             const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
-            var updates = xit.net_server_receive_pack.AppliedRefUpdates.init(ctx.allocator);
-            defer updates.deinit();
+
             var receive_options = ctx.options;
-            receive_options.applied_ref_updates = &updates;
+            receive_options.applied_ref_updates = ctx.updates;
             receive_options.deferred_response = ctx.response;
             try xit.net_server_receive_pack.run(.xit, repo_opts, state, ctx.io, ctx.allocator, ctx.reader, ctx.writer, receive_options);
             try writeReceivedPatches(repo_opts, state, ctx.io, ctx.allocator, ctx.response, ctx.writer);
@@ -114,7 +116,7 @@ pub fn receivePackAndConsume(
             // transaction and must commit regardless.
             if (null != try rf.readRecur(.xit, repo_opts, state.readOnly(), ctx.io, .{ .ref = evt.events_ref })) {
                 _ = try evt.consumeInTransaction(.repo, .xit, repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, evt.events_ref);
-                try pch.detectMerged(repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, ctx.repo_root_path, updates.items.items, ctx.error_writer);
+                try pch.detectMerged(repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, ctx.repo_root_path, ctx.updates.items.items, ctx.error_writer);
             }
             try xit.undo.writeMessage(repo_opts, state, .push);
         }
@@ -128,6 +130,7 @@ pub fn receivePackAndConsume(
         break :blk history.appendContext(
             .{ .slot = try history.getSlot(-1) },
             Ctx{
+                .updates = &updates,
                 .core = &repo.core,
                 .io = io,
                 .allocator = allocator,
@@ -146,6 +149,9 @@ pub fn receivePackAndConsume(
         return err;
     };
 
+    pch.refreshBranches(.server, .xit, repo_opts, io, allocator, repo, updates.items.items) catch |err| {
+        serve_common.logError(io, error_writer, "failed to refresh branch patches: {s}\n", .{@errorName(err)});
+    };
     response.progress(writer, "Checking merges...\n") catch {};
     pch.refreshMergeability(repo_opts, io, allocator, repo, null);
     try response.finish(writer, null);
@@ -242,64 +248,21 @@ pub fn receiveFork(
                     null;
 
                 // reuse an identical revision or record a new one
+                var revision_arena = std.heap.ArenaAllocator.init(ctx.allocator);
+                defer revision_arena.deinit();
                 var events: [2]evt.EventWithId = undefined;
                 var event_count: usize = 0;
-                var base_tree_oid: [hash.hexLen(repo_opts.hash)]u8 = undefined;
-                var head_tree_oid: [hash.hexLen(repo_opts.hash)]u8 = undefined;
-                var tree_entries: [2]evt.EventTreeEntry = undefined;
                 if (existing_revision) |latest| {
                     if (ctx.published) ctx.revision_id_maybe.* = latest.id;
                 } else {
-                    var base_object = try obj.Object(.xit, repo_opts).initCommit(state.readOnly(), ctx.io, ctx.allocator, &base_oid);
-                    defer base_object.deinit();
-                    var source_object = try obj.Object(.xit, repo_opts).initCommit(state.readOnly(), ctx.io, ctx.allocator, &source_oid);
-                    defer source_object.deinit();
-                    base_tree_oid = base_object.content.commit.tree;
-                    head_tree_oid = source_object.content.commit.tree;
-
-                    var revision_id: [evt.event_id_size]u8 = undefined;
-                    ctx.io.random(&revision_id);
-                    const revision_hex = std.fmt.bytesToHex(revision_id, .lower);
-                    const revision_event: evt.PatchRev = .{
-                        .base_oid = &base_oid,
-                        .source_oid = &source_oid,
-                        .message = ctx.title,
-                    };
-                    const identity = try std.fmt.allocPrint(ctx.allocator, "{s} <{s}>", .{ ctx.author.name, ctx.author.email });
-                    defer ctx.allocator.free(identity);
-                    const patch_oid = try evt.PatchRev.writeSquashCommit(
-                        .xit,
-                        repo_opts,
-                        state,
-                        ctx.io,
-                        ctx.allocator,
-                        revision_event,
-                        &head_tree_oid,
-                        identity,
-                        identity,
-                        ctx.timestamp,
-                    );
-                    tree_entries = .{
-                        .{ .tree = .{ .name = "base", .oid = &base_tree_oid } },
-                        .{ .tree = .{ .name = "head", .oid = &head_tree_oid } },
-                    };
-                    events[event_count] = .{
-                        .id = revision_hex,
-                        .timestamp = ctx.timestamp,
-                        .author = ctx.author,
-                        .tree_entries = &tree_entries,
-                        .event = .{ .patchrev = revision_event },
-                    };
+                    const prepared = try evt.PatchRev.prepare(.xit, repo_opts, state, ctx.io, &revision_arena, &base_oid, &source_oid, ctx.title, ctx.author, ctx.timestamp);
+                    events[event_count] = prepared.event;
                     event_count += 1;
-                    ctx.revision_id_maybe.* = revision_id;
+                    ctx.revision_id_maybe.* = try evt.parseEventId(&prepared.event.id);
 
                     if (!ctx.published) {
                         var patch = ctx.patch.event;
-                        patch.revision = .{
-                            .id = revision_hex,
-                            .squash_oid = &patch_oid,
-                            .source_oid = &source_oid,
-                        };
+                        patch.revision = prepared.revision;
                         events[event_count] = .{
                             .id = ctx.patch_id,
                             .timestamp = ctx.timestamp,

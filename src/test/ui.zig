@@ -5,6 +5,42 @@ const Commits = @import("../ui/Repo/Commits.zig");
 const Events = @import("../ui/Repo/Events.zig");
 const xit = @import("xit");
 
+test "web controls omit hidden inputs but retain off-screen inputs" {
+    const wgt = xit.xitui.widget;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var session = ui.Session{ .arena = &arena, .page_arena = &arena, .is_terminal = false };
+    var root = ui.Widget{ .box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert }) };
+    defer root.deinit(allocator);
+    var scroll = try wgt.Scroll(ui.Widget).init(allocator, .{ .box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert }) }, .{ .web_native = true });
+    for ([_][]const u8{ "visible", "hidden", "offscreen" }, 0..) |name, i| {
+        var input = try wgt.TextInput.init(allocator, .{ .name = name, .render_content = false });
+        input.getFocus().mode = .all;
+        try scroll.child.box.children.put(allocator, input.getFocus().id, .{
+            .widget = .{ .text_input = input },
+            .rect = null,
+            .min_size = .{ .width = 20, .height = 3 },
+            .hidden = i == 1,
+        });
+    }
+    for (scroll.child.box.children.values()) |*child| {
+        const input = &child.widget.text_input;
+        try session.text_inputs.put(allocator, input.getFocus().id, input);
+    }
+    try root.box.children.put(allocator, scroll.getFocus().id, .{ .widget = .{ .scroll = scroll }, .rect = null, .min_size = null });
+    const focus = root.getFocus();
+    try root.build(allocator, .{ .min_size = .{ .width = null, .height = null }, .max_size = .{ .width = 30, .height = 3 } }, focus);
+
+    const children = &root.box.children.values()[0].widget.scroll.child.box.children;
+    const offscreen = children.values()[2].rect orelse return error.MissingRect;
+    try std.testing.expect(offscreen.y >= 3);
+    const html = try @import("../web.zig").generateHtml(allocator, &root, &session);
+    try std.testing.expect(std.mem.indexOf(u8, html, "name=\"visible\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "name=\"hidden\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "name=\"offscreen\"") != null);
+}
+
 test "diff windows span the net changes across commits" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;

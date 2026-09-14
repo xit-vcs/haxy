@@ -16,6 +16,90 @@ const pch = @import("../../patch.zig");
 
 const wasm = builtin.target.cpu.arch == .wasm32;
 
+pub const Source = struct {
+    box: wgt.Box(ui.Widget),
+    session: *ui.Session,
+    existing: bool,
+    input_index: usize,
+
+    pub fn init(allocator: std.mem.Allocator, session: *ui.Session, initial: []const u8, existing: bool) !Source {
+        var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
+        errdefer box.deinit(allocator);
+        const labels = [_][]const u8{ "from a new fork", "from an existing branch" };
+        for (labels, 0..) |label, i| {
+            if (session.data.host_kind == .local) {
+                if (i == 0) continue;
+            }
+            var selector = try wgt.TextBox.init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            errdefer selector.deinit(allocator);
+            selector.getFocus().mode = .all;
+            try box.children.put(allocator, selector.getFocus().id, .{ .widget = .{ .text_box = selector }, .rect = null, .min_size = .{ .width = label.len + 2, .height = 3 } });
+        }
+        const input_index = box.children.count();
+        var input_box = try wgt.TextInput.init(allocator, .{ .label = " source branch ", .name = "source_branch", .rounded_corners = true, .visible_width = null, .render_content = session.is_terminal });
+        errdefer input_box.deinit(allocator);
+        input_box.getFocus().mode = .all;
+        try input_box.setContent(allocator, initial);
+        try box.children.put(allocator, input_box.getFocus().id, .{ .widget = .{ .text_input = input_box }, .rect = null, .min_size = .{ .width = 15, .height = 3 } });
+        box.getFocus().child_id = box.children.keys()[if (existing) input_index - 1 else 0];
+        return .{ .box = box, .session = session, .existing = existing or input_index == 1, .input_index = input_index };
+    }
+
+    pub fn field(self: *Source) *wgt.TextInput {
+        return &self.box.children.values()[self.input_index].widget.text_input;
+    }
+    pub fn deinit(self: *Source, allocator: std.mem.Allocator) void {
+        self.box.deinit(allocator);
+    }
+    pub fn clearGrid(self: *Source) void {
+        self.box.clearGrid();
+    }
+    pub fn getGrid(self: Source) ?xitui.grid.Grid {
+        return self.box.getGrid();
+    }
+    pub fn getFocus(self: *Source) *xitui.focus.Focus {
+        return self.box.getFocus();
+    }
+
+    pub fn build(self: *Source, allocator: std.mem.Allocator, constraint: xitui.layout.Constraint, root_focus: *xitui.focus.Focus) !void {
+        self.clearGrid();
+        self.box.children.values()[self.input_index].hidden = !self.existing;
+        for (self.box.children.values()[0..self.input_index], 0..) |*child, i| {
+            child.widget.text_box.options.border_style = if ((i == self.input_index - 1) == self.existing) .single else .hidden;
+        }
+        try self.box.build(allocator, constraint, root_focus);
+        if (!self.session.is_terminal) {
+            try self.session.text_inputs.put(self.session.arena.allocator(), self.field().getFocus().id, self.field());
+        }
+    }
+
+    pub fn input(self: *Source, allocator: std.mem.Allocator, key: xitui.input.Key, root_focus: *xitui.focus.Focus) !void {
+        const current = self.box.getFocus().child_id orelse return;
+        const index = self.box.children.getIndex(current) orelse return;
+        if (index == self.input_index and key != .arrow_left) return self.field().input(allocator, key, root_focus);
+        switch (key) {
+            .arrow_left => if (index > 0) {
+                self.existing = index == self.input_index;
+                root_focus.setFocus(self.box.children.keys()[index - 1]);
+            },
+            .arrow_right => {
+                self.existing = true;
+                root_focus.setFocus(self.box.children.keys()[index + 1]);
+            },
+            .enter => {
+                self.existing = index == self.input_index - 1;
+                if (self.existing) root_focus.setFocus(self.field().getFocus().id);
+            },
+            .mouse => |mouse| {
+                for (self.box.children.keys()[0..self.input_index], 0..) |id, i| {
+                    if (@import("../input.zig").leftClickOn(root_focus, id, mouse)) self.existing = i == self.input_index - 1;
+                }
+            },
+            else => {},
+        }
+    }
+};
+
 // how many patches one window shows before a "next" link appears.
 pub const page_size = 20;
 
@@ -34,7 +118,7 @@ pub const PatchWithId = struct {
     comments: Comment.Window = .empty,
     attachments: []const Attachment.WithId = &.{},
     draft: bool = false,
-    fork_oid: []const u8 = "",
+    revision_oid: []const u8 = "",
     no_changes: bool = false,
     fork_exists: bool = false,
     mergeability: pch.Mergeability = .{},
@@ -162,7 +246,7 @@ pub fn mergeRoute(identity: []const u8, selected: []const u8) ?ui.RoutablePage {
 
 pub fn canMerge(entry: Entry, session: *const ui.Session) bool {
     return !entry.draft and
-        entry.fork_exists and
+        (entry.fork_exists or entry.record.event.source_branch != null) and
         !entry.conflicted and
         entry.record.event.revision != null and
         entry.record.event.status.kind() == .open and
@@ -170,7 +254,7 @@ pub fn canMerge(entry: Entry, session: *const ui.Session) bool {
         session.data.user_id != null;
 }
 
-pub fn createDraft(
+pub fn create(
     data: *const Self,
     session: *ui.Session,
     allocator: std.mem.Allocator,
@@ -178,19 +262,39 @@ pub fn createDraft(
     tags: []const u8,
     description: []const u8,
     target_branch: []const u8,
+    source_branch: ?[]const u8,
 ) ![evt.event_id_size * 2]u8 {
     if (!evt.Patch.fieldsValid(title, tags)) return error.InvalidFields;
     const io = session.io orelse return error.NotFound;
+    const repo_source = data.repo_source orelse return error.NotFound;
+    const author = (try session.eventAuthor()) orelse return error.NotFound;
+    var id_bytes: [evt.event_id_size]u8 = undefined;
+    io.random(&id_bytes);
+    const id = std.fmt.bytesToHex(id_bytes, .lower);
+    if (source_branch) |branch| {
+        switch (repo_source.repo_kind) {
+            inline else => |repo_kind| {
+                var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, repo_source.localInitOpts());
+                defer any_repo.deinit(io, allocator);
+                switch (any_repo) {
+                    inline else => |*repo| try pch.writeBranchPatch(session.data.host_kind, repo_kind, repo.self_repo_opts, io, allocator, repo, id, .{
+                        .title = title,
+                        .tags = tags,
+                        .description = description,
+                        .target_branch = target_branch,
+                        .source_branch = branch,
+                    }, null, author),
+                }
+            },
+        }
+        return id;
+    }
+    if (session.data.host_kind == .local) return error.InvalidSourceBranch;
     const repos_dir = session.repos_dir orelse return error.NotFound;
     const admin_repo = session.admin_repo orelse return error.NotFound;
     const user_id = session.userId() orelse return error.NotFound;
     const repo_id = data.repo_id orelse return error.NotFound;
-    const repo_source = data.repo_source orelse return error.NotFound;
-    const author = (try session.eventAuthor()) orelse return error.NotFound;
-    if (!try repo_source.hasBranch(io, allocator, target_branch)) return error.InvalidFields;
-    var id_bytes: [evt.event_id_size]u8 = undefined;
-    io.random(&id_bytes);
-    const id = std.fmt.bytesToHex(id_bytes, .lower);
+    if (!try repo_source.hasBranch(io, allocator, target_branch)) return error.InvalidTargetBranch;
     const fork_path = try fork.create(.{}, io, allocator, repos_dir, admin_repo, .{
         .id = id,
         .user_id = user_id,
@@ -269,7 +373,7 @@ pub fn editDraft(
     const user_id = session.userId() orelse return error.NotFound;
     const patch_id = evt.parseEventId(id) catch return error.NotFound;
     const author = (try session.eventAuthor()) orelse return error.NotFound;
-    if (!try repo_source.hasBranch(io, allocator, target_branch)) return error.InvalidFields;
+    if (!try repo_source.hasBranch(io, allocator, target_branch)) return error.InvalidTargetBranch;
 
     const id_hex = std.fmt.bytesToHex(patch_id, .lower);
     const fork_path = try fork.forkPath(allocator, repos_dir, &id_hex);
@@ -401,7 +505,7 @@ pub fn init(
     theirs_picks: []const u8,
     view: ui.RoutablePage.PatchesView,
 ) !Self {
-    const allowed_view: ui.RoutablePage.PatchesView = if (session.local != null and (view == .new or view == .drafts)) .open else view;
+    const allowed_view: ui.RoutablePage.PatchesView = if (session.local != null and view == .drafts) .open else view;
     var empty = try emptyResult(arena.allocator(), identity, tag, selected_id, comment_id, comments_start, theirs_picks, allowed_view);
     empty.default_target_branch = try arena.allocator().dupe(u8, target_branch);
 
@@ -546,10 +650,10 @@ pub fn init(
     var closed_window = try thread.loadWindow(Self, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_patch, closed_set, closed_root, conflict_set, empty.selected_id, thread_comments_start);
     var merged_window = try thread.loadWindow(Self, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_patch, merged_set, merged_root, conflict_set, empty.selected_id, thread_comments_start);
     var conflicts_window = try thread.loadWindow(Self, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_patch, conflict_set, conflicts_root, conflict_set, empty.selected_id, thread_comments_start);
-    try setForkDetails(repo_kind, repo_opts, io, arena, admin_moment, repo, &open_window);
-    try setForkDetails(repo_kind, repo_opts, io, arena, admin_moment, repo, &closed_window);
-    try setForkDetails(repo_kind, repo_opts, io, arena, admin_moment, repo, &merged_window);
-    try setForkDetails(repo_kind, repo_opts, io, arena, admin_moment, repo, &conflicts_window);
+    try setPatchDetails(repo_kind, repo_opts, io, arena, admin_moment, repo, &open_window);
+    try setPatchDetails(repo_kind, repo_opts, io, arena, admin_moment, repo, &closed_window);
+    try setPatchDetails(repo_kind, repo_opts, io, arena, admin_moment, repo, &merged_window);
+    try setPatchDetails(repo_kind, repo_opts, io, arena, admin_moment, repo, &conflicts_window);
     if (view == .conflicts and conflicts_window.count > 0) resolved_view = .conflicts;
 
     const comment_page = if (empty.comment_id.len == 0)
@@ -580,7 +684,7 @@ pub fn init(
     };
 }
 
-fn setForkDetails(
+fn setPatchDetails(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     io: std.Io,
@@ -599,7 +703,7 @@ fn setForkDetails(
         }
         const target_branch = item.record.event.target_branch;
         const revision = item.record.event.revision orelse continue;
-        item.fork_oid = switch (item.record.event.status) {
+        item.revision_oid = switch (item.record.event.status) {
             .merged => |oid| oid,
             else => revision.source_oid,
         };
@@ -709,7 +813,7 @@ pub fn loadDraftEntry(
         .record = patch,
         .author = try ui.Author.initFromEmail(admin_moment, arena, patch.author_email),
         .draft = true,
-        .fork_oid = try aa.dupe(u8, &fork_oid),
+        .revision_oid = try aa.dupe(u8, &fork_oid),
         .no_changes = if (target_oid) |oid| std.mem.eql(u8, &oid, &fork_oid) else false,
         .fork_exists = true,
     };
@@ -725,8 +829,6 @@ pub fn appendDetails(self: *const Self, allocator: std.mem.Allocator, box: *wgt.
     const aa = session.page_arena.allocator();
     const status_kind = entry.record.event.status.kind();
     const target_branch = entry.record.event.target_branch;
-    var fields: [2]ui.widget.CopyableText.Choice = undefined;
-    var field_count: usize = 0;
 
     if (status_kind != .merged and entry.fork_exists) if (session.data.git_ssh_port) |port| {
         const url = try std.fmt.allocPrint(aa, "ssh://localhost:{d}/fork/{s}/patch:{s}", .{ port, self.identity, entry.id });
@@ -761,26 +863,27 @@ pub fn appendDetails(self: *const Self, allocator: std.mem.Allocator, box: *wgt.
         errdefer copyable_text.deinit(allocator);
         try box.children.put(allocator, copyable_text.getFocus().id, .{ .widget = .{ .copyable_text = copyable_text }, .rect = null, .min_size = null });
     };
-    if (entry.fork_oid.len != 0) {
-        fields[field_count] = .{
+    if (entry.record.event.source_branch) |branch| {
+        var source = try wgt.TextBox.init(allocator, branch, .{ .label = " source branch ", .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+        errdefer source.deinit(allocator);
+        source.getFocus().mode = .all;
+        try box.children.put(allocator, source.getFocus().id, .{ .widget = .{ .text_box = source }, .rect = null, .min_size = null });
+    }
+    const fields = [_]ui.widget.CopyableText.Choice{
+        .{
             .selector = "from",
-            .text = entry.fork_oid,
+            .text = entry.revision_oid,
             .label = if (entry.no_changes) " object id of this patch (no changes) " else " object id of this patch ",
-        };
-        field_count += 1;
-    }
-    fields[field_count] = .{
-        .selector = "to",
-        .text = target_branch,
-        .label = if (status_kind == .merged) " target branch this patch was merged into " else " target branch this patch will go to ",
+        },
+        .{
+            .selector = "to",
+            .text = target_branch,
+            .label = if (status_kind == .merged) " target branch this patch was merged into " else " target branch this patch will go to ",
+        },
     };
-    field_count += 1;
-
-    if (field_count > 0) {
-        var copyable_text = try ui.widget.CopyableText.init(allocator, session, fields[0..field_count]);
-        errdefer copyable_text.deinit(allocator);
-        try box.children.put(allocator, copyable_text.getFocus().id, .{ .widget = .{ .copyable_text = copyable_text }, .rect = null, .min_size = null });
-    }
+    var copyable_text = try ui.widget.CopyableText.init(allocator, session, fields[@intFromBool(entry.revision_oid.len == 0)..]);
+    errdefer copyable_text.deinit(allocator);
+    try box.children.put(allocator, copyable_text.getFocus().id, .{ .widget = .{ .copyable_text = copyable_text }, .rect = null, .min_size = null });
 }
 
 fn cloneDirectoryName(allocator: std.mem.Allocator, title: []const u8) ![]const u8 {
@@ -838,7 +941,7 @@ pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *con
     }
 
     // new-patch tab; an edit or resolve url shows its tab in this place
-    if (session.local == null) {
+    {
         const route = switch (data.view) {
             .edit => ui.RoutablePage.repoThreadEditRoute(.patch, data.identity, data.selected_id) orelse return error.RouteTooLong,
             .publish => ui.RoutablePage.repoPatchPublishRoute(data.identity, data.selected_id) orelse return error.RouteTooLong,
@@ -864,7 +967,7 @@ pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *con
     }
 
     // drafts belong to the logged-in user and are not available locally
-    if (session.local == null) {
+    if (session.data.host_kind != .local) {
         const route = ui.RoutablePage.repoPatchesDraftsRoute(data.identity) orelse return error.RouteTooLong;
         const link = try ui.inPageTabLink(session, route, page_selected and selected_index == View.viewIndex(.drafts));
         var label_buf: [64]u8 = undefined;
