@@ -1267,14 +1267,6 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         const detail_index: usize = 1;
         const list_max_width: usize = 35;
         const detail_min_width: usize = 40;
-        // indices within the thread form.
-        const title_field_index: usize = 0;
-        const tags_field_index: usize = 1;
-        const description_field_index: usize = 2;
-        const source_field_index: usize = 3;
-        const comment_author_field_index: usize = 0;
-        const comment_body_field_index: usize = 1;
-        const comment_submit_field_index: usize = 2;
 
         pub fn viewIndex(view: ViewKind) usize {
             const name = @tagName(view);
@@ -1633,6 +1625,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 else if (record) |r|
                     try title.setContent(allocator, r.event.title);
                 try box.children.put(allocator, title.getFocus().id, .{ .widget = .{ .text_input = title }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
+                box.getFocus().child_id = title.getFocus().id;
             }
 
             {
@@ -1674,7 +1667,6 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
 
             try addSubmitButtonLabeled(allocator, &box, if (supports_drafts and record == null) "submit draft" else "submit");
 
-            box.getFocus().child_id = box.children.keys()[title_field_index];
             return box;
         }
 
@@ -1689,6 +1681,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 parent.options.label = " replying to ";
                 parent.getFocus().kind = .{ .custom = try std.fmt.allocPrint(session.page_arena.allocator(), "a:{s}", .{try parent_route.toUrl(session.page_arena)}) };
                 try box.children.put(allocator, parent.getFocus().id, .{ .widget = .{ .text_box = parent }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
+                box.getFocus().child_id = parent.getFocus().id;
             }
 
             {
@@ -1709,7 +1702,6 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             }
 
             try addSubmitButtonLabeled(allocator, &box, "submit");
-            box.getFocus().child_id = box.children.keys()[comment_author_field_index];
             return box;
         }
 
@@ -1995,6 +1987,21 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             };
         }
 
+        fn formField(form: *wgt.Box(Widget), name: []const u8) !*wgt.TextInput {
+            for (form.children.values()) |*child| switch (child.widget) {
+                .text_input => |*text_input| if (std.mem.eql(u8, text_input.options.name, name)) return text_input,
+                else => {},
+            };
+            return error.MissingFormField;
+        }
+
+        fn formWidget(form: *wgt.Box(Widget), comptime widget_kind: std.meta.Tag(Widget)) ?*@FieldType(Widget, @tagName(widget_kind)) {
+            for (form.children.values()) |*child| {
+                if (child.widget == widget_kind) return &@field(child.widget, @tagName(widget_kind));
+            }
+            return null;
+        }
+
         fn confirmationForm(self: *This) ?*wgt.Box(Widget) {
             return switch (self.viewStack().children.values()[form_view_index]) {
                 .center => |*center| switch (center.child.*) {
@@ -2129,16 +2136,14 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             // find them by focus id
             if (self.threadForm()) |form| {
                 const failure = if (self.session.formFeedback(feedback_tag)) |saved| saved.failure else null;
-                form.children.values()[title_field_index].widget.text_input.options.label = if (failure == .required_title) " title (required) " else " title ";
+                (try formField(form, "title")).options.label = if (failure == .required_title) " title (required) " else " title ";
                 if (comptime supports_drafts) {
-                    if (form.children.values()[source_field_index].widget == .patch_source) {
-                        const source = &form.children.values()[source_field_index].widget.patch_source;
+                    if (formWidget(form, .patch_source)) |source| {
                         source.field().options.label = if (failure == .invalid_source_branch) " source branch (not found) " else if (failure == .unrelated_branches) " source branch (unrelated) " else " source branch ";
-                        const submit = &form.children.values()[form.children.count() - 2].widget.submit_button;
+                        const submit = formWidget(form, .submit_button) orelse return error.MissingFormField;
                         try submit.setLabel(allocator, if (source.existing) "submit patch" else "submit draft");
                     }
-                    const target_branch_field_index = form.children.count() - 3;
-                    form.children.values()[target_branch_field_index].widget.text_input.options.label =
+                    (try formField(form, "target_branch")).options.label =
                         if (failure == .invalid_target_branch) " target branch (not found) " else if (self.data.view == .edit and failure == .unrelated_branches) " target branch (unrelated to source) " else if (self.data.view == .edit and failure == .invalid_source_branch) " target branch (source branch not found) " else " target branch ";
                 }
             }
@@ -2185,8 +2190,6 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     try self.confirmationFormInput(allocator, key, root_focus);
                 } else if (supports_conflicts and self.data.view == .resolve) {
                     try self.resolveInput(allocator, key, root_focus);
-                } else if (self.data.view == .new_comment or self.data.view == .edit_comment) {
-                    try self.commentFormInput(allocator, key, root_focus);
                 } else {
                     try self.formInput(allocator, key, root_focus);
                 }
@@ -2240,55 +2243,31 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         }
 
         fn formInput(self: *This, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
-            const form = self.threadForm() orelse return;
-            const cid = form.getFocus().child_id orelse return;
-            const cur = form.children.getIndex(cid) orelse return;
-            const submit_field_index = form.children.count() - 2;
-            const child = &form.children.values()[cur];
-
-            if (cur == description_field_index) {
-                if (try multilineKeepsKey(&child.widget.text_input, allocator, key))
-                    return child.widget.input(allocator, key, root_focus);
-            }
-
-            switch (key) {
-                .arrow_up, .back_tab => return if (cur > 0)
-                    root_focus.setFocus(form.children.keys()[cur - 1])
-                else
-                    self.focusHeader(root_focus),
-                .arrow_down, .tab => return if (cur < submit_field_index) root_focus.setFocus(form.children.keys()[cur + 1]),
-                .enter => if (cur == submit_field_index) return self.submitForm(allocator),
-                .mouse => |mouse| if (cur == submit_field_index) {
-                    if (inp.leftClickOn(root_focus, child.widget.submit_button.buttonId(), mouse)) return self.submitForm(allocator);
-                },
-                else => {},
-            }
-            try child.widget.input(allocator, key, root_focus);
-        }
-
-        fn commentFormInput(self: *This, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
             const form = self.formBox() orelse return;
             const cid = form.getFocus().child_id orelse return;
             const cur = form.children.getIndex(cid) orelse return;
             const child = &form.children.values()[cur];
 
-            if (cur == comment_body_field_index and try multilineKeepsKey(&child.widget.text_input, allocator, key))
-                return child.widget.input(allocator, key, root_focus);
+            if (child.widget == .text_input) {
+                const text_input = &child.widget.text_input;
+                if (text_input.options.multiline and try multilineKeepsKey(text_input, allocator, key))
+                    return child.widget.input(allocator, key, root_focus);
+            }
 
+            const on_submit = child.widget == .submit_button;
             switch (key) {
-                .arrow_up, .back_tab => if (cur > comment_author_field_index)
-                    root_focus.setFocus(form.children.keys()[cur - 1])
+                .arrow_up, .back_tab => return if (formStep(form, cur, false)) |i|
+                    root_focus.setFocus(form.children.keys()[i])
                 else
                     self.focusHeader(root_focus),
-                .arrow_down, .tab => if (cur < comment_submit_field_index)
-                    root_focus.setFocus(form.children.keys()[cur + 1]),
-                .enter => if (cur == comment_submit_field_index) try self.submitComment(allocator),
-                .mouse => |mouse| if (cur == comment_submit_field_index) {
-                    const submit = &child.widget.submit_button;
-                    if (inp.leftClickOn(root_focus, submit.buttonId(), mouse)) try self.submitComment(allocator);
+                .arrow_down, .tab => return if (formStep(form, cur, true)) |i| root_focus.setFocus(form.children.keys()[i]),
+                .enter => if (on_submit) return self.submitForm(allocator),
+                .mouse => |mouse| if (on_submit) {
+                    if (inp.leftClickOn(root_focus, child.widget.submit_button.buttonId(), mouse)) return self.submitForm(allocator);
                 },
-                else => try child.widget.input(allocator, key, root_focus),
+                else => {},
             }
+            try child.widget.input(allocator, key, root_focus);
         }
 
         fn confirmationFormInput(self: *This, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
@@ -2330,8 +2309,8 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             const on_submit = child.widget == .submit_button;
 
             switch (key) {
-                .arrow_up, .back_tab => if (resolveStep(form, cur, false)) |i| self.focusResolveChild(form, i, root_focus) else self.focusHeader(root_focus),
-                .arrow_down, .tab => if (resolveStep(form, cur, true)) |i| self.focusResolveChild(form, i, root_focus),
+                .arrow_up, .back_tab => if (formStep(form, cur, false)) |i| self.focusResolveChild(form, i, root_focus) else self.focusHeader(root_focus),
+                .arrow_down, .tab => if (formStep(form, cur, true)) |i| self.focusResolveChild(form, i, root_focus),
                 .arrow_left, .arrow_right => switch (child.widget) {
                     .box => |*row| {
                         const row_cid = row.getFocus().child_id orelse return;
@@ -2362,9 +2341,8 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             };
         }
 
-        // the neighboring focusable resolve-form child, skipping the spacer and
-        // the blank gap rows
-        fn resolveStep(form: *wgt.Box(Widget), cur: usize, down: bool) ?usize {
+        // the neighboring form control, skipping spacers and blank rows
+        fn formStep(form: *wgt.Box(Widget), cur: usize, down: bool) ?usize {
             var i = cur;
             while (true) {
                 if (down) {
@@ -2374,7 +2352,9 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     if (i == 0) return null;
                     i -= 1;
                 }
-                switch (form.children.values()[i].widget) {
+                const child = &form.children.values()[i];
+                if (child.hidden) continue;
+                switch (child.widget) {
                     .spacer, .text => continue,
                     else => return i,
                 }
@@ -2469,7 +2449,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             const src = self.data.repo_source orelse return;
             const author = (try self.session.eventAuthor()) orelse return;
             const form = self.formBox() orelse return;
-            const body_input = &form.children.values()[comment_body_field_index].widget.text_input;
+            const body_input = try formField(form, "body");
             const body = try body_input.text(allocator);
             defer allocator.free(body);
             if (!evt.Comment.fieldsValid(body)) return;
@@ -2504,14 +2484,12 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             try self.session.navigate(route);
         }
 
-        // the terminal submit paths: the new form commits a new thread event, the
-        // edit form re-emits the selected thread's event with the form's content.
-        // the web posts the forms to their routes instead.
+        // terminal form submissions; the web posts to the forms' routes instead
         fn submitForm(self: *This, allocator: std.mem.Allocator) !void {
-            if (self.data.view == .edit) {
-                try self.submitEditedThread(allocator);
-            } else {
-                try self.submitNewThread(allocator);
+            switch (self.data.view) {
+                .new_comment, .edit_comment => try self.submitComment(allocator),
+                .edit => try self.submitEditedThread(allocator),
+                else => try self.submitNewThread(allocator),
             }
         }
 
@@ -2525,10 +2503,9 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             const author = (try self.session.eventAuthor()) orelse return;
 
             const form = self.threadForm() orelse return;
-            const target_branch_field_index = form.children.count() - 3;
-            const title_input = &form.children.values()[title_field_index].widget.text_input;
-            const tags_input = &form.children.values()[tags_field_index].widget.text_input;
-            const description_input = &form.children.values()[description_field_index].widget.text_input;
+            const title_input = try formField(form, "title");
+            const tags_input = try formField(form, "tags");
+            const description_input = try formField(form, "description");
 
             const title = try title_input.text(allocator);
             defer allocator.free(title);
@@ -2536,7 +2513,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             defer allocator.free(tags);
             const description = try description_input.text(allocator);
             defer allocator.free(description);
-            const target_branch = if (comptime supports_drafts) try form.children.values()[target_branch_field_index].widget.text_input.text(allocator) else "";
+            const target_branch = if (comptime supports_drafts) try (try formField(form, "target_branch")).text(allocator) else "";
             defer if (comptime supports_drafts) allocator.free(target_branch);
 
             if (!Event.fieldsValid(title, tags)) {
@@ -2545,7 +2522,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             }
 
             if (comptime supports_drafts) {
-                const source = &form.children.values()[source_field_index].widget.patch_source;
+                const source = formWidget(form, .patch_source) orelse return error.MissingFormField;
                 const source_branch = if (source.existing) try source.field().text(allocator) else null;
                 defer if (source_branch) |branch| allocator.free(branch);
                 const event_id_hex = Data.create(self.data, self.session, allocator, title, tags, description, target_branch, source_branch) catch |err| {
@@ -2556,7 +2533,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 title_input.clear(allocator);
                 tags_input.clear(allocator);
                 description_input.clear(allocator);
-                form.children.values()[target_branch_field_index].widget.text_input.clear(allocator);
+                (try formField(form, "target_branch")).clear(allocator);
                 const route = ui.RoutablePage.repoThreadCommentsRoute(kind, self.data.identity, &event_id_hex, 0) orelse return;
                 try self.session.navigate(route);
                 return;
@@ -2605,10 +2582,9 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             const entry = self.data.selectedThread() orelse return;
 
             const form = self.threadForm() orelse return;
-            const target_branch_field_index = form.children.count() - 3;
-            const title_input = &form.children.values()[title_field_index].widget.text_input;
-            const tags_input = &form.children.values()[tags_field_index].widget.text_input;
-            const description_input = &form.children.values()[description_field_index].widget.text_input;
+            const title_input = try formField(form, "title");
+            const tags_input = try formField(form, "tags");
+            const description_input = try formField(form, "description");
 
             const title = try title_input.text(allocator);
             defer allocator.free(title);
@@ -2616,7 +2592,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             defer allocator.free(tags);
             const description = try description_input.text(allocator);
             defer allocator.free(description);
-            const target_branch = if (comptime supports_drafts) try form.children.values()[target_branch_field_index].widget.text_input.text(allocator) else "";
+            const target_branch = if (comptime supports_drafts) try (try formField(form, "target_branch")).text(allocator) else "";
             defer if (comptime supports_drafts) allocator.free(target_branch);
 
             if (!Event.fieldsValid(title, tags)) {
@@ -2677,10 +2653,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             const aa = self.session.arena.allocator();
             const source = if (supports_drafts) blk: {
                 const form = self.threadForm() orelse break :blk null;
-                break :blk switch (form.children.values()[source_field_index].widget) {
-                    .patch_source => |*value| value,
-                    else => null,
-                };
+                break :blk formWidget(form, .patch_source);
             } else null;
             self.session.data.form_feedback = @unionInit(ui.Session.FormFeedback, @tagName(feedback_tag), .{
                 .failure = failure,
