@@ -1126,7 +1126,12 @@ fn testMergeability(
     {
         try std.Io.Dir.renameAbsolute(draft_path, away_path, io);
         defer std.Io.Dir.renameAbsolute(away_path, draft_path, io) catch {};
-        try std.testing.expectError(error.PatchDataUnavailable, pch.merge(repo_opts, io, allocator, repos_dir, target, input));
+        {
+            const log_level = std.testing.log_level;
+            std.testing.log_level = .err;
+            defer std.testing.log_level = log_level;
+            try std.testing.expectError(error.PatchDataUnavailable, pch.merge(repo_opts, io, allocator, repos_dir, target, input));
+        }
         try std.testing.expectEqualDeep(pch.Mergeability{}, try readMergeability(target, io, allocator, id, patch));
         try std.testing.expectEqual(events_before, try target.readRef(io, evt.events_ref));
     }
