@@ -1988,9 +1988,10 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         }
 
         fn threadForm(self: *This) ?*wgt.Box(Widget) {
+            if (supports_conflicts and self.data.view == .resolve) return null;
             return switch (self.data.view) {
-                .new, .edit => self.formBox(),
-                else => null,
+                .new_comment, .edit_comment => null,
+                else => self.formBox(),
             };
         }
 
@@ -2133,10 +2134,10 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     if (form.children.values()[source_field_index].widget == .patch_source) {
                         const source = &form.children.values()[source_field_index].widget.patch_source;
                         source.field().options.label = if (failure == .invalid_source_branch) " source branch (not found) " else if (failure == .unrelated_branches) " source branch (unrelated) " else " source branch ";
-                        const submit = &form.children.values()[form.children.count() - 1].widget.submit_button;
+                        const submit = &form.children.values()[form.children.count() - 2].widget.submit_button;
                         try submit.setLabel(allocator, if (source.existing) "submit patch" else "submit draft");
                     }
-                    const target_branch_field_index = form.children.count() - 2;
+                    const target_branch_field_index = form.children.count() - 3;
                     form.children.values()[target_branch_field_index].widget.text_input.options.label =
                         if (failure == .invalid_target_branch) " target branch (not found) " else if (self.data.view == .edit and failure == .unrelated_branches) " target branch (unrelated to source) " else if (self.data.view == .edit and failure == .invalid_source_branch) " target branch (source branch not found) " else " target branch ";
                 }
@@ -2242,7 +2243,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             const form = self.threadForm() orelse return;
             const cid = form.getFocus().child_id orelse return;
             const cur = form.children.getIndex(cid) orelse return;
-            const submit_field_index = form.children.count() - 1;
+            const submit_field_index = form.children.count() - 2;
             const child = &form.children.values()[cur];
 
             if (cur == description_field_index) {
@@ -2524,7 +2525,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             const author = (try self.session.eventAuthor()) orelse return;
 
             const form = self.threadForm() orelse return;
-            const target_branch_field_index = form.children.count() - 2;
+            const target_branch_field_index = form.children.count() - 3;
             const title_input = &form.children.values()[title_field_index].widget.text_input;
             const tags_input = &form.children.values()[tags_field_index].widget.text_input;
             const description_input = &form.children.values()[description_field_index].widget.text_input;
@@ -2604,7 +2605,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             const entry = self.data.selectedThread() orelse return;
 
             const form = self.threadForm() orelse return;
-            const target_branch_field_index = form.children.count() - 2;
+            const target_branch_field_index = form.children.count() - 3;
             const title_input = &form.children.values()[title_field_index].widget.text_input;
             const tags_input = &form.children.values()[tags_field_index].widget.text_input;
             const description_input = &form.children.values()[description_field_index].widget.text_input;

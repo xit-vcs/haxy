@@ -5,6 +5,40 @@ const Commits = @import("../ui/Repo/Commits.zig");
 const Events = @import("../ui/Repo/Events.zig");
 const xit = @import("xit");
 
+test "preloaded thread forms receive typing after switching tabs" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var session = ui.Session{ .arena = &arena, .page_arena = &arena, .is_terminal = true, .data = .{ .host_kind = .local } };
+    session.data.current_page = ui.RoutablePage.repoIssuesRoute("", .open, "", "") orelse return error.BadRoute;
+    const data = try ui.Repo.Issues.emptyResult(arena.allocator(), "", "", "", "", 0, "", .open);
+    var root = ui.Widget{ .repo_issues = try ui.Repo.Issues.View.init(allocator, &data, &session) };
+    defer root.deinit(allocator);
+    const focus = root.getFocus();
+    const constraint = xit.xitui.layout.Constraint{
+        .min_size = .{ .width = null, .height = null },
+        .max_size = .{ .width = 100, .height = 40 },
+    };
+    try root.build(allocator, constraint, focus);
+
+    // switch to the preloaded new tab without recreating the page
+    for ([_]xit.xitui.input.Key{ .arrow_right, .arrow_right, .arrow_right, .arrow_down }) |key| {
+        try ui.inputKey(allocator, &root, key, &session);
+        try root.build(allocator, constraint, focus);
+    }
+    for ([_][]const u8{ "title", "tags", "description" }) |name| {
+        const input = session.text_inputs.get(focus.grandchild_id orelse return error.NoFocus) orelse return error.MissingInput;
+        try std.testing.expectEqualStrings(name, input.options.name);
+        try ui.inputKey(allocator, &root, .{ .codepoint = 'x' }, &session);
+        try root.build(allocator, constraint, focus);
+        const value = try input.text(allocator);
+        defer allocator.free(value);
+        try std.testing.expectEqualStrings("x", value);
+        try ui.inputKey(allocator, &root, .tab, &session);
+        try root.build(allocator, constraint, focus);
+    }
+}
+
 test "web controls omit hidden inputs but retain off-screen inputs" {
     const wgt = xit.xitui.widget;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
