@@ -2139,12 +2139,12 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 (try formField(form, "title")).options.label = if (failure == .required_title) " title (required) " else " title ";
                 if (comptime supports_drafts) {
                     if (formWidget(form, .patch_source)) |source| {
-                        source.field().options.label = if (failure == .invalid_source_branch) " source branch (not found) " else if (failure == .unrelated_branches) " source branch (unrelated) " else " source branch ";
+                        source.field().options.label = if (failure == .invalid_source_branch) " source branch (not found) " else if (failure == .same_branch) " source branch (same as target) " else if (failure == .unrelated_branches) " source branch (unrelated) " else " source branch ";
                         const submit = formWidget(form, .submit_button) orelse return error.MissingFormField;
                         try submit.setLabel(allocator, if (source.existing) "submit patch" else "submit draft");
                     }
                     (try formField(form, "target_branch")).options.label =
-                        if (failure == .invalid_target_branch) " target branch (not found) " else if (self.data.view == .edit and failure == .unrelated_branches) " target branch (unrelated to source) " else if (self.data.view == .edit and failure == .invalid_source_branch) " target branch (source branch not found) " else " target branch ";
+                        if (failure == .invalid_target_branch) " target branch (invalid) " else if (self.data.view == .edit and failure == .same_branch) " target branch (same as source) " else if (self.data.view == .edit and failure == .unrelated_branches) " target branch (unrelated to source) " else if (self.data.view == .edit and failure == .invalid_source_branch) " target branch (source branch not found) " else " target branch ";
                 }
             }
             if (self.formBox()) |form| {

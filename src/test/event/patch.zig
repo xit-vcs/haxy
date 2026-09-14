@@ -41,20 +41,36 @@ fn testBranchPatch(comptime kind: rp.RepoKind, comptime hash_kind: hash.HashKind
     try repo.add(io, allocator, &.{"base.txt"});
     const base = try repo.commit(io, allocator, .{ .message = "base" });
     try repo.addBranch(io, .{ .name = "feature" });
-    const source = try repo.commitAtRef(io, allocator, .{ .message = "feature" }, null, .{ .kind = .head, .name = "feature" });
     const id = [_]u8{7} ** evt.event_id_size;
     const patch = evt.Patch{ .title = "branch patch", .tags = "feature", .description = "existing branch", .source_branch = "feature", .target_branch = "master" };
 
-    // submission stores the patch and revision in this repo
+    // the same branch cannot be both source and target
+    {
+        var invalid = patch;
+        invalid.target_branch = "feature";
+        try std.testing.expectError(error.SameBranch, pch.writeBranchPatch(.local, kind, opts, io, allocator, &repo, std.fmt.bytesToHex(id, .lower), invalid, null, author));
+        try std.testing.expectEqual(null, try repo.readRef(io, evt.events_ref));
+    }
+
+    // distinct branches at the same commit can still create a patch
     try pch.writeBranchPatch(.local, kind, opts, io, allocator, &repo, std.fmt.bytesToHex(id, .lower), patch, null, author);
     const first = (try evt.Patch.readFromRepo(kind, opts, io, allocator, &arena, &repo, &id)) orelse return error.NotFound;
     const first_revision = first.event.revision orelse return error.NotFound;
-    try std.testing.expectEqualStrings(&source, first_revision.source_oid);
+    try std.testing.expectEqualStrings(&base, first_revision.source_oid);
     try std.testing.expectEqualStrings(&base, &(try repo.readRef(io, .{ .kind = .head, .name = "master" }) orelse return error.NotFound));
 
     // an unchanged refresh does not add events
     const event_tip = (try repo.readRef(io, evt.events_ref)) orelse return error.NotFound;
     try pch.refreshBranches(.local, kind, opts, io, allocator, &repo, null);
+    try std.testing.expectEqualStrings(&event_tip, &(try repo.readRef(io, evt.events_ref) orelse return error.NotFound));
+
+    // retargeting to the source leaves the patch and revision unchanged
+    try std.testing.expectError(error.SameBranch, evt.Patch.update(.local, kind, opts, io, allocator, &repo, &id, .{ .fields = .{
+        .title = patch.title,
+        .tags = patch.tags,
+        .description = patch.description,
+        .target_branch = "feature",
+    } }, author));
     try std.testing.expectEqualStrings(&event_tip, &(try repo.readRef(io, evt.events_ref) orelse return error.NotFound));
 
     // a source update replaces the revision, not the patch metadata
@@ -306,6 +322,26 @@ test "patch event conflicts, stacking, and gc" {
         .{ .tree = .{ .name = "base", .oid = &base_tree_oid } },
         .{ .tree = .{ .name = "head", .oid = &head_tree_oid } },
     };
+
+    // reject invalid branches even when the event bypasses patch creation
+    {
+        const cases = [_]struct { source: ?[]const u8, target: []const u8, expected_error: anyerror }{
+            .{ .source = "master", .target = "master", .expected_error = error.SameBranch },
+            .{ .source = null, .target = evt.events_ref.name, .expected_error = error.InvalidTargetBranch },
+        };
+        for (cases) |case| {
+            var invalid = patch;
+            invalid.source_branch = case.source;
+            invalid.target_branch = case.target;
+            try std.testing.expectError(case.expected_error, evt.consume(.local, .repo, .xit, repo_opts, io, allocator, &target, evt.events_ref, &.{.{
+                .id = std.fmt.bytesToHex(patch_id, .lower),
+                .timestamp = 3,
+                .author = author,
+                .event = .{ .patch = invalid },
+            }}));
+            try std.testing.expectEqual(null, try target.readRef(io, evt.events_ref));
+        }
+    }
 
     //
     // consume the patch revision and patch

@@ -637,7 +637,7 @@ fn handleThreadNew(
             .local => return respondRemoveNotFound(request),
         };
         const user_id = request_author.user_id orelse return respondLoginRequired(request);
-        if (!try request_repo.source.hasBranch(io, allocator, target_branch)) {
+        if (!evt.Patch.branchValid(target_branch) or !try request_repo.source.hasBranch(io, allocator, target_branch)) {
             const form_location = try std.fmt.allocPrint(allocator, "{s}/patches/new", .{base});
             defer allocator.free(form_location);
             return respondThreadFormFailure(request, allocator, host, form_location, patchFeedback(.invalid_target_branch, title, tags, description, target_branch, null));
@@ -1445,7 +1445,7 @@ fn handleThreadEdit(
         };
         const request_repo = (try requestRepoSource(io, allocator, host, parts.repo_base)) orelse return respondRemoveNotFound(request);
         defer request_repo.deinit(allocator);
-        if (!try request_repo.source.hasBranch(io, allocator, target_branch)) {
+        if (!evt.Patch.branchValid(target_branch) or !try request_repo.source.hasBranch(io, allocator, target_branch)) {
             const form_location = try std.fmt.allocPrint(allocator, "{s}/edit", .{base});
             defer allocator.free(form_location);
             return respondThreadFormFailure(request, allocator, host, form_location, patchFeedback(.invalid_target_branch, title, tags, description, target_branch, null));

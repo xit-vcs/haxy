@@ -294,7 +294,7 @@ pub fn create(
     const admin_repo = session.admin_repo orelse return error.NotFound;
     const user_id = session.userId() orelse return error.NotFound;
     const repo_id = data.repo_id orelse return error.NotFound;
-    if (!try repo_source.hasBranch(io, allocator, target_branch)) return error.InvalidTargetBranch;
+    if (!evt.Patch.branchValid(target_branch) or !try repo_source.hasBranch(io, allocator, target_branch)) return error.InvalidTargetBranch;
     const fork_path = try fork.create(.{}, io, allocator, repos_dir, admin_repo, .{
         .id = id,
         .user_id = user_id,
@@ -373,7 +373,7 @@ pub fn editDraft(
     const user_id = session.userId() orelse return error.NotFound;
     const patch_id = evt.parseEventId(id) catch return error.NotFound;
     const author = (try session.eventAuthor()) orelse return error.NotFound;
-    if (!try repo_source.hasBranch(io, allocator, target_branch)) return error.InvalidTargetBranch;
+    if (!evt.Patch.branchValid(target_branch) or !try repo_source.hasBranch(io, allocator, target_branch)) return error.InvalidTargetBranch;
 
     const id_hex = std.fmt.bytesToHex(patch_id, .lower);
     const fork_path = try fork.forkPath(allocator, repos_dir, &id_hex);

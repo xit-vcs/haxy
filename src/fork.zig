@@ -49,6 +49,7 @@ pub fn create(
     input: CreateInput,
 ) ![]u8 {
     if (!evt.Patch.fieldsValid(input.title, input.tags)) return error.InvalidPatch;
+    if (!evt.Patch.branchValid(input.target_branch)) return error.InvalidTargetBranch;
 
     // get the fork id and path
     const fork_id = try evt.parseEventId(&input.id);
@@ -72,7 +73,6 @@ pub fn create(
     defer allocator.free(target_path);
     var target_repo = try rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = target_path, .require_repo_root = true });
     defer target_repo.deinit(io, allocator);
-    if (!rf.validateName(input.target_branch)) return error.InvalidTarget;
     if ((try target_repo.readRef(io, .{ .kind = .head, .name = input.target_branch })) == null) return error.TargetNotFound;
 
     // create the fork repo dir

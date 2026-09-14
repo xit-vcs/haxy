@@ -1713,12 +1713,14 @@ pub const Session = struct {
             required_title,
             invalid_target_branch,
             invalid_source_branch,
+            same_branch,
             unrelated_branches,
 
             pub fn fromError(err: anyerror) ?PatchFailure {
                 return switch (err) {
                     error.InvalidTargetBranch => .invalid_target_branch,
                     error.InvalidSourceBranch => .invalid_source_branch,
+                    error.SameBranch => .same_branch,
                     error.UnrelatedBranches => .unrelated_branches,
                     else => null,
                 };

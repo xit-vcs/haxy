@@ -91,10 +91,11 @@ fn branchEvents(
 ) ![2]evt.EventWithId {
     const branch = patch.source_branch orelse return error.InvalidSourceBranch;
     if (!evt.Patch.fieldsValid(patch.title, patch.tags)) return error.InvalidFields;
-    if (!rf.validateName(branch) or std.mem.eql(u8, branch, evt.events_ref.name)) return error.InvalidSourceBranch;
-    if (!rf.validateName(patch.target_branch) or std.mem.eql(u8, patch.target_branch, evt.events_ref.name)) return error.InvalidTargetBranch;
+    if (!evt.Patch.branchValid(branch)) return error.InvalidSourceBranch;
+    if (!evt.Patch.branchValid(patch.target_branch)) return error.InvalidTargetBranch;
     const source = (try rf.readRecur(repo_kind, repo_opts, state.readOnly(), io, .{ .ref = .{ .kind = .head, .name = branch } })) orelse return error.InvalidSourceBranch;
     const target = (try rf.readRecur(repo_kind, repo_opts, state.readOnly(), io, .{ .ref = .{ .kind = .head, .name = patch.target_branch } })) orelse return error.InvalidTargetBranch;
+    if (std.mem.eql(u8, branch, patch.target_branch)) return error.SameBranch;
     const base = mrg.commonAncestor(repo_kind, repo_opts, state.readOnly(), io, arena.allocator(), &target, &source) catch |err| switch (err) {
         error.NoCommonAncestor => return error.UnrelatedBranches,
         else => return err,
@@ -541,6 +542,7 @@ pub fn editDraft(
     input: EditDraftInput,
 ) !bool {
     if (!evt.Patch.fieldsValid(input.title, input.tags)) return error.InvalidFields;
+    if (!evt.Patch.branchValid(input.target_branch)) return error.InvalidTargetBranch;
     const patch_id = try evt.parseEventId(&input.id);
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();

@@ -155,6 +155,10 @@ pub fn fieldsValid(title: []const u8, tags: []const u8) bool {
     return true;
 }
 
+pub fn branchValid(branch: []const u8) bool {
+    return rf.validateName(branch) and !std.mem.eql(u8, branch, evt.events_ref.name);
+}
+
 pub fn consume(
     comptime DB: type,
     comptime hash_kind: hash.HashKind,
@@ -180,10 +184,10 @@ pub fn consume(
     var record = record_maybe orelse try evt.removedRecord(Record, DB, hash_kind, haxy_moment.readOnly(), existing_maybe);
 
     if (!fieldsValid(record.event.title, record.event.tags)) return error.InvalidPatch;
-    if (!rf.validateName(record.event.target_branch)) return error.InvalidTarget;
+    if (!branchValid(record.event.target_branch)) return error.InvalidTargetBranch;
     if (record.event.source_branch) |branch| {
-        if (!rf.validateName(branch) or std.mem.eql(u8, branch, evt.events_ref.name) or
-            std.mem.eql(u8, record.event.target_branch, evt.events_ref.name)) return error.InvalidSourceBranch;
+        if (!branchValid(branch)) return error.InvalidSourceBranch;
+        if (std.mem.eql(u8, branch, record.event.target_branch)) return error.SameBranch;
     }
     const revision_id = if (record.event.revision) |*revision| blk: {
         try evt.PatchRev.validateOid(hash_kind, revision.squash_oid);
@@ -345,7 +349,7 @@ pub fn update(
             };
         },
         .fields => |fields| {
-            if (!rf.validateName(fields.target_branch)) return error.InvalidTargetBranch;
+            if (!branchValid(fields.target_branch)) return error.InvalidTargetBranch;
             if ((try repo.readRef(io, .{ .kind = .head, .name = fields.target_branch })) == null) return error.InvalidTargetBranch;
             updated.title = fields.title;
             updated.tags = fields.tags;
