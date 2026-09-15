@@ -759,7 +759,7 @@ test "patch event conflicts, stacking, and gc" {
         const roots = try evt.PatchRev.gcRoots(Repo.DB, repo_opts.hash, allocator, stacked_moment);
         defer allocator.free(roots);
         try std.testing.expectEqual(4, roots.len);
-        _ = try target.garbageCollect(io, allocator, roots);
+        _ = try target.garbageCollect(io, allocator, .{ .extra_roots = roots });
 
         var after_gc_moment = try target.core.latestMoment();
         const after_gc_state = Repo.State(.read_only){ .core = &target.core, .extra = .{ .moment = &after_gc_moment } };
