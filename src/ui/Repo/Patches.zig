@@ -25,15 +25,13 @@ pub const Source = struct {
     pub fn init(allocator: std.mem.Allocator, session: *ui.Session, initial: []const u8, existing: bool) !Source {
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
         errdefer box.deinit(allocator);
-        const labels = [_][]const u8{ "from a new fork", "from an existing branch" };
-        for (labels, 0..) |label, i| {
-            if (session.data.host_kind == .local) {
-                if (i == 0) continue;
+        if (session.data.host_kind != .local) {
+            for ([_][]const u8{ "from a new fork", "from an existing branch" }) |label| {
+                var selector = try wgt.TextBox.init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+                errdefer selector.deinit(allocator);
+                selector.getFocus().mode = .all;
+                try box.children.put(allocator, selector.getFocus().id, .{ .widget = .{ .text_box = selector }, .rect = null, .min_size = .{ .width = label.len + 2, .height = 3 } });
             }
-            var selector = try wgt.TextBox.init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
-            errdefer selector.deinit(allocator);
-            selector.getFocus().mode = .all;
-            try box.children.put(allocator, selector.getFocus().id, .{ .widget = .{ .text_box = selector }, .rect = null, .min_size = .{ .width = label.len + 2, .height = 3 } });
         }
         const input_index = box.children.count();
         var input_box = try wgt.TextInput.init(allocator, .{ .label = " source branch ", .name = "source_branch", .rounded_corners = true, .visible_width = null, .render_content = session.is_terminal });
@@ -41,8 +39,8 @@ pub const Source = struct {
         input_box.getFocus().mode = .all;
         try input_box.setContent(allocator, initial);
         try box.children.put(allocator, input_box.getFocus().id, .{ .widget = .{ .text_input = input_box }, .rect = null, .min_size = .{ .width = 15, .height = 3 } });
-        box.getFocus().child_id = box.children.keys()[if (existing) input_index - 1 else 0];
-        return .{ .box = box, .session = session, .existing = existing or input_index == 1, .input_index = input_index };
+        box.getFocus().child_id = box.children.keys()[if (existing and input_index > 0) input_index - 1 else 0];
+        return .{ .box = box, .session = session, .existing = existing or input_index == 0, .input_index = input_index };
     }
 
     pub fn field(self: *Source) *wgt.TextInput {
@@ -76,7 +74,7 @@ pub const Source = struct {
     pub fn input(self: *Source, allocator: std.mem.Allocator, key: xitui.input.Key, root_focus: *xitui.focus.Focus) !void {
         const current = self.box.getFocus().child_id orelse return;
         const index = self.box.children.getIndex(current) orelse return;
-        if (index == self.input_index and key != .arrow_left) return self.field().input(allocator, key, root_focus);
+        if (self.input_index == 0 or (index == self.input_index and key != .arrow_left)) return self.field().input(allocator, key, root_focus);
         switch (key) {
             .arrow_left => if (index > 0) {
                 self.existing = index == self.input_index;
