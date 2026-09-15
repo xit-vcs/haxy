@@ -1747,7 +1747,7 @@ pub const Session = struct {
                 description: []const u8,
                 target_branch: []const u8,
                 source_branch: []const u8 = "",
-                branch_source: bool = false,
+                source_kind: Repo.Patches.Source.Kind = .fork,
             } = null,
         },
         discussion: struct {

@@ -430,7 +430,7 @@ fn patchFeedback(failure: ui.Session.FormFeedback.PatchFailure, title: []const u
         .description = description,
         .target_branch = target_branch,
         .source_branch = source_branch orelse "",
-        .branch_source = source_branch != null,
+        .source_kind = if (source_branch != null) .branch else .fork,
     } } };
 }
 

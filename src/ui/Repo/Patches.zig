@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const evt = @import("../../event.zig");
 const ui = @import("../../ui.zig");
+const inp = @import("../input.zig");
 const xit = @import("xit");
 const rp = xit.repo;
 const hash = xit.hash;
@@ -19,52 +20,72 @@ const wasm = builtin.target.cpu.arch == .wasm32;
 pub const Source = struct {
     box: wgt.Box(ui.Widget),
     session: *ui.Session,
-    existing: bool,
-    input_index: usize,
+    selected: Kind,
+    selectors: std.enums.EnumMap(Kind, usize),
 
-    pub fn init(allocator: std.mem.Allocator, session: *ui.Session, initial: []const u8, existing: bool) !Source {
+    pub const Kind = enum { fork, branch };
+
+    pub fn init(allocator: std.mem.Allocator, session: *ui.Session, initial: []const u8, initial_kind: Kind) !Source {
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
         errdefer box.deinit(allocator);
+        const selected: Kind = if (session.data.host_kind == .local) .branch else initial_kind;
+        var selectors: std.enums.EnumMap(Kind, usize) = .{};
         if (session.data.host_kind != .local) {
-            for ([_][]const u8{ "from a new fork", "from an existing branch" }) |label| {
+            for (std.enums.values(Kind)) |kind| {
+                const label = switch (kind) {
+                    .fork => "from a new fork",
+                    .branch => "from an existing branch",
+                };
                 var selector = try wgt.TextBox.init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
                 errdefer selector.deinit(allocator);
                 selector.getFocus().mode = .all;
                 try box.children.put(allocator, selector.getFocus().id, .{ .widget = .{ .text_box = selector }, .rect = null, .min_size = .{ .width = label.len + 2, .height = 3 } });
+                selectors.put(kind, selector.getFocus().id);
             }
         }
-        const input_index = box.children.count();
         var input_box = try wgt.TextInput.init(allocator, .{ .label = " source branch ", .name = "source_branch", .rounded_corners = true, .visible_width = null, .render_content = session.is_terminal });
         errdefer input_box.deinit(allocator);
         input_box.getFocus().mode = .all;
         try input_box.setContent(allocator, initial);
         try box.children.put(allocator, input_box.getFocus().id, .{ .widget = .{ .text_input = input_box }, .rect = null, .min_size = .{ .width = 15, .height = 3 } });
-        box.getFocus().child_id = box.children.keys()[if (existing and input_index > 0) input_index - 1 else 0];
-        return .{ .box = box, .session = session, .existing = existing or input_index == 0, .input_index = input_index };
+        box.getFocus().child_id = selectors.get(selected) orelse input_box.getFocus().id;
+        return .{ .box = box, .session = session, .selected = selected, .selectors = selectors };
     }
 
     pub fn field(self: *Source) *wgt.TextInput {
-        return &self.box.children.values()[self.input_index].widget.text_input;
+        for (self.box.children.values()) |*child| switch (child.widget) {
+            .text_input => |*text_input| return text_input,
+            else => {},
+        };
+        unreachable;
     }
+
     pub fn deinit(self: *Source, allocator: std.mem.Allocator) void {
         self.box.deinit(allocator);
     }
+
     pub fn clearGrid(self: *Source) void {
         self.box.clearGrid();
     }
+
     pub fn getGrid(self: Source) ?xitui.grid.Grid {
         return self.box.getGrid();
     }
+
     pub fn getFocus(self: *Source) *xitui.focus.Focus {
         return self.box.getFocus();
     }
 
     pub fn build(self: *Source, allocator: std.mem.Allocator, constraint: xitui.layout.Constraint, root_focus: *xitui.focus.Focus) !void {
         self.clearGrid();
-        self.box.children.values()[self.input_index].hidden = !self.existing;
-        for (self.box.children.values()[0..self.input_index], 0..) |*child, i| {
-            child.widget.text_box.options.border_style = if ((i == self.input_index - 1) == self.existing) .single else .hidden;
-        }
+        for (self.box.children.keys(), self.box.children.values()) |id, *child| switch (child.widget) {
+            .text_input => child.hidden = switch (self.selected) {
+                .fork => true,
+                .branch => false,
+            },
+            .text_box => |*selector| selector.options.border_style = if (id == self.selectors.get(self.selected)) .single else .hidden,
+            else => {},
+        };
         try self.box.build(allocator, constraint, root_focus);
         if (!self.session.is_terminal) {
             try self.session.text_inputs.put(self.session.arena.allocator(), self.field().getFocus().id, self.field());
@@ -72,27 +93,46 @@ pub const Source = struct {
     }
 
     pub fn input(self: *Source, allocator: std.mem.Allocator, key: xitui.input.Key, root_focus: *xitui.focus.Focus) !void {
-        const current = self.box.getFocus().child_id orelse return;
-        const index = self.box.children.getIndex(current) orelse return;
-        if (self.input_index == 0 or (index == self.input_index and key != .arrow_left)) return self.field().input(allocator, key, root_focus);
-        switch (key) {
-            .arrow_left => if (index > 0) {
-                self.existing = index == self.input_index;
-                root_focus.setFocus(self.box.children.keys()[index - 1]);
-            },
-            .arrow_right => {
-                self.existing = true;
-                root_focus.setFocus(self.box.children.keys()[index + 1]);
-            },
-            .enter => {
-                self.existing = index == self.input_index - 1;
-                if (self.existing) root_focus.setFocus(self.field().getFocus().id);
-            },
-            .mouse => |mouse| {
-                for (self.box.children.keys()[0..self.input_index], 0..) |id, i| {
-                    if (@import("../input.zig").leftClickOn(root_focus, id, mouse)) self.existing = i == self.input_index - 1;
+        if (key == .mouse) {
+            var iter = self.selectors.iterator();
+            while (iter.next()) |selector| {
+                if (inp.leftClickOn(root_focus, selector.value.*, key.mouse)) {
+                    self.selected = selector.key;
+                    return;
                 }
+            }
+        }
+        const current = self.box.getFocus().child_id orelse return;
+        const text_input = self.field();
+        if (current == text_input.getFocus().id) {
+            if (key == .arrow_left) {
+                if (self.selectors.get(self.selected)) |id| {
+                    root_focus.setFocus(id);
+                    return;
+                }
+            }
+            return text_input.input(allocator, key, root_focus);
+        }
+
+        var iter = self.selectors.iterator();
+        var previous: ?Kind = null;
+        while (iter.next()) |selector| {
+            if (selector.value.* == current) {
+                self.selected = selector.key;
+                break;
+            }
+            previous = selector.key;
+        } else return;
+        switch (key) {
+            .arrow_left => if (previous) |kind| {
+                self.selected = kind;
+                root_focus.setFocus(self.selectors.get(kind) orelse return);
             },
+            .arrow_right => if (iter.next()) |next| {
+                self.selected = next.key;
+                root_focus.setFocus(next.value.*);
+            } else if (self.selected == .branch) root_focus.setFocus(text_input.getFocus().id),
+            .enter => if (self.selected == .branch) root_focus.setFocus(text_input.getFocus().id),
             else => {},
         }
     }

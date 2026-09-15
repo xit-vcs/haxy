@@ -1651,7 +1651,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             }
 
             if (supports_drafts and record == null) {
-                var source = try Data.Source.init(allocator, session, if (saved_fields) |saved| saved.source_branch else "", if (saved_fields) |saved| saved.branch_source else (session.data.host_kind == .local));
+                var source = try Data.Source.init(allocator, session, if (saved_fields) |saved| saved.source_branch else "", if (saved_fields) |saved| saved.source_kind else .fork);
                 errdefer source.deinit(allocator);
                 try box.children.put(allocator, source.getFocus().id, .{ .widget = .{ .patch_source = source }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
             }
@@ -2141,7 +2141,10 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     if (formWidget(form, .patch_source)) |source| {
                         source.field().options.label = if (failure == .invalid_source_branch) " source branch (not found) " else if (failure == .same_branch) " source branch (same as target) " else if (failure == .unrelated_branches) " source branch (unrelated) " else " source branch ";
                         const submit = formWidget(form, .submit_button) orelse return error.MissingFormField;
-                        try submit.setLabel(allocator, if (source.existing) "submit patch" else "submit draft");
+                        try submit.setLabel(allocator, switch (source.selected) {
+                            .fork => "submit draft",
+                            .branch => "submit patch",
+                        });
                     }
                     (try formField(form, "target_branch")).options.label =
                         if (failure == .invalid_target_branch) " target branch (invalid) " else if (self.data.view == .edit and failure == .same_branch) " target branch (same as source) " else if (self.data.view == .edit and failure == .unrelated_branches) " target branch (unrelated to source) " else if (self.data.view == .edit and failure == .invalid_source_branch) " target branch (source branch not found) " else " target branch ";
@@ -2523,7 +2526,10 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
 
             if (comptime supports_drafts) {
                 const source = formWidget(form, .patch_source) orelse return error.MissingFormField;
-                const source_branch = if (source.existing) try source.field().text(allocator) else null;
+                const source_branch = switch (source.selected) {
+                    .fork => null,
+                    .branch => try source.field().text(allocator),
+                };
                 defer if (source_branch) |branch| allocator.free(branch);
                 const event_id_hex = Data.create(self.data, self.session, allocator, title, tags, description, target_branch, source_branch) catch |err| {
                     const failure = FeedbackFailure.fromError(err) orelse return err;
@@ -2663,7 +2669,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     .description = try aa.dupe(u8, description),
                     .target_branch = try aa.dupe(u8, target_branch),
                     .source_branch = if (source) |value| try value.field().text(aa) else "",
-                    .branch_source = if (source) |value| value.existing else false,
+                    .source_kind = if (source) |value| value.selected else .fork,
                 } else .{
                     .title = try aa.dupe(u8, title),
                     .tags = try aa.dupe(u8, tags),
