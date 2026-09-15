@@ -15,6 +15,7 @@ const inp = @import("./input.zig");
 pub const Header = @import("./Repo/Header.zig");
 pub const Files = @import("./Repo/Files.zig");
 pub const Commits = @import("./Repo/Commits.zig");
+pub const Diff = @import("./Repo/Diff.zig");
 pub const Refs = @import("./Repo/Refs.zig");
 pub const Issues = @import("./Repo/Issues.zig");
 pub const Patches = @import("./Repo/Patches.zig");
@@ -28,7 +29,7 @@ pub const Quit = @import("./Quit.zig");
 header: Header,
 repo: evt.Repo.Record,
 files: Files,
-commits: Commits,
+changes: Changes,
 refs: Refs,
 issues: Issues,
 patches: Patches,
@@ -40,6 +41,11 @@ quit: Quit,
 
 const Self = @This();
 
+const Changes = union(enum) {
+    commits: Commits,
+    diff: Diff,
+};
+
 pub fn init(
     arena: *std.heap.ArenaAllocator,
     session: *ui.Session,
@@ -48,25 +54,27 @@ pub fn init(
     const DB = evt.AdminDB;
     const hash_kind = evt.admin_repo_opts.hash;
 
-    // every repo route stores its identity as "owner/name" (or elides it in
-    // local mode); files and commits carry their remaining fields directly.
+    // every repo route stores its identity as "owner/name" (or elides it in local mode)
     const name_str = route.repoIdentity() orelse return error.UnexpectedRoute;
     const repo_identity = ui.RoutablePage.RepoIdentity.parse(name_str) orelse return error.NotFound;
     const location = ui.RoutablePage.RepoLocation{ .repo = repo_identity.identity };
-    // the files and commits tabs share one ref/oid: whichever the incoming route
-    // names (it rides on the route's target tab), or the default branch when
-    // neither tab is targeted. building both views at it keeps switching tabs
-    // (even by key, without a reload) on the same ref. a null ref means the
-    // default branch (Files/Commits.init resolve it). the directory and the diff
-    // window only apply to their own tab.
+    // files, commits and diff share the requested ref, or the default branch.
+    // directories and hunk windows only apply to their own tab.
     const requested_ref_or_oid: ?ui.RoutablePage.RefOrOid = switch (route) {
         .repo_files => |f| f.ref_kind,
         .repo_commits => |c| c.ref_or_oid,
+        .repo_diff => |d| d.ref_or_oid,
         else => null,
     };
     const requested_ref_value: []const u8 = switch (route) {
         .repo_files => |*f| f.ref_value.slice(),
         .repo_commits => |*c| c.value.slice(),
+        .repo_diff => |*d| d.value.slice(),
+        else => "",
+    };
+    const patchrev_id: []const u8 = switch (route) {
+        .repo_files => |*f| f.patchrev_id.slice(),
+        .repo_diff => |*d| d.patchrev_id.slice(),
         else => "",
     };
     const files_dir = switch (route) {
@@ -218,11 +226,9 @@ pub fn init(
         }
     }
 
-    // open the on-disk repo once and read every tab's data from it. files and
-    // commits resolve the same requested ref (the default branch when the
-    // route named none), so they end up viewing the same one. no filesystem
-    // (wasm), nowhere to look, or a failed open: empty tabs.
-    const files, const commits, const refs, var issues, var patches, var discussions, const events = blk: {
+    // open the repo once for every tab. files and changes share a ref or revision.
+    // no filesystem (wasm), nowhere to look, or a failed open: empty tabs.
+    const files, const changes, const refs, var issues, var patches, var discussions, const events = blk: {
         read: {
             const io = session.io orelse break :read;
             const src = source orelse break :read;
@@ -238,11 +244,20 @@ pub fn init(
                                 try evt.consume(.local, .repo, repo_kind, opened.self_repo_opts, io, gpa, opened, evt.events_ref, &.{});
                                 try pch.refreshBranches(.local, repo_kind, opened.self_repo_opts, io, gpa, opened, null, null);
                             }
-                            const files_data = try Files.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, location, requested_ref_or_oid, requested_ref_value, files_dir, files_line);
+                            const files_data = if (patchrev_id.len != 0)
+                                try Files.initPatchRev(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, location, patchrev_id, files_dir, files_line)
+                            else
+                                try Files.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, location, requested_ref_or_oid, requested_ref_value, files_dir, files_line);
+                            const changes_data: Changes = if (route == .repo_diff)
+                                .{ .diff = try Diff.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, route.repo_diff) }
+                            else if (patchrev_id.len != 0) diff: {
+                                const diff_route = ui.RoutablePage.repoPatchRevDiffRoute(repo_identity.identity, patchrev_id, 0, "") orelse return error.RouteTooLong;
+                                break :diff .{ .diff = try Diff.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, diff_route.repo_diff) };
+                            } else .{ .commits = try Commits.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, session.haxy_moment, location, requested_ref_or_oid, requested_ref_value, commits_content, commits_base_oid) };
                             const target_branch = if (files_data.ref_or_oid == .branch) files_data.ref_or_oid_value else "";
                             break :blk .{
                                 files_data,
-                                try Commits.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, session.haxy_moment, location, requested_ref_or_oid, requested_ref_value, commits_content, commits_base_oid),
+                                changes_data,
                                 try Refs.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, repo_identity.identity, refs_kind, refs_from),
                                 try Issues.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, issues_tag, issues_selected, issues_comment, issues_comments_start, issues_theirs, issues_view),
                                 try Patches.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, session, repo_id_maybe, repo_identity.identity, target_branch, patches_tag, patches_selected, patches_comment, patches_comments_start, patches_theirs, patches_view),
@@ -257,7 +272,7 @@ pub fn init(
         const aa = arena.allocator();
         break :blk .{
             try Files.emptyResult(aa, location, requested_ref_or_oid orelse .branch, requested_ref_value, files_dir),
-            try Commits.emptyResult(aa, location, requested_ref_or_oid orelse .branch, requested_ref_value, commits_content, commits_base_oid),
+            Changes{ .commits = try Commits.emptyResult(aa, location, requested_ref_or_oid orelse .branch, requested_ref_value, commits_content, commits_base_oid) },
             try Refs.emptyResult(arena, repo_identity.identity, refs_kind, refs_from),
             try Issues.emptyResult(aa, repo_identity.identity, issues_tag, issues_selected, issues_comment, issues_comments_start, issues_theirs, issues_view),
             try Patches.emptyResult(aa, repo_identity.identity, patches_tag, patches_selected, patches_comment, patches_comments_start, patches_theirs, patches_view),
@@ -271,12 +286,11 @@ pub fn init(
     discussions.repo_source = source;
 
     return .{
-        // files and commits resolve the same ref, so either's serves the header,
-        // which points both tabs at it.
+        // use the files tab's resolved ref for the header
         .header = try Header.init(arena, repo.event.name, owner_name, files.ref_or_oid, files.ref_or_oid_value, issues.tag, patches.tag, discussions.tag),
         .repo = repo,
         .files = files,
-        .commits = commits,
+        .changes = changes,
         .refs = refs,
         .issues = issues,
         .patches = patches,
@@ -301,7 +315,7 @@ pub const View = struct {
         // build the header first so we can grab the files-tab id for the auth
         // view (it focuses there after login).
         {
-            var header_view = try Header.View.init(allocator, &data.header, data.commits.commit_count, data.commits.base_oid, session);
+            var header_view = try Header.View.init(allocator, data, session);
             errdefer header_view.deinit(allocator);
             try box.children.put(allocator, header_view.getFocus().id, .{ .widget = .{ .repo_header = header_view }, .rect = null, .min_size = null });
         }
@@ -317,11 +331,17 @@ pub const View = struct {
                 try stack.children.put(allocator, files_view.getFocus().id, .{ .repo_files = files_view });
             }
 
-            // commits — the current page of the commit log.
-            {
-                var commits_view = try Commits.View.init(allocator, &data.commits, session);
-                errdefer commits_view.deinit(allocator);
-                try stack.children.put(allocator, commits_view.getFocus().id, .{ .repo_commits = commits_view });
+            switch (data.changes) {
+                .diff => |*diff| {
+                    var diff_view = try Diff.View.init(allocator, diff, session);
+                    errdefer diff_view.deinit(allocator);
+                    try stack.children.put(allocator, diff_view.getFocus().id, .{ .diff_view = diff_view });
+                },
+                .commits => |*commits| {
+                    var commits_view = try Commits.View.init(allocator, commits, session);
+                    errdefer commits_view.deinit(allocator);
+                    try stack.children.put(allocator, commits_view.getFocus().id, .{ .repo_commits = commits_view });
+                },
             }
 
             // refs — the repo's branches and tags.

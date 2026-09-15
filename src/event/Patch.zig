@@ -68,8 +68,7 @@ pub const Status = union(StatusKind) {
 
     pub const Merged = struct {
         revision: MergeRevision,
-        before_oid: []const u8, // all zeroes if the target did not exist
-        after_oid: []const u8,
+        patchrev_id: [evt.event_id_size * 2]u8,
     };
 
     pub fn kind(self: Status) StatusKind {
@@ -183,8 +182,9 @@ pub fn consume(
     switch (record.event.status) {
         .open, .closed => {},
         .merged => |merged| {
-            try evt.PatchRev.validateOid(hash_kind, merged.before_oid);
-            try evt.PatchRev.validateOid(hash_kind, merged.after_oid);
+            const merged_id = try evt.parseEventId(&merged.patchrev_id);
+            const merged_revision = (try evt.PatchRev.readById(DB, hash_kind, haxy_moment.readOnly(), arena, &merged_id)) orelse return error.InvalidPatch;
+            if (merged_revision.removed) return error.InvalidPatch;
             const id = revision_id orelse return error.InvalidPatch;
             const selected = record.event.revision orelse return error.InvalidPatch;
             const revision = (try evt.PatchRev.readById(DB, hash_kind, haxy_moment.readOnly(), arena, &id)) orelse return error.InvalidPatch;
@@ -301,7 +301,7 @@ pub fn update(
 ) !void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    const record = (try readFromRepo(repo_kind, repo_opts, io, allocator, &arena, repo, id)) orelse return error.NotFound;
+    const record = (try evt.readFromRepo(Self, repo_kind, repo_opts, io, allocator, &arena, repo, id)) orelse return error.NotFound;
     if (record.removed) return error.NotFound;
 
     var updated = record.event;
@@ -406,26 +406,6 @@ fn fieldListed(fields: []const u8, delimiter: u8, name: []const u8) bool {
         if (std.mem.eql(u8, field, name)) return true;
     }
     return false;
-}
-
-pub fn readFromRepo(
-    comptime repo_kind: rp.RepoKind,
-    comptime repo_opts: rp.RepoOpts(repo_kind),
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    arena: *std.heap.ArenaAllocator,
-    repo: *rp.Repo(repo_kind, repo_opts),
-    id: *const [evt.event_id_size]u8,
-) !?Record {
-    var event_db_maybe: ?evt.LocalEventDB(repo_opts.hash) = if (repo_kind == .git) try evt.LocalEventDB(repo_opts.hash).openReadOnly(io, allocator, repo.core.repo_dir) else null;
-    defer if (event_db_maybe) |*event_db| event_db.deinit(io, allocator);
-    const moment = (if (event_db_maybe) |*event_db|
-        evt.currentMomentFromDb(repo_opts.hash, event_db.db)
-    else if (repo_kind == .git)
-        return null
-    else
-        evt.currentMoment(repo_opts, repo)) catch return null;
-    return readById(evt.EventDB(repo_opts.hash), repo_opts.hash, moment, arena, id);
 }
 
 fn revisionKey(allocator: std.mem.Allocator, target_branch: []const u8, oid: []const u8) ![]u8 {

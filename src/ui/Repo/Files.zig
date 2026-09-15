@@ -46,6 +46,7 @@ location: ui.RoutablePage.RepoLocation,
 // didn't name one), so the view's directory links stay pinned to it.
 ref_or_oid: ui.RoutablePage.RefOrOid,
 ref_or_oid_value: []const u8,
+patchrev_id: ?[]const u8 = null,
 // the directory being viewed, relative to the repo root ("" at the root).
 dir: []const u8,
 // a file within `dir` to start selected (so its contents show and the url
@@ -57,6 +58,35 @@ entries: []const Entry,
 header: Header,
 
 const Self = @This();
+
+pub fn initPatchRev(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    arena: *std.heap.ArenaAllocator,
+    repo: *rp.Repo(repo_kind, repo_opts),
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    location: ui.RoutablePage.RepoLocation,
+    id_hex: []const u8,
+    path: []const u8,
+    line: usize,
+) !Self {
+    const id = evt.parseEventId(id_hex) catch return error.NotFound;
+    const record = (try evt.readFromRepo(evt.PatchRev, repo_kind, repo_opts, io, gpa, arena, repo, &id)) orelse return error.NotFound;
+    if (record.removed) return error.NotFound;
+    var data = try init(repo_kind, repo_opts, arena, repo, io, gpa, location, .object, record.head_tree_oid, path, line);
+    data.patchrev_id = try arena.allocator().dupe(u8, id_hex);
+    data.header.content = try std.fmt.allocPrint(arena.allocator(), "patchrev {s}", .{id_hex});
+    return data;
+}
+
+pub fn filesRoute(self: *const Self, path: []const u8, line: usize) ?ui.RoutablePage {
+    if (self.patchrev_id) |id| return switch (self.location) {
+        .repo => |identity| ui.RoutablePage.repoPatchRevFilesRoute(identity, id, path, line),
+        .fork => null,
+    };
+    return self.location.filesRoute(self.ref_or_oid, self.ref_or_oid_value, path, line);
+}
 
 // build the listing for an opened repo. generic over the repo's backend and
 // hash kind so the tree/diff types it threads through match the repo's opts.
@@ -77,7 +107,7 @@ pub fn init(
 ) !Self {
     const aa = arena.allocator();
 
-    // resolve the requested ref (or the default branch) to the commit oid whose
+    // resolve the requested ref (or the default branch) to the object oid whose
     // tree we list. a ref the route named explicitly that doesn't resolve is a
     // bad url (NotFound -> 404); the default-branch path falls through to empty.
     const resolved = (try ui.ResolvedRefOrOid(repo_kind, repo_opts).init(repo, io, aa, requested_ref_or_oid, requested_value)) orelse {
@@ -85,7 +115,7 @@ pub fn init(
         return emptyResult(aa, location, .branch, requested_value, path);
     };
 
-    // read just the viewed directory of that commit's tree. building the
+    // read just the viewed directory of that tree or commit. building the
     // read-only state mirrors what repo.status does internally, but for an
     // arbitrary commit rather than HEAD. a path that doesn't exist in the tree
     // is a bad url (404).
@@ -562,7 +592,7 @@ pub const View = struct {
     fn addNavLink(self: *View, allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8, entry: Entry, target_start: usize) !void {
         const page_arena = self.session.page_arena;
         const path = try childDir(page_arena.allocator(), self.data.dir, entry.name);
-        const route = self.data.location.filesRoute(self.data.ref_or_oid, self.data.ref_or_oid_value, path, target_start) orelse return error.RouteTooLong;
+        const route = self.data.filesRoute(path, target_start) orelse return error.RouteTooLong;
         const link = try std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{try route.toUrl(page_arena)});
         var tb = try wgt.TextBox.init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
         errdefer tb.deinit(allocator);
@@ -804,7 +834,7 @@ fn selectedFileIndex(data: *const Self) ?usize {
 // an "a:" link to the files route at `path`, pinned to the listing's ref, so
 // following it navigates to that directory's listing.
 fn dirLink(page_arena: *std.heap.ArenaAllocator, data: *const Self, path: []const u8) ![]const u8 {
-    const route = data.location.filesRoute(data.ref_or_oid, data.ref_or_oid_value, path, 0) orelse return error.RouteTooLong;
+    const route = data.filesRoute(path, 0) orelse return error.RouteTooLong;
     return std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{try route.toUrl(page_arena)});
 }
 
@@ -813,7 +843,7 @@ fn dirLink(page_arena: *std.heap.ArenaAllocator, data: *const Self, path: []cons
 // contents); an unloaded file gets an "a:" link, so activating it reloads the
 // page with that file selected and its content read.
 fn fileLink(page_arena: *std.heap.ArenaAllocator, data: *const Self, path: []const u8, loaded: bool, line: usize) ![]const u8 {
-    const route = data.location.filesRoute(data.ref_or_oid, data.ref_or_oid_value, path, line) orelse return error.RouteTooLong;
+    const route = data.filesRoute(path, line) orelse return error.RouteTooLong;
     const prefix = if (loaded) "ai:" else "a:";
     return std.fmt.allocPrint(page_arena.allocator(), "{s}{s}", .{ prefix, try route.toUrl(page_arena) });
 }

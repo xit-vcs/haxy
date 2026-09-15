@@ -87,7 +87,7 @@ pub const Page = union(PageKind) {
                 };
             },
             .repo => switch (route) {
-                .repo_files, .repo_commits, .repo_refs, .repo_issues, .repo_patches, .repo_discussions, .repo_events, .repo_settings, .repo_auth => .{ .repo = try Repo.init(arena, session, route) },
+                .repo_files, .repo_commits, .repo_diff, .repo_refs, .repo_issues, .repo_patches, .repo_discussions, .repo_events, .repo_settings, .repo_auth => .{ .repo = try Repo.init(arena, session, route) },
                 else => return error.UnexpectedRoute,
             },
             .fork => switch (route) {
@@ -120,6 +120,7 @@ pub const RoutablePage = union(enum) {
     user_auth: Array(evt.User.name_max_len),
     repo_files: RepoFilesRoute,
     repo_commits: RepoCommitsRoute,
+    repo_diff: RepoDiffRoute,
     repo_refs: struct {
         name: Array(repo_route_max_len),
         kind: RefKind = .branch,
@@ -192,7 +193,7 @@ pub const RoutablePage = union(enum) {
 
     // the "key:value" segments of a url tail, collected in any order
     const Params = struct {
-        const ParamKey = enum { start, line, branch, tag, object, base, theirs };
+        const ParamKey = enum { start, line, branch, tag, object, base, patchrev, theirs };
 
         // a branch:/tag:/object: param; the value stays url-encoded
         const RefParam = struct { kind: RefOrOid, value: []const u8 };
@@ -335,9 +336,20 @@ pub const RoutablePage = union(enum) {
         name: Array(repo_identity_max_len),
         ref_kind: ?RefOrOid = null,
         ref_value: Array(ref_route_max_len) = .{},
+        patchrev_id: Array(evt.event_id_size * 2) = .{},
         path: Array(repo_route_max_len) = .{},
         // the selected file's first visible line (1-based; 0 = unset).
         line: usize = 0,
+    };
+
+    pub const RepoDiffRoute = struct {
+        name: Array(repo_identity_max_len),
+        ref_or_oid: ?RefOrOid = null,
+        value: Array(ref_route_max_len) = .{},
+        base_oid: Array(ref_route_max_len) = .{},
+        patchrev_id: Array(evt.event_id_size * 2) = .{},
+        start: usize = 0,
+        path: Array(repo_route_max_len) = .{},
     };
 
     pub const RepoCommitsRoute = struct {
@@ -508,6 +520,16 @@ pub const RoutablePage = union(enum) {
         } };
     }
 
+    pub fn repoPatchRevFilesRoute(identity: []const u8, id: []const u8, path: []const u8, line: usize) ?RoutablePage {
+        _ = evt.parseEventId(id) catch return null;
+        return .{ .repo_files = .{
+            .name = Array(repo_identity_max_len).from(identity) orelse return null,
+            .patchrev_id = Array(evt.event_id_size * 2).from(id) orelse return null,
+            .path = Array(repo_route_max_len).from(path) orelse return null,
+            .line = line,
+        } };
+    }
+
     // build a `.repo_commits` route (a null ref_or_oid = the default branch).
     // always carries the `commits` marker so the bare route doesn't collide
     // with the files root. a non-empty `path` filters the diff pane to that
@@ -523,6 +545,28 @@ pub const RoutablePage = union(enum) {
                 .start = start,
                 .path = Array(repo_route_max_len).from(path) orelse return null,
             } },
+        } };
+    }
+
+    pub fn repoDiffRoute(identity: []const u8, ref_or_oid: ?RefOrOid, value: []const u8, start: usize, path: []const u8, base_oid: []const u8) ?RoutablePage {
+        if (base_oid.len == 0 or (ref_or_oid == null and value.len != 0)) return null;
+        return .{ .repo_diff = .{
+            .name = Array(repo_identity_max_len).from(identity) orelse return null,
+            .ref_or_oid = ref_or_oid,
+            .value = Array(ref_route_max_len).from(value) orelse return null,
+            .base_oid = Array(ref_route_max_len).from(base_oid) orelse return null,
+            .start = start,
+            .path = Array(repo_route_max_len).from(path) orelse return null,
+        } };
+    }
+
+    pub fn repoPatchRevDiffRoute(identity: []const u8, id: []const u8, start: usize, path: []const u8) ?RoutablePage {
+        _ = evt.parseEventId(id) catch return null;
+        return .{ .repo_diff = .{
+            .name = Array(repo_identity_max_len).from(identity) orelse return null,
+            .patchrev_id = Array(evt.event_id_size * 2).from(id) orelse return null,
+            .start = start,
+            .path = Array(repo_route_max_len).from(path) orelse return null,
         } };
     }
 
@@ -850,10 +894,11 @@ pub const RoutablePage = union(enum) {
             .user_auth => |name| try std.fmt.allocPrint(arena.allocator(), user_segment ++ "{s}/auth", .{name.slice()}),
             .repo_files => |f| blk: {
                 const prefix = try repoUrlPrefix(arena, f.name.slice());
-                if (f.ref_kind == null and f.line == 0) break :blk if (prefix.len == 0) "/" else prefix;
+                if (f.ref_kind == null and f.patchrev_id.len == 0 and f.line == 0) break :blk if (prefix.len == 0) "/" else prefix;
                 var out: std.Io.Writer.Allocating = .init(arena.allocator());
                 try out.writer.print("{s}/" ++ files_seg, .{prefix});
                 if (f.ref_kind) |kind| if (f.ref_value.len != 0) try out.writer.print("/{s}:{s}", .{ @tagName(kind), f.ref_value.slice() });
+                if (f.patchrev_id.len != 0) try out.writer.print("/patchrev:{s}", .{f.patchrev_id.slice()});
                 if (f.line != 0) try out.writer.print("/" ++ line_seg ++ "{d}", .{f.line});
                 if (f.path.len != 0) try out.writer.print("/" ++ path_seg ++ "{s}", .{f.path.slice()});
                 break :blk out.written();
@@ -871,6 +916,17 @@ pub const RoutablePage = union(enum) {
                     },
                     .message => try out.writer.print("/" ++ message_seg, .{}),
                 }
+                break :blk out.written();
+            },
+            .repo_diff => |d| blk: {
+                const prefix = try repoUrlPrefix(arena, d.name.slice());
+                var out: std.Io.Writer.Allocating = .init(arena.allocator());
+                try out.writer.print("{s}/diff", .{prefix});
+                if (d.ref_or_oid) |kind| if (d.value.len != 0) try out.writer.print("/{s}:{s}", .{ @tagName(kind), d.value.slice() });
+                if (d.patchrev_id.len != 0) try out.writer.print("/patchrev:{s}", .{d.patchrev_id.slice()});
+                if (d.base_oid.len != 0) try out.writer.print("/" ++ base_seg ++ "{s}", .{d.base_oid.slice()});
+                if (d.start != 0) try out.writer.print("/" ++ start_seg ++ "{d}", .{d.start});
+                if (d.path.len != 0) try out.writer.print("/" ++ path_seg ++ "{s}", .{d.path.slice()});
                 break :blk out.written();
             },
             .repo_refs => |r| blk: {
@@ -1132,6 +1188,7 @@ pub const RoutablePage = union(enum) {
         return switch (self.*) {
             .repo_files => |*f| f.name.slice(),
             .repo_commits => |*c| c.name.slice(),
+            .repo_diff => |*d| d.name.slice(),
             .repo_refs => |*r| r.name.slice(),
             .repo_issues => |*i| i.name.slice(),
             .repo_patches => |*p| p.name.slice(),
@@ -1178,7 +1235,7 @@ pub const RoutablePage = union(enum) {
         return switch (self) {
             .home_users, .home_repos, .home_settings, .home_auth => .home,
             .user_repos, .user_forks, .user_settings, .user_auth => .user,
-            .repo_files, .repo_commits, .repo_refs, .repo_issues, .repo_patches, .repo_discussions, .repo_events, .repo_settings, .repo_auth => .repo,
+            .repo_files, .repo_commits, .repo_diff, .repo_refs, .repo_issues, .repo_patches, .repo_discussions, .repo_events, .repo_settings, .repo_auth => .repo,
             .fork_patch, .fork_diff, .fork_files, .fork_commits, .fork_settings, .fork_auth => .fork,
         };
     }
@@ -1378,6 +1435,10 @@ pub const RoutablePage = union(enum) {
         }
         if (std.mem.eql(u8, tab, files_seg)) {
             params.scanPairs(&segments) catch return null;
+            if (params.values.get(.patchrev)) |id| {
+                if (!params.only(&.{ .line, .patchrev })) return null;
+                return repoPatchRevFilesRoute(pair, id, pathValue(segments.rest()) orelse return null, params.line() orelse return null);
+            }
             if (!params.only(&.{ .line, .branch, .tag, .object })) return null;
             const line = params.line() orelse return null;
             const dir = pathValue(segments.rest()) orelse return null;
@@ -1400,6 +1461,19 @@ pub const RoutablePage = union(enum) {
             const file = pathValue(segments.rest()) orelse return null;
             return repoCommitsRoute(pair, ref.kind, ref.value, start, file, base_oid);
         }
+        if (std.mem.eql(u8, tab, "diff")) {
+            params.scanPairs(&segments) catch return null;
+            if (params.values.get(.patchrev)) |id| {
+                if (!params.only(&.{ .start, .patchrev })) return null;
+                return repoPatchRevDiffRoute(pair, id, params.start() orelse return null, pathValue(segments.rest()) orelse return null);
+            }
+            if (!params.only(&.{ .start, .branch, .tag, .object, .base })) return null;
+            const base_oid = params.values.get(.base) orelse return null;
+            const start = params.start() orelse return null;
+            const ref = params.ref() catch return null;
+            const file = pathValue(segments.rest()) orelse return null;
+            return repoDiffRoute(pair, if (ref) |r| r.kind else null, if (ref) |r| r.value else "", start, file, base_oid);
+        }
         return null; // unknown sub-path
     }
 
@@ -1415,6 +1489,7 @@ pub const RoutablePage = union(enum) {
             .repo_files => |a_f| std.mem.eql(u8, a_f.name.slice(), b.repo_files.name.slice()) and
                 a_f.ref_kind == b.repo_files.ref_kind and
                 std.mem.eql(u8, a_f.ref_value.slice(), b.repo_files.ref_value.slice()) and
+                std.mem.eql(u8, a_f.patchrev_id.slice(), b.repo_files.patchrev_id.slice()) and
                 std.mem.eql(u8, a_f.path.slice(), b.repo_files.path.slice()) and
                 a_f.line == b.repo_files.line,
             .repo_commits => |a_c| std.mem.eql(u8, a_c.name.slice(), b.repo_commits.name.slice()) and
@@ -1428,6 +1503,12 @@ pub const RoutablePage = union(enum) {
                     },
                     .message => std.meta.activeTag(b.repo_commits.content) == .message,
                 },
+            .repo_diff => |a_d| std.mem.eql(u8, a_d.name.slice(), b.repo_diff.name.slice()) and
+                a_d.ref_or_oid == b.repo_diff.ref_or_oid and
+                std.mem.eql(u8, a_d.value.slice(), b.repo_diff.value.slice()) and
+                std.mem.eql(u8, a_d.base_oid.slice(), b.repo_diff.base_oid.slice()) and
+                std.mem.eql(u8, a_d.patchrev_id.slice(), b.repo_diff.patchrev_id.slice()) and
+                a_d.start == b.repo_diff.start and std.mem.eql(u8, a_d.path.slice(), b.repo_diff.path.slice()),
             .repo_refs => |a_r| std.mem.eql(u8, a_r.name.slice(), b.repo_refs.name.slice()) and a_r.kind == b.repo_refs.kind and std.mem.eql(u8, a_r.from.slice(), b.repo_refs.from.slice()),
             .repo_issues => |a_i| std.mem.eql(u8, a_i.name.slice(), b.repo_issues.name.slice()) and
                 std.mem.eql(u8, a_i.tag.slice(), b.repo_issues.tag.slice()) and

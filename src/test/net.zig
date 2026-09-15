@@ -761,13 +761,15 @@ fn testPushFork(
         const moment = try evt.currentMoment(repo_opts, &target);
         const patch = (try evt.Patch.readById(evt.EventDB(hash_kind), hash_kind, moment, &arena, &fork_id)) orelse return error.NotFound;
         try std.testing.expectEqual(.merged, patch.event.status.kind());
-        const merged_range = switch (patch.event.status) {
-            .merged => |range| range,
+        const merged_status = switch (patch.event.status) {
+            .merged => |value| value,
             else => return error.InvalidPatch,
         };
-        try std.testing.expectEqual(.source, merged_range.revision);
-        try std.testing.expectEqualStrings(&base_oid, merged_range.before_oid);
-        try std.testing.expectEqualStrings(&merge_oid, merged_range.after_oid);
+        try std.testing.expectEqual(.source, merged_status.revision);
+        const result_id = try evt.parseEventId(&merged_status.patchrev_id);
+        const result = (try evt.PatchRev.readById(evt.EventDB(hash_kind), hash_kind, moment, &arena, &result_id)) orelse return error.NotFound;
+        try std.testing.expectEqualStrings(&base_oid, result.event.base_oid);
+        try std.testing.expectEqualStrings(&merge_oid, result.event.source_oid);
         const imported = (try evt.PatchRev.readById(evt.EventDB(hash_kind), hash_kind, moment, &arena, &second_revision_id)) orelse return error.NotFound;
         try std.testing.expectEqualStrings(&second_patch_oid, imported.patch_oid);
     }

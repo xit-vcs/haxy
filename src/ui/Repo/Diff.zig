@@ -1,4 +1,5 @@
 const std = @import("std");
+const evt = @import("../../event.zig");
 const ui = @import("../../ui.zig");
 const xit = @import("xit");
 const rp = xit.repo;
@@ -28,18 +29,77 @@ const Self = @This();
 
 pub const Route = union(enum) {
     commit: struct { location: ui.RoutablePage.RepoLocation, oid: []const u8, base_oid: []const u8 = "" },
+    repo: struct { identity: []const u8, ref_or_oid: ui.RoutablePage.RefOrOid, value: []const u8, base_oid: []const u8 },
+    patchrev: struct { identity: []const u8, id: []const u8 },
     fork: struct { identity: []const u8, id: []const u8 },
 
-    fn link(self: Route, arena: *std.heap.ArenaAllocator, start: usize, path: []const u8) ![]const u8 {
-        const route = switch (self) {
+    pub fn page(self: Route, start: usize, path: []const u8) ?ui.RoutablePage {
+        return switch (self) {
             .commit => |c| c.location.commitsRoute(.object, c.oid, start, path, c.base_oid),
+            .repo => |r| ui.RoutablePage.repoDiffRoute(r.identity, r.ref_or_oid, r.value, start, path, r.base_oid),
+            .patchrev => |r| ui.RoutablePage.repoPatchRevDiffRoute(r.identity, r.id, start, path),
             .fork => |f| ui.RoutablePage.forkDiffRoute(f.identity, f.id, start, path),
-        } orelse return error.RouteTooLong;
+        };
+    }
+
+    fn link(self: Route, arena: *std.heap.ArenaAllocator, start: usize, path: []const u8) ![]const u8 {
+        const route = self.page(start, path) orelse return error.RouteTooLong;
         return std.fmt.allocPrint(arena.allocator(), "a:{s}", .{try route.toUrl(arena)});
     }
 };
 
-// render a window of the net diff between two commits
+pub fn init(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    arena: *std.heap.ArenaAllocator,
+    repo: *rp.Repo(repo_kind, repo_opts),
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    route: ui.RoutablePage.RepoDiffRoute,
+) !Self {
+    const aa = arena.allocator();
+    const oid_len = comptime xit.hash.hexLen(repo_opts.hash);
+    const identity = try aa.dupe(u8, route.name.slice());
+    const base_oid, const head_oid, const diff_route = if (route.patchrev_id.len != 0) blk: {
+        const id = evt.parseEventId(route.patchrev_id.slice()) catch return error.NotFound;
+        const record = (try evt.readFromRepo(evt.PatchRev, repo_kind, repo_opts, io, gpa, arena, repo, &id)) orelse return error.NotFound;
+        if (record.removed) return error.NotFound;
+        if (record.base_tree_oid.len != oid_len or record.head_tree_oid.len != oid_len) return error.NotFound;
+        break :blk .{
+            record.base_tree_oid[0..oid_len].*,
+            record.head_tree_oid[0..oid_len].*,
+            Route{ .patchrev = .{ .identity = identity, .id = try aa.dupe(u8, route.patchrev_id.slice()) } },
+        };
+    } else blk: {
+        const resolved = (try ui.ResolvedRefOrOid(repo_kind, repo_opts).init(repo, io, aa, route.ref_or_oid, route.value.slice())) orelse return error.NotFound;
+        evt.PatchRev.validateOid(repo_opts.hash, &resolved.oid) catch return error.NotFound;
+        evt.PatchRev.validateOid(repo_opts.hash, route.base_oid.slice()) catch return error.NotFound;
+
+        var moment = try repo.core.latestMoment();
+        const state = rp.Repo(repo_kind, repo_opts).State(.read_only){ .core = &repo.core, .extra = .{ .moment = &moment } };
+        // peel annotated tags before comparing their trees
+        var tip = try xit.object.Object(repo_kind, repo_opts).initCommit(state, io, gpa, &resolved.oid);
+        defer tip.deinit();
+        break :blk .{
+            route.base_oid.slice()[0..oid_len].*,
+            tip.oid,
+            Route{ .repo = .{
+                .identity = identity,
+                .ref_or_oid = resolved.ref_or_oid,
+                .value = resolved.value,
+                .base_oid = try aa.dupe(u8, route.base_oid.slice()),
+            } },
+        };
+    };
+    const path = try aa.dupe(u8, route.path.slice());
+    return .{
+        .route = diff_route,
+        .path = path,
+        .window = try render(repo_kind, repo_opts, io, gpa, aa, repo, if (std.mem.allEqual(u8, &base_oid, '0')) null else &base_oid, head_oid, route.start, path),
+    };
+}
+
+// render a window of the net diff between two commits or trees
 pub fn render(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),

@@ -273,6 +273,19 @@ pub fn commitsRoute(allocator: std.mem.Allocator, identity: []const u8, entry: P
     return ui.RoutablePage.repoCommitsRoute(identity, .object, entry.revision_oid, 0, "", entry.base_oid) orelse error.RouteTooLong;
 }
 
+pub fn diffRoute(allocator: std.mem.Allocator, identity: []const u8, entry: PatchWithId) !?ui.RoutablePage {
+    // merged patches show what actually landed, including conflict resolutions
+    if (entry.record.event.status == .merged) {
+        return ui.RoutablePage.repoPatchRevDiffRoute(identity, &entry.record.event.status.merged.patchrev_id, 0, "") orelse error.RouteTooLong;
+    }
+    const route = (try commitsRoute(allocator, identity, entry)) orelse return null;
+    return switch (route) {
+        .fork_commits => ui.RoutablePage.forkDiffRoute(identity, entry.id, 0, ""),
+        .repo_commits => |c| ui.RoutablePage.repoDiffRoute(identity, c.ref_or_oid, c.value.slice(), 0, "", c.base_oid.slice()),
+        else => unreachable,
+    } orelse error.RouteTooLong;
+}
+
 pub fn draftsRoute(identity: []const u8) ?ui.RoutablePage {
     return ui.RoutablePage.repoPatchesDraftsRoute(identity);
 }

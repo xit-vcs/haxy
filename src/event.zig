@@ -1368,6 +1368,27 @@ pub fn merge(
     }
 }
 
+pub fn readFromRepo(
+    comptime T: type,
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    arena: *std.heap.ArenaAllocator,
+    repo: *rp.Repo(repo_kind, repo_opts),
+    id: *const [event_id_size]u8,
+) !?T.Record {
+    var event_db_maybe: ?LocalEventDB(repo_opts.hash) = if (repo_kind == .git) try LocalEventDB(repo_opts.hash).openReadOnly(io, allocator, repo.core.repo_dir) else null;
+    defer if (event_db_maybe) |*event_db| event_db.deinit(io, allocator);
+    const moment = (if (event_db_maybe) |*event_db|
+        currentMomentFromDb(repo_opts.hash, event_db.db)
+    else if (repo_kind == .git)
+        return null
+    else
+        currentMoment(repo_opts, repo)) catch return null;
+    return T.readById(EventDB(repo_opts.hash), repo_opts.hash, moment, arena, id);
+}
+
 pub fn currentMoment(
     comptime repo_opts: rp.RepoOpts(.xit),
     repo: *rp.Repo(.xit, repo_opts),

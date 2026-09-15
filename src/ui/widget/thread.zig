@@ -533,9 +533,8 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                 const pa = self.session.page_arena.allocator();
 
                 if (supports_forks and self.session.data.current_page.parent() != .fork) {
-                    if (entry.fork_exists) {
-                        const diff_route = ui.RoutablePage.forkDiffRoute(self.data.identity, entry.id, 0, "") orelse return error.RouteTooLong;
-                        try addToolButton(allocator, row, "view diff", "", try std.fmt.allocPrint(pa, "a:{s}", .{try diff_route.toUrl(self.session.page_arena)}));
+                    if (try Data.diffRoute(pa, self.data.identity, entry)) |route| {
+                        try addToolButton(allocator, row, "view diff", "", try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}));
                     }
                     if (try Data.commitsRoute(pa, self.data.identity, entry)) |route| {
                         const label = if (entry.commit_count) |count| try std.fmt.allocPrint(pa, "view commits ({d})", .{count}) else "view commits";

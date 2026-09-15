@@ -18,8 +18,7 @@ const Array = ui.RoutablePage.Array(ui.RoutablePage.repo_route_max_len);
 name: []const u8,
 owner_name: []const u8,
 title: ui.Title,
-// the ref/oid this page is viewing, so the files and commits tabs both link to
-// it (switching tabs keeps the same ref). the value is url-encoded.
+// the ref/oid this page is viewing; the value is url-encoded
 ref_or_oid: RefOrOid,
 ref_or_oid_value: []const u8,
 // the issues tab's tag filter, url-encoded ("" = unfiltered), so the tab links
@@ -50,7 +49,8 @@ pub const View = struct {
     first_group_width: usize,
     session: *ui.Session,
 
-    pub fn init(allocator: std.mem.Allocator, data: *const Self, commit_count: ?u64, base_oid: []const u8, session: *ui.Session) !View {
+    pub fn init(allocator: std.mem.Allocator, page: *const ui.Repo, session: *ui.Session) !View {
+        const data = &page.header;
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = .hidden, .rounded_corners = true, .direction = .horiz });
         errdefer box.deinit(allocator);
 
@@ -66,11 +66,14 @@ pub const View = struct {
         errdefer tab_ids.deinit(allocator);
 
         const aa = session.page_arena.allocator();
-        const ref_name = std.Uri.percentDecodeInPlace(try aa.dupe(u8, data.ref_or_oid_value));
+        const ref_name = std.Uri.percentDecodeInPlace(try aa.dupe(u8, page.files.patchrev_id orelse data.ref_or_oid_value));
         const bottom_label = try ui.clippedBottomLabel(try aa.alloc(u8, ui.clipped_bottom_label_max_len), ref_name);
         const bottom_label_width = try xitui.width.displayWidth(bottom_label);
-        const commits_label = if (commit_count) |count| try std.fmt.allocPrint(aa, "commits ({d})", .{count}) else "commits";
-        const commits_label_width = try xitui.width.displayWidth(commits_label);
+        const changes_label = switch (page.changes) {
+            .diff => "diff",
+            .commits => |c| if (c.commit_count) |count| try std.fmt.allocPrint(aa, "commits ({d})", .{count}) else "commits",
+        };
+        const changes_label_width = try xitui.width.displayWidth(changes_label);
         var first_group_width = try data.title.width();
 
         try ui.widget.addBackButton(allocator, &title_box, session);
@@ -130,14 +133,18 @@ pub const View = struct {
         // tabs (the page already holds every tab's content), while the href is
         // still followed with js off. the files tab routes through the shared
         // helper so the /repo/.../files url format lives in one place.
-        // both tabs link to the ref/oid this page is viewing, so switching tabs
-        // keeps the same ref (the files tab opens at its root directory).
+        // files and changes keep the same ref or revision when switching tabs.
+        // the files tab opens at its root directory.
         const current_page = session.data.current_page;
         const current_tag = std.meta.activeTag(current_page);
-        const files_route = ui.RoutablePage.repoFilesRoute(identity, data.ref_or_oid, data.ref_or_oid_value, "", 0) orelse return error.RouteTooLong;
+        const files_route = page.files.filesRoute("", 0) orelse return error.RouteTooLong;
         const files_link = try ui.inPageTabLink(session, files_route, current_tag == .repo_files);
-        const commits_route = ui.RoutablePage.repoCommitsRoute(identity, data.ref_or_oid, data.ref_or_oid_value, 0, "", base_oid) orelse return error.RouteTooLong;
-        const commits_link = try ui.inPageTabLink(session, commits_route, current_tag == .repo_commits);
+        const changes_route = (switch (page.changes) {
+            .diff => |d| d.route.page(d.window.start, d.path),
+            .commits => |c| ui.RoutablePage.repoCommitsRoute(identity, data.ref_or_oid, data.ref_or_oid_value, 0, "", c.base_oid),
+        }) orelse return error.RouteTooLong;
+        const changes_tag = std.meta.activeTag(changes_route);
+        const changes_link = try ui.inPageTabLink(session, changes_route, current_tag == changes_tag);
         const refs_route = ui.RoutablePage.repoRefsRoute(identity, .branch, "") orelse return error.RouteTooLong;
         const refs_link = try ui.inPageTabLink(session, refs_route, current_tag == .repo_refs);
         const issues_route = ui.RoutablePage.repoIssuesRoute(identity, .open, data.issues_tag, "") orelse return error.RouteTooLong;
@@ -172,18 +179,18 @@ pub const View = struct {
             });
         }
 
-        // commits tab
+        // commits, or the comparison selected by a diff / patchrev url
         {
-            var text_box = try wgt.TextBox.init(allocator, commits_label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none, .bottom_label = bottom_label });
+            var text_box = try wgt.TextBox.init(allocator, changes_label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none, .bottom_label = bottom_label });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().mode = .all;
-            text_box.getFocus().kind = .{ .custom = commits_link };
+            text_box.getFocus().kind = .{ .custom = changes_link };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
-            if (current_tag == .repo_commits) selected_tab = text_box.getFocus().id;
+            if (current_tag == changes_tag) selected_tab = text_box.getFocus().id;
             try tabs_box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
-                .min_size = .{ .width = @max(commits_label_width, bottom_label_width) + 2, .height = null },
+                .min_size = .{ .width = @max(changes_label_width, bottom_label_width) + 2, .height = null },
             });
         }
 

@@ -76,15 +76,20 @@ test "web controls omit hidden inputs but retain off-screen inputs" {
 }
 
 test "diff windows span the net changes across commits" {
+    try testDiff(.git);
+    try testDiff(.xit);
+}
+
+fn testDiff(comptime kind: xit.repo.RepoKind) !void {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    const Diff = Commits.Diff;
-    const opts: xit.repo.RepoOpts(.xit) = .{ .is_test = true };
+    const Diff = ui.Repo.Diff;
+    const opts: xit.repo.RepoOpts(kind) = .{ .is_test = true };
     var temp = std.testing.tmpDir(.{});
     defer temp.cleanup();
     const path = try temp.dir.realPathFileAlloc(io, ".", allocator);
     defer allocator.free(path);
-    var repo = try xit.repo.Repo(.xit, opts).init(io, allocator, .{ .path = path });
+    var repo = try xit.repo.Repo(kind, opts).init(io, allocator, .{ .path = path });
     defer repo.deinit(io, allocator);
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -111,34 +116,68 @@ test "diff windows span the net changes across commits" {
         try repo.add(io, allocator, &.{name});
         head = try repo.commit(io, allocator, .{ .message = "add file" });
     }
-    const first = try Diff.render(.xit, opts, io, allocator, arena.allocator(), &repo, &base, head, 0, "");
+    const route = ui.RoutablePage.repoDiffRoute("alice/project", .object, &head, 0, "", &base) orelse return error.BadRoute;
+    const diff = try Diff.init(kind, opts, &arena, &repo, io, allocator, route.repo_diff);
+    const first = diff.window;
     try std.testing.expectEqual(Diff.page_size, first.hunks.len);
     try std.testing.expect(first.start == 0 and first.has_more);
     try std.testing.expectEqualStrings("file-00.txt", first.hunks[0].path orelse return error.MissingPath);
-    const last = try Diff.render(.xit, opts, io, allocator, arena.allocator(), &repo, &base, head, Diff.page_size, "");
+    const last = try Diff.render(kind, opts, io, allocator, arena.allocator(), &repo, &base, head, Diff.page_size, "");
     try std.testing.expectEqual(1, last.hunks.len);
     try std.testing.expect(last.start > 0 and !last.has_more);
     try std.testing.expectEqualStrings("file-10.txt", last.hunks[0].path orelse return error.MissingPath);
-    const filtered = try Diff.render(.xit, opts, io, allocator, arena.allocator(), &repo, &base, head, 0, "file-00.txt");
+    const filtered = try Diff.render(kind, opts, io, allocator, arena.allocator(), &repo, &base, head, 0, "file-00.txt");
     try std.testing.expectEqual(1, filtered.hunks.len);
     try std.testing.expect(!filtered.has_more);
 
-    // the standalone pane links to the next fork diff window in both clients
+    // tags and branches compare the same trees as an explicit tip
+    _ = try repo.addTag(io, allocator, .{ .name = "tip", .message = "annotated" });
+    const sources = [_]struct { ref: ?ui.RoutablePage.RefOrOid, value: []const u8 }{
+        .{ .ref = null, .value = "" },
+        .{ .ref = .branch, .value = "master" },
+        .{ .ref = .tag, .value = "tip" },
+    };
+    for (sources) |source| {
+        const selected = ui.RoutablePage.repoDiffRoute("alice/project", source.ref, source.value, 0, "", &base) orelse return error.BadRoute;
+        const data = try Diff.init(kind, opts, &arena, &repo, io, allocator, selected.repo_diff);
+        try std.testing.expectEqualDeep(first, data.window);
+    }
+    const unchanged = ui.RoutablePage.repoDiffRoute("alice/project", .object, &head, 0, "", &head) orelse return error.BadRoute;
+    try std.testing.expectEqual(0, (try Diff.init(kind, opts, &arena, &repo, io, allocator, unchanged.repo_diff)).window.hunks.len);
+
+    // a zero base includes files that were already present in the first commit
+    const zero = [_]u8{'0'} ** xit.hash.hexLen(opts.hash);
+    const created = ui.RoutablePage.repoDiffRoute("alice/project", .object, &head, 0, "shared.txt", &zero) orelse return error.BadRoute;
+    const created_diff = try Diff.init(kind, opts, &arena, &repo, io, allocator, created.repo_diff);
+    try std.testing.expectEqual(1, created_diff.window.hunks.len);
+    try std.testing.expectEqualStrings("shared.txt", created_diff.window.hunks[0].path orelse return error.MissingPath);
+
+    // standalone panes keep their comparison when filtering or paginating
     const id = "11111111111111111111111111111111";
-    const data = Diff{ .route = .{ .fork = .{ .identity = "alice/project", .id = id } }, .window = first };
-    for ([_]bool{ true, false }) |terminal| {
-        var session = ui.Session{ .arena = &arena, .page_arena = &arena, .is_terminal = terminal };
-        session.data.current_page = ui.RoutablePage.forkDiffRoute("alice/project", id, 0, "") orelse return error.BadRoute;
-        var view = try Diff.View.init(allocator, &data, &session);
-        defer view.deinit(allocator);
-        const focus = view.getFocus();
-        try view.build(allocator, .{ .min_size = .{ .width = null, .height = null }, .max_size = .{ .width = 100, .height = 30 } }, focus);
-        const box = &view.scroll.child.box;
-        try std.testing.expectEqual(first.hunks.len * 2 + 1, box.children.count());
-        const file = ui.crossPageLink(focus, box.children.keys()[0], session.data) orelse return error.MissingFileLink;
-        try std.testing.expectEqualStrings("file-00.txt", file.fork_diff.path.slice());
-        const next = ui.crossPageLink(focus, box.children.keys()[box.children.count() - 1], session.data) orelse return error.MissingLink;
-        try std.testing.expectEqual(Diff.page_size, next.fork_diff.start);
+    const fork_diff = Diff{ .route = .{ .fork = .{ .identity = "alice/project", .id = id } }, .window = first };
+    for ([_]Diff{ diff, fork_diff }) |data| {
+        for ([_]bool{ true, false }) |terminal| {
+            var session = ui.Session{ .arena = &arena, .page_arena = &arena, .is_terminal = terminal };
+            session.data.current_page = if (data.route == .repo) route else ui.RoutablePage.forkDiffRoute("alice/project", id, 0, "") orelse return error.BadRoute;
+            var view = try Diff.View.init(allocator, &data, &session);
+            defer view.deinit(allocator);
+            const focus = view.getFocus();
+            try view.build(allocator, .{ .min_size = .{ .width = null, .height = null }, .max_size = .{ .width = 100, .height = 30 } }, focus);
+            const box = &view.scroll.child.box;
+            try std.testing.expectEqual(first.hunks.len * 2 + 1, box.children.count());
+            const file = ui.crossPageLink(focus, box.children.keys()[0], session.data) orelse return error.MissingFileLink;
+            const next = ui.crossPageLink(focus, box.children.keys()[box.children.count() - 1], session.data) orelse return error.MissingLink;
+            if (data.route == .repo) {
+                try std.testing.expectEqualStrings("file-00.txt", file.repo_diff.path.slice());
+                try std.testing.expectEqualStrings(&base, file.repo_diff.base_oid.slice());
+                try std.testing.expectEqualStrings(&base, next.repo_diff.base_oid.slice());
+                try std.testing.expectEqualStrings(&head, next.repo_diff.value.slice());
+                try std.testing.expectEqual(Diff.page_size, next.repo_diff.start);
+            } else {
+                try std.testing.expectEqualStrings("file-00.txt", file.fork_diff.path.slice());
+                try std.testing.expectEqual(Diff.page_size, next.fork_diff.start);
+            }
+        }
     }
 }
 

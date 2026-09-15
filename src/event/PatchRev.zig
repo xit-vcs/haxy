@@ -44,8 +44,17 @@ pub fn prepare(
     timestamp: u64,
 ) !struct { event: evt.EventWithId, revision: evt.Patch.Revision } {
     const allocator = arena.allocator();
-    var base_object = try obj.Object(repo_kind, repo_opts).initCommit(state.readOnly(), io, allocator, base_oid);
-    defer base_object.deinit();
+    const base_tree = if (std.mem.allEqual(u8, base_oid, '0')) blk: {
+        // a merge into a newly created branch starts from an empty tree
+        var reader = std.Io.Reader.fixed("");
+        var oid: [hash.byteLen(repo_opts.hash)]u8 = undefined;
+        try obj.writeObject(repo_kind, repo_opts, state, io, allocator, &reader, .{ .kind = .tree, .size = 0 }, &oid);
+        break :blk std.fmt.bytesToHex(oid, .lower);
+    } else blk: {
+        var base_object = try obj.Object(repo_kind, repo_opts).initCommit(state.readOnly(), io, allocator, base_oid);
+        defer base_object.deinit();
+        break :blk base_object.content.commit.tree;
+    };
     var source_object = try obj.Object(repo_kind, repo_opts).initCommit(state.readOnly(), io, allocator, source_oid);
     defer source_object.deinit();
     const revision = Self{ .base_oid = try allocator.dupe(u8, base_oid), .source_oid = try allocator.dupe(u8, source_oid), .message = message };
@@ -56,7 +65,7 @@ pub fn prepare(
     io.random(&id);
     const id_hex = std.fmt.bytesToHex(id, .lower);
     const entries = try allocator.alloc(evt.EventTreeEntry, 2);
-    entries[0] = .{ .tree = .{ .name = "base", .oid = try allocator.dupe(u8, &base_object.content.commit.tree) } };
+    entries[0] = .{ .tree = .{ .name = "base", .oid = try allocator.dupe(u8, &base_tree) } };
     entries[1] = .{ .tree = .{ .name = "head", .oid = try allocator.dupe(u8, &source_object.content.commit.tree) } };
     return .{
         .event = .{ .id = id_hex, .author = author, .timestamp = timestamp, .tree_entries = entries, .event = .{ .patchrev = revision } },
@@ -125,7 +134,7 @@ pub fn writeSquashCommit(
         .author = author,
         .committer = committer,
         .message = event.message,
-        .parent_oids = &parent_oids,
+        .parent_oids = if (std.mem.allEqual(u8, &base_oid, '0')) &.{} else &parent_oids,
         .timestamp = timestamp,
     }, head_tree_oid);
 }
