@@ -157,6 +157,7 @@ pub const PatchWithId = struct {
     attachments: []const Attachment.WithId = &.{},
     draft: bool = false,
     revision_oid: []const u8 = "",
+    base_oid: []const u8 = "",
     commit_count: ?u64 = null,
     no_changes: bool = false,
     fork_exists: bool = false,
@@ -257,6 +258,19 @@ pub fn statusKind(event: Event) Status {
 
 pub fn listRoute(identity: []const u8, status: Status, tag: []const u8, selected: []const u8) ?ui.RoutablePage {
     return ui.RoutablePage.repoPatchesRoute(identity, status, tag, selected);
+}
+
+pub fn commitsRoute(allocator: std.mem.Allocator, identity: []const u8, entry: PatchWithId) !?ui.RoutablePage {
+    if (entry.fork_exists and entry.record.event.status.kind() != .merged)
+        return ui.RoutablePage.forkCommitsRoute(identity, entry.id, "", 0, "") orelse error.RouteTooLong;
+    if (entry.revision_oid.len == 0 or entry.base_oid.len == 0) return null;
+    // open patches follow the source branch; closed and merged patches keep their recorded revision
+    if (entry.record.event.status.kind() == .open) if (entry.record.event.source_branch) |branch| {
+        const encoded = try ui.urlEncodeRef(allocator, branch);
+        defer allocator.free(encoded);
+        return ui.RoutablePage.repoCommitsRoute(identity, .branch, encoded, 0, "", entry.base_oid) orelse error.RouteTooLong;
+    };
+    return ui.RoutablePage.repoCommitsRoute(identity, .object, entry.revision_oid, 0, "", entry.base_oid) orelse error.RouteTooLong;
 }
 
 pub fn draftsRoute(identity: []const u8) ?ui.RoutablePage {
@@ -685,10 +699,10 @@ pub fn init(
     var closed_window = try thread.loadWindow(Self, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_patch, closed_set, closed_root, conflict_set, empty.selected_id, thread_comments_start);
     var merged_window = try thread.loadWindow(Self, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_patch, merged_set, merged_root, conflict_set, empty.selected_id, thread_comments_start);
     var conflicts_window = try thread.loadWindow(Self, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_patch, conflict_set, conflicts_root, conflict_set, empty.selected_id, thread_comments_start);
-    try setPatchDetails(repo_kind, repo_opts, io, arena, admin_moment, repo, &open_window);
-    try setPatchDetails(repo_kind, repo_opts, io, arena, admin_moment, repo, &closed_window);
-    try setPatchDetails(repo_kind, repo_opts, io, arena, admin_moment, repo, &merged_window);
-    try setPatchDetails(repo_kind, repo_opts, io, arena, admin_moment, repo, &conflicts_window);
+    try setPatchDetails(repo_kind, repo_opts, io, arena, admin_moment, haxy_moment, repo, &open_window);
+    try setPatchDetails(repo_kind, repo_opts, io, arena, admin_moment, haxy_moment, repo, &closed_window);
+    try setPatchDetails(repo_kind, repo_opts, io, arena, admin_moment, haxy_moment, repo, &merged_window);
+    try setPatchDetails(repo_kind, repo_opts, io, arena, admin_moment, haxy_moment, repo, &conflicts_window);
     if (view == .conflicts and conflicts_window.count > 0) resolved_view = .conflicts;
 
     const comment_page = if (empty.comment_id.len == 0)
@@ -725,14 +739,16 @@ fn setPatchDetails(
     io: std.Io,
     arena: *std.heap.ArenaAllocator,
     admin_moment: ?evt.AdminDB.HashMap(.read_only),
+    haxy_moment: evt.EventDB(repo_opts.hash).HashMap(.read_only),
     repo: *rp.Repo(repo_kind, repo_opts),
     target: *Window,
 ) !void {
     if (target.items.len == 0) return;
     const items = try arena.allocator().dupe(PatchWithId, target.items);
     for (items) |*item| {
+        const id = try evt.parseEventId(item.id);
+        const status = item.record.event.status.kind();
         if (admin_moment) |moment| {
-            const id = try evt.parseEventId(item.id);
             const record = try evt.Fork.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, &id);
             item.fork_exists = if (record) |value| !value.removed else false;
         }
@@ -743,11 +759,19 @@ fn setPatchDetails(
             .merged => |oid| oid,
             else => revision.source_oid,
         };
-        if (item.record.event.status.kind() == .merged) continue;
+        if (!item.fork_exists or status == .merged) {
+            const revision_id = try evt.parseEventId(&revision.id);
+            if (try evt.PatchRev.readById(evt.EventDB(repo_opts.hash), repo_opts.hash, haxy_moment, arena, &revision_id)) |record| {
+                item.base_oid = record.event.base_oid;
+            }
+        }
+        if (status == .merged) {
+            if (std.mem.eql(u8, item.revision_oid, revision.squash_oid)) item.commit_count = 1;
+            continue;
+        }
         if (comptime repo_kind == .xit) {
             var moment = try repo.core.latestMoment();
             const state = rp.Repo(.xit, repo_opts).State(.read_only){ .core = &repo.core, .extra = .{ .moment = &moment } };
-            const id = try evt.parseEventId(item.id);
             item.mergeability = pch.readMergeability(repo_opts, state, io, arena, &id, item.record.event) catch .{};
         }
         const target_oid = try repo.readRef(io, .{ .kind = .head, .name = target_branch });

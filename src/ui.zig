@@ -192,7 +192,7 @@ pub const RoutablePage = union(enum) {
 
     // the "key:value" segments of a url tail, collected in any order
     const Params = struct {
-        const ParamKey = enum { start, line, branch, tag, object, theirs };
+        const ParamKey = enum { start, line, branch, tag, object, base, theirs };
 
         // a branch:/tag:/object: param; the value stays url-encoded
         const RefParam = struct { kind: RefOrOid, value: []const u8 };
@@ -270,6 +270,7 @@ pub const RoutablePage = union(enum) {
     const tag_filter_seg = @tagName(Params.ParamKey.tag) ++ ":";
     const start_seg = @tagName(Params.ParamKey.start) ++ ":";
     const line_seg = @tagName(Params.ParamKey.line) ++ ":";
+    const base_seg = @tagName(Params.ParamKey.base) ++ ":";
     const theirs_seg = @tagName(Params.ParamKey.theirs) ++ ":";
     const issue_seg = "issue:";
     const patch_seg = "patch:";
@@ -343,6 +344,7 @@ pub const RoutablePage = union(enum) {
         name: Array(repo_identity_max_len),
         ref_or_oid: ?RefOrOid = null,
         value: Array(ref_route_max_len) = .{},
+        base_oid: Array(ref_route_max_len) = .{},
         // what the pane shows for the commit the log walks from.
         content: Content = .{ .diff = .{} },
 
@@ -415,9 +417,9 @@ pub const RoutablePage = union(enum) {
             };
         }
 
-        pub fn commitsRoute(self: RepoLocation, ref_or_oid: ?RefOrOid, value: []const u8, start: usize, path: []const u8) ?RoutablePage {
+        pub fn commitsRoute(self: RepoLocation, ref_or_oid: ?RefOrOid, value: []const u8, start: usize, path: []const u8, base_oid: []const u8) ?RoutablePage {
             return switch (self) {
-                .repo => |repo_identity| repoCommitsRoute(repo_identity, ref_or_oid, value, start, path),
+                .repo => |repo_identity| repoCommitsRoute(repo_identity, ref_or_oid, value, start, path, base_oid),
                 .fork => |f| if (ref_or_oid == null or (ref_or_oid == .branch and std.mem.eql(u8, value, "patch")))
                     forkCommitsRoute(f.identity, f.id, "", start, path)
                 else if (ref_or_oid == .object)
@@ -427,9 +429,9 @@ pub const RoutablePage = union(enum) {
             };
         }
 
-        pub fn commitMessageRoute(self: RepoLocation, ref_or_oid: RefOrOid, value: []const u8) ?RoutablePage {
+        pub fn commitMessageRoute(self: RepoLocation, ref_or_oid: RefOrOid, value: []const u8, base_oid: []const u8) ?RoutablePage {
             return switch (self) {
-                .repo => |repo_identity| repoCommitMessageRoute(repo_identity, ref_or_oid, value),
+                .repo => |repo_identity| repoCommitMessageRoute(repo_identity, ref_or_oid, value, base_oid),
                 .fork => |f| if (ref_or_oid == .object) forkCommitMessageRoute(f.identity, f.id, value) else null,
             };
         }
@@ -510,12 +512,13 @@ pub const RoutablePage = union(enum) {
     // always carries the `commits` marker so the bare route doesn't collide
     // with the files root. a non-empty `path` filters the diff pane to that
     // file and requires a ref.
-    pub fn repoCommitsRoute(identity: []const u8, ref_or_oid: ?RefOrOid, value: []const u8, start: usize, path: []const u8) ?RoutablePage {
+    pub fn repoCommitsRoute(identity: []const u8, ref_or_oid: ?RefOrOid, value: []const u8, start: usize, path: []const u8, base_oid: []const u8) ?RoutablePage {
         if (ref_or_oid == null and (value.len != 0 or path.len != 0)) return null;
         return .{ .repo_commits = .{
             .name = Array(repo_identity_max_len).from(identity) orelse return null,
             .ref_or_oid = ref_or_oid,
             .value = Array(ref_route_max_len).from(value) orelse return null,
+            .base_oid = Array(ref_route_max_len).from(base_oid) orelse return null,
             .content = .{ .diff = .{
                 .start = start,
                 .path = Array(repo_route_max_len).from(path) orelse return null,
@@ -525,12 +528,13 @@ pub const RoutablePage = union(enum) {
 
     // build a `.repo_commits` route showing the ref/oid's commit message in
     // full, which is the only content that page renders.
-    pub fn repoCommitMessageRoute(identity: []const u8, ref_or_oid: RefOrOid, value: []const u8) ?RoutablePage {
+    pub fn repoCommitMessageRoute(identity: []const u8, ref_or_oid: RefOrOid, value: []const u8, base_oid: []const u8) ?RoutablePage {
         if (value.len == 0) return null;
         return .{ .repo_commits = .{
             .name = Array(repo_identity_max_len).from(identity) orelse return null,
             .ref_or_oid = ref_or_oid,
             .value = Array(ref_route_max_len).from(value) orelse return null,
+            .base_oid = Array(ref_route_max_len).from(base_oid) orelse return null,
             .content = .message,
         } };
     }
@@ -859,6 +863,7 @@ pub const RoutablePage = union(enum) {
                 var out: std.Io.Writer.Allocating = .init(arena.allocator());
                 try out.writer.print("{s}/" ++ commits_seg, .{prefix});
                 if (c.ref_or_oid) |kind| if (c.value.len != 0) try out.writer.print("/{s}:{s}", .{ @tagName(kind), c.value.slice() });
+                if (c.base_oid.len != 0) try out.writer.print("/" ++ base_seg ++ "{s}", .{c.base_oid.slice()});
                 switch (c.content) {
                     .diff => |d| {
                         if (d.start != 0) try out.writer.print("/" ++ start_seg ++ "{d}", .{d.start});
@@ -1382,17 +1387,18 @@ pub const RoutablePage = union(enum) {
         }
         if (std.mem.eql(u8, tab, commits_seg)) {
             params.scanPairs(&segments) catch return null;
-            if (!params.only(&.{ .start, .branch, .tag, .object })) return null;
+            if (!params.only(&.{ .start, .branch, .tag, .object, .base })) return null;
+            const base_oid = params.values.get(.base) orelse "";
             const start = params.start() orelse return null;
             const ref = (params.ref() catch return null) orelse {
                 const file = pathValue(segments.rest()) orelse return null;
-                return if (file.len == 0) repoCommitsRoute(pair, null, "", start, "") else null;
+                return if (file.len == 0) repoCommitsRoute(pair, null, "", start, "", base_oid) else null;
             };
-            // the message page names its commit and nothing else
+            // the message page has no diff window or file filter
             if (std.mem.eql(u8, segments.rest(), message_seg))
-                return if (start == 0) repoCommitMessageRoute(pair, ref.kind, ref.value) else null;
+                return if (start == 0) repoCommitMessageRoute(pair, ref.kind, ref.value, base_oid) else null;
             const file = pathValue(segments.rest()) orelse return null;
-            return repoCommitsRoute(pair, ref.kind, ref.value, start, file);
+            return repoCommitsRoute(pair, ref.kind, ref.value, start, file, base_oid);
         }
         return null; // unknown sub-path
     }
@@ -1414,6 +1420,7 @@ pub const RoutablePage = union(enum) {
             .repo_commits => |a_c| std.mem.eql(u8, a_c.name.slice(), b.repo_commits.name.slice()) and
                 a_c.ref_or_oid == b.repo_commits.ref_or_oid and
                 std.mem.eql(u8, a_c.value.slice(), b.repo_commits.value.slice()) and
+                std.mem.eql(u8, a_c.base_oid.slice(), b.repo_commits.base_oid.slice()) and
                 switch (a_c.content) {
                     .diff => |a_d| switch (b.repo_commits.content) {
                         .diff => |b_d| a_d.start == b_d.start and std.mem.eql(u8, a_d.path.slice(), b_d.path.slice()),

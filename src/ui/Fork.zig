@@ -127,7 +127,7 @@ pub fn init(arena: *std.heap.ArenaAllocator, session: *ui.Session, route: ui.Rou
         .id = &id_hex,
     } };
     const files = try Files.init(.xit, .{}, arena, &fork_repo, io, arena.child_allocator, location, requested_ref, requested_value, files_path, files_line);
-    var commits = try Commits.init(.xit, .{}, arena, &fork_repo, io, arena.child_allocator, haxy_moment, location, requested_ref, requested_value, commits_content, commits_base_oid);
+    var commits = try Commits.init(.xit, .{}, arena, &fork_repo, io, arena.child_allocator, haxy_moment, location, requested_ref, requested_value, commits_content, &commits_base_oid);
     commits.commit_count = if (newest_revision) |revision| revision.record.commit_count else 0;
     const diff_start: usize = switch (route) {
         .fork_diff => |d| d.start,

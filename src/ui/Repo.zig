@@ -83,6 +83,10 @@ pub fn init(
         .repo_commits => |c| c.content,
         else => .{ .diff = .{} },
     };
+    const commits_base_oid: []const u8 = switch (route) {
+        .repo_commits => |*c| c.base_oid.slice(),
+        else => "",
+    };
     // the refs tab windows one column at a time: `refs_from` (a url-encoded
     // ref name) roots `refs_kind`'s column, the other stays at its first window.
     const refs_kind: ui.RoutablePage.RefKind = switch (route) {
@@ -238,7 +242,7 @@ pub fn init(
                             const target_branch = if (files_data.ref_or_oid == .branch) files_data.ref_or_oid_value else "";
                             break :blk .{
                                 files_data,
-                                try Commits.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, session.haxy_moment, location, requested_ref_or_oid, requested_ref_value, commits_content, null),
+                                try Commits.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, session.haxy_moment, location, requested_ref_or_oid, requested_ref_value, commits_content, commits_base_oid),
                                 try Refs.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, repo_identity.identity, refs_kind, refs_from),
                                 try Issues.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, issues_tag, issues_selected, issues_comment, issues_comments_start, issues_theirs, issues_view),
                                 try Patches.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, session, repo_id_maybe, repo_identity.identity, target_branch, patches_tag, patches_selected, patches_comment, patches_comments_start, patches_theirs, patches_view),
@@ -253,7 +257,7 @@ pub fn init(
         const aa = arena.allocator();
         break :blk .{
             try Files.emptyResult(aa, location, requested_ref_or_oid orelse .branch, requested_ref_value, files_dir),
-            try Commits.emptyResult(aa, location, requested_ref_or_oid orelse .branch, requested_ref_value, commits_content),
+            try Commits.emptyResult(aa, location, requested_ref_or_oid orelse .branch, requested_ref_value, commits_content, commits_base_oid),
             try Refs.emptyResult(arena, repo_identity.identity, refs_kind, refs_from),
             try Issues.emptyResult(aa, repo_identity.identity, issues_tag, issues_selected, issues_comment, issues_comments_start, issues_theirs, issues_view),
             try Patches.emptyResult(aa, repo_identity.identity, patches_tag, patches_selected, patches_comment, patches_comments_start, patches_theirs, patches_view),
@@ -297,7 +301,7 @@ pub const View = struct {
         // build the header first so we can grab the files-tab id for the auth
         // view (it focuses there after login).
         {
-            var header_view = try Header.View.init(allocator, &data.header, data.commits.commit_count, session);
+            var header_view = try Header.View.init(allocator, &data.header, data.commits.commit_count, data.commits.base_oid, session);
             errdefer header_view.deinit(allocator);
             try box.children.put(allocator, header_view.getFocus().id, .{ .widget = .{ .repo_header = header_view }, .rect = null, .min_size = null });
         }

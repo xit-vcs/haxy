@@ -152,11 +152,13 @@ test "commits list next row is a cross-page link" {
     const identity = "alice/ziglings";
     const oid0 = "1111111111111111111111111111111111111111";
     const next_oid = "2222222222222222222222222222222222222222";
+    const base_oid = "3333333333333333333333333333333333333333";
 
     const data = Commits{
         .location = .{ .repo = identity },
         .ref_or_oid = .object,
         .ref_or_oid_value = oid0,
+        .base_oid = base_oid,
         .commits = &.{
             .{ .oid = oid0, .date = "2024-01-01", .message = "first", .window = .{} },
         },
@@ -165,7 +167,7 @@ test "commits list next row is a cross-page link" {
     };
 
     var session = ui.Session{ .arena = &arena, .page_arena = &arena, .is_terminal = true };
-    session.data.current_page = ui.RoutablePage.repoCommitsRoute(identity, .object, oid0, 0, "").?;
+    session.data.current_page = ui.RoutablePage.repoCommitsRoute(identity, .object, oid0, 0, "", base_oid).?;
 
     var view = try Commits.View.init(allocator, &data, &session);
     defer view.deinit(allocator);
@@ -185,6 +187,7 @@ test "commits list next row is a cross-page link" {
 
     const route = ui.crossPageLink(root_focus, next_id, session.data);
     try std.testing.expect(route != null);
+    try std.testing.expectEqualStrings(base_oid, route.?.repo_commits.base_oid.slice());
 }
 
 // a ref name with a '/' is url-encoded in the route, so it survives the
@@ -194,11 +197,12 @@ test "encoded ref name survives the commits url round-trip" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const RP = ui.RoutablePage;
+    const base_oid = "3333333333333333333333333333333333333333";
 
     // the route layer holds the value already url-encoded ("feature%2Ffoo").
-    const route = RP.repoCommitsRoute("alice/ziglings", .branch, "feature%2Ffoo", 0, "").?;
+    const route = RP.repoCommitsRoute("alice/ziglings", .branch, "feature%2Ffoo", 0, "", base_oid).?;
     const url = try route.toUrl(&arena);
-    try std.testing.expectEqualStrings("/repo/alice/ziglings/commits/branch:feature%2Ffoo", url);
+    try std.testing.expectEqualStrings("/repo/alice/ziglings/commits/branch:feature%2Ffoo/base:" ++ base_oid, url);
 
     // parsing it back yields the same route, and the ref splits out intact.
     const parsed = RP.fromUrl(url);
@@ -206,6 +210,69 @@ test "encoded ref name survives the commits url round-trip" {
     const parsed_route = parsed.?.repo_commits;
     try std.testing.expectEqual(RP.RefOrOid.branch, parsed_route.ref_or_oid.?);
     try std.testing.expectEqualStrings("feature%2Ffoo", parsed_route.value.slice());
+    try std.testing.expectEqualStrings(base_oid, parsed_route.base_oid.slice());
+    const unfiltered = RP.repoCommitsRoute("alice/ziglings", .branch, "feature%2Ffoo", 0, "", "").?;
+    try std.testing.expect(!RP.eql(route, unfiltered));
+}
+
+test "commit pages stop at the base without excluding other ancestors" {
+    try testCommitBase(.git);
+    try testCommitBase(.xit);
+}
+
+fn testCommitBase(comptime kind: xit.repo.RepoKind) !void {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    const opts: xit.repo.RepoOpts(kind) = .{ .is_test = true };
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const path = try temp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(path);
+    var repo = try xit.repo.Repo(kind, opts).init(io, allocator, .{ .path = path });
+    defer repo.deinit(io, allocator);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const location = ui.RoutablePage.RepoLocation{ .repo = "" };
+    const content = ui.RoutablePage.RepoCommitsRoute.Content{ .diff = .{} };
+    const branch = xit.ref.Ref{ .kind = .head, .name = "master" };
+
+    // one more commit than fits on the first page
+    const base = try repo.commitAtRef(io, allocator, .{ .message = "base" }, null, branch);
+    var tip = base;
+    var previous = base;
+    for (0..21) |_| {
+        previous = tip;
+        tip = try repo.commitAtRef(io, allocator, .{ .message = "next" }, null, branch);
+    }
+    const first = try Commits.init(kind, opts, &arena, &repo, io, allocator, null, location, .object, &tip, content, &base);
+    try std.testing.expectEqual(20, first.commits.len);
+    try std.testing.expectEqual(@as(?u64, if (kind == .xit) 21 else null), first.commit_count);
+    const last = try Commits.init(kind, opts, &arena, &repo, io, allocator, null, location, .object, first.next_start orelse return error.MissingNext, content, &base);
+    try std.testing.expectEqual(1, last.commits.len);
+    try std.testing.expectEqual(null, last.next_start);
+
+    // the base at a page boundary must not create an empty next page
+    const full = try Commits.init(kind, opts, &arena, &repo, io, allocator, null, location, .object, &previous, content, &base);
+    try std.testing.expectEqual(20, full.commits.len);
+    try std.testing.expectEqual(null, full.next_start);
+    _ = try repo.addTag(io, allocator, .{ .name = "tip", .message = "annotated" });
+    const sources = [_]struct { ref: ui.RoutablePage.RefOrOid, value: []const u8 }{
+        .{ .ref = .object, .value = &tip },
+        .{ .ref = .branch, .value = branch.name },
+        .{ .ref = .tag, .value = "tip" },
+    };
+    for (sources) |source| {
+        const empty = try Commits.init(kind, opts, &arena, &repo, io, allocator, null, location, source.ref, source.value, content, &tip);
+        try std.testing.expectEqual(0, empty.commits.len);
+        try std.testing.expectEqual(@as(?u64, if (kind == .xit) 0 else null), empty.commit_count);
+    }
+
+    // an off-chain stopping point must not hide its parent on this chain
+    const other = try repo.commitAtRef(io, allocator, .{ .message = "other", .parent_oids = &.{base} }, null, .{ .kind = .head, .name = "other" });
+    const off_chain = try Commits.init(kind, opts, &arena, &repo, io, allocator, null, location, .object, last.commits[0].oid, content, &other);
+    try std.testing.expectEqual(2, off_chain.commits.len);
+    try std.testing.expectEqualStrings(&base, off_chain.commits[1].oid);
+    try std.testing.expectEqual(null, off_chain.commit_count);
 }
 
 test "sync creates missing event branches and preserves head" {

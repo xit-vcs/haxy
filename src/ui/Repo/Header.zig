@@ -50,7 +50,7 @@ pub const View = struct {
     first_group_width: usize,
     session: *ui.Session,
 
-    pub fn init(allocator: std.mem.Allocator, data: *const Self, commit_count: ?u64, session: *ui.Session) !View {
+    pub fn init(allocator: std.mem.Allocator, data: *const Self, commit_count: ?u64, base_oid: []const u8, session: *ui.Session) !View {
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = .hidden, .rounded_corners = true, .direction = .horiz });
         errdefer box.deinit(allocator);
 
@@ -136,7 +136,7 @@ pub const View = struct {
         const current_tag = std.meta.activeTag(current_page);
         const files_route = ui.RoutablePage.repoFilesRoute(identity, data.ref_or_oid, data.ref_or_oid_value, "", 0) orelse return error.RouteTooLong;
         const files_link = try ui.inPageTabLink(session, files_route, current_tag == .repo_files);
-        const commits_route = ui.RoutablePage.repoCommitsRoute(identity, data.ref_or_oid, data.ref_or_oid_value, 0, "") orelse return error.RouteTooLong;
+        const commits_route = ui.RoutablePage.repoCommitsRoute(identity, data.ref_or_oid, data.ref_or_oid_value, 0, "", base_oid) orelse return error.RouteTooLong;
         const commits_link = try ui.inPageTabLink(session, commits_route, current_tag == .repo_commits);
         const refs_route = ui.RoutablePage.repoRefsRoute(identity, .branch, "") orelse return error.RouteTooLong;
         const refs_link = try ui.inPageTabLink(session, refs_route, current_tag == .repo_refs);

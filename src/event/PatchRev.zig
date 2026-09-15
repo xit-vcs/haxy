@@ -217,6 +217,7 @@ pub fn consume(
 }
 
 pub fn validateOid(comptime hash_kind: hash.HashKind, oid: []const u8) !void {
+    if (oid.len != hash.hexLen(hash_kind)) return error.InvalidOid;
     var bytes: [hash.byteLen(hash_kind)]u8 = undefined;
     _ = try std.fmt.hexToBytes(&bytes, oid);
     if (!std.mem.eql(u8, oid, &std.fmt.bytesToHex(bytes, .lower))) return error.InvalidOid;

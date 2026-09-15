@@ -27,12 +27,12 @@ window: Window,
 const Self = @This();
 
 pub const Route = union(enum) {
-    commit: struct { location: ui.RoutablePage.RepoLocation, oid: []const u8 },
+    commit: struct { location: ui.RoutablePage.RepoLocation, oid: []const u8, base_oid: []const u8 = "" },
     fork: struct { identity: []const u8, id: []const u8 },
 
     fn link(self: Route, arena: *std.heap.ArenaAllocator, start: usize, path: []const u8) ![]const u8 {
         const route = switch (self) {
-            .commit => |c| c.location.commitsRoute(.object, c.oid, start, path),
+            .commit => |c| c.location.commitsRoute(.object, c.oid, start, path, c.base_oid),
             .fork => |f| ui.RoutablePage.forkDiffRoute(f.identity, f.id, start, path),
         } orelse return error.RouteTooLong;
         return std.fmt.allocPrint(arena.allocator(), "a:{s}", .{try route.toUrl(arena)});

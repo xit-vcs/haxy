@@ -455,10 +455,6 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
             return if (supports_drafts) entry.draft else false;
         }
 
-        fn entryHasFork(entry: Entry) bool {
-            return if (supports_forks) entry.fork_exists else false;
-        }
-
         const StatusChange = struct {
             action: []const u8,
             status: Status,
@@ -536,13 +532,15 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                 const row = self.toolRow();
                 const pa = self.session.page_arena.allocator();
 
-                if (entryHasFork(entry) and self.session.data.current_page.parent() != .fork) {
-                    const diff_route = ui.RoutablePage.forkDiffRoute(self.data.identity, entry.id, 0, "") orelse return error.RouteTooLong;
-                    try addToolButton(allocator, row, "view diff", "", try std.fmt.allocPrint(pa, "a:{s}", .{try diff_route.toUrl(self.session.page_arena)}));
-                    const commits_route = ui.RoutablePage.forkCommitsRoute(self.data.identity, entry.id, "", 0, "") orelse return error.RouteTooLong;
-                    const commit_count = if (supports_forks) entry.commit_count else null;
-                    const label = if (commit_count) |count| try std.fmt.allocPrint(pa, "view commits ({d})", .{count}) else "view commits";
-                    try addToolButton(allocator, row, label, "", try std.fmt.allocPrint(pa, "a:{s}", .{try commits_route.toUrl(self.session.page_arena)}));
+                if (supports_forks and self.session.data.current_page.parent() != .fork) {
+                    if (entry.fork_exists) {
+                        const diff_route = ui.RoutablePage.forkDiffRoute(self.data.identity, entry.id, 0, "") orelse return error.RouteTooLong;
+                        try addToolButton(allocator, row, "view diff", "", try std.fmt.allocPrint(pa, "a:{s}", .{try diff_route.toUrl(self.session.page_arena)}));
+                    }
+                    if (try Data.commitsRoute(pa, self.data.identity, entry)) |route| {
+                        const label = if (entry.commit_count) |count| try std.fmt.allocPrint(pa, "view commits ({d})", .{count}) else "view commits";
+                        try addToolButton(allocator, row, label, "", try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}));
+                    }
                 }
 
                 {
@@ -597,12 +595,6 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                         const route = ui.RoutablePage.repoThreadRemoveRoute(kind, self.data.identity, entry.id, "") orelse return error.RouteTooLong;
                         try addToolButton(allocator, row, "✕", "", try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}));
                     }
-                }
-
-                for (row.children.keys(), row.children.values()) |id, *child| {
-                    if (child.widget.getFocus().mode != .all) continue;
-                    row.getFocus().child_id = id;
-                    break;
                 }
             }
 
@@ -757,7 +749,9 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
             if (child_id == self.title_id) {
                 switch (key) {
                     .arrow_left => self.exit = .list,
-                    .arrow_up => if (!self.moveVertical(root_focus, false)) self.focusToolRow(root_focus),
+                    .arrow_up => if (!self.moveVertical(root_focus, false)) {
+                        self.exit = .header;
+                    },
                     .arrow_down => _ = self.moveVertical(root_focus, true),
                     else => {},
                 }
@@ -780,7 +774,9 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
             switch (child.*) {
                 .tag_flow => |*tags| self.tagsInput(child_index, tags, key, root_focus),
                 .copyable_text => |*copyable| switch (key) {
-                    .arrow_up => if (!self.moveVertical(root_focus, false)) self.focusToolRow(root_focus),
+                    .arrow_up => if (!self.moveVertical(root_focus, false)) {
+                        self.exit = .header;
+                    },
                     .arrow_down => _ = self.moveVertical(root_focus, true),
                     .arrow_left => if (copyable.selected == 0) {
                         self.exit = .list;
@@ -1127,19 +1123,19 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
             return self.focusedChild(root_focus) == tool_row_index;
         }
 
-        fn focusToolRow(self: *This, root_focus: *Focus) void {
-            const child_id = self.toolRow().getFocus().child_id orelse {
-                self.exit = .header;
-                return;
-            };
-            root_focus.setFocus(child_id);
-            if (self.inner().children.values()[tool_row_index].rect) |rect| self.scroll.scrollToRect(rect);
-        }
-
         pub fn focusFirst(self: *This, root_focus: ?*Focus) bool {
             const inner_box = self.inner();
-            for (tool_row_index + 1..inner_box.children.count()) |child_index| {
-                if (!self.childFocusable(child_index)) continue;
+            for (inner_box.children.values(), 0..) |*child, child_index| {
+                switch (child.widget) {
+                    .box => |*box| {
+                        for (box.children.keys(), box.children.values()) |id, *item| {
+                            if (item.widget.getFocus().mode != .all) continue;
+                            box.getFocus().child_id = id;
+                            break;
+                        } else continue;
+                    },
+                    else => if (!self.childFocusable(child_index)) continue,
+                }
                 if (root_focus) |focus|
                     self.focusChild(child_index, false, focus)
                 else
