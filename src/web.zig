@@ -774,7 +774,7 @@ fn handlePatchMerge(
     allocator: std.mem.Allocator,
     base: []const u8,
     host: Host,
-    revision: pch.MergeRevision,
+    revision: evt.Patch.MergeRevision,
 ) !void {
     const parts = commentBaseParts(base) orelse return respondRemoveNotFound(request);
     if (parts.thread_kind != .patch or parts.comment_id != null) return respondRemoveNotFound(request);

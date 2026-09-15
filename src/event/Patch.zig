@@ -35,11 +35,9 @@ pub const Revision = struct {
             std.mem.eql(u8, record.patch_oid, self.squash_oid) and
             std.mem.eql(u8, record.event.source_oid, self.source_oid);
     }
-
-    pub fn includesOid(self: Revision, oid: []const u8) bool {
-        return std.mem.eql(u8, oid, self.source_oid) or std.mem.eql(u8, oid, self.squash_oid);
-    }
 };
+
+pub const MergeRevision = enum { squash, source };
 
 pub const Record = struct {
     event: Self,
@@ -66,50 +64,16 @@ pub const StatusKind = enum {
 pub const Status = union(StatusKind) {
     open,
     closed,
-    merged: []const u8,
+    merged: Merged,
 
-    pub const max_encoded_len = "merged ".len + blk: {
-        var len: usize = 0;
-        for (std.enums.values(hash.HashKind)) |hash_kind| len = @max(len, hash.hexLen(hash_kind));
-        break :blk len;
+    pub const Merged = struct {
+        revision: MergeRevision,
+        before_oid: []const u8, // all zeroes if the target did not exist
+        after_oid: []const u8,
     };
 
     pub fn kind(self: Status) StatusKind {
         return std.meta.activeTag(self);
-    }
-
-    pub fn encode(self: Status, buffer: []u8) ![]const u8 {
-        return switch (self) {
-            .open => "open",
-            .closed => "closed",
-            .merged => |oid| try std.fmt.bufPrint(buffer, "merged {s}", .{oid}),
-        };
-    }
-
-    pub fn decode(encoded: []const u8) !Status {
-        if (std.mem.eql(u8, encoded, "open")) return .open;
-        if (std.mem.eql(u8, encoded, "closed")) return .closed;
-        const prefix = "merged ";
-        if (std.mem.startsWith(u8, encoded, prefix) and encoded.len != prefix.len) {
-            return .{ .merged = encoded[prefix.len..] };
-        }
-        return error.InvalidEnumTag;
-    }
-
-    pub fn jsonStringify(self: Status, jw: anytype) !void {
-        var buffer: [max_encoded_len]u8 = undefined;
-        try jw.write(self.encode(&buffer) catch return error.WriteFailed);
-    }
-
-    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !Status {
-        return decode(try std.json.innerParse([]const u8, allocator, source, options));
-    }
-
-    pub fn jsonParseFromValue(_: std.mem.Allocator, source: std.json.Value, _: std.json.ParseOptions) !Status {
-        return switch (source) {
-            .string => |encoded| decode(encoded),
-            else => error.UnexpectedToken,
-        };
     }
 };
 
@@ -218,11 +182,11 @@ pub fn consume(
 
     switch (record.event.status) {
         .open, .closed => {},
-        .merged => |merged_oid| {
-            try evt.PatchRev.validateOid(hash_kind, merged_oid);
+        .merged => |merged| {
+            try evt.PatchRev.validateOid(hash_kind, merged.before_oid);
+            try evt.PatchRev.validateOid(hash_kind, merged.after_oid);
             const id = revision_id orelse return error.InvalidPatch;
             const selected = record.event.revision orelse return error.InvalidPatch;
-            if (!selected.includesOid(merged_oid)) return error.InvalidPatch;
             const revision = (try evt.PatchRev.readById(DB, hash_kind, haxy_moment.readOnly(), arena, &id)) orelse return error.InvalidPatch;
             if (!selected.matches(revision)) return error.InvalidPatch;
         },

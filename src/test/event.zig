@@ -7,6 +7,58 @@ const hash = xit.hash;
 
 const author = evt.CommitAuthor{ .name = "haxy", .email = "user@haxy" };
 
+test "union field storage" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const DB = xit.xitdb.Database(.memory, hash.HashInt(.sha1));
+    var buffer = std.Io.Writer.Allocating.init(allocator);
+    defer buffer.deinit();
+    var db = try DB.init(.{ .buffer = &buffer, .max_size = 1_000_000 });
+    const map = try DB.HashMap(.read_write).init(db.rootCursor());
+
+    const Value = union(enum) {
+        empty,
+        finished,
+        data: struct { message: []const u8, note: ?[]const u8 = null },
+        number: ?u64,
+    };
+    const Data = struct { value: ?Value };
+    const key = hash.hashInt(.sha1, "value");
+
+    // changing variants must replace the old tag and payload
+    for ([_]?Value{
+        null,
+        .empty,
+        .{ .data = .{ .message = "first", .note = "note" } },
+        .{ .data = .{ .message = "second" } },
+        .{ .number = 42 },
+        .{ .number = null },
+        .{ .number = 7 },
+        .finished,
+        .{ .data = .{ .message = "third" } },
+        null,
+    }) |value| {
+        try evt.upsert(Data, DB, .sha1, map, .{ .value = value });
+        const stored = try evt.read(Data, DB, .sha1, &arena, map.readOnly());
+        try std.testing.expectEqualDeep(value, stored.value);
+        if (value) |active| {
+            const cursor = (try map.getCursor(key)) orelse return error.NotFound;
+            switch (active) {
+                .empty, .finished => try std.testing.expectEqualStrings(@tagName(active), try cursor.readBytesAlloc(arena.allocator(), null)),
+                else => try std.testing.expectEqual(.hash_map, cursor.slot().tag),
+            }
+        } else {
+            try std.testing.expectEqual(null, try map.getCursor(key));
+        }
+    }
+
+    // a payload-bearing variant cannot be stored as just its name
+    try map.put(key, .{ .bytes = "data" });
+    try std.testing.expectError(error.InvalidUnion, evt.read(Data, DB, .sha1, &arena, map.readOnly()));
+}
+
 test "rebase" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;

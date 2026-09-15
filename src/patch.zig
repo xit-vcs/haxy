@@ -217,15 +217,13 @@ pub const EditDraftInput = struct {
     timestamp: u64,
 };
 
-pub const MergeRevision = enum { squash, source };
-
 pub const Mergeability = struct {
     pub const Status = enum { clean, conflict, unknown };
 
     source: Status = .unknown,
     squash: Status = .unknown,
 
-    pub fn get(self: Mergeability, revision: MergeRevision) Status {
+    pub fn get(self: Mergeability, revision: evt.Patch.MergeRevision) Status {
         return switch (revision) {
             .source => self.source,
             .squash => self.squash,
@@ -473,7 +471,7 @@ fn checkCommit(
 
 pub const MergeInput = struct {
     id: [evt.event_id_size * 2]u8,
-    revision: MergeRevision,
+    revision: evt.Patch.MergeRevision,
     author: evt.CommitAuthor,
     timestamp: u64,
 };
@@ -637,7 +635,7 @@ pub fn merge(
     var fork_repo_maybe: ?rp.Repo(.xit, repo_opts) = if (patch_record.event.source_branch != null) null else rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = fork_path, .require_repo_root = true }) catch return error.PatchDataUnavailable;
     defer if (fork_repo_maybe) |*repo| repo.deinit(io, allocator);
     // select the commit and merge identity
-    const merge_oid = oidArray(repo_opts.hash, switch (input.revision) {
+    const selected_oid = oidArray(repo_opts.hash, switch (input.revision) {
         .squash => selected.squash_oid,
         .source => selected.source_oid,
     }) catch return error.InvalidPatch;
@@ -655,8 +653,8 @@ pub fn merge(
             patch_id: [evt.event_id_size]u8,
             expected_patch: evt.Patch,
             target_ref: rf.Ref,
-            merge_oid: [hash.hexLen(repo_opts.hash)]u8,
-            revision: MergeRevision,
+            selected_oid: [hash.hexLen(repo_opts.hash)]u8,
+            revision: evt.Patch.MergeRevision,
             identity: []const u8,
             author: evt.CommitAuthor,
             timestamp: u64,
@@ -690,18 +688,16 @@ pub fn merge(
                     const fork_state = State(.read_only){ .core = &repo.core, .extra = .{ .moment = &fork_repo_moment } };
                     var objects = try obj.ObjectIterator(.xit, repo_opts).init(fork_state, ctx.io, ctx.allocator, .{ .kind = .all });
                     defer objects.deinit();
-                    try objects.include(&ctx.merge_oid);
+                    try objects.include(&ctx.selected_oid);
                     try obj.copyFromObjectIterator(.xit, repo_opts, state, .xit, repo_opts, &objects, ctx.io, null);
                 }
 
-                // import the revision and mark the patch merged
-                if (!try importMergedRevision(repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, ctx.fork_repo, &ctx.patch_id, &ctx.merge_oid, ctx.expected_patch, ctx.author, ctx.timestamp)) return error.PatchOutOfDate;
-
                 // merge the selected commit
+                const before_oid = (try rf.readRecur(.xit, repo_opts, state.readOnly(), ctx.io, .{ .ref = ctx.target_ref })) orelse return error.InvalidTargetBranch;
                 {
                     var merge_result = try mrg.Merge(.xit, repo_opts).init(state, ctx.io, ctx.allocator, .{
                         .kind = .full,
-                        .action = .{ .new = .{ .source = &.{.{ .oid = &ctx.merge_oid }}, .algo = .patch } },
+                        .action = .{ .new = .{ .source = &.{.{ .oid = &ctx.selected_oid }}, .algo = .patch } },
                         .commit_metadata = .{
                             .author = ctx.identity,
                             .committer = ctx.identity,
@@ -712,10 +708,14 @@ pub fn merge(
                     defer merge_result.deinit();
                     switch (merge_result.result) {
                         .conflict => return error.MergeConflict,
-                        .success, .nothing, .fast_forward => {},
+                        .success, .fast_forward, .nothing => {},
                         .clean => unreachable,
                     }
                 }
+                const after_oid = (try rf.readRecur(.xit, repo_opts, state.readOnly(), ctx.io, .{ .ref = ctx.target_ref })) orelse return error.InvalidTargetBranch;
+
+                // import the revision and record the target's before/after range
+                if (!try importMergedRevision(repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, ctx.fork_repo, &ctx.patch_id, .{ .revision = ctx.revision, .before_oid = &before_oid, .after_oid = &after_oid }, ctx.expected_patch, ctx.author, ctx.timestamp)) return error.PatchOutOfDate;
 
                 try xit.undo.writeMessage(repo_opts, state, .{ .custom = "merge patch" });
             }
@@ -735,7 +735,7 @@ pub fn merge(
             .patch_id = patch_id,
             .expected_patch = patch_record.event,
             .target_ref = target_ref,
-            .merge_oid = merge_oid,
+            .selected_oid = selected_oid,
             .revision = input.revision,
             .identity = identity,
             .author = input.author,
@@ -780,7 +780,9 @@ fn importMerged(
     allocator: std.mem.Allocator,
     repo_root_path: []const u8,
     patch_id: *const [evt.event_id_size]u8,
-    merged_oid: *const [hash.hexLen(repo_opts.hash)]u8,
+    matched_oid: *const [hash.hexLen(repo_opts.hash)]u8,
+    before_oid: *const [hash.hexLen(repo_opts.hash)]u8,
+    after_oid: *const [hash.hexLen(repo_opts.hash)]u8,
 ) !void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -789,10 +791,12 @@ fn importMerged(
     const fork_path = try fork.forkPath(arena.allocator(), repo_root_path, &patch_hex);
     const events = try evt.currentMomentFromRepoMoment(repo_opts.hash, moment.readOnly());
     const record = (try evt.Patch.readById(evt.EventDB(repo_opts.hash), repo_opts.hash, events, &arena, patch_id)) orelse return;
+    const selected = record.event.revision orelse return;
+    const revision: evt.Patch.MergeRevision = if (std.mem.eql(u8, matched_oid, selected.source_oid)) .source else if (std.mem.eql(u8, matched_oid, selected.squash_oid)) .squash else return;
     var fork_repo_maybe: ?rp.Repo(.xit, repo_opts) = if (record.event.source_branch != null) null else try rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = fork_path, .require_repo_root = true });
     defer if (fork_repo_maybe) |*repo| repo.deinit(io, allocator);
 
-    _ = try importMergedRevision(repo_opts, state, db, moment, io, allocator, if (fork_repo_maybe) |*repo| repo else null, patch_id, merged_oid, null, null, 0);
+    _ = try importMergedRevision(repo_opts, state, db, moment, io, allocator, if (fork_repo_maybe) |*repo| repo else null, patch_id, .{ .revision = revision, .before_oid = before_oid, .after_oid = after_oid }, null, null, 0);
 }
 
 // import the revision and mark its patch merged in the current transaction
@@ -805,7 +809,7 @@ fn importMergedRevision(
     allocator: std.mem.Allocator,
     fork_repo: ?*rp.Repo(.xit, repo_opts),
     patch_id: *const [evt.event_id_size]u8,
-    merged_oid: *const [hash.hexLen(repo_opts.hash)]u8,
+    merged: evt.Patch.Status.Merged,
     expected_patch: ?evt.Patch,
     merged_author: ?evt.CommitAuthor,
     merged_timestamp: u64,
@@ -826,7 +830,6 @@ fn importMergedRevision(
         }
     }
     const revision_id = try evt.parseEventId(&selected.id);
-    if (!selected.includesOid(merged_oid)) return false;
 
     const current_revision = try evt.PatchRev.readById(DB, repo_opts.hash, haxy_moment, &arena, &revision_id);
     const revision = (if (fork_repo) |repo|
@@ -867,7 +870,7 @@ fn importMergedRevision(
     }
 
     var patch = patch_record.event;
-    patch.status = .{ .merged = merged_oid };
+    patch.status = .{ .merged = merged };
     events[event_count] = .{
         .id = std.fmt.bytesToHex(patch_id.*, .lower),
         .timestamp = if (merged_author != null) merged_timestamp else @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
@@ -918,23 +921,47 @@ pub fn detectMerged(
         var commits = try obj.ObjectIterator(.xit, repo_opts).init(state.readOnly(), io, arena.allocator(), .{ .kind = .commit });
         defer commits.deinit();
         if (!std.mem.allEqual(u8, &old_oid, '0')) try commits.exclude(&old_oid);
-        try commits.include(&new_oid);
+        var targets: std.ArrayList(struct {
+            before_oid: [hash.hexLen(repo_opts.hash)]u8,
+            after_oid: [hash.hexLen(repo_opts.hash)]u8,
+        }) = .empty;
+        {
+            var first_parents = try obj.ObjectIterator(.xit, repo_opts).init(state.readOnly(), io, arena.allocator(), .{ .kind = .commit, .first_parent = true });
+            defer first_parents.deinit();
+            if (!std.mem.allEqual(u8, &old_oid, '0')) try first_parents.exclude(&old_oid);
+            try first_parents.include(&new_oid);
+            while (try first_parents.next(arena.allocator())) |commit| {
+                defer commit.deinit();
+                try targets.append(arena.allocator(), .{
+                    .before_oid = (commit.content.commit.metadata.firstParent() orelse &old_oid).*,
+                    .after_oid = commit.oid,
+                });
+            }
+        }
+
+        // visit target commits oldest first, attributing each revision to the
+        // commit that introduced it; the shared iterator visits each ancestor once
         var revision_key_buffer: [rf.MAX_REF_CONTENT_SIZE + 1 + hash.hexLen(repo_opts.hash)]u8 = undefined;
-        while (try commits.next(arena.allocator())) |commit| {
-            defer commit.deinit();
-            const key = try std.fmt.bufPrint(&revision_key_buffer, "{s}\x00{s}", .{ update.ref_name[heads_prefix.len..], &commit.oid });
-            const ids_cursor = try revisions.getCursor(hash.hashInt(repo_opts.hash, key)) orelse continue;
-            const ids = try DB.CountedHashSet(.read_only).init(ids_cursor);
-            var ids_iter = try ids.iterator();
-            while (try ids_iter.next()) |cursor| {
-                const pair = try cursor.readKeyValuePair();
-                var patch_id: [evt.event_id_size]u8 = undefined;
-                if ((try pair.key_cursor.readBytes(&patch_id)).len != patch_id.len) return error.InvalidPatch;
-                const patch_hex = std.fmt.bytesToHex(patch_id, .lower);
-                importMerged(repo_opts, state, db, moment, io, allocator, repo_root_path, &patch_id, &commit.oid) catch |err| {
-                    serve_common.logError(io, error_writer, "failed to mark patch {s} as merged: {s}\n", .{ &patch_hex, @errorName(err) });
-                    continue;
-                };
+        while (targets.pop()) |target| {
+            try commits.include(&target.after_oid);
+            while (try commits.next(arena.allocator())) |commit| {
+                defer commit.deinit();
+                const key = try std.fmt.bufPrint(&revision_key_buffer, "{s}\x00{s}", .{ update.ref_name[heads_prefix.len..], &commit.oid });
+                const ids_cursor = try revisions.getCursor(hash.hashInt(repo_opts.hash, key)) orelse continue;
+                const ids = try DB.CountedHashSet(.read_only).init(ids_cursor);
+                var ids_iter = try ids.iterator();
+                while (try ids_iter.next()) |cursor| {
+                    const pair = try cursor.readKeyValuePair();
+                    var patch_id: [evt.event_id_size]u8 = undefined;
+                    if ((try pair.key_cursor.readBytes(&patch_id)).len != patch_id.len) return error.InvalidPatch;
+                    const patch_hex = std.fmt.bytesToHex(patch_id, .lower);
+                    // a fast-forward has no recorded merge boundary; use the old ref tip
+                    const before_oid = if (std.mem.eql(u8, &commit.oid, &target.after_oid)) &old_oid else &target.before_oid;
+                    importMerged(repo_opts, state, db, moment, io, allocator, repo_root_path, &patch_id, &commit.oid, before_oid, &target.after_oid) catch |err| {
+                        serve_common.logError(io, error_writer, "failed to mark patch {s} as merged: {s}\n", .{ &patch_hex, @errorName(err) });
+                        continue;
+                    };
+                }
             }
         }
     }

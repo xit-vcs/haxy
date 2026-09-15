@@ -518,11 +518,11 @@ fn testPushFork(
 
     const target_path = (try repoOnDiskPath(io, allocator, temp_path, "target", true)).?;
     defer allocator.free(target_path);
-    {
+    const base_oid = blk: {
         var target_repo = try rp.Repo(.xit, repo_opts).init(io, allocator, .{ .bare = true, .path = target_path });
         defer target_repo.deinit(io, allocator);
-        _ = try commitServer(&target_repo, io, allocator, .{ .files = &.{.{ .path = "main.txt", .content = "base contents\n" }} }, .{ .author = "admin <admin@example.test>", .message = "initial code" });
-    }
+        break :blk try commitServer(&target_repo, io, allocator, .{ .files = &.{.{ .path = "main.txt", .content = "base contents\n" }} }, .{ .author = "admin <admin@example.test>", .message = "initial code" });
+    };
 
     const other_path = (try repoOnDiskPath(io, allocator, temp_path, "other", true)).?;
     defer allocator.free(other_path);
@@ -731,7 +731,7 @@ fn testPushFork(
     }
 
     //
-    // restore the patch, merge its source oid, and push the merge
+    // restore the patch, merge a descendant of its source oid, and push the merge
     //
 
     {
@@ -748,8 +748,10 @@ fn testPushFork(
             .event = .{ .patch = removed.event },
         }});
     }
-    const merge_parents = [_][hash.hexLen(hash_kind)]u8{ third_source_oid, second_source_oid };
-    _ = try client.commit(io, allocator, .{ .message = "merge patch", .parent_oids = &merge_parents });
+    const merge_parents = [_][hash.hexLen(hash_kind)]u8{ base_oid, third_source_oid };
+    const merge_oid = try client.commit(io, allocator, .{ .message = "merge patch", .parent_oids = &merge_parents });
+    // later commits in the push must not be mistaken for the merge itself
+    _ = try client.commit(io, allocator, .{ .message = "after merge", .allow_empty = true });
     try client.push(io, allocator, "origin", "master:feature", false, .{ .wire = .{ .ssh = .{ .command = ssh_cmd } } });
     {
         var target = try rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = target_path });
@@ -759,11 +761,13 @@ fn testPushFork(
         const moment = try evt.currentMoment(repo_opts, &target);
         const patch = (try evt.Patch.readById(evt.EventDB(hash_kind), hash_kind, moment, &arena, &fork_id)) orelse return error.NotFound;
         try std.testing.expectEqual(.merged, patch.event.status.kind());
-        const merged_oid = switch (patch.event.status) {
-            .merged => |oid| oid,
+        const merged_range = switch (patch.event.status) {
+            .merged => |range| range,
             else => return error.InvalidPatch,
         };
-        try std.testing.expectEqualStrings(&second_source_oid, merged_oid);
+        try std.testing.expectEqual(.source, merged_range.revision);
+        try std.testing.expectEqualStrings(&base_oid, merged_range.before_oid);
+        try std.testing.expectEqualStrings(&merge_oid, merged_range.after_oid);
         const imported = (try evt.PatchRev.readById(evt.EventDB(hash_kind), hash_kind, moment, &arena, &second_revision_id)) orelse return error.NotFound;
         try std.testing.expectEqualStrings(&second_patch_oid, imported.patch_oid);
     }

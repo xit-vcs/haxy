@@ -2685,7 +2685,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 .merge => if (comptime supports_merge) {
                     if (comptime wasm) return;
                     const entry = self.data.selectedThread() orelse return;
-                    const revision: pch.MergeRevision = if (button_index > 1) .squash else .source;
+                    const revision: evt.Patch.MergeRevision = if (button_index > 1) .squash else .source;
                     if (!Data.canMerge(entry.*, self.session) or entry.mergeability.get(revision) != .clean) return;
                     self.data.mergePatch(self.session, allocator, entry.id, revision) catch |err| switch (err) {
                         error.MergeConflict, error.MergeCheckUnavailable, error.PatchOutOfDate, error.PatchDataUnavailable => {

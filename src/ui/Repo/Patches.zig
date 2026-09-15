@@ -384,7 +384,7 @@ pub fn publishDraft(data: *const Self, session: *ui.Session, allocator: std.mem.
     });
 }
 
-pub fn mergePatch(data: *const Self, session: *ui.Session, allocator: std.mem.Allocator, id: []const u8, revision: pch.MergeRevision) !void {
+pub fn mergePatch(data: *const Self, session: *ui.Session, allocator: std.mem.Allocator, id: []const u8, revision: evt.Patch.MergeRevision) !void {
     const io = session.io orelse return error.NotFound;
     const repos_dir = session.repos_dir orelse return error.NotFound;
     const admin_repo = session.admin_repo orelse return error.NotFound;
@@ -755,9 +755,13 @@ fn setPatchDetails(
         const target_branch = item.record.event.target_branch;
         const revision = item.record.event.revision orelse continue;
         item.commit_count = revision.commit_count;
-        item.revision_oid = switch (item.record.event.status) {
-            .merged => |oid| oid,
-            else => revision.source_oid,
+        const merge_revision: evt.Patch.MergeRevision = switch (item.record.event.status) {
+            .merged => |merged| merged.revision,
+            else => .source,
+        };
+        item.revision_oid = switch (merge_revision) {
+            .source => revision.source_oid,
+            .squash => revision.squash_oid,
         };
         if (!item.fork_exists or status == .merged) {
             const revision_id = try evt.parseEventId(&revision.id);
@@ -766,7 +770,7 @@ fn setPatchDetails(
             }
         }
         if (status == .merged) {
-            if (std.mem.eql(u8, item.revision_oid, revision.squash_oid)) item.commit_count = 1;
+            if (merge_revision == .squash) item.commit_count = 1;
             continue;
         }
         if (comptime repo_kind == .xit) {

@@ -1585,88 +1585,90 @@ pub fn read(
     map: DB.HashMap(.read_only),
 ) !T {
     var event: T = undefined;
-
     switch (@typeInfo(T)) {
         .@"struct" => |struct_info| {
             inline for (struct_info.fields) |field| {
-                switch (@typeInfo(field.type)) {
-                    .pointer => |pointer_info| {
-                        if (pointer_info.size == .slice and pointer_info.child == u8 and pointer_info.is_const) {
-                            @field(event, field.name) = try readBytes(DB, hash_kind, arena.allocator(), map, field.name);
-                        } else {
-                            @compileError("unsupported read field type: " ++ @typeName(field.type));
-                        }
-                    },
-                    .array => |array_info| {
-                        if (array_info.child == u8) {
-                            const bytes = try readBytes(DB, hash_kind, arena.allocator(), map, field.name);
-                            if (bytes.len != array_info.len) return error.InvalidByteArrayLength;
-                            @memcpy(@field(event, field.name)[0..], bytes);
-                        } else {
-                            @compileError("unsupported read field type: " ++ @typeName(field.type));
-                        }
-                    },
-                    .bool => @field(event, field.name) = try readBool(DB, hash_kind, map, field.name),
-                    .int => |int_info| switch (int_info.signedness) {
-                        .unsigned => @field(event, field.name) = @intCast(try readUint(DB, hash_kind, map, field.name)),
-                        .signed => @field(event, field.name) = @intCast(try readInt(DB, hash_kind, map, field.name)),
-                    },
-                    .@"enum" => {
-                        const bytes = try readBytes(DB, hash_kind, arena.allocator(), map, field.name);
-                        @field(event, field.name) = std.meta.stringToEnum(field.type, bytes) orelse return error.InvalidEnumTag;
-                    },
-                    .@"union" => {
-                        if (!@hasDecl(field.type, "decode")) @compileError("unsupported read field type: " ++ @typeName(field.type));
-                        @field(event, field.name) = try field.type.decode(try readBytes(DB, hash_kind, arena.allocator(), map, field.name));
-                    },
-                    .optional => |optional_info| {
-                        // a missing key is null
-                        if (try map.getCursor(hash.hashInt(hash_kind, field.name))) |cursor| {
-                            if (optional_info.child == []const u8) {
-                                @field(event, field.name) = try cursor.readBytesAlloc(arena.allocator(), null);
-                            } else switch (@typeInfo(optional_info.child)) {
-                                .int => |int_info| switch (int_info.signedness) {
-                                    .unsigned => @field(event, field.name) = @intCast(try cursor.readUint()),
-                                    .signed => @field(event, field.name) = @intCast(try cursor.readInt()),
-                                },
-                                .array => |array_info| {
-                                    if (array_info.child != u8) @compileError("unsupported read field type: " ++ @typeName(field.type));
-                                    var bytes: optional_info.child = undefined;
-                                    const value = try cursor.readBytes(&bytes);
-                                    if (value.len != bytes.len) return error.InvalidByteArrayLength;
-                                    @field(event, field.name) = bytes;
-                                },
-                                .@"struct" => @field(event, field.name) = try read(
-                                    optional_info.child,
-                                    DB,
-                                    hash_kind,
-                                    arena,
-                                    try DB.HashMap(.read_only).init(cursor),
-                                ),
-                                else => @compileError("unsupported read field type: " ++ @typeName(field.type)),
-                            }
-                        } else {
-                            @field(event, field.name) = null;
-                        }
-                    },
-                    .@"struct" => {
-                        const cursor = try map.getCursor(hash.hashInt(hash_kind, field.name)) orelse return error.NotFound;
-                        @field(event, field.name) = try read(
-                            field.type,
-                            DB,
-                            hash_kind,
-                            arena,
-                            try DB.HashMap(.read_only).init(cursor),
-                        );
-                    },
-                    else => @compileError("unsupported read field type: " ++ @typeName(field.type)),
-                }
+                const cursor = try map.getCursor(hash.hashInt(hash_kind, field.name));
+                @field(event, field.name) = try readField(field.type, DB, hash_kind, arena, cursor);
             }
         },
         else => @compileError("read expects a struct"),
     }
-
     return event;
+}
+
+fn readField(
+    comptime Field: type,
+    comptime DB: type,
+    comptime hash_kind: hash.HashKind,
+    arena: *std.heap.ArenaAllocator,
+    cursor_maybe: ?DB.Cursor(.read_only),
+) !Field {
+    if (@typeInfo(Field) == .optional) {
+        // a missing key or a null union payload is null
+        const cursor = cursor_maybe orelse return null;
+        if (cursor.slot().tag == .none) return null;
+        return try readField(@typeInfo(Field).optional.child, DB, hash_kind, arena, cursor);
+    }
+    const cursor = cursor_maybe orelse return error.NotFound;
+    switch (@typeInfo(Field)) {
+        .pointer => |pointer_info| {
+            if (pointer_info.size != .slice or pointer_info.child != u8 or !pointer_info.is_const) {
+                @compileError("unsupported read field type: " ++ @typeName(Field));
+            }
+            return try cursor.readBytesAlloc(arena.allocator(), null);
+        },
+        .array => |array_info| {
+            if (array_info.child != u8) @compileError("unsupported read field type: " ++ @typeName(Field));
+            var bytes: Field = undefined;
+            if ((try cursor.readBytes(&bytes)).len != bytes.len) return error.InvalidByteArrayLength;
+            return bytes;
+        },
+        .bool => {
+            var buffer: [5]u8 = undefined;
+            const bytes = try cursor.readBytesObject(&buffer);
+            const format_tag = bytes.format_tag orelse return error.InvalidFormatTag;
+            if (!std.mem.eql(u8, &format_tag, "bl")) return error.InvalidFormatTag;
+            if (std.mem.eql(u8, bytes.value, "true")) return true;
+            if (std.mem.eql(u8, bytes.value, "false")) return false;
+            return error.InvalidBool;
+        },
+        .int => |int_info| return switch (int_info.signedness) {
+            .unsigned => @intCast(try cursor.readUint()),
+            .signed => @intCast(try cursor.readInt()),
+        },
+        .@"enum" => return std.meta.stringToEnum(Field, try cursor.readBytesAlloc(arena.allocator(), null)) orelse error.InvalidEnumTag,
+        .@"union" => |union_info| {
+            if (union_info.tag_type == null) @compileError("unsupported read field type: " ++ @typeName(Field));
+            switch (cursor.slot().tag) {
+                .bytes, .short_bytes => {
+                    const name = try cursor.readBytesAlloc(arena.allocator(), null);
+                    inline for (union_info.fields) |variant| {
+                        if (variant.type == void and std.mem.eql(u8, name, variant.name)) {
+                            return @unionInit(Field, variant.name, {});
+                        }
+                    }
+                    return error.InvalidUnion;
+                },
+                .hash_map => {
+                    const variants = try DB.HashMap(.read_only).init(cursor);
+                    var iter = try variants.iterator();
+                    const entry = (try iter.next()) orelse return error.InvalidUnion;
+                    const pair = try entry.readKeyValuePair();
+                    if (try iter.next() != null) return error.InvalidUnion;
+                    inline for (union_info.fields) |variant| {
+                        if (variant.type != void and pair.hash == hash.hashInt(hash_kind, variant.name)) {
+                            return @unionInit(Field, variant.name, try readField(variant.type, DB, hash_kind, arena, pair.value_cursor));
+                        }
+                    }
+                    return error.InvalidUnion;
+                },
+                else => return error.InvalidUnion,
+            }
+        },
+        .@"struct" => return try read(Field, DB, hash_kind, arena, try DB.HashMap(.read_only).init(cursor)),
+        else => @compileError("unsupported read field type: " ++ @typeName(Field)),
+    }
 }
 
 // whether two events carry the same data
@@ -1717,53 +1719,6 @@ pub fn fieldEqual(comptime Field: type, a: Field, b: Field) bool {
         },
         else => @compileError("unsupported field type: " ++ @typeName(Field)),
     }
-}
-
-fn readBytes(
-    comptime DB: type,
-    comptime hash_kind: hash.HashKind,
-    allocator: std.mem.Allocator,
-    map: DB.HashMap(.read_only),
-    field_name: []const u8,
-) ![]const u8 {
-    const cursor = try map.getCursor(hash.hashInt(hash_kind, field_name)) orelse return error.NotFound;
-    return try cursor.readBytesAlloc(allocator, null);
-}
-
-fn readUint(
-    comptime DB: type,
-    comptime hash_kind: hash.HashKind,
-    map: DB.HashMap(.read_only),
-    field_name: []const u8,
-) !u64 {
-    const cursor = try map.getCursor(hash.hashInt(hash_kind, field_name)) orelse return error.NotFound;
-    return try cursor.readUint();
-}
-
-fn readInt(
-    comptime DB: type,
-    comptime hash_kind: hash.HashKind,
-    map: DB.HashMap(.read_only),
-    field_name: []const u8,
-) !i64 {
-    const cursor = try map.getCursor(hash.hashInt(hash_kind, field_name)) orelse return error.NotFound;
-    return try cursor.readInt();
-}
-
-fn readBool(
-    comptime DB: type,
-    comptime hash_kind: hash.HashKind,
-    map: DB.HashMap(.read_only),
-    field_name: []const u8,
-) !bool {
-    const cursor = try map.getCursor(hash.hashInt(hash_kind, field_name)) orelse return error.NotFound;
-    var buffer: [5]u8 = undefined;
-    const bytes = try cursor.readBytesObject(&buffer);
-    const format_tag = bytes.format_tag orelse return error.InvalidFormatTag;
-    if (!std.mem.eql(u8, &format_tag, "bl")) return error.InvalidFormatTag;
-    if (std.mem.eql(u8, bytes.value, "true")) return true;
-    if (std.mem.eql(u8, bytes.value, "false")) return false;
-    return error.InvalidBool;
 }
 
 //
@@ -1847,12 +1802,32 @@ fn upsertField(
             try map.put(key, .{ .bytes_object = .{ .value = bytes, .format_tag = "bl".* } });
         },
         .@"enum" => try upsertBytes(DB, hash_kind, map, key, @tagName(value)),
-        .@"union" => {
-            if (!@hasDecl(Field, "encode") or !@hasDecl(Field, "max_encoded_len")) {
-                @compileError("unsupported upsert field type: " ++ @typeName(Field));
-            }
-            var buffer: [Field.max_encoded_len]u8 = undefined;
-            try upsertBytes(DB, hash_kind, map, key, try value.encode(&buffer));
+        .@"union" => switch (value) {
+            inline else => |payload, tag| {
+                if (@TypeOf(payload) == void) {
+                    try upsertBytes(DB, hash_kind, map, key, @tagName(tag));
+                } else {
+                    const tag_key = hash.hashInt(hash_kind, @tagName(tag));
+                    if (try map.getCursor(key)) |cursor| {
+                        switch (cursor.slot().tag) {
+                            .hash_map => {
+                                const variants = try DB.HashMap(.read_only).init(cursor);
+                                if (try variants.getCursor(tag_key) == null) try map.put(key, .{ .slot = null });
+                            },
+                            else => try map.put(key, .{ .slot = null }),
+                        }
+                    }
+                    const variants = try DB.HashMap(.read_write).init(try map.putCursor(key));
+                    if (@typeInfo(@TypeOf(payload)) == .optional) {
+                        // keep the variant even when its payload is null
+                        if (payload == null) return try variants.put(tag_key, .{ .slot = null });
+                    }
+                    if (try variants.getCursor(tag_key)) |cursor| {
+                        if (cursor.slot().tag == .none) _ = try variants.remove(tag_key);
+                    }
+                    try upsertField(DB, hash_kind, variants, @tagName(tag), @TypeOf(payload), payload);
+                }
+            },
         },
         .optional => |optional_info| {
             // a missing key is null
@@ -1895,6 +1870,10 @@ fn bytesEqual(
     cursor: *DB.Cursor(.read_only),
     value: []const u8,
 ) !bool {
+    switch (cursor.slot().tag) {
+        .bytes, .short_bytes => {},
+        else => return false,
+    }
     var read_buffer: [1024]u8 = undefined;
     var reader = try cursor.reader(&read_buffer);
     if (reader.size != value.len) {

@@ -178,7 +178,7 @@ test "branch patches merge without a fork" {
     try testBranchMerge(.squash);
 }
 
-fn testBranchMerge(selection: pch.MergeRevision) !void {
+fn testBranchMerge(selection: evt.Patch.MergeRevision) !void {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
     const opts: rp.RepoOpts(.xit) = .{ .is_test = true, .ProgressCtx = *push.PushProgress };
@@ -240,14 +240,37 @@ fn testBranchMerge(selection: pch.MergeRevision) !void {
         try std.testing.expectEqualDeep(pch.Mergeability{ .source = .clean, .squash = .clean }, result);
     }
 
+    // a diverged target produces a merge commit in both merge styles
+    {
+        const file = try repo.core.work_dir.createFile(io, "target.txt", .{});
+        defer file.close(io);
+        try file.writeStreamingAll(io, "target only\n");
+    }
+    try repo.add(io, allocator, &.{"target.txt"});
+    const target_oid = try repo.commit(io, allocator, .{ .message = "advance target" });
+    pch.refreshMergeability(opts, io, allocator, &repo, id);
+
     // both merge styles use the stored revision, without fork data
     try pch.merge(opts, io, allocator, path, &repo, .{ .id = id_hex, .revision = selection, .author = author, .timestamp = 100 });
     const merged = (try evt.Patch.readFromRepo(.xit, opts, io, allocator, &arena, &repo, &id)) orelse return error.NotFound;
-    const oid = switch (merged.event.status) {
+    const range = switch (merged.event.status) {
         .merged => |value| value,
         else => return error.NotMerged,
     };
-    try std.testing.expectEqualStrings(if (selection == .source) revision.source_oid else revision.squash_oid, oid);
+    const result_oid = (try repo.readRef(io, .{ .kind = .head, .name = "master" })) orelse return error.NotFound;
+    try std.testing.expectEqual(selection, range.revision);
+    try std.testing.expectEqualStrings(&target_oid, range.before_oid);
+    try std.testing.expectEqualStrings(&result_oid, range.after_oid);
+    {
+        var commits = try repo.log(io, allocator, .{ .start_oids = &.{result_oid} });
+        defer commits.deinit();
+        const commit = (try commits.next(allocator)) orelse return error.NotFound;
+        defer commit.deinit();
+        const parents = commit.content.commit.metadata.parent_oids orelse return error.ParentOidsNotFound;
+        try std.testing.expectEqual(2, parents.len);
+        try std.testing.expectEqualStrings(&target_oid, &parents[0]);
+        try std.testing.expectEqualStrings(if (selection == .source) revision.source_oid else revision.squash_oid, &parents[1]);
+    }
 
     // the source survives, and merged patches no longer follow it
     _ = try repo.commitAtRef(io, allocator, .{ .message = "later" }, null, .{ .kind = .head, .name = "feature" });
@@ -568,7 +591,7 @@ test "patch event conflicts, stacking, and gc" {
         .{ .tree = .{ .name = "head", .oid = &source_b_tree } },
     };
     var parent_patch = updated_patch;
-    parent_patch.status = .{ .merged = &source_b_oid };
+    parent_patch.status = .{ .merged = .{ .revision = .source, .before_oid = &base_oid, .after_oid = &source_b_oid } };
     {
         try consumePatchWithRevision(.repo, io, allocator, &target, side_events_ref, patchrev_b_id, .{
             .base_oid = &base_oid,
@@ -682,7 +705,7 @@ test "patch event conflicts, stacking, and gc" {
         .event = .{ .patch = closed_child },
     }});
     var merged_child = child.event;
-    merged_child.status = .{ .merged = (child.event.revision orelse return error.NotFound).source_oid };
+    merged_child.status = .{ .merged = .{ .revision = .source, .before_oid = &base_oid, .after_oid = (child.event.revision orelse return error.NotFound).source_oid } };
     try evt.consume(.local, .repo, .xit, repo_opts, io, allocator, &target, status_side_ref, &.{.{
         .id = std.fmt.bytesToHex(child_id, .lower),
         .timestamp = 15,
@@ -724,7 +747,7 @@ test "patch event conflicts, stacking, and gc" {
             .description = "has no revision",
             .tags = "enhancement",
             .target_branch = "master",
-            .status = .{ .merged = &base_oid },
+            .status = .{ .merged = .{ .revision = .source, .before_oid = &base_oid, .after_oid = &base_oid } },
         } },
     }}));
 
@@ -750,7 +773,7 @@ test "patch lifecycle" {
     try patchLifecycle(.source);
 }
 
-fn patchLifecycle(merge_revision: pch.MergeRevision) !void {
+fn patchLifecycle(merge_revision: evt.Patch.MergeRevision) !void {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
 
@@ -1045,11 +1068,13 @@ fn patchLifecycle(merge_revision: pch.MergeRevision) !void {
     const merged_moment = try evt.currentMoment(repo_opts, &target);
     const merged = (try evt.Patch.readById(Repo.DB, repo_opts.hash, merged_moment, &arena, &patch_id)) orelse return error.NotFound;
     try std.testing.expectEqual(.merged, merged.event.status.kind());
-    const merged_oid = switch (merged.event.status) {
-        .merged => |oid| oid,
+    const merged_range = switch (merged.event.status) {
+        .merged => |range| range,
         else => return error.InvalidPatch,
     };
-    try std.testing.expectEqualStrings(&selected_oid, merged_oid);
+    try std.testing.expectEqual(merge_revision, merged_range.revision);
+    try std.testing.expectEqualStrings(&base_oid, merged_range.before_oid);
+    try std.testing.expectEqualStrings(&selected_oid, merged_range.after_oid);
     try std.testing.expect(null != try evt.PatchRev.readById(Repo.DB, repo_opts.hash, merged_moment, &arena, &first_patchrev_id));
 
     _ = arena.reset(.retain_capacity);
