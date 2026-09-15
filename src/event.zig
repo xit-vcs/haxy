@@ -1003,6 +1003,7 @@ pub fn consumeInTransaction(
                             .base_tree_oid = &trees.base,
                             .head_tree_oid = &trees.head,
                             .patch_oid = &patch_oid,
+                            .commit_count = PatchRev.commitCount(repo_kind, repo_opts, read_state, io, allocator, event.base_oid, event.source_oid) catch null,
                         };
                     } else null;
                     try PatchRev.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, record_maybe, &arena, &repo_event_oid);
@@ -1624,6 +1625,10 @@ pub fn read(
                             if (optional_info.child == []const u8) {
                                 @field(event, field.name) = try cursor.readBytesAlloc(arena.allocator(), null);
                             } else switch (@typeInfo(optional_info.child)) {
+                                .int => |int_info| switch (int_info.signedness) {
+                                    .unsigned => @field(event, field.name) = @intCast(try cursor.readUint()),
+                                    .signed => @field(event, field.name) = @intCast(try cursor.readInt()),
+                                },
                                 .array => |array_info| {
                                     if (array_info.child != u8) @compileError("unsupported read field type: " ++ @typeName(field.type));
                                     var bytes: optional_info.child = undefined;
@@ -1852,22 +1857,7 @@ fn upsertField(
         .optional => |optional_info| {
             // a missing key is null
             if (value) |child| {
-                if (optional_info.child == []const u8) {
-                    try upsertBytes(DB, hash_kind, map, key, child);
-                } else switch (@typeInfo(optional_info.child)) {
-                    .array => |array_info| {
-                        if (array_info.child != u8) @compileError("unsupported upsert field type: " ++ @typeName(Field));
-                        try upsertBytes(DB, hash_kind, map, key, &child);
-                    },
-                    .@"struct" => try upsert(
-                        optional_info.child,
-                        DB,
-                        hash_kind,
-                        try DB.HashMap(.read_write).init(try map.putCursor(key)),
-                        child,
-                    ),
-                    else => @compileError("unsupported upsert field type: " ++ @typeName(Field)),
-                }
+                try upsertField(DB, hash_kind, map, field_name, optional_info.child, child);
             } else {
                 _ = try map.remove(key);
             }

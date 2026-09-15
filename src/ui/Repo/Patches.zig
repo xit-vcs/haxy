@@ -157,6 +157,7 @@ pub const PatchWithId = struct {
     attachments: []const Attachment.WithId = &.{},
     draft: bool = false,
     revision_oid: []const u8 = "",
+    commit_count: ?u64 = null,
     no_changes: bool = false,
     fork_exists: bool = false,
     mergeability: pch.Mergeability = .{},
@@ -256,10 +257,6 @@ pub fn statusKind(event: Event) Status {
 
 pub fn listRoute(identity: []const u8, status: Status, tag: []const u8, selected: []const u8) ?ui.RoutablePage {
     return ui.RoutablePage.repoPatchesRoute(identity, status, tag, selected);
-}
-
-pub fn forkRoute(identity: []const u8, id: []const u8) ?ui.RoutablePage {
-    return ui.RoutablePage.forkPatchRoute(identity, id);
 }
 
 pub fn draftsRoute(identity: []const u8) ?ui.RoutablePage {
@@ -741,6 +738,7 @@ fn setPatchDetails(
         }
         const target_branch = item.record.event.target_branch;
         const revision = item.record.event.revision orelse continue;
+        item.commit_count = revision.commit_count;
         item.revision_oid = switch (item.record.event.status) {
             .merged => |oid| oid,
             else => revision.source_oid,
@@ -846,12 +844,17 @@ pub fn loadDraftEntry(
     const patch = (try evt.Patch.readById(evt.EventDB(.sha1), .sha1, moment, arena, &id)) orelse return null;
     const target_branch = patch.event.target_branch;
     const target_oid = try target_repo.readRef(io, .{ .kind = .head, .name = target_branch });
+    const commit_count: ?u64 = blk: {
+        const newest = evt.PatchRev.readNewest(evt.EventDB(.sha1), .sha1, moment, arena) catch break :blk null;
+        break :blk if (newest) |revision| revision.record.commit_count else 0;
+    };
     return .{
         .id = try aa.dupe(u8, &id_hex),
         .record = patch,
         .author = try ui.Author.initFromEmail(admin_moment, arena, patch.author_email),
         .draft = true,
         .revision_oid = try aa.dupe(u8, &fork_oid),
+        .commit_count = commit_count,
         .no_changes = if (target_oid) |oid| std.mem.eql(u8, &oid, &fork_oid) else false,
         .fork_exists = true,
     };

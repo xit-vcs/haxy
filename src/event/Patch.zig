@@ -19,12 +19,14 @@ pub const Revision = struct {
     id: [evt.event_id_size * 2]u8,
     squash_oid: []const u8,
     source_oid: []const u8,
+    commit_count: ?u64 = null,
 
     pub fn fromRecord(id: [evt.event_id_size]u8, record: evt.PatchRev.Record) Revision {
         return .{
             .id = std.fmt.bytesToHex(id, .lower),
             .squash_oid = record.patch_oid,
             .source_oid = record.event.source_oid,
+            .commit_count = record.commit_count,
         };
     }
 

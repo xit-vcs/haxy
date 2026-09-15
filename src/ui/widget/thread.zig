@@ -493,10 +493,6 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
             return if (supports_merge) Data.mergeRoute(identity, selected) else null;
         }
 
-        fn forkRoute(identity: []const u8, id: []const u8) ?ui.RoutablePage {
-            return if (supports_forks) Data.forkRoute(identity, id) else null;
-        }
-
         fn resolveRoute(identity: []const u8, selected: []const u8, picks: []const u8) ?ui.RoutablePage {
             return if (supports_conflicts) Data.resolveRoute(identity, selected, picks) else null;
         }
@@ -541,10 +537,12 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                 const pa = self.session.page_arena.allocator();
 
                 if (entryHasFork(entry) and self.session.data.current_page.parent() != .fork) {
-                    const route = forkRoute(self.data.identity, entry.id) orelse return error.RouteTooLong;
-                    try addToolButton(allocator, row, "view fork", "", try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}));
                     const diff_route = ui.RoutablePage.forkDiffRoute(self.data.identity, entry.id, 0, "") orelse return error.RouteTooLong;
                     try addToolButton(allocator, row, "view diff", "", try std.fmt.allocPrint(pa, "a:{s}", .{try diff_route.toUrl(self.session.page_arena)}));
+                    const commits_route = ui.RoutablePage.forkCommitsRoute(self.data.identity, entry.id, "", 0, "") orelse return error.RouteTooLong;
+                    const commit_count = if (supports_forks) entry.commit_count else null;
+                    const label = if (commit_count) |count| try std.fmt.allocPrint(pa, "view commits ({d})", .{count}) else "view commits";
+                    try addToolButton(allocator, row, label, "", try std.fmt.allocPrint(pa, "a:{s}", .{try commits_route.toUrl(self.session.page_arena)}));
                 }
 
                 {

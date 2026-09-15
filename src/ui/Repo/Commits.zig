@@ -153,21 +153,14 @@ pub fn init(
         }
     }
 
-    const commit_count: ?u64 = switch (repo_kind) {
-        .git => null,
-        .xit => blk: {
-            const head_count = repo.commitCount(io, gpa, .{ .oid = &resolved.oid }) catch break :blk null;
-            const base_oid = base_oid_maybe orelse break :blk head_count;
-            const base_count = repo.commitCount(io, gpa, .{ .oid = &base_oid }) catch break :blk null;
-            break :blk if (head_count >= base_count) head_count - base_count else null;
-        },
-    };
-
     return .{
         .location = try location.dupe(aa),
         .ref_or_oid = resolved.ref_or_oid,
         .ref_or_oid_value = resolved.value,
-        .commit_count = commit_count,
+        .commit_count = if (repo_kind == .xit and base_oid_maybe == null)
+            repo.commitCount(io, gpa, .{ .oid = &resolved.oid }) catch null
+        else
+            null,
         .commits = try aa.dupe(Commit, buf[0..count]),
         .next_start = next_start,
         .content = try pageContent(aa, content),

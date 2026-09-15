@@ -57,8 +57,9 @@ pub fn init(arena: *std.heap.ArenaAllocator, session: *ui.Session, route: ui.Rou
     const fork_moment = try evt.currentMoment(.{}, &fork_repo);
     const retained_patch = (try evt.Patch.readById(evt.EventDB(.sha1), .sha1, fork_moment, arena, &id)) orelse return error.NotFound;
     const fork_oid = (try fork_repo.readRef(io, fork.ref)) orelse return error.NotFound;
+    const newest_revision = try evt.PatchRev.readNewest(evt.EventDB(.sha1), .sha1, fork_moment, arena);
     var commits_base_oid = fork_oid;
-    if (try evt.PatchRev.readNewest(evt.EventDB(.sha1), .sha1, fork_moment, arena)) |revision| {
+    if (newest_revision) |revision| {
         if (revision.record.event.base_oid.len != commits_base_oid.len) return error.NotFound;
         @memcpy(&commits_base_oid, revision.record.event.base_oid);
     }
@@ -126,7 +127,8 @@ pub fn init(arena: *std.heap.ArenaAllocator, session: *ui.Session, route: ui.Rou
         .id = &id_hex,
     } };
     const files = try Files.init(.xit, .{}, arena, &fork_repo, io, arena.child_allocator, location, requested_ref, requested_value, files_path, files_line);
-    const commits = try Commits.init(.xit, .{}, arena, &fork_repo, io, arena.child_allocator, haxy_moment, location, requested_ref, requested_value, commits_content, commits_base_oid);
+    var commits = try Commits.init(.xit, .{}, arena, &fork_repo, io, arena.child_allocator, haxy_moment, location, requested_ref, requested_value, commits_content, commits_base_oid);
+    commits.commit_count = if (newest_revision) |revision| revision.record.commit_count else 0;
     const diff_start: usize = switch (route) {
         .fork_diff => |d| d.start,
         else => 0,

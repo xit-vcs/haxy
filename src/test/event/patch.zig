@@ -13,6 +13,40 @@ const repo_opts: rp.RepoOpts(.xit) = .{ .is_test = true };
 const Repo = rp.Repo(.xit, repo_opts);
 const author = evt.CommitAuthor{ .name = "alice", .email = "alice@example.test" };
 
+test "patch commit counts require a short first-parent path" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const path = try temp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(path);
+    var repo = try Repo.init(io, allocator, .{ .path = path });
+    defer repo.deinit(io, allocator);
+    const branch = rf.Ref{ .kind = .head, .name = "patch" };
+
+    // a second-parent base must not produce a misleading depth difference
+    const root = try repo.commitAtRef(io, allocator, .{ .message = "root" }, null, branch);
+    const base = try repo.commitAtRef(io, allocator, .{ .message = "base" }, null, branch);
+    const source = try repo.commitAtRef(io, allocator, .{ .message = "source", .parent_oids = &.{root} }, null, branch);
+    var tip = try repo.commitAtRef(io, allocator, .{ .message = "merge", .parent_oids = &.{ source, base } }, null, branch);
+    var moment = try repo.core.latestMoment();
+    const state = Repo.State(.read_only){ .core = &repo.core, .extra = .{ .moment = &moment } };
+    try std.testing.expectEqual(null, try evt.PatchRev.commitCount(.xit, repo_opts, state, io, allocator, &base, &tip));
+    try std.testing.expectEqual(@as(?u64, 2), try evt.PatchRev.commitCount(.xit, repo_opts, state, io, allocator, &root, &tip));
+    try std.testing.expectEqual(null, try evt.PatchRev.commitCount(.xit, repo_opts, state, io, allocator, &tip, &root));
+    try std.testing.expectEqual(null, try evt.PatchRev.commitCount(.xit, repo_opts, state, io, allocator, &base, &source));
+
+    // long ranges omit the count instead of walking unbounded history
+    for (2..256) |_| {
+        tip = try repo.commitAtRef(io, allocator, .{ .message = "next" }, null, branch);
+    }
+    moment = try repo.core.latestMoment();
+    try std.testing.expectEqual(@as(?u64, 256), try evt.PatchRev.commitCount(.xit, repo_opts, state, io, allocator, &root, &tip));
+    tip = try repo.commitAtRef(io, allocator, .{ .message = "next" }, null, branch);
+    moment = try repo.core.latestMoment();
+    try std.testing.expectEqual(null, try evt.PatchRev.commitCount(.xit, repo_opts, state, io, allocator, &root, &tip));
+}
+
 test "branch patch lifecycle" {
     try testBranchPatch(.git, .sha1);
     try testBranchPatch(.git, .sha256);
@@ -58,6 +92,7 @@ fn testBranchPatch(comptime kind: rp.RepoKind, comptime hash_kind: hash.HashKind
     const first = (try evt.Patch.readFromRepo(kind, opts, io, allocator, &arena, &repo, &id)) orelse return error.NotFound;
     const first_revision = first.event.revision orelse return error.NotFound;
     try std.testing.expectEqualStrings(&base, first_revision.source_oid);
+    try std.testing.expectEqual(@as(?u64, if (kind == .xit) 0 else null), first_revision.commit_count);
     try std.testing.expectEqualStrings(&base, &(try repo.readRef(io, .{ .kind = .head, .name = "master" }) orelse return error.NotFound));
 
     // an unchanged refresh does not add events
@@ -80,6 +115,7 @@ fn testBranchPatch(comptime kind: rp.RepoKind, comptime hash_kind: hash.HashKind
     const updated = (try evt.Patch.readFromRepo(kind, opts, io, allocator, &arena, &repo, &id)) orelse return error.NotFound;
     const revision = updated.event.revision orelse return error.NotFound;
     try std.testing.expectEqualStrings(&next, revision.source_oid);
+    try std.testing.expectEqual(@as(?u64, if (kind == .xit) 1 else null), revision.commit_count);
     try std.testing.expect(!std.mem.eql(u8, &first_revision.id, &revision.id));
     try std.testing.expectEqualStrings(patch.title, updated.event.title);
 

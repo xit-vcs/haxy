@@ -602,6 +602,7 @@ fn testPushFork(
         const selected = patch.event.revision orelse return error.NotFound;
         try std.testing.expectEqualStrings("master", patch.event.target_branch);
         try std.testing.expectEqualStrings(&source_oid, selected.source_oid);
+        try std.testing.expectEqual(@as(?u64, 1), selected.commit_count);
         first_revision_id = try evt.parseEventId(&selected.id);
         const revision = (try evt.PatchRev.readById(evt.EventDB(hash_kind), hash_kind, moment, &arena, &first_revision_id)) orelse return error.NotFound;
         try std.testing.expectEqualStrings(&source_oid, revision.event.source_oid);
@@ -677,6 +678,7 @@ fn testPushFork(
         const selected = patch.event.revision orelse return error.NotFound;
         try std.testing.expectEqualStrings(&std.fmt.bytesToHex(second_revision_id, .lower), &selected.id);
         try std.testing.expectEqualStrings(&second_source_oid, selected.source_oid);
+        try std.testing.expectEqual(@as(?u64, 2), selected.commit_count);
         try std.testing.expectEqualStrings("feature", patch.event.target_branch);
     }
 

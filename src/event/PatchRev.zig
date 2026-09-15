@@ -19,6 +19,7 @@ pub const Record = struct {
     base_tree_oid: []const u8,
     head_tree_oid: []const u8,
     patch_oid: []const u8,
+    commit_count: ?u64 = null,
 };
 
 const Self = @This();
@@ -26,6 +27,8 @@ const Self = @This();
 pub const merge_policy: evt.MergePolicy = .target_wins;
 pub const record_map_key = "event-id->patchrev";
 pub const all_id_set_key = "patchrev-id-set";
+
+const commit_count_limit = 256;
 
 // prepare a revision event and its patch reference in the caller's arena
 pub fn prepare(
@@ -57,8 +60,47 @@ pub fn prepare(
     entries[1] = .{ .tree = .{ .name = "head", .oid = try allocator.dupe(u8, &source_object.content.commit.tree) } };
     return .{
         .event = .{ .id = id_hex, .author = author, .timestamp = timestamp, .tree_entries = entries, .event = .{ .patchrev = revision } },
-        .revision = .{ .id = id_hex, .source_oid = revision.source_oid, .squash_oid = try allocator.dupe(u8, &squash) },
+        .revision = .{
+            .id = id_hex,
+            .source_oid = revision.source_oid,
+            .squash_oid = try allocator.dupe(u8, &squash),
+            .commit_count = commitCount(repo_kind, repo_opts, state.readOnly(), io, allocator, base_oid, source_oid) catch null,
+        },
     };
+}
+
+// only show the depth difference if a short first-parent walk reaches the base
+pub fn commitCount(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    base_oid: []const u8,
+    source_oid: []const u8,
+) !?u64 {
+    switch (repo_kind) {
+        .git => return null,
+        .xit => {
+            const oid_len = comptime hash.hexLen(repo_opts.hash);
+            if (base_oid.len != oid_len or source_oid.len != oid_len) return error.InvalidOid;
+            const base_count = try state.commitCount(io, allocator, .{ .oid = base_oid[0..oid_len] });
+            const source_count = try state.commitCount(io, allocator, .{ .oid = source_oid[0..oid_len] });
+            const count = std.math.sub(u64, source_count, base_count) catch return null;
+            if (count > commit_count_limit) return null;
+
+            // depth subtraction is only valid if the base is on the source's first-parent chain
+            var oid = source_oid[0..oid_len].*;
+            var remaining = count;
+            while (remaining > 0) : (remaining -= 1) {
+                var object = try obj.Object(.xit, repo_opts).initCommit(state, io, allocator, &oid);
+                defer object.deinit();
+                const parent = object.content.commit.metadata.firstParent() orelse return null;
+                oid = parent.*;
+            }
+            return if (std.mem.eql(u8, &oid, base_oid)) count else null;
+        },
+    }
 }
 
 // create the mergeable squash commit represented by this patch revision
