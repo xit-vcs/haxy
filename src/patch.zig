@@ -110,7 +110,7 @@ fn branchEvents(
     };
 }
 
-// refresh tracked branches and, on the server, check open patches for merges.
+// refresh open patches' tracked branches and, on the server, their mergeability.
 // this runs outside the caller's transaction.
 pub fn refreshBranches(
     host_kind: evt.HostKind,
@@ -170,6 +170,7 @@ pub fn refreshBranches(
                 var id: [evt.event_id_size]u8 = undefined;
                 if ((try id_pair.key_cursor.readBytes(&id)).len != id.len) return error.InvalidPatch;
                 const record = (try evt.Patch.readById(DB, repo_opts.hash, moment, &arena, &id)) orelse continue;
+                if (record.removed or record.event.status.kind() != .open) continue;
                 if (conflicts) |map| if (try map.getCursor(&evt.orderKeyDesc(record.created_order, &id)) != null) continue;
                 if (record.event.revision) |revision| if (std.mem.eql(u8, revision.source_oid, &source)) continue;
                 try patches.put(allocator, id, record);

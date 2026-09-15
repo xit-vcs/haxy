@@ -347,6 +347,8 @@ pub fn update(
                 .closed => .closed,
                 .merged => return error.InvalidPatchStatus,
             };
+            // a closed patch may have missed source branch updates
+            if (status == .open and updated.source_branch != null) updated.revision = null;
         },
         .fields => |fields| {
             if (!branchValid(fields.target_branch)) return error.InvalidTargetBranch;

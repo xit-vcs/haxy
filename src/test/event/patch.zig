@@ -182,10 +182,27 @@ fn testBranchMerge(selection: pch.MergeRevision) !void {
     try pch.refreshBranches(.server, .xit, opts, io, allocator, &repo, null, &progress);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "Updating patches: 100% (1/1)\n") != null);
 
+    // closed patches skip source updates and contribute no progress
+    try evt.Patch.update(.server, .xit, opts, io, allocator, &repo, &id, .{ .status = .closed }, author);
+    const next = try repo.commitAtRef(io, allocator, .{ .message = "revise while closed" }, null, .{ .kind = .head, .name = "feature" });
+    const closed_tip = (try repo.readRef(io, evt.events_ref)) orelse return error.NotFound;
+    const closed_progress_len = output.written().len;
+    try pch.refreshBranches(.server, .xit, opts, io, allocator, &repo, null, &progress);
+    try std.testing.expectEqualStrings(&closed_tip, &(try repo.readRef(io, evt.events_ref) orelse return error.NotFound));
+    try std.testing.expectEqual(closed_progress_len, output.written().len);
+
+    // reopening captures the latest source and checks both merge styles
+    try evt.Patch.update(.server, .xit, opts, io, allocator, &repo, &id, .{ .status = .open }, author);
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const before = (try evt.Patch.readFromRepo(.xit, opts, io, allocator, &arena, &repo, &id)) orelse return error.NotFound;
     const revision = before.event.revision orelse return error.NotFound;
+    try std.testing.expectEqualStrings(&next, revision.source_oid);
+    {
+        var moment = try repo.core.latestMoment();
+        const result = try pch.readMergeability(opts, .{ .core = &repo.core, .extra = .{ .moment = &moment } }, io, &arena, &id, before.event);
+        try std.testing.expectEqualDeep(pch.Mergeability{ .source = .clean, .squash = .clean }, result);
+    }
 
     // both merge styles use the stored revision, without fork data
     try pch.merge(opts, io, allocator, path, &repo, .{ .id = id_hex, .revision = selection, .author = author, .timestamp = 100 });
