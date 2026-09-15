@@ -110,7 +110,8 @@ fn branchEvents(
     };
 }
 
-// refresh tracked branches outside the caller's transaction
+// refresh tracked branches and, on the server, check open patches for merges.
+// this runs outside the caller's transaction.
 pub fn refreshBranches(
     host_kind: evt.HostKind,
     comptime repo_kind: rp.RepoKind,
@@ -119,20 +120,29 @@ pub fn refreshBranches(
     allocator: std.mem.Allocator,
     repo: *rp.Repo(repo_kind, repo_opts),
     updates: ?[]const xit.net_server_receive_pack.AppliedRefUpdate,
+    progress_ctx_maybe: ?repo_opts.ProgressCtx,
 ) !void {
     const DB = evt.EventDB(repo_opts.hash);
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    var patches: std.ArrayList(struct { id: [evt.event_id_size]u8, record: evt.Patch.Record }) = .empty;
+    var patches: std.AutoArrayHashMapUnmanaged([evt.event_id_size]u8, ?evt.Patch.Record) = .empty;
     defer patches.deinit(allocator);
-    {
+    collect: {
         var local_db: ?evt.LocalEventDB(repo_opts.hash) = if (repo_kind == .git) try evt.LocalEventDB(repo_opts.hash).openReadOnly(io, allocator, repo.core.repo_dir) else null;
         defer if (local_db) |*db| db.deinit(io, allocator);
-        const moment = (if (local_db) |*db| evt.currentMomentFromDb(repo_opts.hash, db.db) else if (repo_kind == .git) return else evt.currentMoment(repo_opts, repo)) catch |err| switch (err) {
-            error.NotFound => return,
+        const moment = (if (local_db) |*db| evt.currentMomentFromDb(repo_opts.hash, db.db) else if (repo_kind == .git) break :collect else evt.currentMoment(repo_opts, repo)) catch |err| switch (err) {
+            error.NotFound => break :collect,
             else => return err,
         };
-        const source_cursor = try moment.getCursor(hash.hashInt(repo_opts.hash, evt.Patch.source_to_id_set_key)) orelse return;
+        if (repo_kind == .xit and host_kind == .server) open: {
+            const statuses_cursor = try moment.getCursor(hash.hashInt(repo_opts.hash, evt.Patch.status_to_id_set_key)) orelse break :open;
+            const statuses = try DB.SortedMap(.read_only).init(statuses_cursor);
+            const open_cursor = try statuses.getCursor("open") orelse break :open;
+            const open_patches = try DB.SortedSet(.read_only).init(open_cursor);
+            var iter = try open_patches.iteratorFromIndex(0);
+            while (try iter.next()) |cursor| try patches.put(allocator, try evt.readOrderKeyId(DB, cursor), null);
+        }
+        const source_cursor = try moment.getCursor(hash.hashInt(repo_opts.hash, evt.Patch.source_to_id_set_key)) orelse break :collect;
         const sources = try DB.SortedMap(.read_only).init(source_cursor);
         const conflicts = if (try moment.getCursor(hash.hashInt(repo_opts.hash, evt.Patch.conflicts_key))) |cursor| try DB.SortedMap(.read_only).init(cursor) else null;
         var iter = try sources.iterator();
@@ -162,15 +172,27 @@ pub fn refreshBranches(
                 const record = (try evt.Patch.readById(DB, repo_opts.hash, moment, &arena, &id)) orelse continue;
                 if (conflicts) |map| if (try map.getCursor(&evt.orderKeyDesc(record.created_order, &id)) != null) continue;
                 if (record.event.revision) |revision| if (std.mem.eql(u8, revision.source_oid, &source)) continue;
-                try patches.append(allocator, .{ .id = id, .record = record });
+                try patches.put(allocator, id, record);
             }
         }
     }
-    for (patches.items) |patch| {
-        const author = evt.CommitAuthor{ .name = "haxy", .email = patch.record.author_email orelse "user@haxy" };
-        writeBranchPatch(host_kind, repo_kind, repo_opts, io, allocator, repo, std.fmt.bytesToHex(patch.id, .lower), patch.record.event, patch.record.event, author) catch |err| {
-            std.log.warn("failed to refresh branch patch: {s}", .{@errorName(err)});
-        };
+    if (repo_opts.ProgressCtx != void) {
+        if (progress_ctx_maybe) |progress_ctx| progress_ctx.run(io, .{ .start = .{ .kind = .writing_patch, .estimated_total_items = patches.count() } }) catch {};
+    }
+    for (patches.keys(), patches.values()) |id, record_maybe| {
+        if (record_maybe) |record| {
+            const author = evt.CommitAuthor{ .name = "haxy", .email = record.author_email orelse "user@haxy" };
+            writeBranchPatch(host_kind, repo_kind, repo_opts, io, allocator, repo, std.fmt.bytesToHex(id, .lower), record.event, record.event, author) catch |err| {
+                std.log.warn("failed to refresh branch patch: {s}", .{@errorName(err)});
+            };
+        }
+        if (repo_kind == .xit and host_kind == .server) refreshMergeability(repo_opts, io, allocator, repo, id);
+        if (repo_opts.ProgressCtx != void) {
+            if (progress_ctx_maybe) |progress_ctx| progress_ctx.run(io, .{ .complete_one = .writing_patch }) catch {};
+        }
+    }
+    if (repo_opts.ProgressCtx != void) {
+        if (progress_ctx_maybe) |progress_ctx| progress_ctx.run(io, .{ .end = .writing_patch }) catch {};
     }
 }
 

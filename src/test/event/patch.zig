@@ -7,6 +7,7 @@ const hash = xit.hash;
 const rf = xit.ref;
 const fork = @import("../../fork.zig");
 const pch = @import("../../patch.zig");
+const push = @import("../../push.zig");
 
 const repo_opts: rp.RepoOpts(.xit) = .{ .is_test = true };
 const Repo = rp.Repo(.xit, repo_opts);
@@ -61,7 +62,7 @@ fn testBranchPatch(comptime kind: rp.RepoKind, comptime hash_kind: hash.HashKind
 
     // an unchanged refresh does not add events
     const event_tip = (try repo.readRef(io, evt.events_ref)) orelse return error.NotFound;
-    try pch.refreshBranches(.local, kind, opts, io, allocator, &repo, null);
+    try pch.refreshBranches(.local, kind, opts, io, allocator, &repo, null, null);
     try std.testing.expectEqualStrings(&event_tip, &(try repo.readRef(io, evt.events_ref) orelse return error.NotFound));
 
     // retargeting to the source leaves the patch and revision unchanged
@@ -75,7 +76,7 @@ fn testBranchPatch(comptime kind: rp.RepoKind, comptime hash_kind: hash.HashKind
 
     // a source update replaces the revision, not the patch metadata
     const next = try repo.commitAtRef(io, allocator, .{ .message = "next feature" }, null, .{ .kind = .head, .name = "feature" });
-    try pch.refreshBranches(.local, kind, opts, io, allocator, &repo, null);
+    try pch.refreshBranches(.local, kind, opts, io, allocator, &repo, null, null);
     const updated = (try evt.Patch.readFromRepo(kind, opts, io, allocator, &arena, &repo, &id)) orelse return error.NotFound;
     const revision = updated.event.revision orelse return error.NotFound;
     try std.testing.expectEqualStrings(&next, revision.source_oid);
@@ -123,7 +124,7 @@ fn testBranchPatch(comptime kind: rp.RepoKind, comptime hash_kind: hash.HashKind
 
     // removing the patch leaves its branch intact
     try evt.remove(.local, .repo, kind, opts, io, allocator, &repo, &id, .patch, author);
-    try pch.refreshBranches(.local, kind, opts, io, allocator, &repo, null);
+    try pch.refreshBranches(.local, kind, opts, io, allocator, &repo, null, null);
     const removed = (try evt.Patch.readFromRepo(kind, opts, io, allocator, &arena, &repo, &id)) orelse return error.NotFound;
     try std.testing.expect(removed.removed);
     try std.testing.expectEqualStrings(&next, &(try repo.readRef(io, .{ .kind = .head, .name = "feature" }) orelse return error.NotFound));
@@ -144,11 +145,12 @@ test "branch patches merge without a fork" {
 fn testBranchMerge(selection: pch.MergeRevision) !void {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
+    const opts: rp.RepoOpts(.xit) = .{ .is_test = true, .ProgressCtx = *push.PushProgress };
     var temp = std.testing.tmpDir(.{});
     defer temp.cleanup();
     const path = try temp.dir.realPathFileAlloc(io, ".", allocator);
     defer allocator.free(path);
-    var repo = try Repo.init(io, allocator, .{ .path = path });
+    var repo = try rp.Repo(.xit, opts).init(io, allocator, .{ .path = path });
     defer repo.deinit(io, allocator);
     {
         const file = try repo.core.work_dir.createFile(io, "base.txt", .{});
@@ -161,21 +163,33 @@ fn testBranchMerge(selection: pch.MergeRevision) !void {
     _ = try repo.commitAtRef(io, allocator, .{ .message = "remove file" }, null, .{ .kind = .head, .name = "feature" });
     const id = [_]u8{9} ** evt.event_id_size;
     const id_hex = std.fmt.bytesToHex(id, .lower);
-    try pch.writeBranchPatch(.server, .xit, repo_opts, io, allocator, &repo, id_hex, .{
+    try pch.writeBranchPatch(.server, .xit, opts, io, allocator, &repo, id_hex, .{
         .title = "merge branch",
         .description = "",
         .tags = "",
         .source_branch = "feature",
         .target_branch = "master",
     }, null, author);
+
+    // updating a branch and checking its mergeability counts as one patch
+    _ = try repo.commitAtRef(io, allocator, .{ .message = "revise feature" }, null, .{ .kind = .head, .name = "feature" });
+    var response = xit.net_server_receive_pack.Response.init(allocator);
+    defer response.deinit();
+    response.sideband = true;
+    var output = std.Io.Writer.Allocating.init(allocator);
+    defer output.deinit();
+    var progress = push.PushProgress{ .response = &response, .writer = &output.writer, .label = "Updating patches" };
+    try pch.refreshBranches(.server, .xit, opts, io, allocator, &repo, null, &progress);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "Updating patches: 100% (1/1)\n") != null);
+
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    const before = (try evt.Patch.readFromRepo(.xit, repo_opts, io, allocator, &arena, &repo, &id)) orelse return error.NotFound;
+    const before = (try evt.Patch.readFromRepo(.xit, opts, io, allocator, &arena, &repo, &id)) orelse return error.NotFound;
     const revision = before.event.revision orelse return error.NotFound;
 
     // both merge styles use the stored revision, without fork data
-    try pch.merge(repo_opts, io, allocator, path, &repo, .{ .id = id_hex, .revision = selection, .author = author, .timestamp = 100 });
-    const merged = (try evt.Patch.readFromRepo(.xit, repo_opts, io, allocator, &arena, &repo, &id)) orelse return error.NotFound;
+    try pch.merge(opts, io, allocator, path, &repo, .{ .id = id_hex, .revision = selection, .author = author, .timestamp = 100 });
+    const merged = (try evt.Patch.readFromRepo(.xit, opts, io, allocator, &arena, &repo, &id)) orelse return error.NotFound;
     const oid = switch (merged.event.status) {
         .merged => |value| value,
         else => return error.NotMerged,
@@ -185,7 +199,9 @@ fn testBranchMerge(selection: pch.MergeRevision) !void {
     // the source survives, and merged patches no longer follow it
     _ = try repo.commitAtRef(io, allocator, .{ .message = "later" }, null, .{ .kind = .head, .name = "feature" });
     const tip = (try repo.readRef(io, evt.events_ref)) orelse return error.NotFound;
-    try pch.refreshBranches(.server, .xit, repo_opts, io, allocator, &repo, null);
+    const progress_len = output.written().len;
+    try pch.refreshBranches(.server, .xit, opts, io, allocator, &repo, null, &progress);
+    try std.testing.expectEqual(progress_len, output.written().len);
     try std.testing.expectEqualStrings(&tip, &(try repo.readRef(io, evt.events_ref) orelse return error.NotFound));
 }
 

@@ -1,5 +1,6 @@
 const std = @import("std");
 const evt = @import("../event.zig");
+const pch = @import("../patch.zig");
 const ui = @import("../ui.zig");
 const xit = @import("xit");
 const rp = xit.repo;
@@ -231,7 +232,7 @@ pub fn init(
                             // local mode: bring the event db up to date with the events branch
                             if (session.local != null) {
                                 try evt.consume(.local, .repo, repo_kind, opened.self_repo_opts, io, gpa, opened, evt.events_ref, &.{});
-                                try @import("../patch.zig").refreshBranches(.local, repo_kind, opened.self_repo_opts, io, gpa, opened, null);
+                                try pch.refreshBranches(.local, repo_kind, opened.self_repo_opts, io, gpa, opened, null, null);
                             }
                             const files_data = try Files.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, location, requested_ref_or_oid, requested_ref_value, files_dir, files_line);
                             const target_branch = if (files_data.ref_or_oid == .branch) files_data.ref_or_oid_value else "";

@@ -13,6 +13,7 @@ const serve_common = @import("serve_common.zig");
 pub const PushProgress = struct {
     response: *xit.net_server_receive_pack.Response,
     writer: *std.Io.Writer,
+    label: []const u8 = "Processing commits",
     count: usize = 0,
     total: usize = 0,
 
@@ -32,9 +33,10 @@ pub const PushProgress = struct {
             },
             else => return,
         }
+        if (self.total == 0) return;
         var buffer: [128]u8 = undefined;
-        const percent = if (self.total == 0) 100 else @as(u128, self.count) * 100 / self.total;
-        const text = try std.fmt.bufPrint(&buffer, "Processing commits: {d}% ({d}/{d}){s}", .{ percent, self.count, self.total, if (event == .end) "\n" else "\r" });
+        const percent = @as(u128, self.count) * 100 / self.total;
+        const text = try std.fmt.bufPrint(&buffer, "{s}: {d}% ({d}/{d}){s}", .{ self.label, percent, self.count, self.total, if (event == .end) "\n" else "\r" });
         try self.response.progress(self.writer, text);
     }
 };
@@ -49,7 +51,6 @@ pub fn writeReceivedPatches(
     response: *xit.net_server_receive_pack.Response,
     writer: *std.Io.Writer,
 ) !void {
-    try response.progress(writer, "Processing commits...\n");
     var config = try xit.config.Config(.xit, repo_opts).init(state.readOnly(), io, allocator);
     defer config.deinit();
     try config.add(state, io, .{ .name = "merge.algorithm", .value = "patch" });
@@ -149,11 +150,11 @@ pub fn receivePackAndConsume(
         return err;
     };
 
-    pch.refreshBranches(.server, .xit, repo_opts, io, allocator, repo, updates.items.items) catch |err| {
+    var progress = PushProgress{ .response = &response, .writer = writer, .label = "Updating patches" };
+    pch.refreshBranches(.server, .xit, repo_opts, io, allocator, repo, updates.items.items, &progress) catch |err| {
         serve_common.logError(io, error_writer, "failed to refresh branch patches: {s}\n", .{@errorName(err)});
+        pch.refreshMergeability(repo_opts, io, allocator, repo, null);
     };
-    response.progress(writer, "Checking merges...\n") catch {};
-    pch.refreshMergeability(repo_opts, io, allocator, repo, null);
     try response.finish(writer, null);
 }
 
@@ -322,9 +323,11 @@ pub fn receiveFork(
         return err;
     };
 
-    response.progress(writer, "Checking merges...\n") catch {};
+    var progress = PushProgress{ .response = &response, .writer = writer, .label = "Updating patches" };
+    progress.run(io, .{ .start = .{ .kind = .writing_patch, .estimated_total_items = 1 } }) catch {};
 
     // best-effort update the published patch so it has the new revision
+    var refreshed = false;
     update: {
         const revision_id = revision_id_maybe orelse break :update;
         if (!published) break :update;
@@ -351,11 +354,13 @@ pub fn receiveFork(
             serve_common.logError(io, error_writer, "failed to update published patch {s}: {s}\n", .{ id, @errorName(update_err) });
             break :update;
         };
-        // consume refreshed the published patch before acknowledging the push
-        return response.finish(writer, null);
+        // consume also refreshed mergeability
+        refreshed = true;
     }
 
-    pch.refreshMergeability(repo_opts, io, allocator, target_repo, patch_id);
+    if (!refreshed) pch.refreshMergeability(repo_opts, io, allocator, target_repo, patch_id);
+    progress.run(io, .{ .complete_one = .writing_patch }) catch {};
+    progress.run(io, .{ .end = .writing_patch }) catch {};
 
     // the client may read either repo as soon as it gets the final response.
     try response.finish(writer, null);
