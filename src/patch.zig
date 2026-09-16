@@ -160,7 +160,7 @@ pub fn refreshBranches(
                 if (!found) continue;
             }
             const source = (try repo.readRef(io, .{ .kind = .head, .name = branch })) orelse {
-                std.log.warn("patch source branch missing: {s}", .{branch});
+                if (host_kind == .server) std.log.warn("patch source branch missing: {s}", .{branch});
                 continue;
             };
             const ids = try DB.CountedHashSet(.read_only).init(pair.value_cursor);
@@ -184,7 +184,7 @@ pub fn refreshBranches(
         if (record_maybe) |record| {
             const author = evt.CommitAuthor{ .name = "haxy", .email = record.author_email orelse "user@haxy" };
             writeBranchPatch(host_kind, repo_kind, repo_opts, io, allocator, repo, std.fmt.bytesToHex(id, .lower), record.event, record.event, author) catch |err| {
-                std.log.warn("failed to refresh branch patch: {s}", .{@errorName(err)});
+                if (host_kind == .server) std.log.warn("failed to refresh branch patch: {s}", .{@errorName(err)});
             };
         }
         if (repo_kind == .xit and host_kind == .server) refreshMergeability(repo_opts, io, allocator, repo, id);
