@@ -260,16 +260,10 @@ pub fn listRoute(identity: []const u8, status: Status, tag: []const u8, selected
     return ui.RoutablePage.repoPatchesRoute(identity, status, tag, selected);
 }
 
-pub fn commitsRoute(allocator: std.mem.Allocator, identity: []const u8, entry: PatchWithId) !?ui.RoutablePage {
+pub fn commitsRoute(identity: []const u8, entry: PatchWithId) !?ui.RoutablePage {
     if (entry.fork_exists and entry.record.event.status.kind() != .merged)
         return ui.RoutablePage.forkCommitsRoute(identity, entry.id, "", 0, "") orelse error.RouteTooLong;
     if (entry.revision_oid.len == 0 or entry.base_oid.len == 0) return null;
-    // open patches follow the source branch; closed and merged patches keep their recorded revision
-    if (entry.record.event.status.kind() == .open) if (entry.record.event.source_branch) |branch| {
-        const encoded = try ui.urlEncodeRef(allocator, branch);
-        defer allocator.free(encoded);
-        return ui.RoutablePage.repoCommitsRoute(identity, .branch, encoded, 0, "", entry.base_oid) orelse error.RouteTooLong;
-    };
     return ui.RoutablePage.repoCommitsRoute(identity, .object, entry.revision_oid, 0, "", entry.base_oid) orelse error.RouteTooLong;
 }
 

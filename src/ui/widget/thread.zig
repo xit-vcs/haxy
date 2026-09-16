@@ -536,7 +536,7 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                     if (try Data.diffRoute(self.data.identity, entry)) |route| {
                         try addToolButton(allocator, row, "view diff", "", try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}));
                     }
-                    if (try Data.commitsRoute(pa, self.data.identity, entry)) |route| {
+                    if (try Data.commitsRoute(self.data.identity, entry)) |route| {
                         const label = if (entry.commit_count) |count| try std.fmt.allocPrint(pa, "view commits ({d})", .{count}) else "view commits";
                         try addToolButton(allocator, row, label, "", try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}));
                     }
