@@ -533,7 +533,7 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                 const pa = self.session.page_arena.allocator();
 
                 if (supports_forks and self.session.data.current_page.parent() != .fork) {
-                    if (try Data.diffRoute(pa, self.data.identity, entry)) |route| {
+                    if (try Data.diffRoute(self.data.identity, entry)) |route| {
                         try addToolButton(allocator, row, "view diff", "", try std.fmt.allocPrint(pa, "a:{s}", .{try route.toUrl(self.session.page_arena)}));
                     }
                     if (try Data.commitsRoute(pa, self.data.identity, entry)) |route| {

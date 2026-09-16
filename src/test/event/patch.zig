@@ -296,7 +296,7 @@ fn testBranchMerge(selection: evt.Patch.MergeRevision) !void {
     try std.testing.expectEqualStrings(&tip, &(try repo.readRef(io, evt.events_ref) orelse return error.NotFound));
 
     // retain the exact merge diff after its original commits are collected
-    const diff_route = (try ui.Repo.Patches.diffRoute(allocator, "", .{ .id = &id_hex, .record = merged })) orelse return error.BadRoute;
+    const diff_route = (try ui.Repo.Patches.diffRoute("", .{ .id = &id_hex, .record = merged })) orelse return error.BadRoute;
     const diff_before = try ui.Repo.Diff.init(.xit, opts, &arena, &repo, io, allocator, diff_route.repo_diff);
     try std.testing.expectEqual(1, diff_before.window.hunks.len);
     try std.testing.expectEqualStrings("base.txt", diff_before.window.hunks[0].path orelse return error.MissingPath);

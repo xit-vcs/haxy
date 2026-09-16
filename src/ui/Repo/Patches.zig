@@ -273,17 +273,18 @@ pub fn commitsRoute(allocator: std.mem.Allocator, identity: []const u8, entry: P
     return ui.RoutablePage.repoCommitsRoute(identity, .object, entry.revision_oid, 0, "", entry.base_oid) orelse error.RouteTooLong;
 }
 
-pub fn diffRoute(allocator: std.mem.Allocator, identity: []const u8, entry: PatchWithId) !?ui.RoutablePage {
-    // merged patches show what actually landed, including conflict resolutions
-    if (entry.record.event.status == .merged) {
-        return ui.RoutablePage.repoPatchRevDiffRoute(identity, &entry.record.event.status.merged.patchrev_id, 0, "") orelse error.RouteTooLong;
-    }
-    const route = (try commitsRoute(allocator, identity, entry)) orelse return null;
-    return switch (route) {
-        .fork_commits => ui.RoutablePage.forkDiffRoute(identity, entry.id, 0, ""),
-        .repo_commits => |c| ui.RoutablePage.repoDiffRoute(identity, c.ref_or_oid, c.value.slice(), 0, "", c.base_oid.slice()),
-        else => unreachable,
-    } orelse error.RouteTooLong;
+pub fn diffRoute(identity: []const u8, entry: PatchWithId) !?ui.RoutablePage {
+    const patch = entry.record.event;
+    const revision_id = switch (patch.status) {
+        // merged patches show what actually landed, including conflict resolutions
+        .merged => |merged| merged.patchrev_id,
+        .open, .closed => blk: {
+            if (entry.fork_exists) return ui.RoutablePage.forkDiffRoute(identity, entry.id, 0, "") orelse error.RouteTooLong;
+            if (patch.source_branch == null) return null;
+            break :blk (patch.revision orelse return null).id;
+        },
+    };
+    return ui.RoutablePage.repoPatchRevDiffRoute(identity, &revision_id, 0, "") orelse error.RouteTooLong;
 }
 
 pub fn draftsRoute(identity: []const u8) ?ui.RoutablePage {
