@@ -23,6 +23,8 @@ const escape_timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromMillisecond
 
 var active_connections: std.atomic.Value(u32) = .init(0);
 
+const any_repo_opts: rp.AnyRepoOpts(.xit) = .{ .ProgressCtx = *push.PushProgress };
+
 pub const SessionHandler = struct {
     admin_repo_path: []const u8,
     repo_root_path: []const u8,
@@ -32,6 +34,7 @@ pub const SessionHandler = struct {
     git_ssh_prefix: []const u8,
     err: *std.Io.Writer,
 
+    /// returning without an exit leaves the protocol layer to send status 0
     pub fn handleSession(self: *const SessionHandler, sess: *ssh.SessionCtx, request: ssh.Request) !void {
         serve_common.logError(sess.conn.io, self.err, "ssh session: kind={s} key={s}\n", .{ @tagName(request), sess.fingerprint });
         switch (request) {
@@ -201,9 +204,7 @@ fn runTuiSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh
         const msg = std.fmt.bufPrint(&buf, "haxy ssh: {s}\r\n", .{@errorName(err)}) catch "haxy ssh: internal error\r\n";
         sess.writeBytes(msg) catch {};
         try sess.exit(1);
-        return;
     };
-    try sess.exit(0);
 }
 
 fn runTui(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh.PtySize) !void {
@@ -213,9 +214,9 @@ fn runTui(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh.PtySiz
     // some clients (notably scripted ssh with no local controlling tty)
     // allocate a pty without ever sending a non-zero size. fall back to a
     // conventional 80x24 in that case so render emits something.
-    const effective_pty = ssh.PtySize{
-        .width_cells = if (pty.width_cells == 0) 80 else pty.width_cells,
-        .height_cells = if (pty.height_cells == 0) 24 else pty.height_cells,
+    var terminal_size = Size{
+        .width = if (pty.width_cells == 0) 80 else pty.width_cells,
+        .height = if (pty.height_cells == 0) 24 else pty.height_cells,
     };
 
     // session-lifetime allocations (login, prefs); Nav owns the per-page arenas.
@@ -245,10 +246,6 @@ fn runTui(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh.PtySiz
     // flushes, restoring the client's screen. as a function-scoped defer it runs
     // before runTui returns — on the normal path and on any error — so the
     // caller can write to the client afterward (and sess.exit can close cleanly).
-    var terminal_size = Size{
-        .width = effective_pty.width_cells,
-        .height = effective_pty.height_cells,
-    };
     var terminal_maybe: ?StreamTerminal = try StreamTerminal.init(allocator, &session_writer.interface, terminal_size);
     defer if (terminal_maybe) |*terminal| terminal.deinit();
 
@@ -260,33 +257,26 @@ fn runTui(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh.PtySiz
     // sees the effect of their input on the same iteration.
     event_loop: while (true) {
         const event = try nextTuiEvent(sess, if (terminal_maybe) |*terminal| terminal else null);
-        if (terminal_maybe) |*terminal| {
-            if (event) |ev| switch (ev) {
-                .data => |payload| {
-                    defer allocator.free(payload);
+        if (event) |ev| switch (ev) {
+            .data => |payload| {
+                defer allocator.free(payload);
+                if (terminal_maybe) |*terminal| {
                     try terminal.writeBytes(payload);
-                },
-                .resize => |sz| {
-                    terminal_size = .{ .width = sz.width_cells, .height = sz.height_cells };
-                    terminal.pushResize(terminal_size);
-                },
-                .eof, .close => break :event_loop,
-            };
-            while (terminal.popKey()) |key| {
-                try ui.inputKey(allocator, &nav.root, key, &ui_session);
-            }
-        } else {
-            switch (event orelse unreachable) {
-                .data => |payload| {
-                    defer allocator.free(payload);
+                } else {
+                    // the copyable text stays up until enter
                     if (std.mem.indexOfAny(u8, payload, "\r\n") == null) continue;
                     terminal_maybe = try StreamTerminal.init(allocator, &session_writer.interface, terminal_size);
-                },
-                .resize => |sz| {
-                    terminal_size = .{ .width = sz.width_cells, .height = sz.height_cells };
-                    continue;
-                },
-                .eof, .close => break :event_loop,
+                }
+            },
+            .resize => |sz| {
+                terminal_size = .{ .width = sz.width_cells, .height = sz.height_cells };
+                if (terminal_maybe) |*terminal| terminal.pushResize(terminal_size) else continue;
+            },
+            .eof, .close => break :event_loop,
+        };
+        if (terminal_maybe) |*terminal| {
+            while (terminal.popKey()) |key| {
+                try ui.inputKey(allocator, &nav.root, key, &ui_session);
             }
         }
 
@@ -347,13 +337,13 @@ pub fn nextTuiEvent(sess: *ssh.SessionCtx, terminal: ?*StreamTerminal) !?ssh.Eve
 // git path (exec)
 // ---------------------------------------------------------------------------
 
-pub const GitService = enum { upload_pack, receive_pack };
+const GitService = enum { upload_pack, receive_pack };
 
-pub const ParsedGitCommand = struct {
+const ParsedGitCommand = struct {
     service: GitService,
     dir: []u8,
 
-    pub fn deinit(self: ParsedGitCommand, allocator: std.mem.Allocator) void {
+    fn deinit(self: ParsedGitCommand, allocator: std.mem.Allocator) void {
         allocator.free(self.dir);
     }
 };
@@ -363,71 +353,27 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, exec: ss
     const io = sess.conn.io;
     const protocol_version = xit.net_server_common.parseProtocolVersion(exec.git_protocol);
 
+    // the repo's pack functions consume the channel like any other stream.
+    // whatever they leave buffered is flushed before the exit status goes out.
+    var reader_buf: [4096]u8 = undefined;
+    var writer_buf: [4096]u8 = undefined;
+    var reader = ssh.SessionReader.init(sess, &reader_buf);
+    var writer = ssh.SessionWriter.init(sess, &writer_buf);
+    defer writer.interface.flush() catch {};
+
     const parsed = parseGitCommand(allocator, exec.command) catch return writeError(sess, "unsupported command (expected git-upload-pack or git-receive-pack)");
     defer parsed.deinit(allocator);
     const path = std.mem.trimStart(u8, parsed.dir, "/");
     const fork_prefix = "fork/";
 
     if (std.mem.startsWith(u8, path, fork_prefix)) {
-        const route = fork.parseRoute(path[fork_prefix.len..]) orelse return writeError(sess, "invalid fork path");
-        const owner_repo = evt.parseOwnerRepoPath(route.identity) orelse return writeError(sess, "repo path must be <owner>/<repo>");
-
-        var admin = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = handler.admin_repo_path });
-        defer admin.deinit(io, allocator);
-        var admin_arena = std.heap.ArenaAllocator.init(allocator);
-        defer admin_arena.deinit();
-        const admin_moment = try evt.currentMoment(evt.admin_repo_opts, &admin);
-        const fork_id = try evt.parseEventId(&route.id);
-        const fork_record = (try evt.Fork.readById(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &admin_arena, &fork_id)) orelse
-            return writeError(sess, "patch draft not found");
-        if (fork_record.removed) return writeError(sess, "patch draft not found");
-        const user = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &admin_arena, fork_record.event.user_id)) orelse
-            return writeError(sess, "invalid patch draft");
-        if (user.removed) return writeError(sess, "invalid patch draft");
-        if (parsed.service == .receive_pack and !isKeyInAuthorizedKeys(user.event.ssh_keys, &sess.fingerprint))
-            return writeError(sess, "unauthorized: this SSH key is not registered to the patch author");
-
-        const draft_path = try fork.forkPath(allocator, handler.repo_root_path, &route.id);
-        defer allocator.free(draft_path);
-        var draft = rp.AnyRepo(.xit, .{ .ProgressCtx = *push.PushProgress }).open(io, allocator, .{ .path = draft_path }) catch
-            return writeError(sess, "patch draft not found");
-        defer draft.deinit(io, allocator);
-        var reader_buf: [4096]u8 = undefined;
-        var writer_buf: [4096]u8 = undefined;
-        var reader = ssh.SessionReader.init(sess, &reader_buf);
-        var writer = ssh.SessionWriter.init(sess, &writer_buf);
-        if (parsed.service == .upload_pack) {
-            switch (draft) {
-                inline else => |*repo| try repo.uploadPack(io, allocator, &reader.interface, &writer.interface, .{ .protocol_version = protocol_version }),
-            }
-        } else {
-            const target = (try evt.Repo.readByOwnerAndName(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &admin_arena, owner_repo.owner, owner_repo.name)) orelse
-                return writeError(sess, "repo not found");
-            if (!std.mem.eql(u8, fork_record.event.repo_id, &target.event_id)) return writeError(sess, "patch draft belongs to another repo");
-            const target_id = std.fmt.bytesToHex(target.event_id, .lower);
-            const target_path = try std.fs.path.join(allocator, &.{ handler.repo_root_path, &target_id });
-            defer allocator.free(target_path);
-            const author: evt.CommitAuthor = .{ .name = user.event.name, .email = user.event.email };
-            const timestamp: u64 = @intCast(std.Io.Timestamp.now(io, .real).toSeconds());
-            switch (draft) {
-                inline else => |*repo| {
-                    var target_repo = rp.Repo(.xit, repo.self_repo_opts).open(io, allocator, .{ .path = target_path }) catch
-                        return writeError(sess, "repo not found or has the wrong hash");
-                    defer target_repo.deinit(io, allocator);
-                    try push.receiveFork(repo.self_repo_opts, io, allocator, repo, &target_repo, &route.id, author, timestamp, &reader.interface, &writer.interface, handler.err);
-                },
-            }
-        }
-        writer.interface.flush() catch {};
-        try sess.exit(0);
-        return;
+        return runForkSession(handler, sess, path[fork_prefix.len..], parsed.service, protocol_version, &reader.interface, &writer.interface);
     }
 
     const repo_prefix = "repo/";
     const repo_identity = if (std.mem.startsWith(u8, path, repo_prefix)) path[repo_prefix.len..] else path;
 
     const create_if_missing = parsed.service == .receive_pack;
-    const any_repo_opts: rp.AnyRepoOpts(.xit) = .{ .ProgressCtx = *push.PushProgress };
 
     const owner_repo = evt.parseOwnerRepoPath(repo_identity) orelse return writeError(sess, "repo path must be <owner>/<repo>");
     switch (try authorizeRepoKey(io, allocator, handler.admin_repo_path, owner_repo.owner, owner_repo.name, parsed.service, &sess.fingerprint)) {
@@ -441,30 +387,87 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, exec: ss
 
     const repo_path = switch (try serve_common.resolveRepoPath(io, allocator, handler.repo_root_path, handler.admin_repo_path, repo_identity, create_if_missing)) {
         .ok => |p| p,
-        .invalid => return writeError(sess, "repo path must be <owner>/<repo>"),
+        .invalid => unreachable, // parsed above
         .not_found => return writeError(sess, "repo not found"),
     };
     defer allocator.free(repo_path);
 
-    if (try serveIfExists(repo_path, handler.repo_root_path, sess, io, allocator, parsed.service, protocol_version, handler.err)) {
-        try sess.exit(0);
-        return;
-    }
+    if (try serveIfExists(repo_path, handler.repo_root_path, &reader.interface, &writer.interface, io, allocator, parsed.service, protocol_version, handler.err)) return;
 
     if (!create_if_missing) return writeError(sess, "repo not found");
 
     // create the on-disk repo for the just-minted event and serve the push
     var repo = try createRepo(any_repo_opts.toRepoOpts(), io, allocator, repo_path);
     defer repo.deinit(io, allocator);
-    try servePack(repo.self_repo_opts, &repo, handler.repo_root_path, sess, io, allocator, parsed.service, protocol_version, handler.err);
-    try sess.exit(0);
+    try servePack(repo.self_repo_opts, &repo, handler.repo_root_path, &reader.interface, &writer.interface, io, allocator, parsed.service, protocol_version, handler.err);
+}
+
+// serve a patch draft: anyone may fetch it, only its author may push to it
+fn runForkSession(
+    handler: *const SessionHandler,
+    sess: *ssh.SessionCtx,
+    fork_path: []const u8,
+    service: GitService,
+    protocol_version: xit.net_server_common.ProtocolVersion,
+    reader: *std.Io.Reader,
+    writer: *std.Io.Writer,
+) !void {
+    const allocator = sess.conn.allocator;
+    const io = sess.conn.io;
+
+    const route = fork.parseRoute(fork_path) orelse return writeError(sess, "invalid fork path");
+    const owner_repo = evt.parseOwnerRepoPath(route.identity) orelse return writeError(sess, "repo path must be <owner>/<repo>");
+
+    var admin = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = handler.admin_repo_path });
+    defer admin.deinit(io, allocator);
+    var admin_arena = std.heap.ArenaAllocator.init(allocator);
+    defer admin_arena.deinit();
+    const admin_moment = try evt.currentMoment(evt.admin_repo_opts, &admin);
+    const fork_id = try evt.parseEventId(&route.id);
+    const fork_record = (try evt.Fork.readById(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &admin_arena, &fork_id)) orelse
+        return writeError(sess, "patch draft not found");
+    if (fork_record.removed) return writeError(sess, "patch draft not found");
+    const user = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &admin_arena, fork_record.event.user_id)) orelse
+        return writeError(sess, "invalid patch draft");
+    if (user.removed) return writeError(sess, "invalid patch draft");
+    if (service == .receive_pack and !isKeyInAuthorizedKeys(user.event.ssh_keys, &sess.fingerprint))
+        return writeError(sess, "unauthorized: this SSH key is not registered to the patch author");
+
+    const draft_path = try fork.forkPath(allocator, handler.repo_root_path, &route.id);
+    defer allocator.free(draft_path);
+    var draft = rp.AnyRepo(.xit, any_repo_opts).open(io, allocator, .{ .path = draft_path }) catch
+        return writeError(sess, "patch draft not found");
+    defer draft.deinit(io, allocator);
+    if (service == .upload_pack) {
+        switch (draft) {
+            inline else => |*repo| try repo.uploadPack(io, allocator, reader, writer, .{ .protocol_version = protocol_version }),
+        }
+    } else {
+        const target = (try evt.Repo.readByOwnerAndName(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &admin_arena, owner_repo.owner, owner_repo.name)) orelse
+            return writeError(sess, "repo not found");
+        if (!std.mem.eql(u8, fork_record.event.repo_id, &target.event_id)) return writeError(sess, "patch draft belongs to another repo");
+        const target_id = std.fmt.bytesToHex(target.event_id, .lower);
+        const target_path = try std.fs.path.join(allocator, &.{ handler.repo_root_path, &target_id });
+        defer allocator.free(target_path);
+        const author: evt.CommitAuthor = .{ .name = user.event.name, .email = user.event.email };
+        const timestamp: u64 = @intCast(std.Io.Timestamp.now(io, .real).toSeconds());
+        switch (draft) {
+            inline else => |*repo| {
+                var target_repo = rp.Repo(.xit, repo.self_repo_opts).open(io, allocator, .{ .path = target_path }) catch
+                    return writeError(sess, "repo not found or has the wrong hash");
+                defer target_repo.deinit(io, allocator);
+                try push.receiveFork(repo.self_repo_opts, io, allocator, repo, &target_repo, &route.id, author, timestamp, reader, writer, handler.err);
+            },
+        }
+    }
 }
 
 // serve an existing repo at `repo_path`, or return false if none is there
 fn serveIfExists(
     repo_path: []const u8,
     repo_root_path: []const u8,
-    sess: *ssh.SessionCtx,
+    reader: *std.Io.Reader,
+    writer: *std.Io.Writer,
     io: std.Io,
     allocator: std.mem.Allocator,
     service: GitService,
@@ -475,7 +478,6 @@ fn serveIfExists(
     // attempt it when the path already exists
     std.Io.Dir.accessAbsolute(io, repo_path, .{}) catch return false;
 
-    const any_repo_opts: rp.AnyRepoOpts(.xit) = .{ .ProgressCtx = *push.PushProgress };
     var any_repo = rp.AnyRepo(.xit, any_repo_opts).open(io, allocator, .{ .path = repo_path }) catch |err| switch (err) {
         error.RepoNotFound => return false,
         else => |e| return e,
@@ -483,7 +485,7 @@ fn serveIfExists(
     defer any_repo.deinit(io, allocator);
 
     switch (any_repo) {
-        inline else => |*repo| try servePack(repo.self_repo_opts, repo, repo_root_path, sess, io, allocator, service, protocol_version, error_writer),
+        inline else => |*repo| try servePack(repo.self_repo_opts, repo, repo_root_path, reader, writer, io, allocator, service, protocol_version, error_writer),
     }
     return true;
 }
@@ -501,32 +503,22 @@ fn createRepo(
     return repo;
 }
 
-// wrap the channel I/O in std.Io.Reader/Writer adapters so the repo's pack
-// functions can consume them like any other stream, then run the requested
-// service
 fn servePack(
     comptime repo_opts: rp.RepoOpts(.xit),
     repo: *rp.Repo(.xit, repo_opts),
     repo_root_path: []const u8,
-    sess: *ssh.SessionCtx,
+    reader: *std.Io.Reader,
+    writer: *std.Io.Writer,
     io: std.Io,
     allocator: std.mem.Allocator,
     service: GitService,
     protocol_version: xit.net_server_common.ProtocolVersion,
     error_writer: *std.Io.Writer,
 ) !void {
-    var session_reader_buf: [4096]u8 = undefined;
-    var session_writer_buf: [4096]u8 = undefined;
-    var session_reader = ssh.SessionReader.init(sess, &session_reader_buf);
-    var session_writer = ssh.SessionWriter.init(sess, &session_writer_buf);
-
     switch (service) {
-        .upload_pack => try repo.uploadPack(io, allocator, &session_reader.interface, &session_writer.interface, .{ .protocol_version = protocol_version }),
-        .receive_pack => try push.receivePackAndConsume(repo_opts, io, allocator, repo, &session_reader.interface, &session_writer.interface, .{ .protocol_version = protocol_version }, repo_root_path, error_writer),
+        .upload_pack => try repo.uploadPack(io, allocator, reader, writer, .{ .protocol_version = protocol_version }),
+        .receive_pack => try push.receivePackAndConsume(repo_opts, io, allocator, repo, reader, writer, .{ .protocol_version = protocol_version }, repo_root_path, error_writer),
     }
-
-    // flush whatever the pack op buffered into our writer adapter
-    session_writer.interface.flush() catch {};
 }
 
 fn parseGitCommand(allocator: std.mem.Allocator, command: []const u8) !ParsedGitCommand {
