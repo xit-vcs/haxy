@@ -463,6 +463,8 @@ pub const SessionCtx = struct {
                 try sendChannelMessage(conn, self.channel, SSH_MSG_CHANNEL_CLOSE);
             },
             SSH_MSG_GLOBAL_REQUEST => try handleGlobalRequest(conn, packet),
+            // RFC 4252 §5.1: silently ignored once authenticated
+            SSH_MSG_USERAUTH_REQUEST => {},
             else => try sendUnimplemented(conn),
         }
     }
@@ -1640,6 +1642,11 @@ fn runAuth(conn: *Conn) ![fingerprint_len]u8 {
         defer allocator.free(req);
         if (req.len < 1 or req[0] != SSH_MSG_USERAUTH_REQUEST) return error.UnexpectedMessage;
 
+        // every request counts, probes included, so a client can't loop here
+        // forever
+        if (auth_attempts >= max_auth_attempts) return error.TooManyAuthAttempts;
+        auth_attempts += 1;
+
         var req_reader = std.Io.Reader.fixed(req[1..]);
         const user_name = try takeString(&req_reader, 256);
         const service_name = try takeString(&req_reader, 64);
@@ -1647,15 +1654,11 @@ fn runAuth(conn: *Conn) ![fingerprint_len]u8 {
 
         // RFC 4252 §5: the server must verify the requested service
         if (!std.mem.eql(u8, service_name, "ssh-connection")) {
-            auth_attempts += 1;
-            if (auth_attempts >= max_auth_attempts) return error.TooManyAuthAttempts;
             try sendUserauthFailure(conn);
             continue;
         }
 
         if (!std.mem.eql(u8, method, "publickey")) {
-            auth_attempts += 1;
-            if (auth_attempts >= max_auth_attempts) return error.TooManyAuthAttempts;
             try sendUserauthFailure(conn);
             continue;
         }
@@ -1665,16 +1668,11 @@ fn runAuth(conn: *Conn) ![fingerprint_len]u8 {
         const pubkey_blob = try takeString(&req_reader, 4096);
 
         if (!std.mem.eql(u8, algo, "ssh-ed25519")) {
-            auth_attempts += 1;
-            if (auth_attempts >= max_auth_attempts) return error.TooManyAuthAttempts;
             try sendUserauthFailure(conn);
             continue;
         }
 
         if (!has_signature) {
-            // probes count as attempts so a client can't loop here forever
-            auth_attempts += 1;
-            if (auth_attempts >= max_auth_attempts) return error.TooManyAuthAttempts;
             // probe — tell the client this key is acceptable so it'll send
             // the signed version next.
             var pk_ok: std.ArrayList(u8) = .empty;
@@ -1697,11 +1695,13 @@ fn runAuth(conn: *Conn) ![fingerprint_len]u8 {
             algo,
             pubkey_blob,
             signature_blob,
-        ) catch false;
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            // a malformed key or signature blob
+            else => false,
+        };
 
         if (!ok) {
-            auth_attempts += 1;
-            if (auth_attempts >= max_auth_attempts) return error.TooManyAuthAttempts;
             try sendUserauthFailure(conn);
             continue;
         }
@@ -1883,6 +1883,8 @@ fn runChannelLayer(
                 return;
             },
 
+            // RFC 4252 §5.1: silently ignored once authenticated
+            SSH_MSG_USERAUTH_REQUEST => {},
             else => try sendUnimplemented(conn),
         }
     }
