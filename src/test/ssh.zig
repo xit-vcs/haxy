@@ -962,11 +962,11 @@ const ServerTask = struct {
     pub fn handleSession(self: *ServerTask, sess: *proto.SessionCtx, request: proto.Request) !void {
         @memcpy(&self.captured_fp, &sess.fingerprint);
         switch (request) {
-            .exec => |cmd| {
+            .exec => |exec| {
                 // copy out of the protocol's stack-scoped buffer so the
                 // test can assert on it after the handler returns.
-                @memcpy(self.captured_exec_buf[0..cmd.len], cmd);
-                self.captured_exec_len = cmd.len;
+                @memcpy(self.captured_exec_buf[0..exec.command.len], exec.command);
+                self.captured_exec_len = exec.command.len;
             },
             .shell => {},
         }

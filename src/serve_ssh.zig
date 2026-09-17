@@ -47,8 +47,8 @@ pub const SessionHandler = struct {
                 sess.exemptFromIdleTimeout();
                 try runTuiSession(self, sess, pty);
             },
-            .exec => |command| {
-                try runGitSession(self, sess, command);
+            .exec => |exec| {
+                try runGitSession(self, sess, exec);
             },
         }
     }
@@ -358,11 +358,12 @@ pub const ParsedGitCommand = struct {
     }
 };
 
-fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, command: []const u8) !void {
+fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, exec: ssh.Request.Exec) !void {
     const allocator = sess.conn.allocator;
     const io = sess.conn.io;
+    const protocol_version = xit.net_server_common.parseProtocolVersion(exec.git_protocol);
 
-    const parsed = parseGitCommand(allocator, command) catch return writeError(sess, "unsupported command (expected git-upload-pack or git-receive-pack)");
+    const parsed = parseGitCommand(allocator, exec.command) catch return writeError(sess, "unsupported command (expected git-upload-pack or git-receive-pack)");
     defer parsed.deinit(allocator);
     const path = std.mem.trimStart(u8, parsed.dir, "/");
     const fork_prefix = "fork/";
@@ -397,7 +398,7 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, command:
         var writer = ssh.SessionWriter.init(sess, &writer_buf);
         if (parsed.service == .upload_pack) {
             switch (draft) {
-                inline else => |*repo| try repo.uploadPack(io, allocator, &reader.interface, &writer.interface, .{}),
+                inline else => |*repo| try repo.uploadPack(io, allocator, &reader.interface, &writer.interface, .{ .protocol_version = protocol_version }),
             }
         } else {
             const target = (try evt.Repo.readByOwnerAndName(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &admin_arena, owner_repo.owner, owner_repo.name)) orelse
@@ -445,7 +446,7 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, command:
     };
     defer allocator.free(repo_path);
 
-    if (try serveIfExists(repo_path, handler.repo_root_path, sess, io, allocator, parsed.service, handler.err)) {
+    if (try serveIfExists(repo_path, handler.repo_root_path, sess, io, allocator, parsed.service, protocol_version, handler.err)) {
         try sess.exit(0);
         return;
     }
@@ -455,7 +456,7 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, command:
     // create the on-disk repo for the just-minted event and serve the push
     var repo = try createRepo(any_repo_opts.toRepoOpts(), io, allocator, repo_path);
     defer repo.deinit(io, allocator);
-    try servePack(repo.self_repo_opts, &repo, handler.repo_root_path, sess, io, allocator, parsed.service, handler.err);
+    try servePack(repo.self_repo_opts, &repo, handler.repo_root_path, sess, io, allocator, parsed.service, protocol_version, handler.err);
     try sess.exit(0);
 }
 
@@ -467,6 +468,7 @@ fn serveIfExists(
     io: std.Io,
     allocator: std.mem.Allocator,
     service: GitService,
+    protocol_version: xit.net_server_common.ProtocolVersion,
     error_writer: *std.Io.Writer,
 ) !bool {
     // a bare open() creates the directory while probing for the repo, so only
@@ -481,7 +483,7 @@ fn serveIfExists(
     defer any_repo.deinit(io, allocator);
 
     switch (any_repo) {
-        inline else => |*repo| try servePack(repo.self_repo_opts, repo, repo_root_path, sess, io, allocator, service, error_writer),
+        inline else => |*repo| try servePack(repo.self_repo_opts, repo, repo_root_path, sess, io, allocator, service, protocol_version, error_writer),
     }
     return true;
 }
@@ -510,6 +512,7 @@ fn servePack(
     io: std.Io,
     allocator: std.mem.Allocator,
     service: GitService,
+    protocol_version: xit.net_server_common.ProtocolVersion,
     error_writer: *std.Io.Writer,
 ) !void {
     var session_reader_buf: [4096]u8 = undefined;
@@ -518,8 +521,8 @@ fn servePack(
     var session_writer = ssh.SessionWriter.init(sess, &session_writer_buf);
 
     switch (service) {
-        .upload_pack => try repo.uploadPack(io, allocator, &session_reader.interface, &session_writer.interface, .{}),
-        .receive_pack => try push.receivePackAndConsume(repo_opts, io, allocator, repo, &session_reader.interface, &session_writer.interface, .{}, repo_root_path, error_writer),
+        .upload_pack => try repo.uploadPack(io, allocator, &session_reader.interface, &session_writer.interface, .{ .protocol_version = protocol_version }),
+        .receive_pack => try push.receivePackAndConsume(repo_opts, io, allocator, repo, &session_reader.interface, &session_writer.interface, .{ .protocol_version = protocol_version }, repo_root_path, error_writer),
     }
 
     // flush whatever the pack op buffered into our writer adapter

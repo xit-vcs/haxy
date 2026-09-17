@@ -169,7 +169,13 @@ pub const HostKey = struct {
 /// what the client wants to do on this channel.
 pub const Request = union(enum) {
     shell: ?PtySize, // pty info if a pty-req arrived before the shell
-    exec: []const u8, // command string from the exec request
+    exec: Exec,
+
+    pub const Exec = struct {
+        command: []const u8,
+        /// the GIT_PROTOCOL env value, if one arrived before the exec
+        git_protocol: ?[]const u8,
+    };
 };
 
 /// next thing that arrived from the client.
@@ -1792,6 +1798,9 @@ const Channel = struct {
     remote_window: u32, // bytes we may still send to peer before they adjust
     max_packet: u32, // max CHANNEL_DATA payload the peer accepts in one packet
     pty: ?PtySize = null,
+    // value of GIT_PROTOCOL, the one env variable we keep
+    git_protocol_buf: [64]u8 = undefined,
+    git_protocol_len: ?usize = null,
 };
 
 pub const PtySize = struct { width_cells: u16, height_cells: u16 };
@@ -1994,7 +2003,13 @@ fn handleChannelRequest(conn: *Conn, ch: *Channel, packet: []const u8) !?Request
     }
 
     if (std.mem.eql(u8, req_type, "env")) {
-        // ignore environment variables silently (we don't pass them anywhere)
+        // string name, string value. the rest are ignored silently.
+        const name = try takeString(&r, max_packet_len);
+        const value = try takeString(&r, max_packet_len);
+        if (std.mem.eql(u8, name, "GIT_PROTOCOL") and value.len <= ch.git_protocol_buf.len) {
+            @memcpy(ch.git_protocol_buf[0..value.len], value);
+            ch.git_protocol_len = value.len;
+        }
         try replyChannelRequest(conn, ch, want_reply, true);
         return null;
     }
@@ -2017,7 +2032,10 @@ fn handleChannelRequest(conn: *Conn, ch: *Channel, packet: []const u8) !?Request
         // capture the command string for the handler to inspect
         const cmd = try takeString(&r, 4096);
         try replyChannelRequest(conn, ch, want_reply, true);
-        return .{ .exec = cmd };
+        return .{ .exec = .{
+            .command = cmd,
+            .git_protocol = if (ch.git_protocol_len) |len| ch.git_protocol_buf[0..len] else null,
+        } };
     }
 
     // unknown request kind — fail it

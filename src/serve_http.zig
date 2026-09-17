@@ -108,7 +108,7 @@ fn handleGitRequest(
     const content_type = try allocator.dupe(u8, findHeader(request, "content-type") orelse "");
     defer allocator.free(content_type);
     const has_remote_user = findHeader(request, "authorization") != null;
-    const protocol_version = protocolVersionFromHeader(findHeader(request, "git-protocol"));
+    const protocol_version = xit.net_server_common.parseProtocolVersion(findHeader(request, "git-protocol"));
 
     // pushing over HTTP is not supported; pushes go over SSH
     if (isReceivePack(handler, suffix, uri.query)) {
@@ -267,24 +267,6 @@ fn decodeAndValidateRepoPath(allocator: std.mem.Allocator, encoded: []const u8) 
 
 fn normalizeMethod(method: std.http.Method) std.http.Method {
     return if (method == .HEAD) .GET else method;
-}
-
-fn protocolVersionFromHeader(header: ?[]const u8) xit.net_server_common.ProtocolVersion {
-    const git_protocol = header orelse return .v0;
-    var version: xit.net_server_common.ProtocolVersion = .v0;
-    var iter = std.mem.splitScalar(u8, git_protocol, ':');
-    while (iter.next()) |entry| {
-        const value = std.mem.trimStart(u8, entry, " ");
-        if (std.mem.startsWith(u8, value, "version=")) {
-            const v = value["version=".len..];
-            if (std.mem.eql(u8, v, "2")) {
-                version = .v2;
-            } else if (std.mem.eql(u8, v, "1") and version != .v2) {
-                version = .v1;
-            }
-        }
-    }
-    return version;
 }
 
 fn findHeader(request: *std.http.Server.Request, name: []const u8) ?[]const u8 {
