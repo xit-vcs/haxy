@@ -413,8 +413,7 @@ pub const SessionCtx = struct {
                 var r = std.Io.Reader.fixed(packet[1..]);
                 const recipient_channel = try r.takeInt(u32, .big);
                 if (recipient_channel != self.channel.local_id) return error.UnknownChannel;
-                const req_type = try takeStringField(conn.allocator, &r, 64);
-                defer conn.allocator.free(req_type);
+                const req_type = try takeString(&r, 64);
                 const want_reply = (try r.takeByte()) != 0;
                 if (std.mem.eql(u8, req_type, "window-change")) {
                     const sz = try takePtySize(&r);
@@ -891,10 +890,11 @@ pub fn writeMpint(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, bytes: 
     try buf.appendSlice(allocator, trimmed);
 }
 
-pub fn takeStringField(allocator: std.mem.Allocator, reader: *std.Io.Reader, max_len: u32) ![]u8 {
+/// a string field's bytes, borrowed from the packet behind a fixed reader
+pub fn takeString(reader: *std.Io.Reader, max_len: u32) ![]const u8 {
     const len = try reader.takeInt(u32, .big);
     if (len > max_len) return error.FieldTooLarge;
-    return try reader.readAlloc(allocator, len);
+    return reader.take(len);
 }
 
 fn nameListContainsAny(haystack: []const u8, our_options: []const []const u8) bool {
@@ -965,42 +965,28 @@ fn buildServerKexInit(io: std.Io, allocator: std.mem.Allocator) ![]u8 {
     return buildKexInit(io, allocator, &(our_kex_algos ++ [_][]const u8{kex_strict_server}), &our_host_key_algos, &our_ciphers);
 }
 
+// the name-lists borrow from the KEXINIT payload
 const ParsedKexInit = struct {
-    kex_algos: []u8,
-    host_key_algos: []u8,
-    cs_cipher: []u8,
-    sc_cipher: []u8,
+    kex_algos: []const u8,
+    host_key_algos: []const u8,
+    cs_cipher: []const u8,
+    sc_cipher: []const u8,
     first_kex_packet_follows: bool,
-
-    fn deinit(self: ParsedKexInit, allocator: std.mem.Allocator) void {
-        allocator.free(self.kex_algos);
-        allocator.free(self.host_key_algos);
-        allocator.free(self.cs_cipher);
-        allocator.free(self.sc_cipher);
-    }
 };
 
-fn parseClientKexInit(allocator: std.mem.Allocator, payload: []const u8) !ParsedKexInit {
+fn parseClientKexInit(payload: []const u8) !ParsedKexInit {
     if (payload.len < 1 + 16) return error.KexInitTruncated;
     if (payload[0] != SSH_MSG_KEXINIT) return error.UnexpectedMessage;
 
     var reader = std.Io.Reader.fixed(payload[1 + 16 ..]); // skip type + cookie
 
-    const kex_algos = try takeStringField(allocator, &reader, max_name_list_len);
-    errdefer allocator.free(kex_algos);
-    const host_key_algos = try takeStringField(allocator, &reader, max_name_list_len);
-    errdefer allocator.free(host_key_algos);
-    const cs_cipher = try takeStringField(allocator, &reader, max_name_list_len);
-    errdefer allocator.free(cs_cipher);
-    const sc_cipher = try takeStringField(allocator, &reader, max_name_list_len);
-    errdefer allocator.free(sc_cipher);
+    const kex_algos = try takeString(&reader, max_name_list_len);
+    const host_key_algos = try takeString(&reader, max_name_list_len);
+    const cs_cipher = try takeString(&reader, max_name_list_len);
+    const sc_cipher = try takeString(&reader, max_name_list_len);
 
     // skip c->s mac, s->c mac, c->s compress, s->c compress, lang c->s, lang s->c
-    for (0..6) |_| {
-        const len = try reader.takeInt(u32, .big);
-        if (len > max_name_list_len) return error.FieldTooLarge;
-        try reader.discardAll(len);
-    }
+    for (0..6) |_| _ = try takeString(&reader, max_name_list_len);
     const first_kex_packet_follows = (try reader.takeByte()) != 0;
     _ = try reader.takeInt(u32, .big); // reserved
 
@@ -1045,8 +1031,7 @@ fn runKex(
     const client_kex_init = try transport.readPacket(allocator, reader, false);
     defer allocator.free(client_kex_init);
 
-    var parsed = try parseClientKexInit(allocator, client_kex_init);
-    defer parsed.deinit(allocator);
+    const parsed = try parseClientKexInit(client_kex_init);
 
     // strict kex: when the client advertises it, its KEXINIT must be the
     // first packet, ignorable messages are banned until NEWKEYS, and both
@@ -1093,8 +1078,7 @@ const RekeyState = struct {
 // the whole exchange under the current keys, then swap the new keys into
 // both ciphers in place.
 fn runRekey(conn: *Conn, client_kex_init: []const u8) !void {
-    var parsed = try parseClientKexInit(conn.allocator, client_kex_init);
-    defer parsed.deinit(conn.allocator);
+    const parsed = try parseClientKexInit(client_kex_init);
 
     // the exchange reads and writes through the ciphers directly
     conn.setWaiting(true);
@@ -1190,8 +1174,7 @@ fn exchangeKeys(
 
     var ecdh_init_reader = std.Io.Reader.fixed(ecdh_init[1..]);
     const expected_client_len: u32 = if (hybrid) hybrid_client_blob_len else X25519.public_length;
-    const client_blob = try takeStringField(allocator, &ecdh_init_reader, expected_client_len);
-    defer allocator.free(client_blob);
+    const client_blob = try takeString(&ecdh_init_reader, expected_client_len);
     if (client_blob.len != expected_client_len) return error.InvalidEphemeralKey;
 
     // derive server reply blob (S_REPLY) + shared secret K.
@@ -1601,8 +1584,7 @@ fn runAuth(conn: *Conn) ![fingerprint_len]u8 {
         if (req.len < 1 or req[0] != SSH_MSG_SERVICE_REQUEST) return error.UnexpectedMessage;
 
         var req_reader = std.Io.Reader.fixed(req[1..]);
-        const service = try takeStringField(allocator, &req_reader, 64);
-        defer allocator.free(service);
+        const service = try takeString(&req_reader, 64);
         if (!std.mem.eql(u8, service, "ssh-userauth")) return error.UnsupportedService;
 
         var accept: std.ArrayList(u8) = .empty;
@@ -1621,12 +1603,9 @@ fn runAuth(conn: *Conn) ![fingerprint_len]u8 {
         if (req.len < 1 or req[0] != SSH_MSG_USERAUTH_REQUEST) return error.UnexpectedMessage;
 
         var req_reader = std.Io.Reader.fixed(req[1..]);
-        const user_name = try takeStringField(allocator, &req_reader, 256);
-        defer allocator.free(user_name);
-        const service_name = try takeStringField(allocator, &req_reader, 64);
-        defer allocator.free(service_name);
-        const method = try takeStringField(allocator, &req_reader, 64);
-        defer allocator.free(method);
+        const user_name = try takeString(&req_reader, 256);
+        const service_name = try takeString(&req_reader, 64);
+        const method = try takeString(&req_reader, 64);
 
         // RFC 4252 §5: the server must verify the requested service
         if (!std.mem.eql(u8, service_name, "ssh-connection")) {
@@ -1644,10 +1623,8 @@ fn runAuth(conn: *Conn) ![fingerprint_len]u8 {
         }
 
         const has_signature = (try req_reader.takeByte()) != 0;
-        const algo = try takeStringField(allocator, &req_reader, 64);
-        defer allocator.free(algo);
-        const pubkey_blob = try takeStringField(allocator, &req_reader, 4096);
-        defer allocator.free(pubkey_blob);
+        const algo = try takeString(&req_reader, 64);
+        const pubkey_blob = try takeString(&req_reader, 4096);
 
         if (!std.mem.eql(u8, algo, "ssh-ed25519")) {
             auth_attempts += 1;
@@ -1672,8 +1649,7 @@ fn runAuth(conn: *Conn) ![fingerprint_len]u8 {
         }
 
         // has signature — verify it
-        const signature_blob = try takeStringField(allocator, &req_reader, 1024);
-        defer allocator.free(signature_blob);
+        const signature_blob = try takeString(&req_reader, 1024);
 
         const ok = verifyUserauthSignature(
             allocator,
@@ -1744,20 +1720,16 @@ fn verifyUserauthSignature(
 
     // parse pubkey_blob: string "ssh-ed25519" || string raw_pubkey
     var pubkey_reader = std.Io.Reader.fixed(pubkey_blob);
-    const pk_algo = try takeStringField(allocator, &pubkey_reader, 64);
-    defer allocator.free(pk_algo);
+    const pk_algo = try takeString(&pubkey_reader, 64);
     if (!std.mem.eql(u8, pk_algo, "ssh-ed25519")) return false;
-    const raw_pubkey = try takeStringField(allocator, &pubkey_reader, 64);
-    defer allocator.free(raw_pubkey);
+    const raw_pubkey = try takeString(&pubkey_reader, 64);
     if (raw_pubkey.len != Ed25519.PublicKey.encoded_length) return false;
 
     // parse signature_blob: string "ssh-ed25519" || string raw_signature
     var sig_reader = std.Io.Reader.fixed(signature_blob);
-    const sig_algo = try takeStringField(allocator, &sig_reader, 64);
-    defer allocator.free(sig_algo);
+    const sig_algo = try takeString(&sig_reader, 64);
     if (!std.mem.eql(u8, sig_algo, "ssh-ed25519")) return false;
-    const raw_sig = try takeStringField(allocator, &sig_reader, Ed25519.Signature.encoded_length);
-    defer allocator.free(raw_sig);
+    const raw_sig = try takeString(&sig_reader, Ed25519.Signature.encoded_length);
     if (raw_sig.len != Ed25519.Signature.encoded_length) return false;
 
     var pubkey_bytes: [Ed25519.PublicKey.encoded_length]u8 = undefined;
@@ -1805,8 +1777,6 @@ fn runChannelLayer(
 ) !void {
     const allocator = conn.allocator;
     var channel: ?Channel = null;
-    var pending_exec: ?[]u8 = null;
-    defer if (pending_exec) |s| allocator.free(s);
 
     while (true) {
         const packet = try readSessionPacket(conn);
@@ -1827,7 +1797,8 @@ fn runChannelLayer(
 
             SSH_MSG_CHANNEL_REQUEST => {
                 const ch = if (channel) |*c| c else continue;
-                const start_request = try handleChannelRequest(conn, ch, packet, &pending_exec);
+                const start_request = try handleChannelRequest(conn, ch, packet);
+                // the request borrows from the packet, which outlives the session
                 if (start_request) |request| {
                     // any key authenticates, so the deadline holds until here
                     if (conn.idle) |idle| idle.session_started.store(true, .release);
@@ -1885,8 +1856,7 @@ fn handleGlobalRequest(conn: *Conn, packet: []const u8) !void {
     // boolean want_reply
     // …request-specific data we ignore
     var r = std.Io.Reader.fixed(packet[1..]);
-    const name = try takeStringField(conn.allocator, &r, 256);
-    defer conn.allocator.free(name);
+    _ = try takeString(&r, 256);
     const want_reply = (try r.takeByte()) != 0;
     if (want_reply) {
         try conn.writePacket(&[_]u8{SSH_MSG_REQUEST_FAILURE});
@@ -1905,8 +1875,7 @@ fn handleChannelOpen(conn: *Conn, packet: []const u8) !?Channel {
     // uint32 initial_window
     // uint32 max_packet
     var r = std.Io.Reader.fixed(packet[1..]);
-    const ch_type = try takeStringField(allocator, &r, 64);
-    defer allocator.free(ch_type);
+    const ch_type = try takeString(&r, 64);
     const remote_id = try r.takeInt(u32, .big);
     const initial_window = try r.takeInt(u32, .big);
     const max_packet = try r.takeInt(u32, .big);
@@ -1962,10 +1931,8 @@ fn sendChannelOpenFailure(conn: *Conn, open_packet: []const u8, reason: u32, des
 }
 
 /// returns the session request if this one triggered it, else null. an exec
-/// command is owned by `pending_exec`, which outlives the packet it arrived in.
-fn handleChannelRequest(conn: *Conn, ch: *Channel, packet: []const u8, pending_exec: *?[]u8) !?Request {
-    const allocator = conn.allocator;
-
+/// command borrows from `packet`.
+fn handleChannelRequest(conn: *Conn, ch: *Channel, packet: []const u8) !?Request {
     // byte SSH_MSG_CHANNEL_REQUEST
     // uint32 recipient_channel (== our local_id)
     // string request_type
@@ -1974,15 +1941,13 @@ fn handleChannelRequest(conn: *Conn, ch: *Channel, packet: []const u8, pending_e
     var r = std.Io.Reader.fixed(packet[1..]);
     const recipient_channel = try r.takeInt(u32, .big);
     if (recipient_channel != ch.local_id) return error.UnknownChannel;
-    const req_type = try takeStringField(allocator, &r, 64);
-    defer allocator.free(req_type);
+    const req_type = try takeString(&r, 64);
     const want_reply = (try r.takeByte()) != 0;
 
     if (std.mem.eql(u8, req_type, "pty-req")) {
         // string TERM, uint32 width chars, uint32 height rows, uint32 width px,
         // uint32 height px, string modes
-        const term = try takeStringField(allocator, &r, 64);
-        defer allocator.free(term);
+        _ = try takeString(&r, 64);
         ch.pty = try takePtySize(&r);
         try replyChannelRequest(conn, ch, want_reply, true);
         return null;
@@ -2010,9 +1975,7 @@ fn handleChannelRequest(conn: *Conn, ch: *Channel, packet: []const u8, pending_e
 
     if (std.mem.eql(u8, req_type, "exec")) {
         // capture the command string for the handler to inspect
-        const cmd = try takeStringField(allocator, &r, 4096);
-        if (pending_exec.*) |old| allocator.free(old);
-        pending_exec.* = cmd;
+        const cmd = try takeString(&r, 4096);
         try replyChannelRequest(conn, ch, want_reply, true);
         return .{ .exec = cmd };
     }

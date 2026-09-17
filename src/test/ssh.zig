@@ -364,20 +364,16 @@ test "SSH-2 negotiation: walk through every step (banner -> KEX -> auth -> chann
     try std.testing.expectEqual(@as(u8, proto.SSH_MSG_KEX_ECDH_REPLY), ecdh_reply[0]);
 
     var server_eph_pub: [X25519.public_length]u8 = undefined;
-    var k_s: []u8 = undefined;
-    var sig_blob: []u8 = undefined;
+    var k_s: []const u8 = undefined;
+    var sig_blob: []const u8 = undefined;
     {
         var r = std.Io.Reader.fixed(ecdh_reply[1..]);
-        k_s = try proto.takeStringField(allocator, &r, 4096);
-        errdefer allocator.free(k_s);
-        const q_s = try proto.takeStringField(allocator, &r, X25519.public_length);
-        defer allocator.free(q_s);
+        k_s = try proto.takeString(&r, 4096);
+        const q_s = try proto.takeString(&r, X25519.public_length);
         try std.testing.expectEqual(X25519.public_length, q_s.len);
         @memcpy(&server_eph_pub, q_s);
-        sig_blob = try proto.takeStringField(allocator, &r, 1024);
+        sig_blob = try proto.takeString(&r, 1024);
     }
-    defer allocator.free(k_s);
-    defer allocator.free(sig_blob);
 
     // K_S must be the host's ed25519 pubkey we configured.
     var expected_k_s: std.ArrayList(u8) = .empty;
@@ -395,11 +391,9 @@ test "SSH-2 negotiation: walk through every step (banner -> KEX -> auth -> chann
     // verify the host signature on H.
     {
         var r = std.Io.Reader.fixed(sig_blob);
-        const algo = try proto.takeStringField(allocator, &r, 64);
-        defer allocator.free(algo);
+        const algo = try proto.takeString(&r, 64);
         try std.testing.expectEqualStrings("ssh-ed25519", algo);
-        const raw_sig = try proto.takeStringField(allocator, &r, Ed25519.Signature.encoded_length);
-        defer allocator.free(raw_sig);
+        const raw_sig = try proto.takeString(&r, Ed25519.Signature.encoded_length);
         var sig_bytes: [Ed25519.Signature.encoded_length]u8 = undefined;
         @memcpy(&sig_bytes, raw_sig);
         const sig = Ed25519.Signature.fromBytes(sig_bytes);
@@ -576,8 +570,7 @@ test "SSH-2 negotiation: walk through every step (banner -> KEX -> auth -> chann
             proto.SSH_MSG_CHANNEL_REQUEST => {
                 var r = std.Io.Reader.fixed(pkt[1..]);
                 _ = try r.takeInt(u32, .big);
-                const req_type = try proto.takeStringField(allocator, &r, 64);
-                defer allocator.free(req_type);
+                const req_type = try proto.takeString(&r, 64);
                 if (std.mem.eql(u8, req_type, "exit-status")) {
                     _ = try r.takeByte();
                     const status = try r.takeInt(u32, .big);
@@ -690,14 +683,11 @@ test "auth + channel layer failure modes" {
         const reply = try proto.readPlainPacket(allocator, cr);
         defer allocator.free(reply);
         var rr = std.Io.Reader.fixed(reply[1..]);
-        const k_s = try proto.takeStringField(allocator, &rr, 4096);
-        defer allocator.free(k_s);
-        const q_s = try proto.takeStringField(allocator, &rr, X25519.public_length);
-        defer allocator.free(q_s);
+        const k_s = try proto.takeString(&rr, 4096);
+        const q_s = try proto.takeString(&rr, X25519.public_length);
         var server_pub: [X25519.public_length]u8 = undefined;
         @memcpy(&server_pub, q_s);
-        const sig_blob = try proto.takeStringField(allocator, &rr, 1024);
-        defer allocator.free(sig_blob);
+        _ = try proto.takeString(&rr, 1024);
         const k = try X25519.scalarmult(eph.secret_key, server_pub);
         const exchange = try proto.computeExchangeHash(allocator, client_version, v_s, ckex, skex, k_s, &eph.public_key, &server_pub, &k, false);
 
@@ -739,8 +729,7 @@ test "auth + channel layer failure modes" {
             defer allocator.free(accept);
             try std.testing.expectEqual(@as(u8, proto.SSH_MSG_SERVICE_ACCEPT), accept[0]);
             var r = std.Io.Reader.fixed(accept[1..]);
-            const service = try proto.takeStringField(allocator, &r, 64);
-            defer allocator.free(service);
+            const service = try proto.takeString(&r, 64);
             try std.testing.expectEqualStrings("ssh-userauth", service);
         }
 
@@ -766,11 +755,9 @@ test "auth + channel layer failure modes" {
             defer allocator.free(pk_ok);
             try std.testing.expectEqual(@as(u8, proto.SSH_MSG_USERAUTH_PK_OK), pk_ok[0]);
             var r = std.Io.Reader.fixed(pk_ok[1..]);
-            const algo = try proto.takeStringField(allocator, &r, 64);
-            defer allocator.free(algo);
+            const algo = try proto.takeString(&r, 64);
             try std.testing.expectEqualStrings("ssh-ed25519", algo);
-            const accepted_blob = try proto.takeStringField(allocator, &r, 4096);
-            defer allocator.free(accepted_blob);
+            const accepted_blob = try proto.takeString(&r, 4096);
             try std.testing.expectEqualSlices(u8, pubkey_blob.items, accepted_blob);
         }
 
