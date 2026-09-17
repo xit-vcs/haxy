@@ -672,7 +672,8 @@ pub fn handleConnection(
     const client_version = try exchangeVersions(allocator, reader, writer);
     defer allocator.free(client_version);
 
-    const kex = try runKex(io, allocator, reader, writer, host_key, client_version);
+    var kex = try runKex(io, allocator, reader, writer, host_key, client_version);
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&kex));
 
     // post-KEX everything is encrypted with chacha20-poly1305@openssh.com
     var conn = Conn{
@@ -690,6 +691,8 @@ pub fn handleConnection(
         },
         .idle = idle,
     };
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&conn.cs_cipher));
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&conn.sc_cipher));
 
     const fingerprint = runAuth(&conn) catch |err| {
         disconnectOnError(&conn, err);
@@ -1071,7 +1074,7 @@ fn runKex(
     const strict = nameListContainsAny(parsed.kex_algos, &.{kex_strict_client});
     if (strict and seqs.read != 1) return error.StrictKexViolation;
 
-    const negotiated = try exchangeKeys(
+    var negotiated = try exchangeKeys(
         io,
         allocator,
         reader,
@@ -1085,6 +1088,7 @@ fn runKex(
         &parsed,
         null,
     );
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&negotiated.keys));
 
     return .{
         .cs_key = negotiated.keys.cs_enc,
@@ -1120,7 +1124,7 @@ fn runRekey(conn: *Conn, client_kex_init: []const u8) !void {
     defer conn.allocator.free(server_kex_init);
     try conn.sc_cipher.writePacket(conn.io, conn.writer, server_kex_init);
 
-    const negotiated = try exchangeKeys(
+    var negotiated = try exchangeKeys(
         conn.io,
         conn.allocator,
         conn.reader,
@@ -1134,6 +1138,7 @@ fn runRekey(conn: *Conn, client_kex_init: []const u8) !void {
         &parsed,
         &conn.rekey.session_id,
     );
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&negotiated.keys));
 
     // seqnos continue across a rekey unless strict kex was negotiated,
     // which resets them after every NEWKEYS
@@ -1213,36 +1218,40 @@ fn exchangeKeys(
     //   ECDH: server_blob = X25519 server pub (32B); K = X25519(s, c_pub).
     //   hybrid: server_blob = MLKEM ciphertext (1088B) || X25519 server pub (32B);
     //           K = SHA-256(K_MLKEM || K_X25519).
-    var server_blob: []u8 = undefined;
-    var k: []u8 = undefined;
-    {
+    var server_blob_buf: [hybrid_server_blob_len]u8 = undefined;
+    var k: [Sha256.digest_length]u8 = undefined;
+    defer std.crypto.secureZero(u8, &k);
+    const server_blob: []const u8 = blk: {
         const x25519_offset: usize = if (hybrid) MLKem768.PublicKey.encoded_length else 0;
         var x25519_client_pub: [X25519.public_length]u8 = undefined;
         @memcpy(&x25519_client_pub, client_blob[x25519_offset..]);
-        const server_kp = X25519.KeyPair.generate(io);
-        const x25519_shared = try X25519.scalarmult(server_kp.secret_key, x25519_client_pub);
+        var server_kp = X25519.KeyPair.generate(io);
+        defer std.crypto.secureZero(u8, &server_kp.secret_key);
+        var x25519_shared = try X25519.scalarmult(server_kp.secret_key, x25519_client_pub);
+        defer std.crypto.secureZero(u8, &x25519_shared);
 
-        if (hybrid) {
-            var pq_pub_bytes: [MLKem768.PublicKey.encoded_length]u8 = undefined;
-            @memcpy(&pq_pub_bytes, client_blob[0..MLKem768.PublicKey.encoded_length]);
-            const pq_pub = try MLKem768.PublicKey.fromBytes(&pq_pub_bytes);
-            const encap = pq_pub.encaps(io);
-
-            server_blob = try allocator.alloc(u8, hybrid_server_blob_len);
-            @memcpy(server_blob[0..MLKem768.ciphertext_length], &encap.ciphertext);
-            @memcpy(server_blob[MLKem768.ciphertext_length..], &server_kp.public_key);
-
-            var h = Sha256.init(.{});
-            h.update(&encap.shared_secret);
-            h.update(&x25519_shared);
-            k = try allocator.dupe(u8, &h.finalResult());
-        } else {
-            server_blob = try allocator.dupe(u8, &server_kp.public_key);
-            k = try allocator.dupe(u8, &x25519_shared);
+        if (!hybrid) {
+            server_blob_buf[0..X25519.public_length].* = server_kp.public_key;
+            k = x25519_shared;
+            break :blk server_blob_buf[0..X25519.public_length];
         }
-    }
-    defer allocator.free(server_blob);
-    defer allocator.free(k);
+
+        var pq_pub_bytes: [MLKem768.PublicKey.encoded_length]u8 = undefined;
+        @memcpy(&pq_pub_bytes, client_blob[0..MLKem768.PublicKey.encoded_length]);
+        const pq_pub = try MLKem768.PublicKey.fromBytes(&pq_pub_bytes);
+        var encap = pq_pub.encaps(io);
+        defer std.crypto.secureZero(u8, &encap.shared_secret);
+
+        server_blob_buf[0..MLKem768.ciphertext_length].* = encap.ciphertext;
+        server_blob_buf[MLKem768.ciphertext_length..].* = server_kp.public_key;
+
+        var h = Sha256.init(.{});
+        defer std.crypto.secureZero(u8, std.mem.asBytes(&h));
+        h.update(&encap.shared_secret);
+        h.update(&x25519_shared);
+        h.final(&k);
+        break :blk &server_blob_buf;
+    };
 
     // build host key blob (K_S)
     var host_key_blob: std.ArrayList(u8) = .empty;
@@ -1259,7 +1268,7 @@ fn exchangeKeys(
         host_key_blob.items,
         client_blob,
         server_blob,
-        k,
+        &k,
         hybrid,
     );
 
@@ -1288,7 +1297,8 @@ fn exchangeKeys(
     // derive session keys per RFC 4253 §7.2. only the encrypt keys are
     // needed for chacha20-poly1305 (no separate MAC/IV).
     var keys: SessionKeys = undefined;
-    try deriveSessionKeys(allocator, k, &exchange_hash, if (session_id) |sid| sid else &exchange_hash, &keys, hybrid);
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&keys));
+    try deriveSessionKeys(allocator, &k, &exchange_hash, if (session_id) |sid| sid else &exchange_hash, &keys, hybrid);
 
     return .{ .keys = keys, .exchange_hash = exchange_hash };
 }
@@ -1313,6 +1323,11 @@ pub fn computeExchangeHash(
 ) ![Sha256.digest_length]u8 {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
+    defer std.crypto.secureZero(u8, buf.items);
+    // reserved up front so a reallocation can't leave K behind
+    try buf.ensureTotalCapacityPrecise(allocator, 8 * 4 + 1 + client_version.len + server_version_str.len +
+        client_kex_init.len + server_kex_init.len + host_key_blob.len + client_ephemeral.len +
+        server_ephemeral.len + shared_secret.len);
 
     try writeStringField(&buf, allocator, client_version);
     try writeStringField(&buf, allocator, server_version_str);
@@ -1328,6 +1343,7 @@ pub fn computeExchangeHash(
     }
 
     var hasher = Sha256.init(.{});
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&hasher));
     hasher.update(buf.items);
     return hasher.finalResult();
 }
@@ -1356,6 +1372,9 @@ pub fn deriveSessionKeys(
     // pre-build the K || H prefix once; reused for every derivation
     var prefix: std.ArrayList(u8) = .empty;
     defer prefix.deinit(allocator);
+    defer std.crypto.secureZero(u8, prefix.items);
+    // reserved up front so a reallocation can't leave K behind
+    try prefix.ensureTotalCapacityPrecise(allocator, 4 + 1 + shared_secret.len + exchange_hash.len);
     if (k_is_string) {
         try writeStringField(&prefix, allocator, shared_secret);
     } else {
@@ -1363,46 +1382,31 @@ pub fn deriveSessionKeys(
     }
     try prefix.appendSlice(allocator, exchange_hash);
 
-    try deriveKey(allocator, prefix.items, 'C', session_id, &out.cs_enc);
-    try deriveKey(allocator, prefix.items, 'D', session_id, &out.sc_enc);
+    deriveKey(prefix.items, 'C', session_id, &out.cs_enc);
+    deriveKey(prefix.items, 'D', session_id, &out.sc_enc);
 }
 
 fn deriveKey(
-    allocator: std.mem.Allocator,
     prefix: []const u8, // K || H, already encoded
     letter: u8,
     session_id: []const u8,
-    out: []u8,
-) !void {
-    // first block: HASH(K || H || letter || session_id)
-    var first_block: [Sha256.digest_length]u8 = undefined;
-    {
-        var hasher = Sha256.init(.{});
-        hasher.update(prefix);
-        hasher.update(&[_]u8{letter});
-        hasher.update(session_id);
-        first_block = hasher.finalResult();
-    }
-    const first_copy = @min(out.len, first_block.len);
-    @memcpy(out[0..first_copy], first_block[0..first_copy]);
+    out: *[2 * Sha256.digest_length]u8,
+) void {
+    // a finished context still holds its digest and last input block
+    // K_1 = HASH(K || H || letter || session_id)
+    var first = Sha256.init(.{});
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&first));
+    first.update(prefix);
+    first.update(&.{letter});
+    first.update(session_id);
+    first.final(out[0..Sha256.digest_length]);
 
-    // chain additional blocks if requested length exceeds one hash:
-    //   K_{n+1} = HASH(K || H || K_1 || K_2 || … || K_n)
-    var chained: std.ArrayList(u8) = .empty;
-    defer chained.deinit(allocator);
-    try chained.appendSlice(allocator, first_block[0..]);
-
-    var produced: usize = first_copy;
-    while (produced < out.len) {
-        var hasher = Sha256.init(.{});
-        hasher.update(prefix);
-        hasher.update(chained.items);
-        const block = hasher.finalResult();
-        const copy_len = @min(out.len - produced, block.len);
-        @memcpy(out[produced .. produced + copy_len], block[0..copy_len]);
-        produced += copy_len;
-        try chained.appendSlice(allocator, block[0..]);
-    }
+    // K_2 = HASH(K || H || K_1)
+    var second = Sha256.init(.{});
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&second));
+    second.update(prefix);
+    second.update(out[0..Sha256.digest_length]);
+    second.final(out[Sha256.digest_length..]);
 }
 
 // ---------------------------------------------------------------------------
@@ -1425,6 +1429,8 @@ fn deriveKey(
 pub const Cipher = struct {
     main_key: [32]u8, // K_2
     header_key: [32]u8, // K_1
+    // wider than the 32-bit wire seqno, so a peer that never rekeys fails the
+    // mac at 2^32 packets instead of wrapping into nonce reuse
     seq: u64,
 
     pub fn init(key_material: *const [64]u8, initial_seq: u64) Cipher {
