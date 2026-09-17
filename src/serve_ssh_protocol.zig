@@ -38,6 +38,7 @@ const Poly1305 = std.crypto.onetimeauth.Poly1305;
 
 pub const server_version = "SSH-2.0-haxy_0.0";
 pub const host_key_file_name = "ssh_host_ed25519_key";
+const max_host_key_file_len = 4096;
 
 const max_packet_len: u32 = 35000; // RFC 4253 §6.1 — minimum implementations must support
 pub const packet_buffer_size = 4 + max_packet_len + Poly1305.mac_length;
@@ -123,28 +124,147 @@ pub const HostKey = struct {
         defer allocator.free(path);
 
         const cwd = std.Io.Dir.cwd();
-        if (cwd.openFile(io, path, .{ .mode = .read_only })) |file| {
-            defer file.close(io);
-            var buf: [Ed25519.SecretKey.encoded_length]u8 = undefined;
-            var read_storage: [128]u8 = undefined;
-            var file_reader = file.reader(io, &read_storage);
-            try file_reader.interface.readSliceAll(&buf);
-            const sk = try Ed25519.SecretKey.fromBytes(buf);
-            const keypair = try Ed25519.KeyPair.fromSecretKey(sk);
-            return .{ .keypair = keypair };
+        var text_buf: [max_host_key_file_len]u8 = undefined;
+        defer std.crypto.secureZero(u8, &text_buf);
+        if (cwd.readFile(io, path, &text_buf)) |text| {
+            return parseOpenssh(text);
         } else |err| switch (err) {
             error.FileNotFound => {},
             else => return err,
         }
 
-        const keypair = Ed25519.KeyPair.generate(io);
+        const host_key: HostKey = .{ .keypair = Ed25519.KeyPair.generate(io) };
+        const text = try host_key.formatOpenssh(allocator);
+        defer allocator.free(text);
+        defer std.crypto.secureZero(u8, text);
         // owner-only from the start — never a window where the key is readable
         const permissions: std.Io.File.Permissions = if (builtin.os.tag == .windows) .default_file else @enumFromInt(0o600);
         // linked into place only once complete, and never over an existing key
         var atomic_file = try cwd.createFileAtomic(io, path, .{ .permissions = permissions });
         defer atomic_file.deinit(io);
-        try atomic_file.file.writeStreamingAll(io, &keypair.secret_key.bytes);
+        try atomic_file.file.writeStreamingAll(io, text);
         try atomic_file.link(io);
+        return host_key;
+    }
+
+    const openssh_magic = "openssh-key-v1\x00";
+    const openssh_begin = "-----BEGIN OPENSSH PRIVATE KEY-----";
+    const openssh_end = "-----END OPENSSH PRIVATE KEY-----";
+
+    /// the unencrypted openssh-key-v1 file that `ssh-keygen` writes and reads
+    fn formatOpenssh(self: HostKey, allocator: std.mem.Allocator) ![]u8 {
+        var public_blob: std.ArrayList(u8) = .empty;
+        defer public_blob.deinit(allocator);
+        try self.appendPublicBlob(&public_blob, allocator);
+
+        // two equal check ints show a reader that the section decrypted
+        // properly, a formality without a cipher
+        var private: std.ArrayList(u8) = .empty;
+        defer private.deinit(allocator);
+        defer std.crypto.secureZero(u8, private.items);
+        // every buffer that holds the secret is reserved up front, so a
+        // reallocation can't leave a copy behind, and wiped before it's freed
+        const private_capacity = 256;
+        try private.ensureTotalCapacityPrecise(allocator, private_capacity);
+        try writeU32(&private, allocator, 0);
+        try writeU32(&private, allocator, 0);
+        try writeStringField(&private, allocator, "ssh-ed25519");
+        try writeStringField(&private, allocator, &self.keypair.public_key.bytes);
+        try writeStringField(&private, allocator, &self.keypair.secret_key.bytes);
+        try writeStringField(&private, allocator, "haxy"); // comment
+        // padded with 1, 2, 3 and so on to the cipher's block size, 8 for none
+        var pad: u8 = 1;
+        while (private.items.len % 8 != 0) : (pad += 1) try private.append(allocator, pad);
+        std.debug.assert(private.items.len <= private_capacity);
+
+        var blob: std.ArrayList(u8) = .empty;
+        defer blob.deinit(allocator);
+        defer std.crypto.secureZero(u8, blob.items);
+        const blob_capacity = 128 + public_blob.items.len + private.items.len;
+        try blob.ensureTotalCapacityPrecise(allocator, blob_capacity);
+        try blob.appendSlice(allocator, openssh_magic);
+        try writeStringField(&blob, allocator, "none"); // cipher
+        try writeStringField(&blob, allocator, "none"); // kdf
+        try writeStringField(&blob, allocator, ""); // kdf options
+        try writeU32(&blob, allocator, 1); // number of keys
+        try writeStringField(&blob, allocator, public_blob.items);
+        try writeStringField(&blob, allocator, private.items);
+        std.debug.assert(blob.items.len <= blob_capacity);
+
+        const encoder = std.base64.standard.Encoder;
+        const encoded = try allocator.alloc(u8, encoder.calcSize(blob.items.len));
+        defer allocator.free(encoded);
+        defer std.crypto.secureZero(u8, encoded);
+        _ = encoder.encode(encoded, blob.items);
+
+        // sized exactly, so toOwnedSlice hands over the allocation as it is
+        const line_len = 70;
+        const line_count = std.math.divCeil(usize, encoded.len, line_len) catch unreachable;
+        var text: std.ArrayList(u8) = .empty;
+        errdefer text.deinit(allocator);
+        errdefer std.crypto.secureZero(u8, text.items);
+        try text.ensureTotalCapacityPrecise(allocator, openssh_begin.len + 1 + encoded.len + line_count + openssh_end.len + 1);
+        try text.appendSlice(allocator, openssh_begin ++ "\n");
+        var lines = std.mem.window(u8, encoded, line_len, line_len);
+        while (lines.next()) |line| {
+            try text.appendSlice(allocator, line);
+            try text.append(allocator, '\n');
+        }
+        try text.appendSlice(allocator, openssh_end ++ "\n");
+        return try text.toOwnedSlice(allocator);
+    }
+
+    fn parseOpenssh(text: []const u8) !HostKey {
+        const trimmed = std.mem.trim(u8, text, " \t\r\n");
+        if (!std.mem.startsWith(u8, trimmed, openssh_begin) or !std.mem.endsWith(u8, trimmed, openssh_end)) return error.InvalidHostKey;
+        const encoded = trimmed[openssh_begin.len .. trimmed.len - openssh_end.len];
+
+        var blob_buf: [max_host_key_file_len]u8 = undefined;
+        defer std.crypto.secureZero(u8, &blob_buf);
+        const decoder = std.base64.standard.decoderWithIgnore(" \t\r\n");
+        const blob_len = decoder.decode(&blob_buf, encoded) catch return error.InvalidHostKey;
+        return parseOpensshBlob(blob_buf[0..blob_len]) catch |err| switch (err) {
+            error.EncryptedHostKey, error.UnsupportedHostKeyType => |e| e,
+            else => error.InvalidHostKey,
+        };
+    }
+
+    fn parseOpensshBlob(blob: []const u8) !HostKey {
+        var r = std.Io.Reader.fixed(blob);
+        if (!std.mem.eql(u8, try r.take(openssh_magic.len), openssh_magic)) return error.InvalidHostKey;
+        const cipher_name = try takeString(&r, 64);
+        const kdf_name = try takeString(&r, 64);
+        _ = try takeString(&r, 1024); // kdf options
+        if (!std.mem.eql(u8, cipher_name, "none") or !std.mem.eql(u8, kdf_name, "none")) return error.EncryptedHostKey;
+        if (try r.takeInt(u32, .big) != 1) return error.InvalidHostKey;
+        var outer = std.Io.Reader.fixed(try takeString(&r, 1024));
+        const private_section = try takeString(&r, 2048);
+        if (r.bufferedLen() != 0) return error.InvalidHostKey;
+
+        var private = std.Io.Reader.fixed(private_section);
+        if (try private.takeInt(u32, .big) != try private.takeInt(u32, .big)) return error.InvalidHostKey;
+        if (!std.mem.eql(u8, try takeString(&private, 64), "ssh-ed25519")) return error.UnsupportedHostKeyType;
+        const public = try takeString(&private, 64);
+        const secret = try takeString(&private, 128);
+        if (secret.len != Ed25519.SecretKey.encoded_length) return error.InvalidHostKey;
+        _ = try takeString(&private, 1024); // comment
+
+        // padded with 1, 2, 3 and so on to the cipher's block size, 8 for none
+        if (private_section.len % 8 != 0) return error.InvalidHostKey;
+        for (private.buffered(), 1..) |byte, i| {
+            if (byte != i) return error.InvalidHostKey;
+        }
+
+        // the outer public key must be the same key
+        if (!std.mem.eql(u8, try takeString(&outer, 64), "ssh-ed25519") or
+            !std.mem.eql(u8, try takeString(&outer, 64), public) or
+            outer.bufferedLen() != 0) return error.InvalidHostKey;
+
+        // the secret is seed || public. rebuild it from the seed so a file
+        // whose halves disagree is rejected in every build mode.
+        const keypair = try Ed25519.KeyPair.generateDeterministic(secret[0..Ed25519.KeyPair.seed_length].*);
+        if (!std.mem.eql(u8, secret, &keypair.secret_key.bytes) or
+            !std.mem.eql(u8, public, &keypair.public_key.bytes)) return error.InvalidHostKey;
         return .{ .keypair = keypair };
     }
 
