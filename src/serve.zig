@@ -39,6 +39,7 @@ const SshService = struct {
     listener: BoundListener,
     host_key: serve_ssh_protocol.HostKey,
     session_handler: serve_ssh.SessionHandler,
+    watchdog: serve_ssh.Watchdog = .{},
 };
 
 pub fn run(
@@ -132,7 +133,7 @@ pub fn run(
     if (ssh_maybe) |*ssh| {
         try err.print("serving SSH on {s}:{d}\n", .{ ssh.listener.address.host, ssh.listener.port() });
         try err.flush();
-        serve_ssh.runListener(io, allocator, &ssh.host_key, &ssh.session_handler, &ssh.listener.server, &tasks, err);
+        serve_ssh.runListener(io, allocator, &ssh.host_key, &ssh.session_handler, &ssh.watchdog, &ssh.listener.server, &tasks, err);
     }
 
     try err.print("serving web UI on http://{s}:{d}/\n", .{ wui_listen_address.host, wui_server.socket.address.getPort() });

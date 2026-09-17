@@ -11,13 +11,12 @@ const evt = @import("./event.zig");
 const serve_common = @import("./serve_common.zig");
 const fork = @import("./fork.zig");
 
-// listener resource limits. the watchdog gives unauthenticated peers a hard
-// deadline, detects idle non-interactive sessions from protocol progress, and
-// bounds the post-CLOSE drain. each connection holds two OS threads under
-// std.Io.Threaded (session + watchdog), so the cap is sized by thread count.
+// listener resource limits. the watchdog gives peers a hard deadline to start
+// a session, times out non-interactive sessions that stall while we're blocked
+// on the peer, and bounds the post-CLOSE drain.
 const max_connections: u32 = 4096;
 const watchdog_interval = std.Io.Duration.fromSeconds(5);
-const preauth_timeout_ticks: u32 = 6; // 30 seconds
+const presession_timeout_ticks: u32 = 6; // 30 seconds
 const idle_timeout_ticks: u32 = 24; // 120 seconds
 const close_drain_timeout_ticks: u32 = 2; // 5-10 seconds
 const escape_timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(25), .clock = .awake } };
@@ -60,6 +59,7 @@ pub fn runListener(
     allocator: std.mem.Allocator,
     host_key: *const ssh.HostKey,
     session_handler: *const SessionHandler,
+    watchdog: *Watchdog,
     net_server: *std.Io.net.Server,
     tasks: *std.Io.Group,
     err: *std.Io.Writer,
@@ -69,6 +69,7 @@ pub fn runListener(
         allocator: std.mem.Allocator,
         host_key: *const ssh.HostKey,
         session_handler: *const SessionHandler,
+        watchdog: *Watchdog,
         err: *std.Io.Writer,
     };
 
@@ -83,12 +84,9 @@ pub fn runListener(
                 return;
             }
 
-            var idle_state = ssh.IdleState{};
-            var watchdog_future = std.Io.concurrent(ctx.io, watchdog, .{ ctx.io, &stream, &idle_state }) catch |spawn_err| {
-                serve_common.logError(ctx.io, ctx.err, "ssh: watchdog spawn failed: {s}\n", .{@errorName(spawn_err)});
-                return;
-            };
-            defer watchdog_future.cancel(ctx.io);
+            var connection = Watchdog.Connection{ .stream = &stream };
+            ctx.watchdog.add(ctx.io, &connection);
+            defer ctx.watchdog.remove(ctx.io, &connection);
 
             // timed peeks need room for a complete encrypted packet
             var recv_buf: [ssh.packet_buffer_size]u8 = undefined;
@@ -101,7 +99,7 @@ pub fn runListener(
                 &stream_reader.interface,
                 &stream_writer.interface,
                 ctx.host_key,
-                &idle_state,
+                &connection.idle_state,
                 ctx.session_handler,
             ) catch |session_err| {
                 serve_common.logError(ctx.io, ctx.err, "ssh session failed: {s}\n", .{@errorName(session_err)});
@@ -109,59 +107,88 @@ pub fn runListener(
         }
     }.h;
 
+    // without the watchdog nothing bounds a connection, so don't listen
+    tasks.concurrent(io, Watchdog.run, .{ watchdog, io }) catch |spawn_err| {
+        serve_common.logError(io, err, "ssh: watchdog spawn failed: {s}\n", .{@errorName(spawn_err)});
+        return;
+    };
+
     serve_common.runListener(io, net_server, tasks, err, "ssh", Context{
         .io = io,
         .allocator = allocator,
         .host_key = host_key,
         .session_handler = session_handler,
+        .watchdog = watchdog,
         .err = err,
     }, handle);
 }
 
-// enforce a hard pre-auth deadline, an idle timeout for non-interactive
-// sessions, and a bounded close drain. interactive sessions are exempt only
-// from the idle timeout; the watchdog remains available to break a stalled
-// teardown.
-fn watchdog(io: std.Io, stream: *const std.Io.net.Stream, idle_state: *ssh.IdleState) void {
-    var last_seen: u64 = 0;
-    var preauth_ticks: u32 = 0;
-    var idle_ticks: u32 = 0;
-    var closing_ticks: u32 = 0;
-    while (true) {
-        io.sleep(watchdog_interval, .awake) catch return; // canceled — connection is done
+/// one task watches every connection. a connection links its entry only
+/// while it runs, so the watchdog never sees a closed stream.
+pub const Watchdog = struct {
+    mutex: std.Io.Mutex = .init,
+    connections: std.DoublyLinkedList = .{},
 
-        if (idle_state.closing.load(.acquire)) {
-            closing_ticks += 1;
-            if (closing_ticks >= close_drain_timeout_ticks) {
-                stream.shutdown(io, .both) catch {};
-                return;
-            }
-            continue;
-        }
+    const Connection = struct {
+        node: std.DoublyLinkedList.Node = .{},
+        stream: *const std.Io.net.Stream,
+        idle_state: ssh.IdleState = .{},
+        // tick state, touched only by the watchdog
+        last_seen: u64 = 0,
+        presession_ticks: u32 = 0,
+        idle_ticks: u32 = 0,
+        closing_ticks: u32 = 0,
 
-        if (!idle_state.authenticated.load(.acquire)) {
-            preauth_ticks += 1;
-            if (preauth_ticks >= preauth_timeout_ticks) {
-                stream.shutdown(io, .both) catch {};
-                return;
+        // interactive sessions are exempt only from the idle timeout, so a
+        // stalled teardown can still be broken
+        fn timedOut(self: *Connection) bool {
+            if (self.idle_state.closing.load(.acquire)) {
+                self.closing_ticks += 1;
+                return self.closing_ticks >= close_drain_timeout_ticks;
             }
-            continue;
-        }
+            if (!self.idle_state.session_started.load(.acquire)) {
+                self.presession_ticks += 1;
+                return self.presession_ticks >= presession_timeout_ticks;
+            }
+            if (self.idle_state.exempt.load(.acquire)) return false;
 
-        if (idle_state.exempt.load(.monotonic)) continue;
-        const seen = idle_state.activity.load(.monotonic);
-        if (seen == last_seen) {
-            idle_ticks += 1;
-            if (idle_ticks >= idle_timeout_ticks) {
-                stream.shutdown(io, .both) catch {};
-                return;
+            // our own work between packets is not the peer idling
+            const seen = self.idle_state.activity.load(.monotonic);
+            defer self.last_seen = seen;
+            if (self.idle_state.waiting.load(.acquire) and seen == self.last_seen) {
+                self.idle_ticks += 1;
+            } else {
+                self.idle_ticks = 0;
             }
-        } else {
-            idle_ticks = 0;
+            return self.idle_ticks >= idle_timeout_ticks;
         }
-        last_seen = seen;
+    };
+
+    fn add(self: *Watchdog, io: std.Io, connection: *Connection) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        self.connections.append(&connection.node);
     }
-}
+
+    fn remove(self: *Watchdog, io: std.Io, connection: *Connection) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        self.connections.remove(&connection.node);
+    }
+
+    fn run(self: *Watchdog, io: std.Io) void {
+        while (true) {
+            io.sleep(watchdog_interval, .awake) catch return;
+            self.mutex.lock(io) catch return;
+            defer self.mutex.unlock(io);
+            var node = self.connections.first;
+            while (node) |n| : (node = n.next) {
+                const connection: *Connection = @fieldParentPtr("node", n);
+                if (connection.timedOut()) connection.stream.shutdown(io, .both) catch {};
+            }
+        }
+    }
+};
 
 fn runTuiSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh.PtySize) !void {
     // runTui owns the terminal, whose deinit restores the client's screen and
