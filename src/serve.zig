@@ -131,7 +131,7 @@ pub fn run(
     }
 
     if (ssh_maybe) |*ssh| {
-        try err.print("serving SSH on {s}:{d}\n", .{ ssh.listener.address.host, ssh.listener.port() });
+        try err.print("serving SSH on {s}:{d}, host key ED25519 {s}\n", .{ ssh.listener.address.host, ssh.listener.port(), try ssh.host_key.fingerprint(allocator) });
         try err.flush();
         serve_ssh.runListener(io, allocator, &ssh.host_key, &ssh.session_handler, &ssh.watchdog, &ssh.listener.server, &tasks, err);
     }

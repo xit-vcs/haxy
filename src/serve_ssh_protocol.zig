@@ -140,10 +140,20 @@ pub const HostKey = struct {
         const keypair = Ed25519.KeyPair.generate(io);
         // owner-only from the start — never a window where the key is readable
         const permissions: std.Io.File.Permissions = if (builtin.os.tag == .windows) .default_file else @enumFromInt(0o600);
-        const file = try cwd.createFile(io, path, .{ .permissions = permissions });
-        defer file.close(io);
-        try file.writeStreamingAll(io, &keypair.secret_key.bytes);
+        // linked into place only once complete, and never over an existing key
+        var atomic_file = try cwd.createFileAtomic(io, path, .{ .permissions = permissions });
+        defer atomic_file.deinit(io);
+        try atomic_file.file.writeStreamingAll(io, &keypair.secret_key.bytes);
+        try atomic_file.link(io);
         return .{ .keypair = keypair };
+    }
+
+    /// what `ssh` shows a user on first connect
+    pub fn fingerprint(self: HostKey, allocator: std.mem.Allocator) ![fingerprint_len]u8 {
+        var blob: std.ArrayList(u8) = .empty;
+        defer blob.deinit(allocator);
+        try self.appendPublicBlob(&blob, allocator);
+        return formatFingerprint(blob.items);
     }
 
     /// SSH wire-format ed25519 public key blob (used as K_S in the hash and
@@ -2126,7 +2136,7 @@ pub fn writeU32(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, value: u3
     try buf.appendSlice(allocator, &bytes);
 }
 
-test "pty dimensions have bounded axes and area, preserving normal and zero sizes" {
+test "pty dimensions have bounded axes, preserving normal and zero sizes" {
     for ([_]struct { width: u32, height: u32, expected: PtySize }{
         .{ .width = 80, .height = 24, .expected = .{ .width_cells = 80, .height_cells = 24 } },
         .{ .width = 0, .height = 0, .expected = .{ .width_cells = 0, .height_cells = 0 } },
