@@ -194,7 +194,8 @@ fn runTuiSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh
     // runTui owns the terminal, whose deinit restores the client's screen and
     // runs as the function unwinds — so any error it returns leaves the TUI torn
     // down and we can surface the failure on the restored screen before exiting.
-    runTui(handler, sess, pty) catch |err| {
+    runTui(handler, sess, pty) catch |tui_err| {
+        const err = sess.underlyingError(tui_err);
         serve_common.logError(sess.conn.io, handler.err, "ssh tui session failed: {s}\n", .{@errorName(err)});
         var buf: [256]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "haxy ssh: {s}\r\n", .{@errorName(err)}) catch "haxy ssh: internal error\r\n";

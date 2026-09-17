@@ -43,7 +43,6 @@ const max_packet_len: u32 = 35000; // RFC 4253 §6.1 — minimum implementations
 pub const packet_buffer_size = 4 + max_packet_len + Poly1305.mac_length;
 const max_name_list_len: u32 = 4096;
 const max_auth_attempts: u32 = 20;
-const max_exit_drain_packets: u32 = 32;
 const max_banner_lines: u32 = 32;
 // terminal grids can have several live copies during layout and rendering
 const max_pty_width: u32 = 512;
@@ -80,6 +79,8 @@ pub const SSH_MSG_CHANNEL_SUCCESS: u8 = 99;
 pub const SSH_MSG_CHANNEL_FAILURE: u8 = 100;
 
 pub const SSH_DISCONNECT_PROTOCOL_ERROR: u32 = 2;
+pub const SSH_DISCONNECT_MAC_ERROR: u32 = 5;
+pub const SSH_DISCONNECT_BY_APPLICATION: u32 = 11;
 
 // SSH_OPEN_* reason codes for CHANNEL_OPEN_FAILURE
 pub const SSH_OPEN_RESOURCE_SHORTAGE: u32 = 4;
@@ -193,6 +194,8 @@ pub const Conn = struct {
     idle: ?*IdleState = null,
     // set only while the TUI waits to resolve a lone escape key
     read_timeout: std.Io.Timeout = .none,
+    // teardown ran to the peer's EOF, so nothing more can be said
+    drained: bool = false,
 
     fn setWaiting(self: *Conn, waiting: bool) void {
         if (self.idle) |idle| idle.waiting.store(waiting, .release);
@@ -246,6 +249,10 @@ pub const SessionCtx = struct {
     /// can use it as a stable per-key identity.
     fingerprint: [fingerprint_len]u8,
     closed: bool = false,
+    // what a SessionReader or SessionWriter actually hit. kept apart so a
+    // cleanup write can't replace the cause of a failed read.
+    read_err: ?anyerror = null,
+    write_err: ?anyerror = null,
 
     // shared state for the packet pump. incoming CHANNEL_DATA bytes
     // accumulate in incoming_buffer (already-consumed prefix tracked by
@@ -264,6 +271,26 @@ pub const SessionCtx = struct {
 
     pub fn deinit(self: *SessionCtx) void {
         self.incoming_buffer.deinit(self.conn.allocator);
+    }
+
+    /// the std.Io adapters can only report ReadFailed or WriteFailed. recover
+    /// what the session hit.
+    pub fn underlyingError(self: *const SessionCtx, err: anyerror) anyerror {
+        return switch (err) {
+            error.ReadFailed => self.read_err orelse err,
+            error.WriteFailed => self.write_err orelse err,
+            else => err,
+        };
+    }
+
+    fn failRead(self: *SessionCtx, err: anyerror) error{ReadFailed} {
+        self.read_err = err;
+        return error.ReadFailed;
+    }
+
+    fn failWrite(self: *SessionCtx, err: anyerror) error{WriteFailed} {
+        self.write_err = err;
+        return error.WriteFailed;
     }
 
     fn incomingBytes(self: *const SessionCtx) []const u8 {
@@ -486,13 +513,10 @@ fn drainConnection(conn: *Conn) void {
     // we close with those unread, Linux sends RST instead of FIN, which the
     // client reports as "Connection reset by peer" and treats as a failed
     // push even though the ref updated. draining to EOF leaves nothing
-    // unread, so we send a clean FIN. we're tearing down, so the packet
-    // contents don't matter — just get them off the socket.
-    var drain_packets: u32 = 0;
-    while (drain_packets < max_exit_drain_packets) : (drain_packets += 1) {
-        const packet = conn.cs_cipher.readPacket(conn.allocator, conn.reader) catch break;
-        conn.allocator.free(packet);
-    }
+    // unread, so we send a clean FIN. the bytes don't matter, and the host's
+    // watchdog bounds how long a peer can keep this going.
+    _ = conn.reader.discardRemaining() catch {};
+    conn.drained = true;
 }
 
 /// std.Io.Writer adapter that ships bytes to a SessionCtx as CHANNEL_DATA.
@@ -518,7 +542,7 @@ pub const SessionWriter = struct {
         // first ship anything already accumulated in the Writer's buffer
         const buffered = w.buffered();
         if (buffered.len > 0) {
-            self.sess.writeBytes(buffered) catch return error.WriteFailed;
+            self.sess.writeBytes(buffered) catch |err| return self.sess.failWrite(err);
         }
 
         // then ship the bytes passed in directly. data[0..len-1] are written
@@ -528,7 +552,7 @@ pub const SessionWriter = struct {
         if (data.len > 1) {
             for (data[0 .. data.len - 1]) |chunk| {
                 if (chunk.len == 0) continue;
-                self.sess.writeBytes(chunk) catch return error.WriteFailed;
+                self.sess.writeBytes(chunk) catch |err| return self.sess.failWrite(err);
                 extra += chunk.len;
             }
         }
@@ -537,7 +561,7 @@ pub const SessionWriter = struct {
             if (pattern.len > 0) {
                 var i: usize = 0;
                 while (i < splat) : (i += 1) {
-                    self.sess.writeBytes(pattern) catch return error.WriteFailed;
+                    self.sess.writeBytes(pattern) catch |err| return self.sess.failWrite(err);
                     extra += pattern.len;
                 }
             }
@@ -579,7 +603,7 @@ pub const SessionReader = struct {
         // wait for data to arrive (or EOF)
         while (self.sess.incomingBytes().len == 0) {
             if (self.sess.incoming_eof) return error.EndOfStream;
-            self.sess.processOneBackgroundPacket() catch return error.ReadFailed;
+            self.sess.processOneBackgroundPacket() catch |err| return self.sess.failRead(err);
         }
 
         // drain as much buffered input as the limit allows, in one go
@@ -587,7 +611,7 @@ pub const SessionReader = struct {
         const written = try w.write(chunk);
 
         self.sess.consumeIncoming(written);
-        self.sess.maybeRefillRecvWindowForBufferedInput() catch return error.ReadFailed;
+        self.sess.maybeRefillRecvWindowForBufferedInput() catch |err| return self.sess.failRead(err);
 
         return written;
     }
@@ -598,7 +622,7 @@ pub const SessionReader = struct {
         // wait until some input is buffered (or EOF)
         while (self.sess.incomingBytes().len == 0) {
             if (self.sess.incoming_eof) return error.EndOfStream;
-            self.sess.processOneBackgroundPacket() catch return error.ReadFailed;
+            self.sess.processOneBackgroundPacket() catch |err| return self.sess.failRead(err);
         }
 
         const src = self.sess.incomingBytes();
@@ -613,7 +637,7 @@ pub const SessionReader = struct {
             @memcpy(dest[0..copy], src[0..copy]);
             r.end += copy;
             self.sess.consumeIncoming(copy);
-            self.sess.maybeRefillRecvWindowForBufferedInput() catch return error.ReadFailed;
+            self.sess.maybeRefillRecvWindowForBufferedInput() catch |err| return self.sess.failRead(err);
             return 0;
         }
 
@@ -621,7 +645,7 @@ pub const SessionReader = struct {
         const copy = @min(dest.len, src.len);
         @memcpy(dest[0..copy], src[0..copy]);
         self.sess.consumeIncoming(copy);
-        self.sess.maybeRefillRecvWindowForBufferedInput() catch return error.ReadFailed;
+        self.sess.maybeRefillRecvWindowForBufferedInput() catch |err| return self.sess.failRead(err);
         return copy;
     }
 };
@@ -678,18 +702,26 @@ pub fn handleConnection(
     };
 }
 
-/// tell the peer why we're hanging up (RFC 4253 §11.1). best effort — a peer
-/// that already went away has nothing left to read it.
+/// tell the peer why we're hanging up (RFC 4253 §11.1), best effort. protocol
+/// errors are named for whoever is debugging the client.
 fn disconnectOnError(conn: *Conn, err: anyerror) void {
-    if (err == error.EndOfStream) return; // peer hung up first
-    disconnect(conn, @errorName(err)) catch {};
+    if (conn.drained) return;
+    const reason: u32, const description: []const u8 = switch (err) {
+        // the peer hung up first, or the transport is broken
+        error.EndOfStream, error.ReadFailed, error.WriteFailed => return,
+        error.MacVerificationFailed => .{ SSH_DISCONNECT_MAC_ERROR, @errorName(err) },
+        error.OutOfMemory, error.Canceled => .{ SSH_DISCONNECT_BY_APPLICATION, "server error" },
+        else => .{ SSH_DISCONNECT_PROTOCOL_ERROR, @errorName(err) },
+    };
+
+    disconnect(conn, reason, description) catch {};
 }
 
-fn disconnect(conn: *Conn, description: []const u8) !void {
+fn disconnect(conn: *Conn, reason: u32, description: []const u8) !void {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(conn.allocator);
     try buf.append(conn.allocator, SSH_MSG_DISCONNECT);
-    try writeU32(&buf, conn.allocator, SSH_DISCONNECT_PROTOCOL_ERROR);
+    try writeU32(&buf, conn.allocator, reason);
     try writeStringField(&buf, conn.allocator, description);
     try writeStringField(&buf, conn.allocator, ""); // language tag
     try conn.writePacket(buf.items);
@@ -1811,7 +1843,7 @@ fn runChannelLayer(
                     handler.handleSession(&sess, request) catch |session_err| {
                         // try to send a non-zero exit status before closing
                         sess.exit(1) catch {};
-                        return session_err;
+                        return sess.underlyingError(session_err);
                     };
                     if (!sess.closed) try sess.exit(0);
                     return;
