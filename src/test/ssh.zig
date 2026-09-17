@@ -274,7 +274,7 @@ test "ignored packets do not count as connection activity" {
     };
 
     try std.testing.expectError(error.EndOfStream, proto.readSessionPacket(&conn));
-    try std.testing.expectEqual(@as(u64, 0), idle.activity.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, 0), idle.activity.load(.acquire));
 }
 
 test "SSH-2 negotiation: walk through every step (banner -> KEX -> auth -> channel -> exec)" {

@@ -77,8 +77,8 @@ pub fn runListener(
         fn h(ctx: Context, stream: std.Io.net.Stream) void {
             defer stream.close(ctx.io);
 
-            const prev_count = active_connections.fetchAdd(1, .monotonic);
-            defer _ = active_connections.fetchSub(1, .monotonic);
+            const prev_count = active_connections.fetchAdd(1, .acq_rel);
+            defer _ = active_connections.fetchSub(1, .acq_rel);
             if (prev_count >= max_connections) {
                 serve_common.logError(ctx.io, ctx.err, "ssh: connection limit reached, dropping\n", .{});
                 return;
@@ -153,7 +153,7 @@ pub const Watchdog = struct {
             if (self.idle_state.exempt.load(.acquire)) return false;
 
             // our own work between packets is not the peer idling
-            const seen = self.idle_state.activity.load(.monotonic);
+            const seen = self.idle_state.activity.load(.acquire);
             defer self.last_seen = seen;
             if (self.idle_state.waiting.load(.acquire) and seen == self.last_seen) {
                 self.idle_ticks += 1;

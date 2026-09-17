@@ -889,7 +889,7 @@ fn sendUnimplemented(conn: *Conn) !void {
 }
 
 fn recordActivity(conn: *Conn) void {
-    if (conn.idle) |idle| _ = idle.activity.fetchAdd(1, .monotonic);
+    if (conn.idle) |idle| _ = idle.activity.fetchAdd(1, .acq_rel);
 }
 
 // ---------------------------------------------------------------------------
