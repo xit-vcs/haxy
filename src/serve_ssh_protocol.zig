@@ -199,9 +199,13 @@ pub const Conn = struct {
     }
 
     fn writePacket(self: *Conn, payload: []const u8) !void {
+        try self.writePacketVec(&.{payload});
+    }
+
+    fn writePacketVec(self: *Conn, parts: []const []const u8) !void {
         self.setWaiting(true);
         defer self.setWaiting(false);
-        try self.sc_cipher.writePacket(self.io, self.writer, payload);
+        try self.sc_cipher.writePacketVec(self.io, self.writer, parts);
         // a peer that keeps reading is alive
         recordActivity(self);
     }
@@ -257,12 +261,9 @@ pub const SessionCtx = struct {
     eof_reported: bool = false,
     // resize seen by the background pump, returned by the next nextEvent call
     pending_resize: ?PtySize = null,
-    // reused per-chunk message buffer for writeChannel
-    write_scratch: std.ArrayList(u8) = .empty,
 
     pub fn deinit(self: *SessionCtx) void {
         self.incoming_buffer.deinit(self.conn.allocator);
-        self.write_scratch.deinit(self.conn.allocator);
     }
 
     fn incomingBytes(self: *const SessionCtx) []const u8 {
@@ -344,6 +345,15 @@ pub const SessionCtx = struct {
     /// SessionReader).
     fn writeChannel(self: *SessionCtx, bytes: []const u8, extended: bool) !void {
         const conn = self.conn;
+
+        // byte type, uint32 recipient_channel, [if extended: uint32 type_code],
+        // uint32 data length
+        var header: [13]u8 = undefined;
+        header[0] = if (extended) SSH_MSG_CHANNEL_EXTENDED_DATA else SSH_MSG_CHANNEL_DATA;
+        std.mem.writeInt(u32, header[1..5], self.channel.remote_id, .big);
+        if (extended) std.mem.writeInt(u32, header[5..9], SSH_EXTENDED_DATA_STDERR, .big);
+        const len_start: usize = if (extended) 9 else 5;
+
         var rest = bytes;
         while (rest.len > 0) {
             if (self.closed or self.remote_closed) return error.RemoteClosed;
@@ -355,12 +365,8 @@ pub const SessionCtx = struct {
             const cap = @min(rest.len, self.channel.max_packet, self.channel.remote_window, max_packet_size);
             const chunk_len: u32 = @intCast(cap);
 
-            self.write_scratch.clearRetainingCapacity();
-            try self.write_scratch.append(conn.allocator, if (extended) SSH_MSG_CHANNEL_EXTENDED_DATA else SSH_MSG_CHANNEL_DATA);
-            try writeU32(&self.write_scratch, conn.allocator, self.channel.remote_id);
-            if (extended) try writeU32(&self.write_scratch, conn.allocator, SSH_EXTENDED_DATA_STDERR);
-            try writeStringField(&self.write_scratch, conn.allocator, rest[0..chunk_len]);
-            try conn.writePacket(self.write_scratch.items);
+            std.mem.writeInt(u32, header[len_start..][0..4], chunk_len, .big);
+            try conn.writePacketVec(&.{ header[0 .. len_start + 4], rest[0..chunk_len] });
 
             self.channel.remote_window -= chunk_len;
             rest = rest[chunk_len..];
@@ -1454,30 +1460,49 @@ pub const Cipher = struct {
         writer: *std.Io.Writer,
         payload: []const u8,
     ) !void {
+        try self.writePacketVec(io, writer, &.{payload});
+    }
+
+    /// the payload is the concatenation of `parts`
+    pub fn writePacketVec(
+        self: *Cipher,
+        io: std.Io,
+        writer: *std.Io.Writer,
+        parts: []const []const u8,
+    ) !void {
+        var payload_len: usize = 0;
+        for (parts) |part| payload_len += part.len;
+
         const block: usize = 8;
-        const initial_pad = block - ((1 + payload.len) % block);
+        const initial_pad = block - ((1 + payload_len) % block);
         const padding_len: u8 = @intCast(if (initial_pad < 4) initial_pad + block else initial_pad);
-        const body_len: u32 = @intCast(1 + payload.len + padding_len);
+        const body_len = 1 + payload_len + padding_len;
+        if (body_len > max_packet_len) return error.PacketTooLarge;
 
         const nonce = makeNonce(self.seq);
 
-        // plaintext body = padding_length || payload || random padding.
-        // stack-allocated to avoid a heap alloc on every packet.
-        var body_buf: [max_packet_len]u8 = undefined;
-        if (body_len > body_buf.len) return error.PacketTooLarge;
-        const body = body_buf[0..body_len];
+        // encrypted length || body || mac, contiguous so the packet goes out
+        // in one write. stack-allocated to avoid a heap alloc on every packet.
+        var packet_buf: [packet_buffer_size]u8 = undefined;
+        const packet = packet_buf[0 .. 4 + body_len + Poly1305.mac_length];
+        const enc_length = packet[0..4];
+        const body = packet[4..][0..body_len];
+
+        // plaintext body = padding_length || payload || random padding
         body[0] = padding_len;
-        @memcpy(body[1 .. 1 + payload.len], payload);
-        io.random(body[1 + payload.len ..]);
+        var end: usize = 1;
+        for (parts) |part| {
+            @memcpy(body[end..][0..part.len], part);
+            end += part.len;
+        }
+        io.random(body[end..]);
 
         // encrypt body in place with counter=1
         ChaCha20.xor(body, body, 1, self.main_key, nonce);
 
         // encrypt length field with header key, counter=0
-        var enc_length: [4]u8 = undefined;
-        var length_plain: [4]u8 = undefined;
-        std.mem.writeInt(u32, &length_plain, body_len, .big);
-        ChaCha20.xor(&enc_length, &length_plain, 0, self.header_key, nonce);
+        std.mem.writeInt(u32, enc_length, @intCast(body_len), .big);
+        ChaCha20.xor(enc_length, enc_length, 0, self.header_key, nonce);
 
         // poly1305 key = first 32 bytes of chacha20(K_2, nonce, counter=0)
         var poly_key: [Poly1305.key_length]u8 = undefined;
@@ -1485,14 +1510,10 @@ pub const Cipher = struct {
 
         // mac over encrypted_length || encrypted_body
         var poly = Poly1305.init(&poly_key);
-        poly.update(&enc_length);
-        poly.update(body);
-        var tag: [Poly1305.mac_length]u8 = undefined;
-        poly.final(&tag);
+        poly.update(packet[0 .. 4 + body_len]);
+        poly.final(packet[4 + body_len ..][0..Poly1305.mac_length]);
 
-        try writer.writeAll(&enc_length);
-        try writer.writeAll(body);
-        try writer.writeAll(&tag);
+        try writer.writeAll(packet);
         try writer.flush();
 
         self.seq += 1;
