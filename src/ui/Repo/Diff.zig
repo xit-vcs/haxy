@@ -176,10 +176,6 @@ fn renderHunk(
             .ins => |e| try hunk_iter.line_iter_b.get(e.new_line.num),
             .del => |e| try hunk_iter.line_iter_a.get(e.old_line.num),
         };
-        defer switch (edit) {
-            .eql, .ins => hunk_iter.line_iter_b.free(text),
-            .del => hunk_iter.line_iter_a.free(text),
-        };
         const prefix: u8 = switch (edit) {
             .eql => ' ',
             .ins => '+',

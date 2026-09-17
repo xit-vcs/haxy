@@ -92,7 +92,7 @@ pub fn readConflict(
             };
         } else if (std.mem.eql(u8, field, "description")) {
             conflict.description = .{
-                .chunks = try diff3.chunks(io, arena.child_allocator, arena, if (base) |b| b.event.description else "", ours.event.description, theirs.event.description),
+                .chunks = try diff3.chunks(arena.child_allocator, arena, if (base) |b| b.event.description else "", ours.event.description, theirs.event.description),
                 .ours_author = our_author,
                 .theirs_author = their_author,
             };

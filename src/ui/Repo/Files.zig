@@ -219,7 +219,6 @@ fn readFileContent(
     var i = start;
     while (i < end) : (i += 1) {
         const line = try line_iter.get(i);
-        defer line_iter.free(line);
         try lines.append(arena, try arena.dupe(u8, line));
     }
     return .{

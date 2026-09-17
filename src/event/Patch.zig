@@ -388,7 +388,7 @@ fn resolveFields(
         const base = try evt.read(Record, DB, repo_opts.hash, arena, try DB.HashMap(.read_only).init(base_cursor));
         base_description = base.event.description;
     }
-    const chunks = try diff3.chunks(io, allocator, arena, base_description, live.event.description, theirs.event.description);
+    const chunks = try diff3.chunks(allocator, arena, base_description, live.event.description, theirs.event.description);
     var resolutions: std.ArrayList([]const u8) = .empty;
     var hunk_index: usize = 0;
     for (chunks) |chunk| {

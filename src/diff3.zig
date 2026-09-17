@@ -27,7 +27,6 @@ pub const Chunk = union(enum) {
 // split base/ours/theirs into a chunk sequence. chunk texts are allocated in
 // `arena` and hold whole lines joined with newlines.
 pub fn chunks(
-    io: std.Io,
     gpa: std.mem.Allocator,
     arena: *std.heap.ArenaAllocator,
     base: []const u8,
@@ -36,11 +35,11 @@ pub fn chunks(
 ) ![]Chunk {
     const aa = arena.allocator();
 
-    var base_iter = try LineIterator.initFromTestBuffer(io, gpa, base);
+    var base_iter = try LineIterator.initFromTestBuffer(gpa, base);
     defer base_iter.deinit();
-    var ours_iter = try LineIterator.initFromTestBuffer(io, gpa, ours);
+    var ours_iter = try LineIterator.initFromTestBuffer(gpa, ours);
     defer ours_iter.deinit();
-    var theirs_iter = try LineIterator.initFromTestBuffer(io, gpa, theirs);
+    var theirs_iter = try LineIterator.initFromTestBuffer(gpa, theirs);
     defer theirs_iter.deinit();
 
     // invalid utf-8 degrades an iterator to .binary with no lines, which would
