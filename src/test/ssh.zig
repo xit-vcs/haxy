@@ -19,6 +19,7 @@ const TestSession = struct {
     output: [2048]u8 = undefined,
     writer: std.Io.Writer = undefined,
     conn: proto.Conn = undefined,
+    idle: proto.IdleState = .{},
     channel: Channel = undefined,
     sess: proto.SessionCtx = undefined,
 
@@ -33,6 +34,7 @@ const TestSession = struct {
             .cs_cipher = proto.Cipher.init(&key, 0),
             .sc_cipher = proto.Cipher.init(&key, 0),
             .rekey = undefined,
+            .idle = &self.idle,
         };
         self.channel = .{ .local_id = 0, .remote_id = 7, .local_window = 1 << 20, .remote_window = 32768, .max_packet = 32768 };
         self.sess = .{ .conn = &self.conn, .channel = &self.channel, .fingerprint = undefined };
@@ -974,13 +976,14 @@ const ServerTask = struct {
 
     fn run(self: *ServerTask) void {
         defer self.outgoing.close(self.io);
+        var idle = proto.IdleState{};
         proto.handleConnection(
             self.io,
             self.allocator,
             self.reader,
             self.writer,
             self.host_key,
-            null,
+            &idle,
             self,
         ) catch |e| {
             self.result = e;
