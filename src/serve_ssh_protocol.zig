@@ -217,14 +217,10 @@ pub const Conn = struct {
         if (self.idle) |idle| idle.waiting.store(waiting, .release);
     }
 
-    fn writePacket(self: *Conn, payload: []const u8) !void {
-        try self.writePacketVec(&.{payload});
-    }
-
-    fn writePacketVec(self: *Conn, parts: []const []const u8) !void {
+    fn writePacket(self: *Conn, parts: []const []const u8) !void {
         self.setWaiting(true);
         defer self.setWaiting(false);
-        try self.sc_cipher.writePacketVec(self.io, self.writer, parts);
+        try self.sc_cipher.writePacket(self.io, self.writer, parts);
         // a peer that keeps reading is alive
         recordActivity(self);
     }
@@ -409,7 +405,7 @@ pub const SessionCtx = struct {
             const chunk_len: u32 = @intCast(cap);
 
             std.mem.writeInt(u32, header[len_start..][0..4], chunk_len, .big);
-            try conn.writePacketVec(&.{ header[0 .. len_start + 4], rest[0..chunk_len] });
+            try conn.writePacket(&.{ header[0 .. len_start + 4], rest[0..chunk_len] });
 
             self.channel.remote_window -= chunk_len;
             rest = rest[chunk_len..];
@@ -512,7 +508,7 @@ pub const SessionCtx = struct {
                 try writeStringField(&req, conn.allocator, "exit-status");
                 try req.append(conn.allocator, 0); // want_reply MUST be false
                 try writeU32(&req, conn.allocator, status);
-                try conn.writePacket(req.items);
+                try conn.writePacket(&.{req.items});
             }
 
             // EOF then CLOSE
@@ -745,7 +741,7 @@ fn disconnect(conn: *Conn, reason: u32, description: []const u8) !void {
     try writeU32(&buf, conn.allocator, reason);
     try writeStringField(&buf, conn.allocator, description);
     try writeStringField(&buf, conn.allocator, ""); // language tag
-    try conn.writePacket(buf.items);
+    try conn.writePacket(&.{buf.items});
 }
 
 // ---------------------------------------------------------------------------
@@ -850,7 +846,7 @@ pub const KexTransport = union(enum) {
                 try writePlainPacket(io, writer, payload);
                 seqs.written += 1;
             },
-            .encrypted => |ciphers| try ciphers.sc.writePacket(io, writer, payload),
+            .encrypted => |ciphers| try ciphers.sc.writePacket(io, writer, &.{payload}),
         }
     }
 };
@@ -889,7 +885,7 @@ fn sendUnimplemented(conn: *Conn) !void {
     try buf.append(conn.allocator, SSH_MSG_UNIMPLEMENTED);
     // the read already advanced past the packet we're rejecting
     try writeU32(&buf, conn.allocator, @truncate(conn.cs_cipher.seq - 1));
-    try conn.writePacket(buf.items);
+    try conn.writePacket(&.{buf.items});
 }
 
 fn recordActivity(conn: *Conn) void {
@@ -1140,7 +1136,7 @@ fn runRekey(conn: *Conn, client_kex_init: []const u8) !void {
 
     const server_kex_init = try buildServerKexInit(conn.io, conn.allocator);
     defer conn.allocator.free(server_kex_init);
-    try conn.sc_cipher.writePacket(conn.io, conn.writer, server_kex_init);
+    try conn.sc_cipher.writePacket(conn.io, conn.writer, &.{server_kex_init});
 
     var negotiated = try exchangeKeys(
         conn.io,
@@ -1493,17 +1489,8 @@ pub const Cipher = struct {
         return bytes.len >= 4 + (try self.bodyLength(bytes[0..4])) + Poly1305.mac_length;
     }
 
-    pub fn writePacket(
-        self: *Cipher,
-        io: std.Io,
-        writer: *std.Io.Writer,
-        payload: []const u8,
-    ) !void {
-        try self.writePacketVec(io, writer, &.{payload});
-    }
-
     /// the payload is the concatenation of `parts`
-    pub fn writePacketVec(
+    pub fn writePacket(
         self: *Cipher,
         io: std.Io,
         writer: *std.Io.Writer,
@@ -1647,7 +1634,7 @@ fn runAuth(conn: *Conn) ![fingerprint_len]u8 {
         defer accept.deinit(allocator);
         try accept.append(allocator, SSH_MSG_SERVICE_ACCEPT);
         try writeStringField(&accept, allocator, "ssh-userauth");
-        try conn.writePacket(accept.items);
+        try conn.writePacket(&.{accept.items});
     }
 
     // step 2: USERAUTH loop until SUCCESS. accept any ed25519 key whose
@@ -1696,7 +1683,7 @@ fn runAuth(conn: *Conn) ![fingerprint_len]u8 {
             try pk_ok.append(allocator, SSH_MSG_USERAUTH_PK_OK);
             try writeStringField(&pk_ok, allocator, algo);
             try writeStringField(&pk_ok, allocator, pubkey_blob);
-            try conn.writePacket(pk_ok.items);
+            try conn.writePacket(&.{pk_ok.items});
             continue;
         }
 
@@ -1722,7 +1709,7 @@ fn runAuth(conn: *Conn) ![fingerprint_len]u8 {
             continue;
         }
 
-        try conn.writePacket(&[_]u8{SSH_MSG_USERAUTH_SUCCESS});
+        try conn.writePacket(&.{&[_]u8{SSH_MSG_USERAUTH_SUCCESS}});
         return formatFingerprint(pubkey_blob);
     }
 }
@@ -1733,7 +1720,7 @@ fn sendUserauthFailure(conn: *Conn) !void {
     try buf.append(conn.allocator, SSH_MSG_USERAUTH_FAILURE);
     try writeNameList(&buf, conn.allocator, &.{"publickey"}); // allowed methods
     try buf.append(conn.allocator, 0); // partial_success = false
-    try conn.writePacket(buf.items);
+    try conn.writePacket(&.{buf.items});
 }
 
 /// append the canonical publickey-signed-data bytes (RFC 4252 §7) to `buf`.
@@ -1918,7 +1905,7 @@ fn handleGlobalRequest(conn: *Conn, packet: []const u8) !void {
     _ = try takeString(&r, 256);
     const want_reply = (try r.takeByte()) != 0;
     if (want_reply) {
-        try conn.writePacket(&[_]u8{SSH_MSG_REQUEST_FAILURE});
+        try conn.writePacket(&.{&[_]u8{SSH_MSG_REQUEST_FAILURE}});
     }
 }
 
@@ -1958,7 +1945,7 @@ fn handleChannelOpen(conn: *Conn, packet: []const u8) !?Channel {
     try writeU32(&reply, allocator, local_id);
     try writeU32(&reply, allocator, initial_recv_window);
     try writeU32(&reply, allocator, max_packet_size);
-    try conn.writePacket(reply.items);
+    try conn.writePacket(&.{reply.items});
 
     return .{
         .local_id = local_id,
@@ -1986,7 +1973,7 @@ fn sendChannelOpenFailure(conn: *Conn, open_packet: []const u8, reason: u32, des
     try writeU32(&reply, allocator, reason);
     try writeStringField(&reply, allocator, description);
     try writeStringField(&reply, allocator, ""); // language tag
-    try conn.writePacket(reply.items);
+    try conn.writePacket(&.{reply.items});
 }
 
 /// returns the session request if this one triggered it, else null. an exec
@@ -2062,7 +2049,7 @@ fn sendChannelMessage(conn: *Conn, ch: *Channel, msg_type: u8) !void {
     var packet: [5]u8 = undefined;
     packet[0] = msg_type;
     std.mem.writeInt(u32, packet[1..5], ch.remote_id, .big);
-    try conn.writePacket(&packet);
+    try conn.writePacket(&.{&packet});
 }
 
 fn handleWindowAdjust(ch: *Channel, packet: []const u8) !void {
@@ -2127,7 +2114,7 @@ fn maybeRefillRecvWindow(conn: *Conn, ch: *Channel, budget: u32) !void {
     try adj.append(conn.allocator, SSH_MSG_CHANNEL_WINDOW_ADJUST);
     try writeU32(&adj, conn.allocator, ch.remote_id);
     try writeU32(&adj, conn.allocator, add);
-    try conn.writePacket(adj.items);
+    try conn.writePacket(&.{adj.items});
 }
 
 pub fn writeU32(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, value: u32) !void {
@@ -2164,8 +2151,8 @@ test "channel close before shell or exec is acknowledged" {
     try writeU32(&open, allocator, 7);
     try writeU32(&open, allocator, 32768);
     try writeU32(&open, allocator, 32768);
-    try sender.writePacket(io, &encoded_writer, open.items);
-    try sender.writePacket(io, &encoded_writer, &.{ SSH_MSG_CHANNEL_CLOSE, 0, 0, 0, 0 });
+    try sender.writePacket(io, &encoded_writer, &.{open.items});
+    try sender.writePacket(io, &encoded_writer, &.{&.{ SSH_MSG_CHANNEL_CLOSE, 0, 0, 0, 0 }});
     var reader = std.Io.Reader.fixed(encoded_writer.buffered());
     var output: [256]u8 = undefined;
     var writer = std.Io.Writer.fixed(&output);
