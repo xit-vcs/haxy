@@ -32,7 +32,41 @@ pub const Access = enum {
     public,
 };
 
+// what a user may do in a repo, ordered so a higher role includes the lower ones
+pub const Role = enum {
+    none,
+    read,
+    write,
+    owner,
+
+    pub fn atLeast(self: Role, min: Role) bool {
+        return @intFromEnum(self) >= @intFromEnum(min);
+    }
+};
+
 pub const name_max_len = 32;
+
+// the role `user_id_maybe` holds in the repo. null is a logged-out user, who
+// gets the base role the access fields give everyone.
+pub fn roleOf(record: Record, user_id_maybe: ?[evt.event_id_size]u8) Role {
+    const event = record.event;
+    const base: Role = if (event.write_access == .public) .write else if (event.read_access == .public) .read else .none;
+    const user_id = user_id_maybe orelse return base;
+    if (std.mem.eql(u8, event.user_id, &user_id)) return .owner;
+
+    const user_id_hex = std.fmt.bytesToHex(user_id, .lower);
+    if (base == .write or containsUserId(event.write_user_ids, &user_id_hex)) return .write;
+    if (base == .read or containsUserId(event.read_user_ids, &user_id_hex)) return .read;
+    return .none;
+}
+
+fn containsUserId(user_ids: []const u8, user_id_hex: []const u8) bool {
+    var lines = std.mem.tokenizeScalar(u8, user_ids, '\n');
+    while (lines.next()) |id| {
+        if (std.mem.eql(u8, id, user_id_hex)) return true;
+    }
+    return false;
+}
 
 // the moment keys `evt.merge` reads and writes for this kind
 pub const merge_policy: evt.MergePolicy = .target_wins;

@@ -566,22 +566,35 @@ fn authorizeRepoKey(
         return if (isKeyInAuthorizedKeys(owner.event.ssh_keys, fingerprint)) .allowed else .denied;
     };
 
-    if ((service == .upload_pack and repo.repo.event.read_access == .public) or
-        (service == .receive_pack and repo.repo.event.write_access == .public)) return .allowed;
-    if (try keyBelongsToUser(moment, &arena, repo.repo.event.user_id, fingerprint)) return .allowed;
-
-    const user_id_lists: []const []const u8 = switch (service) {
-        .upload_pack => &.{ repo.repo.event.write_user_ids, repo.repo.event.read_user_ids },
-        .receive_pack => &.{repo.repo.event.write_user_ids},
+    const min_role: evt.Repo.Role = switch (service) {
+        .upload_pack => .read,
+        .receive_pack => .write,
     };
-    for (user_id_lists) |user_ids| {
+    // skip the key lookups when the base role is enough
+    if (evt.Repo.roleOf(repo.repo, null).atLeast(min_role)) return .allowed;
+
+    const user_id_maybe = try repoUserWithKey(moment, &arena, repo.repo.event, fingerprint);
+    return if (evt.Repo.roleOf(repo.repo, user_id_maybe).atLeast(min_role)) .allowed else .denied;
+}
+
+// the repo's owner or collaborator holding the key, or null for anyone else
+fn repoUserWithKey(
+    moment: evt.AdminDB.HashMap(.read_only),
+    arena: *std.heap.ArenaAllocator,
+    repo: evt.Repo,
+    fingerprint: *const [ssh.fingerprint_len]u8,
+) !?[evt.event_id_size]u8 {
+    // a user found by this id has a full-size id
+    if (try keyBelongsToUser(moment, arena, repo.user_id, fingerprint)) return repo.user_id[0..evt.event_id_size].*;
+
+    for ([_][]const u8{ repo.write_user_ids, repo.read_user_ids }) |user_ids| {
         var lines = std.mem.tokenizeScalar(u8, user_ids, '\n');
         while (lines.next()) |id| {
             const user_id = try evt.parseEventId(id);
-            if (try keyBelongsToUser(moment, &arena, &user_id, fingerprint)) return .allowed;
+            if (try keyBelongsToUser(moment, arena, &user_id, fingerprint)) return user_id;
         }
     }
-    return .denied;
+    return null;
 }
 
 fn keyBelongsToUser(
