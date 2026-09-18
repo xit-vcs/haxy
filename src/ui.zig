@@ -70,7 +70,7 @@ pub const Page = union(PageKind) {
         // the repo page can build without a moment in local mode; the home and
         // user pages always read from the admin db.
         return switch (route.parent()) {
-            .home => .{ .home = try Home.init(arena, session.haxy_moment orelse return error.NoMoment, switch (route) {
+            .home => .{ .home = try Home.init(arena, session.haxy_moment orelse return error.NoMoment, session.userId(), switch (route) {
                 .home_users => |start| start,
                 else => 0,
             }, switch (route) {
@@ -1754,6 +1754,30 @@ pub const Authorization = union(enum) {
     forbidden,
 };
 
+// the account `user_id` names, or null once it has been removed. a user id is
+// checked here wherever one enters, so the role lookups can trust theirs.
+pub fn activeUser(
+    moment: evt.AdminDB.HashMap(.read_only),
+    arena: *std.heap.ArenaAllocator,
+    user_id: [evt.event_id_size]u8,
+) !?evt.User.Record {
+    const user = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, &user_id)) orelse return null;
+    return if (user.removed) null else user;
+}
+
+// the role the user holds in the repo `identity` names, or null when no repo
+// has that identity. a null user is logged out.
+pub fn repoRole(
+    moment: evt.AdminDB.HashMap(.read_only),
+    arena: *std.heap.ArenaAllocator,
+    user_id: ?[evt.event_id_size]u8,
+    identity: []const u8,
+) !?evt.Repo.Role {
+    const owner_repo = evt.parseOwnerRepoPath(identity) orelse return null;
+    const repo = (try evt.Repo.readByOwnerAndName(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, owner_repo.owner, owner_repo.name)) orelse return null;
+    return evt.Repo.roleOf(repo.repo, user_id);
+}
+
 // whether the user may write to the repo `identity` names with at least
 // `min_role`
 pub fn authorizeUser(
@@ -1763,13 +1787,11 @@ pub fn authorizeUser(
     identity: []const u8,
     min_role: evt.Repo.Role,
 ) !Authorization {
-    const user = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, &user_id)) orelse return .login_required;
-    // a removed account's open sessions stop writing
-    if (user.removed) return .login_required;
-    const owner_repo = evt.parseOwnerRepoPath(identity) orelse return .repo_not_found;
-    const repo = (try evt.Repo.readByOwnerAndName(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, owner_repo.owner, owner_repo.name)) orelse return .repo_not_found;
+    const user = (try activeUser(moment, arena, user_id)) orelse return .login_required;
 
-    const role = evt.Repo.roleOf(repo.repo, user_id);
+    const role = (try repoRole(moment, arena, user_id, identity)) orelse return .repo_not_found;
+    // a repo the user can't read doesn't exist to them
+    if (role == .none) return .repo_not_found;
     if (!role.atLeast(min_role)) return .forbidden;
     return .{ .actor = .{
         .author = .{ .name = user.event.name, .email = user.event.email },
@@ -1971,12 +1993,17 @@ pub const Session = struct {
 
     // load the logged-in user's name and persisted preferences from the db
     pub fn loadUser(self: *Self) !void {
-        const user_id = self.data.user_id orelse return;
+        const user_id = self.userId() orelse return;
         const moment = self.haxy_moment orelse return;
-        if (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, self.arena, user_id)) |user| {
-            self.data.user_name = user.event.name;
-            self.data.enable_ansi = user.event.enable_ansi;
-        }
+        const user = (try activeUser(moment, self.arena, user_id)) orelse return self.logOut();
+        self.data.user_name = user.event.name;
+        self.data.enable_ansi = user.event.enable_ansi;
+    }
+
+    // a removed account's sessions read as logged out
+    fn logOut(self: *Self) void {
+        self.data.user_id = null;
+        self.data.user_name = null;
     }
 
     pub fn userId(self: *const Self) ?[evt.event_id_size]u8 {
@@ -2062,12 +2089,11 @@ pub const Session = struct {
         const moment = try evt.currentMoment(evt.admin_repo_opts, repo);
         self.haxy_moment = moment;
 
-        const user_id = self.data.user_id orelse return;
+        const user_id = self.userId() orelse return;
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
-        if (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, &arena, user_id)) |user| {
-            self.data.enable_ansi = user.event.enable_ansi;
-        }
+        const user = (try activeUser(moment, &arena, user_id)) orelse return self.logOut();
+        self.data.enable_ansi = user.event.enable_ansi;
     }
 
     // request a forward navigation to `route`; the host consumes next_page

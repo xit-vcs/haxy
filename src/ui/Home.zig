@@ -29,6 +29,7 @@ const Self = @This();
 pub fn init(
     arena: *std.heap.ArenaAllocator,
     haxy_moment: evt.AdminDB.HashMap(.read_only),
+    user_id: ?[evt.event_id_size]u8,
     // pagination window start for each list tab; the inactive tab gets 0.
     users_start: usize,
     repos_start: usize,
@@ -36,7 +37,7 @@ pub fn init(
     return .{
         .header = try Header.init(arena),
         .users = try Users.init(arena, haxy_moment, users_start),
-        .repos = try Repos.init(arena, haxy_moment, repos_start),
+        .repos = try Repos.init(arena, haxy_moment, user_id, repos_start),
         .settings = Settings.init(),
         .auth = Auth.init(),
         .quit = Quit.init(),

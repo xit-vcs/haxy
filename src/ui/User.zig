@@ -93,6 +93,8 @@ pub fn init(
                 const repo_cursor = try event_id_to_repo.getCursor(hash.hashInt(hash_kind, event_id)) orelse continue;
                 const repo_map = try DB.HashMap(.read_only).init(repo_cursor);
                 const repo_event = try evt.read(evt.Repo.Record, DB, hash_kind, arena, repo_map);
+                // unreadable repos leave their window short rather than shifting the others
+                if (evt.Repo.roleOf(repo_event, session.userId()) == .none) continue;
                 try repos.append(arena.allocator(), repo_event);
             }
             repos_next_start = if (end < count) end else null;
@@ -123,6 +125,7 @@ pub fn init(
 
                 const repo_cursor = try repo_records.getCursor(hash.hashInt(hash_kind, record.event.repo_id)) orelse continue;
                 const target_repo = try evt.read(evt.Repo.Record, DB, hash_kind, arena, try DB.HashMap(.read_only).init(repo_cursor));
+                if (evt.Repo.roleOf(target_repo, session.userId()) == .none) continue;
                 const owner = (try evt.User.readById(DB, hash_kind, haxy_moment, arena, target_repo.event.user_id)) orelse continue;
                 const target = try std.fmt.allocPrint(arena.allocator(), "{s}/{s}", .{ owner.event.name, target_repo.event.name });
 

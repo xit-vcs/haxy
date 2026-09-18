@@ -208,6 +208,8 @@ pub fn init(
     } else {
         const haxy_moment = session.haxy_moment orelse return error.NoMoment;
         const found = (try evt.Repo.readByOwnerAndName(DB, hash_kind, haxy_moment, arena, repo_identity.owner, repo_identity.name)) orelse return error.NotFound;
+        // a repo the session can't read doesn't exist to it
+        if (evt.Repo.roleOf(found.repo, session.userId()) == .none) return error.NotFound;
         repo = found.repo;
         repo_id_maybe = found.event_id;
 

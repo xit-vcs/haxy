@@ -46,6 +46,8 @@ pub fn init(arena: *std.heap.ArenaAllocator, session: *ui.Session, route: ui.Rou
     @memcpy(&target_id, fork_record.event.repo_id);
 
     const target_record = (try evt.Repo.readById(evt.AdminDB, evt.admin_repo_opts.hash, haxy_moment, arena, fork_record.event.repo_id)) orelse return error.NotFound;
+    // a draft is as readable as the repo it targets
+    if (evt.Repo.roleOf(target_record, session.userId()) == .none) return error.NotFound;
     const owner = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, haxy_moment, arena, target_record.event.user_id)) orelse return error.NotFound;
     if (!std.mem.eql(u8, owner.event.name, identity.owner) or !std.mem.eql(u8, target_record.event.name, identity.name)) return error.NotFound;
 

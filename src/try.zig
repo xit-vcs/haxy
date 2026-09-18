@@ -147,6 +147,7 @@ pub fn main(init: std.process.Init) !void {
             user_index: usize,
             name: []const u8,
             description: []const u8,
+            read_access: evt.Repo.Access = .public,
         }{
             .{ .user_index = 1, .name = "ziglings", .description = "Learn the Zig programming language by fixing tiny broken programs" },
             .{ .user_index = 2, .name = "linux", .description = "Linux kernel source tree" },
@@ -159,7 +160,8 @@ pub fn main(init: std.process.Init) !void {
             .{ .user_index = 9, .name = "cpython", .description = "The Python programming language" },
             .{ .user_index = 10, .name = "docker", .description = "Container platform for developing, shipping, and running applications" },
             .{ .user_index = 1, .name = "vim", .description = "The ubiquitous text editor" },
-            .{ .user_index = 2, .name = "neovim", .description = "Hyperextensible Vim-based text editor" },
+            // private, so only bob and admin can see it
+            .{ .user_index = 2, .name = "neovim", .description = "Hyperextensible Vim-based text editor", .read_access = .private },
             .{ .user_index = 3, .name = "emacs", .description = "GNU Emacs source code mirror" },
             .{ .user_index = 4, .name = "tmux", .description = "Terminal multiplexer" },
             .{ .user_index = 5, .name = "zsh", .description = "Mirror of the Z shell source code repository" },
@@ -238,7 +240,7 @@ pub fn main(init: std.process.Init) !void {
                         .user_id = &user_ids[r.user_index],
                         .name = r.name,
                         .description = r.description,
-                        .read_access = .public,
+                        .read_access = r.read_access,
                         .write_user_ids = &admin_user_id_hex,
                     },
                 },

@@ -507,9 +507,7 @@ fn authorizeWrite(
         .local => |src| return .{ .author = try ui.localAuthor(src, io, allocator, arena), .role = .owner },
     };
     const authorization: ui.Authorization = blk: {
-        const token = getCookieValue(request, cookie_name) orelse break :blk .login_required;
-        var user_id: [evt.event_id_size]u8 = undefined;
-        if (!server.session_store.lookup(token, &user_id)) break :blk .login_required;
+        const user_id = requestUserId(request, server.session_store) orelse break :blk .login_required;
 
         const repo_prefix = "/repo/";
         if (!std.mem.startsWith(u8, repo_base, repo_prefix)) break :blk .repo_not_found;
@@ -526,6 +524,42 @@ fn authorizeWrite(
         .forbidden => try respondForbidden(request),
     }
     return null;
+}
+
+// whether the request may read the repo `repo_base` names. local mode always
+// may.
+fn mayRead(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    request: *std.http.Server.Request,
+    host: Host,
+    repo_base: []const u8,
+) !bool {
+    const server = switch (host) {
+        .server => |server| server,
+        .local => return true,
+    };
+    const repo_prefix = "/repo/";
+    if (!std.mem.startsWith(u8, repo_base, repo_prefix)) return false;
+
+    var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = server.admin_repo_path });
+    defer admin_repo.deinit(io, allocator);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const moment = try evt.currentMoment(evt.admin_repo_opts, &admin_repo);
+    const user_id = blk: {
+        const id = requestUserId(request, server.session_store) orelse break :blk null;
+        break :blk if (try ui.activeUser(moment, &arena, id) != null) id else null;
+    };
+    const role = (try ui.repoRole(moment, &arena, user_id, repo_base[repo_prefix.len..])) orelse return false;
+    return role != .none;
+}
+
+// the logged-in user the request's session cookie names
+fn requestUserId(request: *std.http.Server.Request, session_store: SessionStore) ?[evt.event_id_size]u8 {
+    const token = getCookieValue(request, cookie_name) orelse return null;
+    var user_id: [evt.event_id_size]u8 = undefined;
+    return if (session_store.lookup(token, &user_id)) user_id else null;
 }
 
 // refuse a write from a request with no logged-in user. the body goes unread,
@@ -934,6 +968,7 @@ fn serveAttachment(
     attachment: AttachmentRequest,
     host: Host,
 ) !void {
+    if (!try mayRead(io, allocator, request, host, attachment.repo_base)) return respondAttachmentNotFound(request);
     const request_repo = (try requestRepoSource(io, allocator, host, attachment.repo_base)) orelse return respondAttachmentNotFound(request);
     defer request_repo.deinit(allocator);
     const source = request_repo.source;

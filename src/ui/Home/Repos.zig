@@ -22,6 +22,7 @@ const Self = @This();
 pub fn init(
     arena: *std.heap.ArenaAllocator,
     haxy_moment: evt.AdminDB.HashMap(.read_only),
+    user_id: ?[evt.event_id_size]u8,
     start: usize,
 ) !Self {
     const DB = evt.AdminDB;
@@ -56,6 +57,8 @@ pub fn init(
         const repo_cursor = try event_id_to_repo.getCursor(hash.hashInt(hash_kind, event_id)) orelse continue;
         const repo_map = try DB.HashMap(.read_only).init(repo_cursor);
         const repo_event = try evt.read(evt.Repo.Record, DB, hash_kind, arena, repo_map);
+        // unreadable repos leave their window short rather than shifting the others
+        if (evt.Repo.roleOf(repo_event, user_id) == .none) continue;
         try repos.append(arena.allocator(), repo_event);
 
         const owner = try evt.User.readById(DB, hash_kind, haxy_moment, arena, repo_event.event.user_id);
