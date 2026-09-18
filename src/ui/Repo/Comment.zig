@@ -192,7 +192,7 @@ pub const Item = struct {
                 try bar.children.put(allocator, parent.getFocus().id, .{ .widget = .{ .text_box = parent }, .rect = null, .min_size = .{ .width = @max(parent_text.len, " replying to ".len) + 2, .height = null } });
             }
 
-            if (!entry.comment.removed and (session.data.host_kind == .local or session.data.user_id != null)) {
+            if (!entry.comment.removed) {
                 var remove = try linkBox(allocator, session, "✕", removeRoute(thread_kind, identity, &entry.comment.event.thread_id, &entry.id) orelse return error.RouteTooLong);
                 errdefer remove.deinit(allocator);
                 try bar.children.put(allocator, remove.getFocus().id, .{ .widget = .{ .text_box = remove }, .rect = null, .min_size = .{ .width = 3, .height = null } });

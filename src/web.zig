@@ -491,36 +491,41 @@ fn handleAnsi(
     });
 }
 
-const RequestAuthor = struct {
-    author: evt.CommitAuthor,
-    user_id: ?[evt.event_id_size]u8 = null,
-};
-
-// the author and user id for an event created by this request, or null when the
-// request may not create one. local mode has no accounts, so it has no user id.
-fn eventAuthor(
+// the actor for a write to the repo `repo_base` names with at least `min_role`,
+// or null once the refusal has been sent. local mode always writes.
+fn authorizeWrite(
     io: std.Io,
     allocator: std.mem.Allocator,
     arena: *std.heap.ArenaAllocator,
     request: *std.http.Server.Request,
     host: Host,
-) !?RequestAuthor {
+    repo_base: []const u8,
+    min_role: evt.Repo.Role,
+) !?ui.Actor {
     const server = switch (host) {
         .server => |server| server,
-        .local => |src| return .{ .author = try ui.localAuthor(src, io, allocator, arena) },
+        .local => |src| return .{ .author = try ui.localAuthor(src, io, allocator, arena), .role = .owner },
     };
-    const token = getCookieValue(request, cookie_name) orelse return null;
-    var user_id: [evt.event_id_size]u8 = undefined;
-    if (!server.session_store.lookup(token, &user_id)) return null;
+    const authorization: ui.Authorization = blk: {
+        const token = getCookieValue(request, cookie_name) orelse break :blk .login_required;
+        var user_id: [evt.event_id_size]u8 = undefined;
+        if (!server.session_store.lookup(token, &user_id)) break :blk .login_required;
 
-    var repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = server.admin_repo_path });
-    defer repo.deinit(io, allocator);
-    const moment = try evt.currentMoment(evt.admin_repo_opts, &repo);
-    const user = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, &user_id)) orelse return null;
-    return .{
-        .author = .{ .name = user.event.name, .email = user.event.email },
-        .user_id = user_id,
+        const repo_prefix = "/repo/";
+        if (!std.mem.startsWith(u8, repo_base, repo_prefix)) break :blk .repo_not_found;
+
+        var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = server.admin_repo_path });
+        defer admin_repo.deinit(io, allocator);
+        const moment = try evt.currentMoment(evt.admin_repo_opts, &admin_repo);
+        break :blk try ui.authorizeUser(moment, arena, user_id, repo_base[repo_prefix.len..], min_role);
     };
+    switch (authorization) {
+        .actor => |actor| return actor,
+        .login_required => try respondLoginRequired(request),
+        .repo_not_found => try respondRepoNotFound(request),
+        .forbidden => try respondForbidden(request),
+    }
+    return null;
 }
 
 // refuse a write from a request with no logged-in user. the body goes unread,
@@ -528,6 +533,23 @@ fn eventAuthor(
 fn respondLoginRequired(request: *std.http.Server.Request) !void {
     try request.respond("log in to make changes", .{
         .status = .forbidden,
+        .keep_alive = false,
+        .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+    });
+}
+
+// refuse a write the user's role in the repo doesn't allow
+fn respondForbidden(request: *std.http.Server.Request) !void {
+    try request.respond("you don't have permission to do that", .{
+        .status = .forbidden,
+        .keep_alive = false,
+        .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+    });
+}
+
+fn respondRepoNotFound(request: *std.http.Server.Request) !void {
+    try request.respond("repo not found", .{
+        .status = .not_found,
         .keep_alive = false,
         .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
     });
@@ -571,8 +593,8 @@ fn handleThreadNew(
 ) !void {
     var author_arena = std.heap.ArenaAllocator.init(allocator);
     defer author_arena.deinit();
-    const request_author = (try eventAuthor(io, allocator, &author_arena, request, host)) orelse return respondLoginRequired(request);
-    const author = request_author.author;
+    const actor = (try authorizeWrite(io, allocator, &author_arena, request, host, base, .read)) orelse return;
+    const author = actor.author;
     const body = try readFormBody(request, allocator);
     defer allocator.free(body);
 
@@ -636,7 +658,7 @@ fn handleThreadNew(
             .server => |server| server,
             .local => return respondRemoveNotFound(request),
         };
-        const user_id = request_author.user_id orelse return respondLoginRequired(request);
+        const user_id = actor.user_id orelse return respondLoginRequired(request);
         if (!evt.Patch.branchValid(target_branch) or !try request_repo.source.hasBranch(io, allocator, target_branch)) {
             const form_location = try std.fmt.allocPrint(allocator, "{s}/patches/new", .{base});
             defer allocator.free(form_location);
@@ -739,9 +761,10 @@ fn handlePatchPublish(
     };
     var author_arena = std.heap.ArenaAllocator.init(allocator);
     defer author_arena.deinit();
-    const request_author = (try eventAuthor(io, allocator, &author_arena, request, host)) orelse return respondLoginRequired(request);
-    const user_id = request_author.user_id orelse return respondLoginRequired(request);
-    const author = request_author.author;
+    // only the draft's author may publish it, which publish checks
+    const actor = (try authorizeWrite(io, allocator, &author_arena, request, host, parts.repo_base, .read)) orelse return;
+    const user_id = actor.user_id orelse return respondLoginRequired(request);
+    const author = actor.author;
 
     const request_repo = (try requestRepoSource(io, allocator, host, parts.repo_base)) orelse return respondRemoveNotFound(request);
     defer request_repo.deinit(allocator);
@@ -784,7 +807,7 @@ fn handlePatchMerge(
     };
     var author_arena = std.heap.ArenaAllocator.init(allocator);
     defer author_arena.deinit();
-    const author = ((try eventAuthor(io, allocator, &author_arena, request, host)) orelse return respondLoginRequired(request)).author;
+    const author = ((try authorizeWrite(io, allocator, &author_arena, request, host, parts.repo_base, .write)) orelse return).author;
 
     const request_repo = (try requestRepoSource(io, allocator, host, parts.repo_base)) orelse return respondRemoveNotFound(request);
     defer request_repo.deinit(allocator);
@@ -839,7 +862,7 @@ fn handleCommentNew(
 
     var author_arena = std.heap.ArenaAllocator.init(allocator);
     defer author_arena.deinit();
-    const author = ((try eventAuthor(io, allocator, &author_arena, request, host)) orelse return respondLoginRequired(request)).author;
+    const author = ((try authorizeWrite(io, allocator, &author_arena, request, host, parts.repo_base, .read)) orelse return).author;
 
     const form_body = try readFormBody(request, allocator);
     defer allocator.free(form_body);
@@ -1017,6 +1040,7 @@ const attachment_name_header = "x-attachment-name";
 
 const AttachParentParts = struct {
     repo_base: []const u8,
+    kind: evt.EventKind,
     id_bytes: [evt.event_id_size]u8,
 };
 
@@ -1026,8 +1050,9 @@ fn attachParentParts(base: []const u8) ?AttachParentParts {
     const segment_at = std.mem.lastIndexOfScalar(u8, base, '/') orelse return null;
     const segment = base[segment_at + 1 ..];
     const colon_at = std.mem.lastIndexOfScalar(u8, segment, ':') orelse return null;
+    const kind = std.meta.stringToEnum(evt.EventKind, segment[0..colon_at]) orelse return null;
     const id_bytes = evt.parseEventId(segment[colon_at + 1 ..]) catch return null;
-    return .{ .repo_base = base[0..segment_at], .id_bytes = id_bytes };
+    return .{ .repo_base = base[0..segment_at], .kind = kind, .id_bytes = id_bytes };
 }
 
 // attach the uploaded file to the event the url names, then reload. the file is
@@ -1044,7 +1069,13 @@ fn handleAttach(
 
     var author_arena = std.heap.ArenaAllocator.init(allocator);
     defer author_arena.deinit();
-    const author = ((try eventAuthor(io, allocator, &author_arena, request, host)) orelse return respondLoginRequired(request)).author;
+    const actor = (try authorizeWrite(io, allocator, &author_arena, request, host, parts.repo_base, .read)) orelse return;
+    const author = actor.author;
+    // an attachment changes the event it hangs off
+    const request_repo = (try requestRepoSource(io, allocator, host, parts.repo_base)) orelse return respondAttachmentParentNotFound(request);
+    defer request_repo.deinit(allocator);
+    const source = request_repo.source;
+    if (!try source.canModify(io, allocator, actor, parts.kind, &parts.id_bytes)) return respondForbidden(request);
 
     const name = (try attachmentName(allocator, request)) orelse return respondUploadError(request, .bad_request, "attachment needs a name");
     defer allocator.free(name);
@@ -1059,9 +1090,6 @@ fn handleAttach(
     var body_buf: [4096]u8 = undefined;
     const blob: evt.Blob = .{ .name = name, .size = size, .reader = try request.readerExpectContinue(&body_buf) };
 
-    const request_repo = (try requestRepoSource(io, allocator, host, parts.repo_base)) orelse return respondAttachmentParentNotFound(request);
-    defer request_repo.deinit(allocator);
-    const source = request_repo.source;
     switch (source.repo_kind) {
         inline else => |repo_kind| {
             var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, source.localInitOpts());
@@ -1150,7 +1178,15 @@ fn handleCommentEdit(
 ) !void {
     var author_arena = std.heap.ArenaAllocator.init(allocator);
     defer author_arena.deinit();
-    const author = ((try eventAuthor(io, allocator, &author_arena, request, host)) orelse return respondLoginRequired(request)).author;
+    const actor = (try authorizeWrite(io, allocator, &author_arena, request, host, parts.repo_base, .read)) orelse return;
+    const author = actor.author;
+    // edits only reach here for a comment
+    const comment_id = parts.comment_id orelse unreachable;
+    {
+        const request_repo = (try requestRepoSource(io, allocator, host, parts.repo_base)) orelse return respondRemoveNotFound(request);
+        defer request_repo.deinit(allocator);
+        if (!try request_repo.source.canModify(io, allocator, actor, .comment, &comment_id)) return respondForbidden(request);
+    }
 
     const form_body = try readFormBody(request, allocator);
     defer allocator.free(form_body);
@@ -1247,8 +1283,8 @@ fn handleRemove(
 
     var author_arena = std.heap.ArenaAllocator.init(allocator);
     defer author_arena.deinit();
-    const request_author = (try eventAuthor(io, allocator, &author_arena, request, host)) orelse return respondLoginRequired(request);
-    const author = request_author.author;
+    const actor = (try authorizeWrite(io, allocator, &author_arena, request, host, parts.repo_base, .read)) orelse return;
+    const author = actor.author;
 
     const request_repo = (try requestRepoSource(io, allocator, host, parts.repo_base)) orelse return respondRemoveNotFound(request);
     defer request_repo.deinit(allocator);
@@ -1256,7 +1292,7 @@ fn handleRemove(
 
     if (parts.kind == .patch) switch (host) {
         .server => |server| {
-            const user_id = request_author.user_id orelse return respondLoginRequired(request);
+            const user_id = actor.user_id orelse return respondLoginRequired(request);
 
             var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = server.admin_repo_path });
             defer admin_repo.deinit(io, allocator);
@@ -1283,6 +1319,9 @@ fn handleRemove(
         },
         .local => {},
     };
+
+    // a draft is its author's alone, which its removal above checks
+    if (!try source.canModify(io, allocator, actor, parts.kind, &parts.id)) return respondForbidden(request);
 
     switch (source.repo_kind) {
         inline else => |repo_kind| {
@@ -1361,7 +1400,13 @@ fn handleThreadStatus(
 
     var author_arena = std.heap.ArenaAllocator.init(allocator);
     defer author_arena.deinit();
-    const author = ((try eventAuthor(io, allocator, &author_arena, request, host)) orelse return respondLoginRequired(request)).author;
+    const actor = (try authorizeWrite(io, allocator, &author_arena, request, host, parts.repo_base, .read)) orelse return;
+    const author = actor.author;
+    {
+        const request_repo = (try requestRepoSource(io, allocator, host, parts.repo_base)) orelse return respondRemoveNotFound(request);
+        defer request_repo.deinit(allocator);
+        if (!try request_repo.source.canModify(io, allocator, actor, parts.thread_kind, &parts.thread_id)) return respondForbidden(request);
+    }
 
     (switch (parts.thread_kind) {
         .issue => updateThread(evt.Issue, io, allocator, host, parts.repo_base, &parts.thread_id, .{ .status = if (open) .open else .closed }, author),
@@ -1398,8 +1443,8 @@ fn handleThreadEdit(
 ) !void {
     var author_arena = std.heap.ArenaAllocator.init(allocator);
     defer author_arena.deinit();
-    const request_author = (try eventAuthor(io, allocator, &author_arena, request, host)) orelse return respondLoginRequired(request);
-    const author = request_author.author;
+    const actor = (try authorizeWrite(io, allocator, &author_arena, request, host, parts.repo_base, .read)) orelse return;
+    const author = actor.author;
 
     const body = try readFormBody(request, allocator);
     defer allocator.free(body);
@@ -1437,14 +1482,15 @@ fn handleThreadEdit(
         return;
     }
 
-    const draft_user_id = if (parts.thread_kind == .patch) request_author.user_id else null;
+    const request_repo = (try requestRepoSource(io, allocator, host, parts.repo_base)) orelse return respondRemoveNotFound(request);
+    defer request_repo.deinit(allocator);
+
+    const draft_user_id = if (parts.thread_kind == .patch) actor.user_id else null;
     if (draft_user_id) |user_id| {
         const server = switch (host) {
             .server => |server| server,
             .local => unreachable,
         };
-        const request_repo = (try requestRepoSource(io, allocator, host, parts.repo_base)) orelse return respondRemoveNotFound(request);
-        defer request_repo.deinit(allocator);
         if (!evt.Patch.branchValid(target_branch) or !try request_repo.source.hasBranch(io, allocator, target_branch)) {
             const form_location = try std.fmt.allocPrint(allocator, "{s}/edit", .{base});
             defer allocator.free(form_location);
@@ -1476,6 +1522,9 @@ fn handleThreadEdit(
             return;
         }
     }
+
+    // a draft is its author's alone, which its edit above checks
+    if (!try request_repo.source.canModify(io, allocator, actor, parts.thread_kind, &parts.thread_id)) return respondForbidden(request);
 
     const not_found = switch (parts.thread_kind) {
         .issue => "issue not found",
@@ -1528,9 +1577,17 @@ fn handleThreadResolve(
     base: []const u8,
     host: Host,
 ) !void {
+    const parts = commentBaseParts(base) orelse {
+        try request.respond("thread not found", .{
+            .status = .not_found,
+            .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+        });
+        return;
+    };
+
     var author_arena = std.heap.ArenaAllocator.init(allocator);
     defer author_arena.deinit();
-    const author = ((try eventAuthor(io, allocator, &author_arena, request, host)) orelse return respondLoginRequired(request)).author;
+    const author = ((try authorizeWrite(io, allocator, &author_arena, request, host, parts.repo_base, .write)) orelse return).author;
 
     const body = try readFormBody(request, allocator);
     defer allocator.free(body);
@@ -1551,13 +1608,6 @@ fn handleThreadResolve(
         try hunks.append(aa, try std.mem.replaceOwned(u8, aa, submitted, "\r\n", "\n"));
     }
 
-    const parts = commentBaseParts(base) orelse {
-        try request.respond("thread not found", .{
-            .status = .not_found,
-            .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
-        });
-        return;
-    };
     if (parts.comment_id != null or (parts.thread_kind != .issue and parts.thread_kind != .patch)) {
         try request.respond("thread not found", .{
             .status = .not_found,

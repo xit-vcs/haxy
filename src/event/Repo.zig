@@ -42,6 +42,14 @@ pub const Role = enum {
     pub fn atLeast(self: Role, min: Role) bool {
         return @intFromEnum(self) >= @intFromEnum(min);
     }
+
+    // whether a user may change an event: anyone's with the write role,
+    // otherwise only one they authored
+    pub fn canModify(self: Role, user_email: []const u8, author_email_maybe: ?[]const u8) bool {
+        if (self.atLeast(.write)) return true;
+        const author_email = author_email_maybe orelse return false;
+        return self.atLeast(.read) and std.mem.eql(u8, user_email, author_email);
+    }
 };
 
 pub const name_max_len = 32;

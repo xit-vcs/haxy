@@ -307,14 +307,14 @@ pub fn canMerge(entry: Entry, session: *const ui.Session) bool {
         !entry.conflicted and
         entry.record.event.revision != null and
         entry.record.event.status.kind() == .open and
-        session.data.host_kind == .server and
-        session.data.user_id != null;
+        session.data.host_kind == .server;
 }
 
 pub fn create(
     data: *const Self,
     session: *ui.Session,
     allocator: std.mem.Allocator,
+    author: evt.CommitAuthor,
     title: []const u8,
     tags: []const u8,
     description: []const u8,
@@ -324,7 +324,6 @@ pub fn create(
     if (!evt.Patch.fieldsValid(title, tags)) return error.InvalidFields;
     const io = session.io orelse return error.NotFound;
     const repo_source = data.repo_source orelse return error.NotFound;
-    const author = (try session.eventAuthor()) orelse return error.NotFound;
     var id_bytes: [evt.event_id_size]u8 = undefined;
     io.random(&id_bytes);
     const id = std.fmt.bytesToHex(id_bytes, .lower);
@@ -367,7 +366,7 @@ pub fn create(
     return id;
 }
 
-pub fn publishDraft(data: *const Self, session: *ui.Session, allocator: std.mem.Allocator, id: []const u8) !void {
+pub fn publishDraft(data: *const Self, session: *ui.Session, allocator: std.mem.Allocator, author: evt.CommitAuthor, id: []const u8) !void {
     const io = session.io orelse return error.NotFound;
     const repos_dir = session.repos_dir orelse return error.NotFound;
     const admin_repo = session.admin_repo orelse return error.NotFound;
@@ -375,7 +374,6 @@ pub fn publishDraft(data: *const Self, session: *ui.Session, allocator: std.mem.
     const repo_id = data.repo_id orelse return error.NotFound;
     const user_id = session.userId() orelse return error.NotFound;
     const patch_id = evt.parseEventId(id) catch return error.NotFound;
-    const author = (try session.eventAuthor()) orelse return error.NotFound;
 
     const id_hex = std.fmt.bytesToHex(patch_id, .lower);
     const fork_path = try fork.forkPath(allocator, repos_dir, &id_hex);
@@ -392,14 +390,13 @@ pub fn publishDraft(data: *const Self, session: *ui.Session, allocator: std.mem.
     });
 }
 
-pub fn mergePatch(data: *const Self, session: *ui.Session, allocator: std.mem.Allocator, id: []const u8, revision: evt.Patch.MergeRevision) !void {
+pub fn mergePatch(data: *const Self, session: *ui.Session, allocator: std.mem.Allocator, author: evt.CommitAuthor, id: []const u8, revision: evt.Patch.MergeRevision) !void {
     const io = session.io orelse return error.NotFound;
     const repos_dir = session.repos_dir orelse return error.NotFound;
     const admin_repo = session.admin_repo orelse return error.NotFound;
     const repo_source = data.repo_source orelse return error.NotFound;
     if (repo_source.repo_kind != .xit) return error.NotFound;
     const patch_id = evt.parseEventId(id) catch return error.NotFound;
-    const author = (try session.eventAuthor()) orelse return error.NotFound;
 
     const id_hex = std.fmt.bytesToHex(patch_id, .lower);
     var target_repo = try rp.Repo(.xit, .{}).open(io, allocator, repo_source.localInitOpts());
@@ -416,6 +413,7 @@ pub fn editDraft(
     data: *const Self,
     session: *ui.Session,
     allocator: std.mem.Allocator,
+    author: evt.CommitAuthor,
     id: []const u8,
     title: []const u8,
     tags: []const u8,
@@ -429,7 +427,6 @@ pub fn editDraft(
     const repo_source = data.repo_source orelse return error.NotFound;
     const user_id = session.userId() orelse return error.NotFound;
     const patch_id = evt.parseEventId(id) catch return error.NotFound;
-    const author = (try session.eventAuthor()) orelse return error.NotFound;
     if (!evt.Patch.branchValid(target_branch) or !try repo_source.hasBranch(io, allocator, target_branch)) return error.InvalidTargetBranch;
 
     const id_hex = std.fmt.bytesToHex(patch_id, .lower);
@@ -448,12 +445,11 @@ pub fn editDraft(
     })) return error.NotFound;
 }
 
-pub fn removeDraft(session: *ui.Session, allocator: std.mem.Allocator, id: *const [evt.event_id_size]u8) !void {
+pub fn removeDraft(session: *ui.Session, allocator: std.mem.Allocator, author: evt.CommitAuthor, id: *const [evt.event_id_size]u8) !void {
     const io = session.io orelse return error.NotFound;
     const repos_dir = session.repos_dir orelse return error.NotFound;
     const admin_repo = session.admin_repo orelse return error.NotFound;
     const user_id = session.userId() orelse return error.NotFound;
-    const author = (try session.eventAuthor()) orelse return error.NotFound;
 
     const id_hex = std.fmt.bytesToHex(id.*, .lower);
     try fork.remove(io, allocator, repos_dir, admin_repo, &id_hex, &user_id, author);

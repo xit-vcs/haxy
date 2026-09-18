@@ -1511,6 +1511,45 @@ pub fn readEventKind(
     return std.meta.stringToEnum(EventKind, try cursor.readBytes(&buffer)) orelse error.InvalidEventKind;
 }
 
+// the email of the event's author, or null when the id names no authored event
+// of this kind
+pub fn readAuthorEmail(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    arena: *std.heap.ArenaAllocator,
+    repo: *rp.Repo(repo_kind, repo_opts),
+    kind: EventKind,
+    id: *const [event_id_size]u8,
+) !?[]const u8 {
+    const record_map_key = switch (kind) {
+        .issue => Issue.record_map_key,
+        .discuss => Discussion.record_map_key,
+        .comment => Comment.record_map_key,
+        .attach => Attachment.record_map_key,
+        .patchrev => PatchRev.record_map_key,
+        .patch => Patch.record_map_key,
+        .user, .repo, .fork => return null,
+    };
+
+    const DB = EventDB(repo_opts.hash);
+    var event_db_maybe: ?LocalEventDB(repo_opts.hash) = if (repo_kind == .git) try LocalEventDB(repo_opts.hash).openReadOnly(io, allocator, repo.core.repo_dir) else null;
+    defer if (event_db_maybe) |*event_db| event_db.deinit(io, allocator);
+    const moment = (if (event_db_maybe) |*event_db|
+        currentMomentFromDb(repo_opts.hash, event_db.db)
+    else if (repo_kind == .git)
+        return null
+    else
+        currentMoment(repo_opts, repo)) catch return null;
+
+    const records_cursor = (try moment.getCursor(hash.hashInt(repo_opts.hash, record_map_key))) orelse return null;
+    const records = try DB.HashMap(.read_only).init(records_cursor);
+    const record_cursor = (try records.getCursor(hash.hashInt(repo_opts.hash, id))) orelse return null;
+    const record = try DB.HashMap(.read_only).init(record_cursor);
+    return try readField(?[]const u8, DB, repo_opts.hash, arena, try record.getCursor(hash.hashInt(repo_opts.hash, "author_email")));
+}
+
 // the event id embedded in a set entry's order key
 pub fn readOrderKeyId(comptime DB: type, kv_pair_cursor: DB.Cursor(.read_only)) ![event_id_size]u8 {
     var cursor = kv_pair_cursor;

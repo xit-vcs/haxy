@@ -225,6 +225,9 @@ pub fn main(init: std.process.Init) !void {
                 },
             };
         }
+        // admin collaborates on every repo, so it can write everywhere while the
+        // other users can only write to their own
+        const admin_user_id_hex = std.fmt.bytesToHex(admin_user_id, .lower);
         for (repo_data, 0..) |r, i| {
             events_to_consume[user_data.len + i] = .{
                 .id = std.fmt.bytesToHex(repo_event_ids[i], .lower),
@@ -236,7 +239,7 @@ pub fn main(init: std.process.Init) !void {
                         .name = r.name,
                         .description = r.description,
                         .read_access = .public,
-                        .write_access = .public,
+                        .write_user_ids = &admin_user_id_hex,
                     },
                 },
             };

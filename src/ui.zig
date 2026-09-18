@@ -1712,7 +1712,71 @@ pub const RepoSource = struct {
             },
         };
     }
+
+    // whether the actor may change the event `id` names
+    pub fn canModify(
+        self: RepoSource,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        actor: Actor,
+        kind: evt.EventKind,
+        id: *const [evt.event_id_size]u8,
+    ) !bool {
+        // a role that may change an event with no author needs no read
+        if (actor.role.canModify(actor.author.email, null)) return true;
+
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        return switch (self.repo_kind) {
+            inline else => |repo_kind| blk: {
+                var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, self.localInitOpts());
+                defer any_repo.deinit(io, allocator);
+                break :blk switch (any_repo) {
+                    inline else => |*repo| actor.role.canModify(actor.author.email, try evt.readAuthorEmail(repo_kind, repo.self_repo_opts, io, allocator, &arena, repo, kind, id)),
+                };
+            },
+        };
+    }
 };
+
+// who a write acts as and the role they hold in its repo
+pub const Actor = struct {
+    author: evt.CommitAuthor,
+    // local mode has no accounts, so it has no user id
+    user_id: ?[evt.event_id_size]u8 = null,
+    role: evt.Repo.Role,
+};
+
+pub const Authorization = union(enum) {
+    actor: Actor,
+    login_required,
+    repo_not_found,
+    forbidden,
+};
+
+// whether the user may write to the repo `identity` names with at least
+// `min_role`
+pub fn authorizeUser(
+    moment: evt.AdminDB.HashMap(.read_only),
+    arena: *std.heap.ArenaAllocator,
+    user_id: [evt.event_id_size]u8,
+    identity: []const u8,
+    min_role: evt.Repo.Role,
+) !Authorization {
+    const user = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, &user_id)) orelse return .login_required;
+    // a removed account's open sessions stop writing
+    if (user.removed) return .login_required;
+    const owner_repo = evt.parseOwnerRepoPath(identity) orelse return .repo_not_found;
+    const repo = (try evt.Repo.readByOwnerAndName(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, owner_repo.owner, owner_repo.name)) orelse return .repo_not_found;
+
+    const role = evt.Repo.roleOf(repo.repo, user_id);
+    if (!role.atLeast(min_role)) return .forbidden;
+    return .{ .actor = .{
+        .author = .{ .name = user.event.name, .email = user.event.email },
+        .user_id = user_id,
+        .role = role,
+    } };
+}
 
 // events created in local mode have no account behind them, so the commit
 // author comes from the repo's config, which the global config feeds into.
@@ -1933,18 +1997,26 @@ pub const Session = struct {
         self.data.form_feedback = null;
     }
 
-    // the commit author for an event this session creates, or null when it may
-    // not create one
-    pub fn eventAuthor(self: *Self) !?evt.CommitAuthor {
+    // the actor for a write to the repo `identity` names, or null when the
+    // session may not write there with at least `min_role`. local mode always
+    // writes.
+    pub fn authorize(self: *Self, identity: []const u8, min_role: evt.Repo.Role) !?Actor {
         if (self.data.host_kind == .local) {
-            const src = self.local orelse return local_author_fallback;
-            const io = self.io orelse return local_author_fallback;
-            return try localAuthor(src, io, self.page_arena.child_allocator, self.page_arena);
+            const author = blk: {
+                const src = self.local orelse break :blk local_author_fallback;
+                const io = self.io orelse break :blk local_author_fallback;
+                break :blk try localAuthor(src, io, self.page_arena.child_allocator, self.page_arena);
+            };
+            return .{ .author = author, .role = .owner };
         }
-        const user_id = self.data.user_id orelse return null;
-        const moment = self.haxy_moment orelse return null;
-        const user = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, self.page_arena, user_id)) orelse return null;
-        return .{ .name = user.event.name, .email = user.event.email };
+        const user_id = self.userId() orelse return null;
+        // the session's moment predates this input, so read the roles afresh
+        const admin_repo = self.admin_repo orelse return null;
+        const moment = try evt.currentMoment(evt.admin_repo_opts, admin_repo);
+        return switch (try authorizeUser(moment, self.page_arena, user_id, identity, min_role)) {
+            .actor => |actor| actor,
+            .login_required, .repo_not_found, .forbidden => null,
+        };
     }
 
     // queue an action for the host to drain this frame.
