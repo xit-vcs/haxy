@@ -1928,18 +1928,21 @@ fn bytesEqual(
 pub fn CommitIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
     return struct {
         const DB = EventDB(repo_opts.hash);
+        // a plain file is used for the scratch db because each write outside
+        // a transaction is synced anyway, so buffering would gain nothing
+        const TempDB = xit.xitdb.Database(.file, hash.HashInt(repo_opts.hash));
         const db_name = "haxy-repo-events.db";
 
         repo_dir: std.Io.Dir,
         db_file: std.Io.File,
-        db: *DB,
+        db: *TempDB,
         // map of each object id to its children
-        parent_to_children: DB.HashMap(.read_write),
+        parent_to_children: TempDB.HashMap(.read_write),
         // tracking pending parents is necessary because a child can only
         // be returned after all of its unconsumed parents have been returned
-        child_to_pending_parents: DB.HashMap(.read_write),
+        child_to_pending_parents: TempDB.HashMap(.read_write),
         // queue of object ids that are ready to be returned from `next`
-        ready_queue: DB.ArrayList(.read_write),
+        ready_queue: TempDB.ArrayList(.read_write),
         ready_queue_index: u64,
         // the object id at the tip of this branch
         newest_object_id: ?[hash.byteLen(repo_opts.hash)]u8,
@@ -1959,28 +1962,23 @@ pub fn CommitIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Re
                 state.core.repo_dir.deleteFile(io, db_name) catch {};
             }
 
-            const buffer_ptr = try allocator.create(std.Io.Writer.Allocating);
-            errdefer allocator.destroy(buffer_ptr);
-
-            buffer_ptr.* = std.Io.Writer.Allocating.init(allocator);
-            errdefer buffer_ptr.deinit();
-
-            const db_ptr = try allocator.create(DB);
+            // cursors point at the db, so it needs a stable address
+            const db_ptr = try allocator.create(TempDB);
             errdefer allocator.destroy(db_ptr);
             // the db is scratch state that gets deleted after iteration, so
             // there is nothing worth fsyncing
-            db_ptr.* = try DB.init(.{ .io = io, .file = db_file, .buffer = buffer_ptr, .fsync = false });
+            db_ptr.* = try TempDB.init(.{ .io = io, .file = db_file, .fsync = false });
 
-            const map = try DB.HashMap(.read_write).init(db_ptr.rootCursor());
+            const map = try TempDB.HashMap(.read_write).init(db_ptr.rootCursor());
 
             const parent_to_children_cursor = try map.putCursor(hash.hashInt(repo_opts.hash, "parent->children"));
-            const parent_to_children = try DB.HashMap(.read_write).init(parent_to_children_cursor);
+            const parent_to_children = try TempDB.HashMap(.read_write).init(parent_to_children_cursor);
 
             const child_to_pending_parents_cursor = try map.putCursor(hash.hashInt(repo_opts.hash, "child->pending-parents"));
-            const child_to_pending_parents = try DB.HashMap(.read_write).init(child_to_pending_parents_cursor);
+            const child_to_pending_parents = try TempDB.HashMap(.read_write).init(child_to_pending_parents_cursor);
 
             const ready_queue_cursor = try map.putCursor(hash.hashInt(repo_opts.hash, "ready-queue"));
-            const ready_queue = try DB.ArrayList(.read_write).init(ready_queue_cursor);
+            const ready_queue = try TempDB.ArrayList(.read_write).init(ready_queue_cursor);
 
             var self = CommitIterator(repo_kind, repo_opts){
                 .repo_dir = state.core.repo_dir,
@@ -2002,8 +2000,6 @@ pub fn CommitIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Re
 
         pub fn deinit(self: *CommitIterator(repo_kind, repo_opts), io: std.Io, allocator: std.mem.Allocator) void {
             self.db_file.close(io);
-            self.db.core.memory.buffer.deinit();
-            allocator.destroy(self.db.core.memory.buffer);
             self.repo_dir.deleteFile(io, db_name) catch {};
             allocator.destroy(self.db);
         }
@@ -2026,14 +2022,14 @@ pub fn CommitIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Re
             consumed_object_ids: DB.HashMap(.read_only),
             ref: rf.Ref,
         ) !void {
-            const map = try DB.HashMap(.read_write).init(self.db.rootCursor());
+            const map = try TempDB.HashMap(.read_write).init(self.db.rootCursor());
 
             const walk_queue_cursor = try map.putCursor(hash.hashInt(repo_opts.hash, "walk-queue"));
-            const walk_queue = try DB.ArrayList(.read_write).init(walk_queue_cursor);
+            const walk_queue = try TempDB.ArrayList(.read_write).init(walk_queue_cursor);
             var walk_queue_index: u64 = 0;
 
             const seen_object_ids_cursor = try map.putCursor(hash.hashInt(repo_opts.hash, "seen-object-ids"));
-            const seen_object_ids = try DB.HashSet(.read_write).init(seen_object_ids_cursor);
+            const seen_object_ids = try TempDB.HashSet(.read_write).init(seen_object_ids_cursor);
 
             const head_oid_hex = (try rf.readRecur(repo_kind, repo_opts, state, io, .{ .ref = ref })) orelse return error.OidNotFound;
             var head_oid: [hash.byteLen(repo_opts.hash)]u8 = undefined;
@@ -2082,7 +2078,7 @@ pub fn CommitIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Re
                     }
 
                     const children_cursor = try self.parent_to_children.putCursor(parent_oid_int);
-                    const children = try DB.HashSet(.read_write).init(children_cursor);
+                    const children = try TempDB.HashSet(.read_write).init(children_cursor);
                     try children.put(oid_int, .{ .bytes = &oid });
                     pending_parent_count += 1;
                 }
@@ -2098,7 +2094,7 @@ pub fn CommitIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Re
         fn enqueueChildren(self: *CommitIterator(repo_kind, repo_opts), oid: *const [hash.byteLen(repo_opts.hash)]u8) !void {
             const oid_int = hash.bytesToInt(repo_opts.hash, oid);
             const children_cursor = try self.parent_to_children.getCursor(oid_int) orelse return;
-            const children = try DB.HashSet(.read_only).init(children_cursor);
+            const children = try TempDB.HashSet(.read_only).init(children_cursor);
             var children_iter = try children.iterator();
 
             while (try children_iter.next()) |*child_cursor| {
@@ -2117,7 +2113,7 @@ pub fn CommitIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Re
             }
         }
 
-        fn readOidFromList(list: DB.ArrayList(.read_only), index: u64) ![hash.byteLen(repo_opts.hash)]u8 {
+        fn readOidFromList(list: TempDB.ArrayList(.read_only), index: u64) ![hash.byteLen(repo_opts.hash)]u8 {
             const oid_cursor = try list.getCursor(index) orelse return error.CursorNotFound;
             var oid: [hash.byteLen(repo_opts.hash)]u8 = undefined;
             _ = try oid_cursor.readBytes(&oid);
