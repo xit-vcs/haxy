@@ -92,8 +92,7 @@ pub const View = struct {
     }
 
     fn logout(self: *View) !void {
-        self.session.data.user_id = null;
-        self.session.data.user_name = null;
+        self.session.logOut();
         // leave the auth tab for the page it belongs to, where the web's
         // /logout redirect also lands
         try self.session.navigate(self.session.data.current_page.pageRoot());

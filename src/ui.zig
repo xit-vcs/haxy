@@ -2000,8 +2000,8 @@ pub const Session = struct {
         self.data.enable_ansi = user.event.enable_ansi;
     }
 
-    // a removed account's sessions read as logged out
-    fn logOut(self: *Self) void {
+    // forget the logged-in user, on a logout or once their account is removed
+    pub fn logOut(self: *Self) void {
         self.data.user_id = null;
         self.data.user_name = null;
     }

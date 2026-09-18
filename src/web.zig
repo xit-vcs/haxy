@@ -210,6 +210,9 @@ fn handleRequest(
         // accounts, so it is always logged out.
         var user_id_buf: [evt.event_id_size]u8 = undefined;
         var user_id: ?[]const u8 = null;
+        // the session token that named the user, so a stale one can be revoked
+        var token_buf: [SessionStore.token_hex_len]u8 = undefined;
+        var session_token: ?[]const u8 = null;
         var form_arena = std.heap.ArenaAllocator.init(allocator);
         defer form_arena.deinit();
         var form_feedback: ?ui.Session.FormFeedback = null;
@@ -226,13 +229,14 @@ fn handleRequest(
                 user_id = blk: {
                     const token = getCookieValue(request, cookie_name) orelse break :blk null;
                     if (!server.session_store.lookup(token, &user_id_buf)) break :blk null;
+                    session_token = token;
                     break :blk user_id_buf[0..evt.event_id_size];
                 };
                 // whoever seeded the store may have left a session to claim
                 if (user_id == null) {
-                    var token: [SessionStore.token_hex_len]u8 = undefined;
-                    if (server.session_store.autoLogin(&token) and server.session_store.lookup(&token, &user_id_buf)) {
-                        session_cookie = try std.fmt.bufPrint(&cookie_buf, session_cookie_fmt, .{token});
+                    if (server.session_store.autoLogin(&token_buf) and server.session_store.lookup(&token_buf, &user_id_buf)) {
+                        session_cookie = try std.fmt.bufPrint(&cookie_buf, session_cookie_fmt, .{token_buf});
+                        session_token = &token_buf;
                         user_id = user_id_buf[0..evt.event_id_size];
                     }
                 }
@@ -265,7 +269,7 @@ fn handleRequest(
             .server => |server| .{ server.git_http_port, server.git_ssh_port, server.git_ssh_prefix },
             .local => .{ null, null, "" },
         };
-        const html = renderIndexHtml(io, allocator, host, .{
+        const html = renderIndexHtml(io, allocator, host, session_token, .{
             .user_id = user_id,
             .form_feedback = form_feedback,
             .sync_failure = sync_failure,
@@ -1762,6 +1766,7 @@ fn renderIndexHtml(
     io: std.Io,
     allocator: std.mem.Allocator,
     host: Host,
+    session_token: ?[]const u8,
     session_data: ui.Session.Data,
 ) ![]const u8 {
     const template = (findEmbed("/index.html") orelse return error.MissingIndexAsset).body;
@@ -1780,6 +1785,11 @@ fn renderIndexHtml(
             repo_maybe = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = server.admin_repo_path });
             const repo = if (repo_maybe) |*repo| repo else unreachable;
             var session = try ui.Session.init(&page_arena, repo, session_data);
+            // the session dropped a user whose account was removed, so revoke
+            // the token that named them
+            if (session_token) |token| {
+                if (session.data.user_id == null) server.session_store.remove(token);
+            }
             // give the page builders filesystem access to the on-disk repos (a
             // sibling "repos" dir next to the admin repo) so the Repo page can
             // read its files.
