@@ -122,6 +122,16 @@ pub fn init(
     var moment = repo.core.latestMoment() catch return emptyResult(aa, location, resolved.ref_or_oid, resolved.value, content, base_oid);
     const state = rp.Repo(repo_kind, repo_opts).State(.read_only){ .core = &repo.core, .extra = .{ .moment = &moment } };
 
+    // resolve annotated tags once, independently of the page's starting commit.
+    {
+        var tip = obj.Object(repo_kind, repo_opts).initCommit(state, io, gpa, &resolved.oid) catch {
+            if (query != null) return error.NotFound;
+            return emptyResult(aa, location, resolved.ref_or_oid, resolved.value, content, base_oid);
+        };
+        defer tip.deinit();
+        resolved.oid = tip.oid;
+    }
+
     // collect this page's commit metadata, plus a peek at the one after it (its
     // oid is the next page's start). the diff for each is rendered afterward, so
     // the log iterator is closed before opening per-commit diff iterators.
@@ -137,10 +147,6 @@ pub fn init(
     // bounded by a base, whose version also covers the commits before it.
     if (comptime repo_kind == .xit) index: {
         if (location != .repo or resolved.ref_or_oid == .object or base_oid.len != 0) break :index;
-        // versions are keyed by commit, so an annotated tag is peeled first
-        var tip = obj.Object(.xit, repo_opts).initCommit(state, io, gpa, &resolved.oid) catch break :index;
-        defer tip.deinit();
-        resolved.oid = tip.oid;
         const index = (try cms.lookup(repo_opts, moment, &resolved.oid)) orelse break :index;
         search_available = true;
         const text = query orelse break :index;
@@ -179,8 +185,6 @@ pub fn init(
         defer iter.deinit();
         while (try iter.next(gpa)) |commit_object| {
             defer commit_object.deinit();
-            // count from the commit itself when the tip is an annotated tag
-            if (count == 0 and from.len == 0) resolved.oid = commit_object.oid;
             // the base is a stopping point, not an ancestry exclusion
             if (std.mem.eql(u8, &commit_object.oid, base_oid)) break;
             if (count == page_size) {
@@ -212,7 +216,10 @@ pub fn init(
         .ref_or_oid_value = resolved.value,
         .base_oid = try aa.dupe(u8, base_oid),
         .commit_count = if (repo_kind == .xit and location == .repo) blk: {
-            if (base_oid.len == 0) break :blk repo.commitCount(io, gpa, .{ .oid = &resolved.oid }) catch null;
+            if (base_oid.len == 0) {
+                const stats = (xit.patch.readCommitStats(repo_opts, state.extra.moment, &resolved.oid) catch null) orelse break :blk null;
+                break :blk stats.first_parent_depth;
+            }
             break :blk evt.PatchRev.commitCount(repo_kind, repo_opts, state, io, gpa, base_oid, &resolved.oid) catch null;
         } else null,
         .commits = try aa.dupe(Commit, buf[0..count]),

@@ -79,6 +79,7 @@ pub fn prepare(
 }
 
 // only show the depth difference if a short first-parent walk reaches the base
+// both oids must identify commits, not annotated tags
 pub fn commitCount(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
@@ -93,9 +94,9 @@ pub fn commitCount(
         .xit => {
             const oid_len = comptime hash.hexLen(repo_opts.hash);
             if (base_oid.len != oid_len or source_oid.len != oid_len) return error.InvalidOid;
-            const base_count = try state.commitCount(io, allocator, .{ .oid = base_oid[0..oid_len] });
-            const source_count = try state.commitCount(io, allocator, .{ .oid = source_oid[0..oid_len] });
-            const count = std.math.sub(u64, source_count, base_count) catch return null;
+            const base_stats = (try xit.patch.readCommitStats(repo_opts, state.extra.moment, base_oid[0..oid_len])) orelse return null;
+            const source_stats = (try xit.patch.readCommitStats(repo_opts, state.extra.moment, source_oid[0..oid_len])) orelse return null;
+            const count = std.math.sub(u64, source_stats.first_parent_depth, base_stats.first_parent_depth) catch return null;
             if (count > commit_count_limit) return null;
 
             // depth subtraction is only valid if the base is on the source's first-parent chain

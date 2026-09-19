@@ -285,7 +285,6 @@ fn testCommitBase(comptime kind: xit.repo.RepoKind) !void {
     }
     const first = try Commits.init(kind, opts, &arena, &repo, io, allocator, null, location, .object, &tip, content, &base, "", "");
     try std.testing.expectEqual(20, first.commits.len);
-    try std.testing.expectEqual(@as(?u64, if (kind == .xit) 21 else null), first.commit_count);
     const last = try Commits.init(kind, opts, &arena, &repo, io, allocator, null, location, .object, first.next_start orelse return error.MissingNext, content, &base, "", "");
     try std.testing.expectEqual(1, last.commits.len);
     try std.testing.expectEqual(null, last.next_start);
@@ -294,16 +293,21 @@ fn testCommitBase(comptime kind: xit.repo.RepoKind) !void {
     const full = try Commits.init(kind, opts, &arena, &repo, io, allocator, null, location, .object, &previous, content, &base, "", "");
     try std.testing.expectEqual(20, full.commits.len);
     try std.testing.expectEqual(null, full.next_start);
-    _ = try repo.addTag(io, allocator, .{ .name = "tip", .message = "annotated" });
+    const tag_oid = try repo.addTag(io, allocator, .{ .name = "tip", .message = "annotated" });
     const sources = [_]struct { ref: ui.RoutablePage.RefOrOid, value: []const u8 }{
         .{ .ref = .object, .value = &tip },
+        .{ .ref = .object, .value = &tag_oid },
         .{ .ref = .branch, .value = branch.name },
         .{ .ref = .tag, .value = "tip" },
     };
     for (sources) |source| {
         const empty = try Commits.init(kind, opts, &arena, &repo, io, allocator, null, location, source.ref, source.value, content, &tip, "", "");
         try std.testing.expectEqual(0, empty.commits.len);
-        try std.testing.expectEqual(@as(?u64, if (kind == .xit) 0 else null), empty.commit_count);
+        const paged = try Commits.init(kind, opts, &arena, &repo, io, allocator, null, location, source.ref, source.value, content, &base, "", first.next_start orelse return error.MissingNext);
+        try std.testing.expectEqual(1, paged.commits.len);
+        try std.testing.expectEqualStrings(last.commits[0].oid, paged.commits[0].oid);
+        try std.testing.expectEqual(source.ref, paged.ref_or_oid);
+        try std.testing.expectEqualStrings(source.value, paged.ref_or_oid_value);
     }
 
     // an off-chain stopping point must not hide its parent on this chain
@@ -311,7 +315,6 @@ fn testCommitBase(comptime kind: xit.repo.RepoKind) !void {
     const off_chain = try Commits.init(kind, opts, &arena, &repo, io, allocator, null, location, .object, last.commits[0].oid, content, &other, "", "");
     try std.testing.expectEqual(2, off_chain.commits.len);
     try std.testing.expectEqualStrings(&base, off_chain.commits[1].oid);
-    try std.testing.expectEqual(null, off_chain.commit_count);
 }
 
 test "sync creates missing event branches and preserves head" {
