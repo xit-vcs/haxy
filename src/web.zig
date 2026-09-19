@@ -1978,6 +1978,29 @@ fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: 
         }
     };
 
+    // the focusable owning each cell, among this panel's own (skipping any
+    // that belong to a child scroll, whose cells are drawn in their own panel).
+    // claimed in focus order, so the first focusable over a cell keeps it.
+    // looking every focusable up for every cell is quadratic in a long list.
+    const owners = try allocator.alloc(?usize, grid.size.width * grid.size.height);
+    defer allocator.free(owners);
+    @memset(owners, null);
+    {
+        var it = focus.children.iterator();
+        while (it.next()) |entry| {
+            const child = entry.value_ptr.*;
+            if (child.focus.mode != .all) continue;
+            if (excluded.contains(entry.key_ptr.*)) continue;
+            const r = child.rect;
+            for (@min(r.y, grid.size.height)..@min(r.y + r.size.height, grid.size.height)) |y| {
+                for (@min(r.x, grid.size.width)..@min(r.x + r.size.width, grid.size.width)) |x| {
+                    const owner = &owners[y * grid.size.width + x];
+                    if (owner.* == null) owner.* = entry.key_ptr.*;
+                }
+            }
+        }
+    }
+
     // the cells are the volatile part of a panel. js replaces this one subtree
     // wholesale while retaining the panel's native controls and scroll shells.
     try output.appendSlice(allocator, "<div class=\"grid-cells\">");
@@ -2004,22 +2027,8 @@ fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: 
                 }
                 break :blk false;
             };
-            // the focusable cell at (x, y) among this panel's own focusables (skipping
-            // any that belong to a child scroll, whose cells are drawn in their own
-            // panel); none for a covered cell.
-            const cell_id = if (covered_by_scroll) null else blk: {
-                var iter = focus.children.iterator();
-                while (iter.next()) |entry| {
-                    const child = entry.value_ptr.*;
-                    if (child.focus.mode != .all) continue;
-                    if (excluded.contains(entry.key_ptr.*)) continue;
-                    const r = child.rect;
-                    if (x >= r.x and y >= r.y and x < r.x + r.size.width and y < r.y + r.size.height) {
-                        break :blk entry.key_ptr.*;
-                    }
-                }
-                break :blk null;
-            };
+            // the focusable owning the cell at (x, y); none for a covered cell.
+            const cell_id = if (covered_by_scroll) null else owners[y * grid.size.width + x];
             const fg = if (covered_by_scroll) null else cell.style.fg;
             const bg = cell.style.bg;
 
