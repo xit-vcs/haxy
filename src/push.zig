@@ -327,6 +327,11 @@ pub fn receiveFork(
         return err;
     };
 
+    find.refresh(repo_opts, io, allocator, fork_repo) catch |err| {
+        serve_common.logError(io, error_writer, "failed to refresh file index: {s}\n", .{@errorName(err)});
+    };
+    if (!published) return response.finish(writer, null);
+
     var progress = PushProgress{ .response = &response, .writer = writer, .label = "Updating patches" };
     progress.run(io, .{ .start = .{ .kind = .writing_patch, .estimated_total_items = 1 } }) catch {};
 
@@ -334,7 +339,6 @@ pub fn receiveFork(
     var refreshed = false;
     update: {
         const revision_id = revision_id_maybe orelse break :update;
-        if (!published) break :update;
         var update_arena = std.heap.ArenaAllocator.init(allocator);
         defer update_arena.deinit();
         const target_update_moment = evt.currentMoment(repo_opts, target_repo) catch break :update;
@@ -363,9 +367,6 @@ pub fn receiveFork(
     }
 
     if (!refreshed) pch.refreshMergeability(repo_opts, io, allocator, target_repo, patch_id);
-    find.refresh(repo_opts, io, allocator, fork_repo) catch |err| {
-        serve_common.logError(io, error_writer, "failed to refresh file index: {s}\n", .{@errorName(err)});
-    };
     progress.run(io, .{ .complete_one = .writing_patch }) catch {};
     progress.run(io, .{ .end = .writing_patch }) catch {};
 

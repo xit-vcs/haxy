@@ -970,6 +970,11 @@ fn patchLifecycle(merge_revision: evt.Patch.MergeRevision) !void {
     }
     try std.testing.expectError(error.NotFound, evt.currentMoment(repo_opts, &target));
 
+    // draft mergeability checks leave the target repo untouched
+    const before_draft_check = (try target.core.latestMoment()).cursor.slot();
+    pch.refreshMergeability(repo_opts, io, allocator, &target, patch_id);
+    try std.testing.expectEqualDeep(before_draft_check, (try target.core.latestMoment()).cursor.slot());
+
     //
     // publish another draft before its first push
     //
@@ -1088,14 +1093,14 @@ fn patchLifecycle(merge_revision: evt.Patch.MergeRevision) !void {
     // merge the selected revision into the target
     //
 
-    try evt.Patch.update(.local, .xit, repo_opts, io, allocator, &target, &patch_id, .{ .status = .closed }, author);
+    try evt.Patch.update(.server, .xit, repo_opts, io, allocator, &target, &patch_id, .{ .status = .closed }, author);
     try std.testing.expectError(error.PatchClosed, pch.merge(repo_opts, io, allocator, repos_dir, &target, .{
         .id = patch_id_hex,
         .revision = merge_revision,
         .author = author,
         .timestamp = 5,
     }));
-    try evt.Patch.update(.local, .xit, repo_opts, io, allocator, &target, &patch_id, .{ .status = .open }, author);
+    try evt.Patch.update(.server, .xit, repo_opts, io, allocator, &target, &patch_id, .{ .status = .open }, author);
 
     // run the cache scenario once; both lifecycle runs still perform a merge
     if (merge_revision == .source) {
@@ -1172,7 +1177,9 @@ fn readMergeability(repo: *Repo, io: std.Io, allocator: std.mem.Allocator, id: *
 }
 
 fn expectMergeabilityShortBytes(moment: Repo.DB.HashMap(.read_only), id: *const [evt.event_id_size]u8) !void {
-    const checks = try Repo.DB.HashMap(.read_only).init((try moment.getCursor(hash.hashInt(repo_opts.hash, "patch-id->mergeability"))) orelse return error.NotFound);
+    try std.testing.expectEqual(null, try moment.getCursor(hash.hashInt(repo_opts.hash, evt.Patch.patch_id_to_mergeability_key)));
+    const haxy_moment = try evt.currentMomentFromRepoMoment(repo_opts.hash, moment);
+    const checks = try Repo.DB.HashMap(.read_only).init((try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Patch.patch_id_to_mergeability_key))) orelse return error.NotFound);
     const entry = try Repo.DB.HashMap(.read_only).init((try checks.getCursor(hash.hashInt(repo_opts.hash, id))) orelse return error.NotFound);
     const result = try Repo.DB.HashMap(.read_only).init((try entry.getCursor(hash.hashInt(repo_opts.hash, "result"))) orelse return error.NotFound);
     for ([_][]const u8{ "source", "squash" }) |field| {

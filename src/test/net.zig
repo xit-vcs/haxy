@@ -617,6 +617,9 @@ fn testPushFork(
         defer admin.deinit(io, allocator);
         var target = try rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = target_path });
         defer target.deinit(io, allocator);
+        // pushing a draft does not create haxy state or a mergeability cache
+        try std.testing.expectError(error.NotFound, evt.currentMoment(repo_opts, &target));
+        try std.testing.expectEqual(null, try (try target.core.latestMoment()).getCursor(hash.hashInt(hash_kind, evt.Patch.patch_id_to_mergeability_key)));
         try target.addBranch(io, .{ .name = "feature" });
         try pch.publish(repo_opts, io, allocator, &admin, &target, draft_path, .{
             .id = fork_id_hex,

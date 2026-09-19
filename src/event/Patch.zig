@@ -100,6 +100,7 @@ pub const status_to_id_set_key = "status->patch-id-set";
 pub const tag_status_to_id_set_key = "tag+status->patch-id-set";
 pub const revision_to_id_set_key = "target-branch+oid->patch-id-set";
 pub const source_to_id_set_key = "source-branch->patch-id-set";
+pub const patch_id_to_mergeability_key = "patch-id->mergeability";
 
 pub const TagStatusKey = [tag_max_len + 1 + StatusKind.longest_len]u8;
 
@@ -190,6 +191,14 @@ pub fn consume(
             const revision = (try evt.PatchRev.readById(DB, hash_kind, haxy_moment.readOnly(), arena, &id)) orelse return error.InvalidPatch;
             if (!selected.matches(revision)) return error.InvalidPatch;
         },
+    }
+
+    if (record.removed or status_kind != .open) {
+        const key = hash.hashInt(hash_kind, patch_id_to_mergeability_key);
+        if (try haxy_moment.getCursor(key) != null) {
+            const checks = try DB.HashMap(.read_write).init(try haxy_moment.putCursor(key));
+            _ = try checks.remove(record_key);
+        }
     }
 
     const order_key = evt.orderKeyDesc(record.created_order, event_id);

@@ -238,8 +238,6 @@ pub const Mergeability = struct {
     }
 };
 
-const mergeability_key = "patch-id->mergeability";
-
 const MergeCheck = struct {
     revision: evt.Patch.Revision,
     target_branch: []const u8,
@@ -255,12 +253,12 @@ const MergeCheck = struct {
 
 fn readMergeCheck(
     comptime repo_opts: rp.RepoOpts(.xit),
-    moment: evt.EventDB(repo_opts.hash).HashMap(.read_only),
+    haxy_moment: evt.EventDB(repo_opts.hash).HashMap(.read_only),
     arena: *std.heap.ArenaAllocator,
     id: *const [evt.event_id_size]u8,
 ) !?MergeCheck {
     const DB = evt.EventDB(repo_opts.hash);
-    const map_cursor = try moment.getCursor(hash.hashInt(repo_opts.hash, mergeability_key)) orelse return null;
+    const map_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Patch.patch_id_to_mergeability_key)) orelse return null;
     const map = try DB.HashMap(.read_only).init(map_cursor);
     const cursor = try map.getCursor(hash.hashInt(repo_opts.hash, id)) orelse return null;
     return evt.read(MergeCheck, DB, repo_opts.hash, arena, try DB.HashMap(.read_only).init(cursor)) catch |err| switch (err) {
@@ -280,7 +278,11 @@ pub fn readMergeability(
 ) !Mergeability {
     if (patch.source_branch != null and !try branchCurrent(repo_opts, state, io, arena, patch)) return .{};
     const target_oid = try rf.readRecur(.xit, repo_opts, state, io, .{ .ref = .{ .kind = .head, .name = patch.target_branch } }) orelse return .{};
-    const cached = try readMergeCheck(repo_opts, state.extra.moment.*, arena, id) orelse return .{};
+    const haxy_moment = evt.currentMomentFromRepoMoment(repo_opts.hash, state.extra.moment.*) catch |err| switch (err) {
+        error.NotFound => return .{},
+        else => return err,
+    };
+    const cached = try readMergeCheck(repo_opts, haxy_moment, arena, id) orelse return .{};
     return if (cached.matches(patch, &target_oid)) cached.result else .{};
 }
 
@@ -333,11 +335,11 @@ fn refreshMergeCheck(
     const DB = Repo.DB;
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    const initial = try evt.readFromRepo(evt.Patch, .xit, repo_opts, io, allocator, &arena, target_repo, id);
-    if (initial) |record| if (record.removed or record.event.status.kind() != .open) return;
+    const initial = (try evt.readFromRepo(evt.Patch, .xit, repo_opts, io, allocator, &arena, target_repo, id)) orelse return;
+    if (initial.removed or initial.event.status.kind() != .open) return;
     const repo_root_path = std.fs.path.dirname(target_repo.core.work_path) orelse ".";
     const path = try fork.forkPath(arena.allocator(), repo_root_path, &std.fmt.bytesToHex(id.*, .lower));
-    const branch_backed = if (initial) |record| record.event.source_branch != null else false;
+    const branch_backed = initial.event.source_branch != null;
     var fork_repo_maybe: ?Repo = if (branch_backed) null else Repo.open(io, allocator, .{ .path = path, .require_repo_root = true }) catch |err| blk: {
         std.log.warn("mergeability fork unavailable: {s}", .{@errorName(err)});
         break :blk null;
@@ -351,10 +353,11 @@ fn refreshMergeCheck(
     var target_moment = try target_repo.core.latestMoment();
     const target_state = Repo.State(.read_only){ .core = &target_repo.core, .extra = .{ .moment = &target_moment } };
     const target_events = evt.currentMomentFromRepoMoment(repo_opts.hash, target_moment) catch |err| switch (err) {
-        error.NotFound => null,
+        error.NotFound => return,
         else => return err,
     };
-    var record = if (target_events) |events| try evt.Patch.readById(DB, repo_opts.hash, events, &arena, id) else null;
+    const patch_record = (try evt.Patch.readById(DB, repo_opts.hash, target_events, &arena, id)) orelse return;
+    if (patch_record.removed or patch_record.event.status.kind() != .open) return;
     var newest: ?evt.PatchRev.WithId = null;
     if (fork_repo_maybe) |*repo| {
         if (evt.currentMoment(repo_opts, repo)) |events| {
@@ -362,16 +365,13 @@ fn refreshMergeCheck(
                 std.log.warn("mergeability revision unavailable: {s}", .{@errorName(err)});
                 break :blk null;
             };
-            if (record == null) record = try evt.Patch.readById(DB, repo_opts.hash, events, &arena, id);
         } else |err| std.log.warn("mergeability revision unavailable: {s}", .{@errorName(err)});
     }
-    const patch_record = record orelse return;
-    if (patch_record.removed or patch_record.event.status.kind() != .open) return;
     const patch = patch_record.event;
     const revision = patch.revision orelse return;
     const target_oid = try rf.readRecur(.xit, repo_opts, target_state, io, .{ .ref = .{ .kind = .head, .name = patch.target_branch } });
     var check = MergeCheck{ .revision = revision, .target_branch = patch.target_branch, .target_oid = if (target_oid) |*oid| oid else "" };
-    const cached = try readMergeCheck(repo_opts, target_moment, &arena, id);
+    const cached = try readMergeCheck(repo_opts, target_events, &arena, id);
     const current = if (patch.source_branch != null) try branchCurrent(repo_opts, target_state, io, &arena, patch) else if (newest) |latest| std.mem.eql(u8, &std.fmt.bytesToHex(latest.id, .lower), &revision.id) and revision.matches(latest.record) else false;
     if (current and target_oid != null) {
         if (cached) |value| if (value.matches(patch, check.target_oid) and value.result.source != .unknown and value.result.squash != .unknown) return;
@@ -421,9 +421,17 @@ fn refreshMergeCheck(
 
         pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
             const moment = try DB.HashMap(.read_write).init(cursor.*);
-            const map = try DB.HashMap(.read_write).init(try moment.putCursor(hash.hashInt(repo_opts.hash, mergeability_key)));
+            const last_object_id_cursor = try moment.getCursor(hash.hashInt(repo_opts.hash, evt.last_object_id_key)) orelse return error.NotFound;
+            var last_object_id: [hash.byteLen(repo_opts.hash)]u8 = undefined;
+            _ = try last_object_id_cursor.readBytes(&last_object_id);
+            const haxy = try DB.ArrayList(.read_write).init(try moment.putCursor(hash.hashInt(repo_opts.hash, evt.materialized_key)));
+            const haxy_moments = try DB.HashMap(.read_write).init(try haxy.putCursor(-1));
+            const haxy_moment = try DB.HashMap(.read_write).init(try haxy_moments.putCursor(hash.bytesToInt(repo_opts.hash, &last_object_id)));
+            const map = try DB.HashMap(.read_write).init(try haxy_moment.putCursor(hash.hashInt(repo_opts.hash, evt.Patch.patch_id_to_mergeability_key)));
             const entry = try DB.HashMap(.read_write).init(try map.putCursor(hash.hashInt(repo_opts.hash, &ctx.id)));
             try evt.upsert(MergeCheck, DB, repo_opts.hash, entry, ctx.check);
+            // discard the old repo-level cache as results are rebuilt here
+            _ = try moment.remove(hash.hashInt(repo_opts.hash, evt.Patch.patch_id_to_mergeability_key));
         }
     };
     const history = try DB.ArrayList(.read_write).init(target_repo.core.db.rootCursor());
