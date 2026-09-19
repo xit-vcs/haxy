@@ -133,7 +133,7 @@ pub fn init(arena: *std.heap.ArenaAllocator, session: *ui.Session, route: ui.Rou
         .id = &id_hex,
     } };
     const files = try Files.init(.xit, .{}, arena, &fork_repo, io, arena.child_allocator, location, requested_ref, requested_value, files_path, files_line, files_find);
-    var commits = try Commits.init(.xit, .{}, arena, &fork_repo, io, arena.child_allocator, haxy_moment, location, requested_ref, requested_value, commits_content, &commits_base_oid);
+    var commits = try Commits.init(.xit, .{}, arena, &fork_repo, io, arena.child_allocator, haxy_moment, location, requested_ref, requested_value, commits_content, &commits_base_oid, "", "");
     commits.commit_count = if (newest_revision) |revision| revision.record.commit_count else 0;
     const diff_start: usize = switch (route) {
         .fork_diff => |d| d.start,
@@ -250,7 +250,7 @@ pub const View = struct {
                     if (stack.getSelected()) |selected| switch (selected.*) {
                         .repo_patch_detail => |*view| if (view.focusFirst(root_focus)) return,
                         .repo_files => |*view| if (view.focusHeader(root_focus)) return,
-                        .repo_commits => |*view| if (view.focusCloneUrl(root_focus)) return,
+                        .repo_commits => |*view| if (view.focusHeader(root_focus)) return,
                         else => {},
                     };
                     next_index = stack_index;

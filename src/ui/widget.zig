@@ -38,8 +38,7 @@ pub const Widget = union(enum) {
     user_header: ui.User.Header.View,
     repo_header: ui.Repo.Header.View,
     fork_header: ui.Fork.Header.View,
-    repo_files_header: ui.Repo.Files.Header.View,
-    repo_commits_header: ui.Repo.Commits.Header.View,
+    search_header: SearchHeader,
     repo_issues_header: ui.Repo.Issues.Header,
     repo_patches_header: ui.Repo.Patches.Header,
     repo_discussions_header: ui.Repo.Discussions.Header,
@@ -655,6 +654,147 @@ pub const Spacer = struct {
 
     pub fn getFocus(self: *Spacer) *Focus {
         return self.focus;
+    }
+};
+
+// a tab's sub-header: an optional search box on the left, then a spacer, then
+// the clone url on the right. the owning view turns a submitted query into a
+// route, so route building stays with the tab that knows its own url.
+pub const SearchHeader = struct {
+    box: wgt.Box(Widget),
+    session: *ui.Session,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        session: *ui.Session,
+        location: ui.RoutablePage.RepoLocation,
+        label: []const u8,
+        name: []const u8,
+        text: ?[]const u8,
+        show_input: bool,
+    ) !SearchHeader {
+        var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
+        errdefer box.deinit(allocator);
+
+        // the search box only appears where an index can serve it.
+        if (show_input) {
+            var text_input = try wgt.TextInput.init(allocator, .{ .label = label, .name = name, .rounded_corners = true, .visible_width = 18, .render_content = session.is_terminal });
+            errdefer text_input.deinit(allocator);
+            text_input.getFocus().mode = .all;
+            if (text) |value| try text_input.setContent(allocator, value);
+            box.getFocus().child_id = text_input.getFocus().id;
+            try box.children.put(allocator, text_input.getFocus().id, .{ .widget = .{ .text_input = text_input }, .rect = null, .min_size = .{ .width = 20, .height = 3 } });
+        }
+
+        // the spacer pushes the clone url to the right edge.
+        {
+            var spacer = try Spacer.init(allocator);
+            errdefer spacer.deinit(allocator);
+            try box.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null });
+        }
+
+        if (session.data.host_kind == .server) {
+            if (try CopyableText.initClone(allocator, session, location)) |value| {
+                var clone_url = value;
+                errdefer clone_url.deinit(allocator);
+                const min_width = clone_url.minWidth();
+                if (box.getFocus().child_id == null) box.getFocus().child_id = clone_url.getFocus().id;
+                try box.children.put(allocator, clone_url.getFocus().id, .{ .widget = .{ .copyable_text = clone_url }, .rect = null, .min_size = .{ .width = min_width, .height = 3 }, .max_size = .{ .width = min_width, .height = 3 } });
+            }
+        }
+
+        return .{ .box = box, .session = session };
+    }
+
+    pub fn deinit(self: *SearchHeader, allocator: std.mem.Allocator) void {
+        self.box.deinit(allocator);
+    }
+
+    pub fn build(self: *SearchHeader, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
+        self.clearGrid();
+        if (self.searchInput()) |text_input| {
+            text_input.options.bottom_label = if (root_focus.grandchild_id == text_input.getFocus().id) " press enter " else "";
+        }
+        try self.box.build(allocator, constraint, root_focus);
+        if (!self.session.is_terminal) {
+            if (self.searchInput()) |text_input| {
+                try self.session.text_inputs.put(self.session.arena.allocator(), text_input.getFocus().id, text_input);
+            }
+        }
+    }
+
+    pub fn input(self: *SearchHeader, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
+        const current = self.box.getFocus().child_id orelse return;
+        if (self.searchInput()) |text_input| {
+            if (current == text_input.getFocus().id) {
+                if (key == .arrow_right and text_input.cursor == text_input.content.items.len) {
+                    if (self.cloneUrl()) |clone_url| {
+                        root_focus.setFocus(clone_url.getFocus().id);
+                        return;
+                    }
+                }
+                return text_input.input(allocator, key, root_focus);
+            }
+        }
+        const clone_url = self.cloneUrl() orelse return;
+        if (key == .arrow_left and clone_url.selected == 0) {
+            if (self.searchInput()) |text_input| {
+                root_focus.setFocus(text_input.getFocus().id);
+                return;
+            }
+        }
+        try clone_url.input(allocator, key, root_focus);
+    }
+
+    // the typed query when enter should submit it: the box exists and holds
+    // focus. the caller owns the returned text.
+    pub fn submittedText(self: *SearchHeader, allocator: std.mem.Allocator) !?[]u8 {
+        const text_input = self.searchInput() orelse return null;
+        if (self.box.getFocus().child_id != text_input.getFocus().id) return null;
+        return try text_input.text(allocator);
+    }
+
+    // enter the header, preferring the search box.
+    pub fn focusHeader(self: *SearchHeader, root_focus: *Focus) bool {
+        if (self.searchInput()) |text_input| {
+            root_focus.setFocus(text_input.getFocus().id);
+            return true;
+        }
+        const clone_url = self.cloneUrl() orelse return false;
+        root_focus.setFocus(clone_url.getFocus().id);
+        return true;
+    }
+
+    pub fn hasFocusable(self: *SearchHeader) bool {
+        return self.cloneUrl() != null or self.searchInput() != null;
+    }
+
+    fn cloneUrl(self: *SearchHeader) ?*CopyableText {
+        for (self.box.children.values()) |*child| switch (child.widget) {
+            .copyable_text => |*copyable_text| return copyable_text,
+            else => {},
+        };
+        return null;
+    }
+
+    fn searchInput(self: *SearchHeader) ?*wgt.TextInput {
+        for (self.box.children.values()) |*child| switch (child.widget) {
+            .text_input => |*text_input| return text_input,
+            else => {},
+        };
+        return null;
+    }
+
+    pub fn clearGrid(self: *SearchHeader) void {
+        self.box.clearGrid();
+    }
+
+    pub fn getGrid(self: SearchHeader) ?Grid {
+        return self.box.getGrid();
+    }
+
+    pub fn getFocus(self: *SearchHeader) *Focus {
+        return self.box.getFocus();
     }
 };
 

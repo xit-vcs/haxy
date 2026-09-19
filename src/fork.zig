@@ -1,6 +1,7 @@
 const std = @import("std");
 const evt = @import("event.zig");
 const find = @import("find.zig");
+const cms = @import("search_commit.zig");
 const xit = @import("xit");
 const rp = xit.repo;
 const hash = xit.hash;
@@ -138,6 +139,9 @@ pub fn create(
 
                 _ = try moment.remove(hash.hashInt(repo_opts.hash, evt.history_key));
                 _ = try moment.remove(hash.hashInt(repo_opts.hash, evt.last_object_id_key));
+                // forks aren't searched, so the copied versions would linger
+                // with nothing to prune them
+                _ = try moment.remove(hash.hashInt(repo_opts.hash, cms.index_key));
 
                 if (head_oid_maybe) |*head_oid| {
                     try rf.write(.xit, repo_opts, state, ctx.io, patch_path, .{ .oid = head_oid });

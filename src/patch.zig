@@ -7,6 +7,7 @@ const obj = xit.object;
 const rf = xit.ref;
 const mrg = xit.merge;
 const find = @import("find.zig");
+const cms = @import("search_commit.zig");
 const fork = @import("fork.zig");
 const serve_common = @import("serve_common.zig");
 
@@ -752,9 +753,12 @@ pub fn merge(
         });
     }
     refreshMergeability(repo_opts, io, allocator, target_repo, null);
-    // the merge moved the target branch, so its file index follows
+    // the merge moved the target branch, so its indexes follow
     find.refresh(repo_opts, io, allocator, target_repo) catch |err| {
         std.log.warn("failed to refresh file index: {s}", .{@errorName(err)});
+    };
+    cms.refresh(repo_opts, io, allocator, target_repo, null) catch |err| {
+        std.log.warn("failed to refresh commit index: {s}", .{@errorName(err)});
     };
 }
 

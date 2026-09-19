@@ -8,6 +8,7 @@ const rf = xit.ref;
 const evt = @import("event.zig");
 const pch = @import("patch.zig");
 const find = @import("find.zig");
+const cms = @import("search_commit.zig");
 const fork = @import("fork.zig");
 const serve_common = @import("serve_common.zig");
 
@@ -158,6 +159,9 @@ pub fn receivePackAndConsume(
     };
     find.refresh(repo_opts, io, allocator, repo) catch |err| {
         serve_common.logError(io, error_writer, "failed to refresh file index: {s}\n", .{@errorName(err)});
+    };
+    cms.refresh(repo_opts, io, allocator, repo, updates.items.items) catch |err| {
+        serve_common.logError(io, error_writer, "failed to refresh commit index: {s}\n", .{@errorName(err)});
     };
     try response.finish(writer, null);
 }

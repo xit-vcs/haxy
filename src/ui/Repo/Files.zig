@@ -354,9 +354,9 @@ pub const View = struct {
 
         // the search box and the clone url at the top.
         {
-            var header_view = try Header.View.init(allocator, data, session);
+            var header_view = try ui.widget.SearchHeader.init(allocator, session, data.location, " find file ", "find", data.find, data.find_available);
             errdefer header_view.deinit(allocator);
-            try outer.children.put(allocator, header_view.getFocus().id, .{ .widget = .{ .repo_files_header = header_view }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
+            try outer.children.put(allocator, header_view.getFocus().id, .{ .widget = .{ .search_header = header_view }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
         }
 
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
@@ -504,8 +504,8 @@ pub const View = struct {
         return &self.box.children.values()[content_index].widget.box;
     }
 
-    fn header(self: *View) *Header.View {
-        return &self.box.children.values()[header_index].widget.repo_files_header;
+    fn header(self: *View) *ui.widget.SearchHeader {
+        return &self.box.children.values()[header_index].widget.search_header;
     }
 
     fn headerActive(self: *View) bool {
@@ -701,10 +701,13 @@ pub const View = struct {
         if (self.headerActive()) {
             if (key == .arrow_down) {
                 root_focus.setFocus(self.contentBox().getFocus().id);
-            } else {
-                try self.header().input(allocator, key, root_focus);
+                return;
             }
-            return;
+            if (key == .enter) if (try self.header().submittedText(allocator)) |term| {
+                defer allocator.free(term);
+                return self.submit(term);
+            };
+            return self.header().input(allocator, key, root_focus);
         }
         if (key == .arrow_up and self.contentAtTop() and self.header().focusHeader(root_focus)) return;
         if (self.detailActive()) {
@@ -712,6 +715,14 @@ pub const View = struct {
         } else {
             try self.listInput(key, root_focus);
         }
+    }
+
+    // navigate to the typed term's results, pinned to the listing's ref. an
+    // empty term leaves the results for the plain listing.
+    fn submit(self: *View, term: []const u8) !void {
+        if (term.len == 0 and self.data.find == null) return;
+        const route = self.data.filesRoute("", 0) orelse return;
+        try self.session.navigate(route.withFind(term) orelse return);
     }
 
     fn listInput(self: *View, key: Key, root_focus: *Focus) !void {
@@ -875,7 +886,7 @@ pub const View = struct {
 
     // only the header's own row sits directly below the repository header.
     pub fn atTop(self: *View) bool {
-        return self.headerActive() or (!self.header().hasHeaderFocus() and self.contentAtTop());
+        return self.headerActive() or (!self.header().hasFocusable() and self.contentAtTop());
     }
 
     pub fn focusHeader(self: *View, root_focus: *Focus) bool {
@@ -981,143 +992,3 @@ fn resultDirLabel(aa: std.mem.Allocator, path: []const u8) ![]const u8 {
     }
     return std.fmt.allocPrint(aa, " " ++ ellipsis ++ "{s} ", .{dir[start..]});
 }
-
-// the search box and the clone url shown above the listing.
-pub const Header = struct {
-    pub const View = struct {
-        box: wgt.Box(ui.Widget),
-        data: *const Self,
-        session: *ui.Session,
-
-        pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !Header.View {
-            var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
-            errdefer box.deinit(allocator);
-
-            // the search box only appears where an index can serve it.
-            if (data.find_available) {
-                var text_input = try wgt.TextInput.init(allocator, .{ .label = " find file ", .name = "find", .rounded_corners = true, .visible_width = 18, .render_content = session.is_terminal });
-                errdefer text_input.deinit(allocator);
-                text_input.getFocus().mode = .all;
-                if (data.find) |term| try text_input.setContent(allocator, term);
-                box.getFocus().child_id = text_input.getFocus().id;
-                try box.children.put(allocator, text_input.getFocus().id, .{ .widget = .{ .text_input = text_input }, .rect = null, .min_size = .{ .width = 20, .height = 3 } });
-            }
-
-            // the spacer pushes the clone url to the right edge.
-            {
-                var spacer = try ui.widget.Spacer.init(allocator);
-                errdefer spacer.deinit(allocator);
-                try box.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null });
-            }
-
-            if (session.data.host_kind == .server) {
-                if (try ui.widget.CopyableText.initClone(allocator, session, data.location)) |value| {
-                    var clone_url = value;
-                    errdefer clone_url.deinit(allocator);
-                    const min_width = clone_url.minWidth();
-                    if (box.getFocus().child_id == null) box.getFocus().child_id = clone_url.getFocus().id;
-                    try box.children.put(allocator, clone_url.getFocus().id, .{ .widget = .{ .copyable_text = clone_url }, .rect = null, .min_size = .{ .width = min_width, .height = 3 }, .max_size = .{ .width = min_width, .height = 3 } });
-                }
-            }
-
-            return .{ .box = box, .data = data, .session = session };
-        }
-
-        pub fn deinit(self: *Header.View, allocator: std.mem.Allocator) void {
-            self.box.deinit(allocator);
-        }
-
-        pub fn build(self: *Header.View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
-            self.clearGrid();
-            if (self.findInput()) |text_input| {
-                text_input.options.bottom_label = if (root_focus.grandchild_id == text_input.getFocus().id) " press enter " else "";
-            }
-            try self.box.build(allocator, constraint, root_focus);
-            if (!self.session.is_terminal) {
-                if (self.findInput()) |text_input| {
-                    try self.session.text_inputs.put(self.session.arena.allocator(), text_input.getFocus().id, text_input);
-                }
-            }
-        }
-
-        pub fn input(self: *Header.View, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
-            const current = self.box.getFocus().child_id orelse return;
-            if (self.findInput()) |text_input| {
-                if (current == text_input.getFocus().id) {
-                    switch (key) {
-                        .enter => return self.submit(allocator, text_input),
-                        .arrow_right => if (text_input.cursor == text_input.content.items.len) {
-                            if (self.cloneUrl()) |clone_url| {
-                                root_focus.setFocus(clone_url.getFocus().id);
-                                return;
-                            }
-                        },
-                        else => {},
-                    }
-                    return text_input.input(allocator, key, root_focus);
-                }
-            }
-            const clone_url = self.cloneUrl() orelse return;
-            if (key == .arrow_left and clone_url.selected == 0) {
-                if (self.findInput()) |text_input| {
-                    root_focus.setFocus(text_input.getFocus().id);
-                    return;
-                }
-            }
-            try clone_url.input(allocator, key, root_focus);
-        }
-
-        // navigate to the typed term's results, pinned to the listing's ref. an
-        // empty term leaves the results for the plain listing.
-        fn submit(self: *Header.View, allocator: std.mem.Allocator, text_input: *wgt.TextInput) !void {
-            const term = try text_input.text(allocator);
-            defer allocator.free(term);
-            if (term.len == 0 and self.data.find == null) return;
-            const route = self.data.filesRoute("", 0) orelse return;
-            try self.session.navigate(route.withFind(term) orelse return);
-        }
-
-        // enter the header, preferring the search box.
-        pub fn focusHeader(self: *Header.View, root_focus: *Focus) bool {
-            if (self.findInput()) |text_input| {
-                root_focus.setFocus(text_input.getFocus().id);
-                return true;
-            }
-            const clone_url = self.cloneUrl() orelse return false;
-            root_focus.setFocus(clone_url.getFocus().id);
-            return true;
-        }
-
-        pub fn hasHeaderFocus(self: *Header.View) bool {
-            return self.cloneUrl() != null or self.findInput() != null;
-        }
-
-        fn cloneUrl(self: *Header.View) ?*ui.widget.CopyableText {
-            for (self.box.children.values()) |*child| switch (child.widget) {
-                .copyable_text => |*copyable_text| return copyable_text,
-                else => {},
-            };
-            return null;
-        }
-
-        fn findInput(self: *Header.View) ?*wgt.TextInput {
-            for (self.box.children.values()) |*child| switch (child.widget) {
-                .text_input => |*text_input| return text_input,
-                else => {},
-            };
-            return null;
-        }
-
-        pub fn clearGrid(self: *Header.View) void {
-            self.box.clearGrid();
-        }
-
-        pub fn getGrid(self: Header.View) ?Grid {
-            return self.box.getGrid();
-        }
-
-        pub fn getFocus(self: *Header.View) *Focus {
-            return self.box.getFocus();
-        }
-    };
-};

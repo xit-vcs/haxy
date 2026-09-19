@@ -193,7 +193,7 @@ pub const RoutablePage = union(enum) {
 
     // the "key:value" segments of a url tail, collected in any order
     const Params = struct {
-        const ParamKey = enum { start, line, branch, tag, object, base, patchrev, theirs, find };
+        const ParamKey = enum { start, line, branch, tag, object, base, patchrev, theirs, find, search, from };
 
         // a branch:/tag:/object: param; the value stays url-encoded
         const RefParam = struct { kind: RefOrOid, value: []const u8 };
@@ -272,6 +272,8 @@ pub const RoutablePage = union(enum) {
     const start_seg = @tagName(Params.ParamKey.start) ++ ":";
     const line_seg = @tagName(Params.ParamKey.line) ++ ":";
     const find_seg = @tagName(Params.ParamKey.find) ++ ":";
+    const search_seg = @tagName(Params.ParamKey.search) ++ ":";
+    const from_seg = @tagName(Params.ParamKey.from) ++ ":";
     const base_seg = @tagName(Params.ParamKey.base) ++ ":";
     const theirs_seg = @tagName(Params.ParamKey.theirs) ++ ":";
     const issue_seg = "issue:";
@@ -308,6 +310,9 @@ pub const RoutablePage = union(enum) {
 
     // caps the files tab's url-encoded search term.
     pub const find_route_max_len = 100 * 3;
+
+    // caps the commits tab's url-encoded search query.
+    pub const search_route_max_len = 100 * 3;
 
     // the identity stored by every repo route. Local routes elide it.
     pub const RepoIdentity = struct {
@@ -364,6 +369,11 @@ pub const RoutablePage = union(enum) {
         ref_or_oid: ?RefOrOid = null,
         value: Array(ref_route_max_len) = .{},
         base_oid: Array(ref_route_max_len) = .{},
+        // the url-encoded query this page holds the results of ("" = the plain
+        // log). only a branch or tag can carry one.
+        search: Array(search_route_max_len) = .{},
+        // the commit the list starts at ("" = the ref's own commit).
+        from: Array(ref_route_max_len) = .{},
         // what the pane shows for the commit the log walks from.
         content: Content = .{ .diff = .{} },
 
@@ -530,11 +540,8 @@ pub const RoutablePage = union(enum) {
 
     // carry a search term on a files route, url-encoding it into the route.
     // null when it doesn't fit.
-    pub fn withFind(self: RoutablePage, search: []const u8) ?RoutablePage {
-        var find: Array(find_route_max_len) = .{};
-        var writer: std.Io.Writer = .fixed(&find.bytes);
-        std.Uri.Component.percentEncode(&writer, search, isUnreserved) catch return null;
-        find.len = @intCast(writer.buffered().len);
+    pub fn withFind(self: RoutablePage, file_name: []const u8) ?RoutablePage {
+        const find = encodeParam(find_route_max_len, file_name) orelse return null;
         var route = self;
         switch (route) {
             .repo_files => |*f| f.find = find,
@@ -542,6 +549,35 @@ pub const RoutablePage = union(enum) {
             else => return null,
         }
         return route;
+    }
+
+    // carry a search query on a commits route, url-encoding it into the route.
+    pub fn withSearch(self: RoutablePage, query: []const u8) ?RoutablePage {
+        const search = encodeParam(search_route_max_len, query) orelse return null;
+        var route = self;
+        switch (route) {
+            .repo_commits => |*c| c.search = search,
+            else => return null,
+        }
+        return route;
+    }
+
+    // root a commits route's list at `oid` rather than the ref's own commit.
+    pub fn withFrom(self: RoutablePage, oid: []const u8) ?RoutablePage {
+        var route = self;
+        switch (route) {
+            .repo_commits => |*c| c.from = Array(ref_route_max_len).from(oid) orelse return null,
+            else => return null,
+        }
+        return route;
+    }
+
+    fn encodeParam(comptime max_len: usize, value: []const u8) ?Array(max_len) {
+        var encoded: Array(max_len) = .{};
+        var writer: std.Io.Writer = .fixed(&encoded.bytes);
+        std.Uri.Component.percentEncode(&writer, value, isUnreserved) catch return null;
+        encoded.len = @intCast(writer.buffered().len);
+        return encoded;
     }
 
     pub fn repoPatchRevFilesRoute(identity: []const u8, id: []const u8, path: []const u8, line: usize) ?RoutablePage {
@@ -934,6 +970,8 @@ pub const RoutablePage = union(enum) {
                 try out.writer.print("{s}/" ++ commits_seg, .{prefix});
                 if (c.ref_or_oid) |kind| if (c.value.len != 0) try out.writer.print("/{s}:{s}", .{ @tagName(kind), c.value.slice() });
                 if (c.base_oid.len != 0) try out.writer.print("/" ++ base_seg ++ "{s}", .{c.base_oid.slice()});
+                if (c.search.len != 0) try out.writer.print("/" ++ search_seg ++ "{s}", .{c.search.slice()});
+                if (c.from.len != 0) try out.writer.print("/" ++ from_seg ++ "{s}", .{c.from.slice()});
                 switch (c.content) {
                     .diff => |d| {
                         if (d.start != 0) try out.writer.print("/" ++ start_seg ++ "{d}", .{d.start});
@@ -1488,18 +1526,27 @@ pub const RoutablePage = union(enum) {
         }
         if (std.mem.eql(u8, tab, commits_seg)) {
             params.scanPairs(&segments) catch return null;
-            if (!params.only(&.{ .start, .branch, .tag, .object, .base })) return null;
+            if (!params.only(&.{ .start, .branch, .tag, .object, .base, .search, .from })) return null;
             const base_oid = params.values.get(.base) orelse "";
+            const search = params.values.get(.search) orelse "";
+            const from = params.values.get(.from) orelse "";
             const start = params.start() orelse return null;
             const ref = (params.ref() catch return null) orelse {
+                if (search.len != 0 or from.len != 0) return null;
                 const file = pathValue(segments.rest()) orelse return null;
                 return if (file.len == 0) repoCommitsRoute(pair, null, "", start, "", base_oid) else null;
             };
+            // the index covers branch and tag tips, so only they can be
+            // searched or paged by commit; an object roots the list itself
+            if ((search.len != 0 or from.len != 0) and ref.kind == .object) return null;
             // the message page has no diff window or file filter
-            if (std.mem.eql(u8, segments.rest(), message_seg))
-                return if (start == 0) repoCommitMessageRoute(pair, ref.kind, ref.value, base_oid) else null;
-            const file = pathValue(segments.rest()) orelse return null;
-            return repoCommitsRoute(pair, ref.kind, ref.value, start, file, base_oid);
+            var route = if (std.mem.eql(u8, segments.rest(), message_seg))
+                (if (start == 0) repoCommitMessageRoute(pair, ref.kind, ref.value, base_oid) else null) orelse return null
+            else
+                repoCommitsRoute(pair, ref.kind, ref.value, start, pathValue(segments.rest()) orelse return null, base_oid) orelse return null;
+            if (search.len != 0) route.repo_commits.search = Array(search_route_max_len).from(search) orelse return null;
+            if (from.len != 0) route.repo_commits.from = Array(ref_route_max_len).from(from) orelse return null;
+            return route;
         }
         if (std.mem.eql(u8, tab, "diff")) {
             params.scanPairs(&segments) catch return null;
@@ -1537,6 +1584,8 @@ pub const RoutablePage = union(enum) {
                 a_c.ref_or_oid == b.repo_commits.ref_or_oid and
                 std.mem.eql(u8, a_c.value.slice(), b.repo_commits.value.slice()) and
                 std.mem.eql(u8, a_c.base_oid.slice(), b.repo_commits.base_oid.slice()) and
+                std.mem.eql(u8, a_c.search.slice(), b.repo_commits.search.slice()) and
+                std.mem.eql(u8, a_c.from.slice(), b.repo_commits.from.slice()) and
                 switch (a_c.content) {
                     .diff => |a_d| switch (b.repo_commits.content) {
                         .diff => |b_d| a_d.start == b_d.start and std.mem.eql(u8, a_d.path.slice(), b_d.path.slice()),

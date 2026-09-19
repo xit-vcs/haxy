@@ -282,15 +282,15 @@ fn testCommitBase(comptime kind: xit.repo.RepoKind) !void {
         previous = tip;
         tip = try repo.commitAtRef(io, allocator, .{ .message = "next" }, null, branch);
     }
-    const first = try Commits.init(kind, opts, &arena, &repo, io, allocator, null, location, .object, &tip, content, &base);
+    const first = try Commits.init(kind, opts, &arena, &repo, io, allocator, null, location, .object, &tip, content, &base, "", "");
     try std.testing.expectEqual(20, first.commits.len);
     try std.testing.expectEqual(@as(?u64, if (kind == .xit) 21 else null), first.commit_count);
-    const last = try Commits.init(kind, opts, &arena, &repo, io, allocator, null, location, .object, first.next_start orelse return error.MissingNext, content, &base);
+    const last = try Commits.init(kind, opts, &arena, &repo, io, allocator, null, location, .object, first.next_start orelse return error.MissingNext, content, &base, "", "");
     try std.testing.expectEqual(1, last.commits.len);
     try std.testing.expectEqual(null, last.next_start);
 
     // the base at a page boundary must not create an empty next page
-    const full = try Commits.init(kind, opts, &arena, &repo, io, allocator, null, location, .object, &previous, content, &base);
+    const full = try Commits.init(kind, opts, &arena, &repo, io, allocator, null, location, .object, &previous, content, &base, "", "");
     try std.testing.expectEqual(20, full.commits.len);
     try std.testing.expectEqual(null, full.next_start);
     _ = try repo.addTag(io, allocator, .{ .name = "tip", .message = "annotated" });
@@ -300,14 +300,14 @@ fn testCommitBase(comptime kind: xit.repo.RepoKind) !void {
         .{ .ref = .tag, .value = "tip" },
     };
     for (sources) |source| {
-        const empty = try Commits.init(kind, opts, &arena, &repo, io, allocator, null, location, source.ref, source.value, content, &tip);
+        const empty = try Commits.init(kind, opts, &arena, &repo, io, allocator, null, location, source.ref, source.value, content, &tip, "", "");
         try std.testing.expectEqual(0, empty.commits.len);
         try std.testing.expectEqual(@as(?u64, if (kind == .xit) 0 else null), empty.commit_count);
     }
 
     // an off-chain stopping point must not hide its parent on this chain
     const other = try repo.commitAtRef(io, allocator, .{ .message = "other", .parent_oids = &.{base} }, null, .{ .kind = .head, .name = "other" });
-    const off_chain = try Commits.init(kind, opts, &arena, &repo, io, allocator, null, location, .object, last.commits[0].oid, content, &other);
+    const off_chain = try Commits.init(kind, opts, &arena, &repo, io, allocator, null, location, .object, last.commits[0].oid, content, &other, "", "");
     try std.testing.expectEqual(2, off_chain.commits.len);
     try std.testing.expectEqualStrings(&base, off_chain.commits[1].oid);
     try std.testing.expectEqual(null, off_chain.commit_count);

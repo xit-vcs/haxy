@@ -99,6 +99,14 @@ pub fn init(
         .repo_commits => |*c| c.base_oid.slice(),
         else => "",
     };
+    const commits_search: []const u8 = switch (route) {
+        .repo_commits => |*c| c.search.slice(),
+        else => "",
+    };
+    const commits_from: []const u8 = switch (route) {
+        .repo_commits => |*c| c.from.slice(),
+        else => "",
+    };
     // the refs tab windows one column at a time: `refs_from` (a url-encoded
     // ref name) roots `refs_kind`'s column, the other stays at its first window.
     const refs_kind: ui.RoutablePage.RefKind = switch (route) {
@@ -259,7 +267,7 @@ pub fn init(
                             else if (patchrev_id.len != 0) diff: {
                                 const diff_route = ui.RoutablePage.repoPatchRevDiffRoute(repo_identity.identity, patchrev_id, 0, "") orelse return error.RouteTooLong;
                                 break :diff .{ .diff = try Diff.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, diff_route.repo_diff) };
-                            } else .{ .commits = try Commits.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, session.haxy_moment, location, requested_ref_or_oid, requested_ref_value, commits_content, commits_base_oid) };
+                            } else .{ .commits = try Commits.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, session.haxy_moment, location, requested_ref_or_oid, requested_ref_value, commits_content, commits_base_oid, commits_search, commits_from) };
                             const target_branch = if (files_data.ref_or_oid == .branch) files_data.ref_or_oid_value else "";
                             break :blk .{
                                 files_data,
@@ -410,8 +418,9 @@ pub const View = struct {
 
         var self = View{ .box = box };
         // a page opens on its tabs, except that search results open in the
-        // files tab's search box.
-        self.getFocus().child_id = box.children.keys()[if (data.files.find != null) stack_index else header_index];
+        // tab's own search box.
+        const results = data.files.find != null or (data.changes == .commits and data.changes.commits.search != null);
+        self.getFocus().child_id = box.children.keys()[if (results) stack_index else header_index];
         return self;
     }
 
@@ -462,7 +471,7 @@ pub const View = struct {
                             .repo_header => {
                                 if (stack.getSelected()) |selected_widget| switch (selected_widget.*) {
                                     .repo_files => |*v| if (v.focusHeader(root_focus)) return,
-                                    .repo_commits => |*v| if (v.focusCloneUrl(root_focus)) return,
+                                    .repo_commits => |*v| if (v.focusHeader(root_focus)) return,
                                     else => {},
                                 };
                                 index = stack_index;

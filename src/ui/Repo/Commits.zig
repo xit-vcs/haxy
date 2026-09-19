@@ -5,6 +5,9 @@ const ui = @import("../../ui.zig");
 const xit = @import("xit");
 const rp = xit.repo;
 const Diff = @import("Diff.zig");
+const obj = xit.object;
+const cms = @import("../../search_commit.zig");
+const srch = @import("../../search.zig");
 const xitui = xit.xitui;
 const wgt = xitui.widget;
 const layout = xitui.layout;
@@ -45,6 +48,11 @@ commits: []const Commit,
 next_start: ?[]const u8,
 // what the pane shows for the commit the log walks from.
 content: Content = .{ .diff = .{} },
+// the decoded query this list holds the results of, or null for a plain log.
+search: ?[]const u8 = null,
+// whether the viewed ref has a commit index, so the search box shows and a
+// search: route resolves. travels in the page json for the wasm view.
+search_available: bool = false,
 
 const Self = @This();
 
@@ -78,12 +86,18 @@ pub fn init(
     requested_value: []const u8,
     content: ui.RoutablePage.RepoCommitsRoute.Content,
     base_oid: []const u8,
+    search: []const u8,
+    from: []const u8,
 ) !Self {
     const aa = arena.allocator();
     const hex_len = ui.ResolvedRefOrOid(repo_kind, repo_opts).hex_len;
     if (base_oid.len != 0) {
         evt.PatchRev.validateOid(repo_opts.hash, base_oid) catch return error.NotFound;
     }
+    if (from.len != 0) {
+        evt.PatchRev.validateOid(repo_opts.hash, from) catch return error.NotFound;
+    }
+    const query: ?[]const u8 = if (search.len == 0) null else std.Uri.percentDecodeInPlace(try aa.dupe(u8, search));
 
     // the walk root's message replaces its diff, so it's read whole and its
     // hunks aren't rendered. the window and the filter are its diff's.
@@ -105,6 +119,9 @@ pub fn init(
         return emptyResult(aa, location, .branch, requested_value, content, base_oid);
     };
 
+    var moment = repo.core.latestMoment() catch return emptyResult(aa, location, resolved.ref_or_oid, resolved.value, content, base_oid);
+    const state = rp.Repo(repo_kind, repo_opts).State(.read_only){ .core = &repo.core, .extra = .{ .moment = &moment } };
+
     // collect this page's commit metadata, plus a peek at the one after it (its
     // oid is the next page's start). the diff for each is rendered afterward, so
     // the log iterator is closed before opening per-commit diff iterators.
@@ -112,30 +129,66 @@ pub fn init(
     var oids: [page_size][hex_len]u8 = undefined;
     var count: usize = 0;
     var next_start: ?[]const u8 = null;
-    {
-        var iter = repo.log(io, gpa, .{ .start_oids = &.{resolved.oid}, .first_parent = true }) catch return emptyResult(aa, location, resolved.ref_or_oid, resolved.value, content, base_oid);
+    var search_available = false;
+    var searched = false;
+
+    // the index covers a repository's branch and tag tips, so a fork or an
+    // object view gets no search box and refuses a search: url. nor does a list
+    // bounded by a base, whose version also covers the commits before it.
+    if (comptime repo_kind == .xit) index: {
+        if (location != .repo or resolved.ref_or_oid == .object or base_oid.len != 0) break :index;
+        // versions are keyed by commit, so an annotated tag is peeled first
+        var tip = obj.Object(.xit, repo_opts).initCommit(state, io, gpa, &resolved.oid) catch break :index;
+        defer tip.deinit();
+        resolved.oid = tip.oid;
+        const index = (try cms.lookup(repo_opts, moment, &resolved.oid)) orelse break :index;
+        search_available = true;
+        const text = query orelse break :index;
+
+        var results = try srch.Query(rp.Repo(.xit, repo_opts).DB).init(index, aa, text);
+        if (from.len != 0) {
+            var start = obj.Object(.xit, repo_opts).initCommit(state, io, gpa, from[0..hex_len]) catch return error.NotFound;
+            defer start.deinit();
+            const key = try cms.docKey(repo_opts.hash, start.content.commit.metadata.timestamp, &start.oid);
+            results.seek(&key);
+        }
+        while (try results.next()) |key| {
+            const oid = try cms.keyOid(repo_opts.hash, key);
+            if (count == page_size) {
+                next_start = try aa.dupe(u8, &oid);
+                break;
+            }
+            // a result whose object is gone is skipped rather than shown
+            var commit_object = obj.Object(.xit, repo_opts).init(state, io, gpa, &oid) catch continue;
+            defer commit_object.deinit();
+            if (commit_object.content != .commit) continue;
+            @memcpy(&oids[count], &oid);
+            buf[count] = try commitEntry(repo_kind, repo_opts, arena, repo, io, gpa, admin_moment, &commit_object, root_message and count == 0);
+            count += 1;
+        }
+        searched = true;
+    }
+    if (query != null and !searched) return error.NotFound;
+
+    if (!searched) {
+        // paging keeps the ref and starts the walk at the url's commit
+        var start_oid = resolved.oid;
+        if (from.len != 0) @memcpy(&start_oid, from);
+
+        var iter = repo.log(io, gpa, .{ .start_oids = &.{start_oid}, .first_parent = true }) catch return emptyResult(aa, location, resolved.ref_or_oid, resolved.value, content, base_oid);
         defer iter.deinit();
         while (try iter.next(gpa)) |commit_object| {
             defer commit_object.deinit();
             // count from the commit itself when the tip is an annotated tag
-            if (count == 0) resolved.oid = commit_object.oid;
+            if (count == 0 and from.len == 0) resolved.oid = commit_object.oid;
             // the base is a stopping point, not an ancestry exclusion
             if (std.mem.eql(u8, &commit_object.oid, base_oid)) break;
             if (count == page_size) {
                 next_start = try aa.dupe(u8, &commit_object.oid);
                 break;
             }
-            const md = commit_object.content.commit.metadata;
             @memcpy(&oids[count], &commit_object.oid);
-            const text, const truncated = try readMessage(repo_kind, repo_opts, aa, commit_object, root_message and count == 0);
-            buf[count] = .{
-                .oid = try aa.dupe(u8, &commit_object.oid),
-                .date = try formatDate(aa, md.timestamp),
-                .message = text,
-                .message_truncated = truncated,
-                .author = try ui.Author.init(admin_moment, arena, md.author orelse ""),
-                .stats = if (repo_kind == .xit) try repo.commitStats(io, gpa, .{ .oid = &commit_object.oid }) else null,
-            };
+            buf[count] = try commitEntry(repo_kind, repo_opts, arena, repo, io, gpa, admin_moment, commit_object, root_message and count == 0);
             count += 1;
         }
     }
@@ -160,13 +213,39 @@ pub fn init(
         .base_oid = try aa.dupe(u8, base_oid),
         .commit_count = if (repo_kind == .xit and location == .repo) blk: {
             if (base_oid.len == 0) break :blk repo.commitCount(io, gpa, .{ .oid = &resolved.oid }) catch null;
-            var moment = repo.core.latestMoment() catch break :blk null;
-            const state = rp.Repo(.xit, repo_opts).State(.read_only){ .core = &repo.core, .extra = .{ .moment = &moment } };
             break :blk evt.PatchRev.commitCount(repo_kind, repo_opts, state, io, gpa, base_oid, &resolved.oid) catch null;
         } else null,
         .commits = try aa.dupe(Commit, buf[0..count]),
         .next_start = next_start,
         .content = try pageContent(aa, content),
+        .search = query,
+        .search_available = search_available,
+    };
+}
+
+// one commit's row: its message, author and stats. the diff window is rendered
+// afterward, once the log iterator is closed.
+fn commitEntry(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    arena: *std.heap.ArenaAllocator,
+    repo: *rp.Repo(repo_kind, repo_opts),
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    admin_moment: ?evt.AdminDB.HashMap(.read_only),
+    commit_object: *obj.Object(repo_kind, repo_opts),
+    full_message: bool,
+) !Commit {
+    const aa = arena.allocator();
+    const md = commit_object.content.commit.metadata;
+    const text, const truncated = try readMessage(repo_kind, repo_opts, aa, commit_object, full_message);
+    return .{
+        .oid = try aa.dupe(u8, &commit_object.oid),
+        .date = try formatDate(aa, md.timestamp),
+        .message = text,
+        .message_truncated = truncated,
+        .author = try ui.Author.init(admin_moment, arena, md.author orelse ""),
+        .stats = if (repo_kind == .xit) try repo.commitStats(io, gpa, .{ .oid = &commit_object.oid }) else null,
     };
 }
 
@@ -313,11 +392,11 @@ pub const View = struct {
         var outer = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert });
         errdefer outer.deinit(allocator);
 
-        // the clone url at the top.
+        // the search box and the clone url at the top.
         {
-            var header_view = try Header.View.init(allocator, session, data.location);
+            var header_view = try ui.widget.SearchHeader.init(allocator, session, data.location, " search ", "search", data.search, data.search_available);
             errdefer header_view.deinit(allocator);
-            try outer.children.put(allocator, header_view.getFocus().id, .{ .widget = .{ .repo_commits_header = header_view }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
+            try outer.children.put(allocator, header_view.getFocus().id, .{ .widget = .{ .search_header = header_view }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
         }
 
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
@@ -336,7 +415,7 @@ pub const View = struct {
                     try addRow(allocator, &list_box, firstLine(commit.message), try commitRowLink(session.page_arena, data, commit, content));
                 }
                 if (data.next_start) |next| {
-                    try addRow(allocator, &list_box, "next →", try commitsLink(session.page_arena, data, next, 0, ""));
+                    try addRow(allocator, &list_box, "next →", try nextPageLink(session.page_arena, data, next));
                 }
                 if (list_box.children.count() > 0) list_box.getFocus().child_id = list_box.children.keys()[0];
                 break :blk try wgt.Scroll(ui.Widget).init(allocator, .{ .box = list_box }, .{ .direction = .vert, .web_native = !session.is_terminal, .fill = true });
@@ -368,8 +447,9 @@ pub const View = struct {
         box.getFocus().child_id = box.children.keys()[list_index];
         try outer.children.put(allocator, box.getFocus().id, .{ .widget = .{ .box = box }, .rect = null, .min_size = null });
 
-        // focus lives in the split; the banner isn't focusable.
-        outer.getFocus().child_id = outer.children.keys()[content_index];
+        // focus lives in the split, except that search results start in the
+        // search box so the query can be refined right away.
+        outer.getFocus().child_id = outer.children.keys()[if (data.search != null) header_index else content_index];
 
         return .{
             .box = outer,
@@ -434,8 +514,8 @@ pub const View = struct {
         return &self.box.children.values()[content_index].widget.box;
     }
 
-    fn header(self: *View) *Header.View {
-        return &self.box.children.values()[header_index].widget.repo_commits_header;
+    fn header(self: *View) *ui.widget.SearchHeader {
+        return &self.box.children.values()[header_index].widget.search_header;
     }
 
     fn headerActive(self: *View) bool {
@@ -608,12 +688,15 @@ pub const View = struct {
         if (self.headerActive()) {
             if (key == .arrow_down) {
                 root_focus.setFocus(self.contentBox().getFocus().id);
-            } else {
-                try self.header().input(allocator, key, root_focus);
+                return;
             }
-            return;
+            if (key == .enter) if (try self.header().submittedText(allocator)) |text| {
+                defer allocator.free(text);
+                return self.submit(text);
+            };
+            return self.header().input(allocator, key, root_focus);
         }
-        if (key == .arrow_up and self.contentAtTop() and self.header().focusCloneUrl(root_focus)) return;
+        if (key == .arrow_up and self.contentAtTop() and self.header().focusHeader(root_focus)) return;
         if (self.diffActive()) {
             if (key == .arrow_left and self.diffScroll().x == 0) {
                 self.focusList(root_focus);
@@ -623,6 +706,14 @@ pub const View = struct {
         } else {
             try self.listInput(key, root_focus);
         }
+    }
+
+    // navigate to the typed query's results, pinned to the list's ref. an
+    // empty query leaves the results for the plain log.
+    fn submit(self: *View, text: []const u8) !void {
+        if (text.len == 0 and self.data.search == null) return;
+        const route = self.data.location.commitsRoute(self.data.ref_or_oid, self.data.ref_or_oid_value, 0, "", self.data.base_oid) orelse return;
+        try self.session.navigate(route.withSearch(text) orelse return);
     }
 
     fn listInput(self: *View, key: Key, root_focus: *Focus) !void {
@@ -637,8 +728,7 @@ pub const View = struct {
             .enter => if (self.selectedCommitIndex() != null)
                 self.focusDiff(root_focus)
             else if (self.data.next_start) |next| {
-                if (self.data.location.commitsRoute(.object, next, 0, "", self.data.base_oid)) |route|
-                    try self.session.navigate(route);
+                if (pageRoute(self.data, next)) |route| try self.session.navigate(route);
             },
             .arrow_right => self.focusDiff(root_focus),
             else => {},
@@ -683,13 +773,13 @@ pub const View = struct {
         return lb.children.getIndex(cid) == 0;
     }
 
-    // only the clone-url row sits directly below the repository header.
+    // only the header's own row sits directly below the repository header.
     pub fn atTop(self: *View) bool {
-        return self.headerActive() or (!self.header().hasCloneUrl() and self.contentAtTop());
+        return self.headerActive() or (!self.header().hasFocusable() and self.contentAtTop());
     }
 
-    pub fn focusCloneUrl(self: *View, root_focus: *Focus) bool {
-        return self.header().focusCloneUrl(root_focus);
+    pub fn focusHeader(self: *View, root_focus: *Focus) bool {
+        return self.header().focusHeader(root_focus);
     }
 };
 
@@ -698,6 +788,24 @@ pub const View = struct {
 // to `path` ("" = every file).
 fn commitsLink(page_arena: *std.heap.ArenaAllocator, data: *const Self, oid: []const u8, start: usize, path: []const u8) ![]const u8 {
     const route = data.location.commitsRoute(.object, oid, start, path, data.base_oid) orelse return error.RouteTooLong;
+    const url = try route.toUrl(page_arena);
+    return std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{url});
+}
+
+// this list's page starting at `oid`: a repo's branch or tag keeps its ref (and
+// its query) and moves `from` along, so the search box survives paging. a fork
+// or an object view roots the page at the commit itself.
+fn pageRoute(data: *const Self, oid: []const u8) ?ui.RoutablePage {
+    if (data.location != .repo or data.ref_or_oid == .object) {
+        return data.location.commitsRoute(.object, oid, 0, "", data.base_oid);
+    }
+    const route = data.location.commitsRoute(data.ref_or_oid, data.ref_or_oid_value, 0, "", data.base_oid) orelse return null;
+    const paged = route.withFrom(oid) orelse return null;
+    return paged.withSearch(data.search orelse return paged);
+}
+
+fn nextPageLink(page_arena: *std.heap.ArenaAllocator, data: *const Self, oid: []const u8) ![]const u8 {
+    const route = pageRoute(data, oid) orelse return error.RouteTooLong;
     const url = try route.toUrl(page_arena);
     return std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{url});
 }
@@ -713,6 +821,12 @@ fn filesObjectLink(page_arena: *std.heap.ArenaAllocator, location: ui.RoutablePa
 // the in-page "ai:" anchor for selecting a commit with its current pane content
 // and window. the href is only followed with js off.
 fn commitRowLink(page_arena: *std.heap.ArenaAllocator, data: *const Self, commit: Commit, content: Content) ![]const u8 {
+    // a result roots the same results page at its commit, so the query
+    // survives following the row
+    if (data.search != null) {
+        const route = pageRoute(data, commit.oid) orelse return error.RouteTooLong;
+        return std.fmt.allocPrint(page_arena.allocator(), "ai:{s}", .{try route.toUrl(page_arena)});
+    }
     const route = (switch (content) {
         .message => data.location.commitMessageRoute(.object, commit.oid, data.base_oid),
         .diff => |diff| data.location.commitsRoute(.object, commit.oid, commit.window.start, diff.path, data.base_oid),
@@ -727,78 +841,3 @@ fn messageLink(page_arena: *std.heap.ArenaAllocator, data: *const Self, oid: []c
     const url = try route.toUrl(page_arena);
     return std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{url});
 }
-
-// the clone url shown above the log.
-pub const Header = struct {
-    pub const View = struct {
-        box: wgt.Box(ui.Widget),
-
-        pub fn init(allocator: std.mem.Allocator, session: *ui.Session, location: ui.RoutablePage.RepoLocation) !Header.View {
-            var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
-            errdefer box.deinit(allocator);
-
-            // the spacer pushes the clone url to the right edge.
-            {
-                var spacer = try ui.widget.Spacer.init(allocator);
-                errdefer spacer.deinit(allocator);
-                try box.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null });
-            }
-
-            if (session.data.host_kind == .server) {
-                if (try ui.widget.CopyableText.initClone(allocator, session, location)) |value| {
-                    var clone_url = value;
-                    errdefer clone_url.deinit(allocator);
-                    const min_width = clone_url.minWidth();
-                    box.getFocus().child_id = clone_url.getFocus().id;
-                    try box.children.put(allocator, clone_url.getFocus().id, .{ .widget = .{ .copyable_text = clone_url }, .rect = null, .min_size = .{ .width = min_width, .height = 3 }, .max_size = .{ .width = min_width, .height = 3 } });
-                }
-            }
-
-            return .{ .box = box };
-        }
-
-        pub fn deinit(self: *Header.View, allocator: std.mem.Allocator) void {
-            self.box.deinit(allocator);
-        }
-
-        pub fn build(self: *Header.View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
-            self.clearGrid();
-            try self.box.build(allocator, constraint, root_focus);
-        }
-
-        pub fn input(self: *Header.View, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
-            const clone_url = self.cloneUrl() orelse return;
-            try clone_url.input(allocator, key, root_focus);
-        }
-
-        pub fn focusCloneUrl(self: *Header.View, root_focus: *Focus) bool {
-            const clone_url = self.cloneUrl() orelse return false;
-            root_focus.setFocus(clone_url.getFocus().id);
-            return true;
-        }
-
-        pub fn hasCloneUrl(self: *Header.View) bool {
-            return self.cloneUrl() != null;
-        }
-
-        fn cloneUrl(self: *Header.View) ?*ui.widget.CopyableText {
-            for (self.box.children.values()) |*child| switch (child.widget) {
-                .copyable_text => |*copyable_text| return copyable_text,
-                else => {},
-            };
-            return null;
-        }
-
-        pub fn clearGrid(self: *Header.View) void {
-            self.box.clearGrid();
-        }
-
-        pub fn getGrid(self: Header.View) ?Grid {
-            return self.box.getGrid();
-        }
-
-        pub fn getFocus(self: *Header.View) *Focus {
-            return self.box.getFocus();
-        }
-    };
-};
