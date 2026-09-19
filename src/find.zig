@@ -151,9 +151,6 @@ pub fn refresh(
     try repo.core.db_file.lock(io, .exclusive);
     defer repo.core.db_file.unlock(io);
 
-    // decide everything before opening a write transaction: a slot copied from
-    // a base must come from an earlier transaction, otherwise the base's own
-    // nodes are mutated in place rather than shared.
     {
         var moment = try repo.core.latestMoment();
         const state = Repo.State(.read_only){ .core = &repo.core, .extra = .{ .moment = &moment } };
@@ -196,79 +193,80 @@ pub fn refresh(
         for (existing.keys()) |branch_hash| try work.append(aa, .{ .branch_hash = branch_hash, .tree = null, .own = null });
     }
 
+    if (work.items.len == 0) return;
+
     const Save = struct {
         core: *Repo.Core,
         io: std.Io,
         allocator: std.mem.Allocator,
-        branch_hash: HashInt,
-        // the tip's root tree (null removes the branch's entry)
-        tree: ?Tree,
-        // the entry the new one starts from (null = index the whole tree)
-        from: ?Entry,
+        work: []const Work,
+        base: ?Entry,
 
         pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
             var moment = try DB.HashMap(.read_write).init(cursor.*);
             const state = Repo.State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
-            const index = try DB.HashMap(.read_write).init(try moment.putCursor(hash.hashInt(repo_opts.hash, index_key)));
-            const tree = ctx.tree orelse {
-                _ = try index.remove(ctx.branch_hash);
-                return;
-            };
-
-            var tree_bytes: [hash.byteLen(repo_opts.hash)]u8 = undefined;
-            _ = try std.fmt.hexToBytes(&tree_bytes, &tree);
-            // putKey only fills an empty key slot, and this one changes whenever
-            // the branch moves
-            var tree_cursor = try index.putKeyCursor(ctx.branch_hash);
-            try tree_cursor.write(.{ .bytes = &tree_bytes });
-            var files_cursor = try index.putCursor(ctx.branch_hash);
-            if (ctx.from) |from| try files_cursor.write(.{ .slot = from.files });
-            const files = try DB.SortedMap(.read_write).init(files_cursor);
+            const index_hash = hash.hashInt(repo_opts.hash, index_key);
+            var new_branch_base = ctx.base;
 
             var key: std.ArrayList(u8) = .empty;
             defer key.deinit(ctx.allocator);
-            if (ctx.from) |from| {
-                var tree_diff = tr.TreeDiff(.xit, repo_opts).init(ctx.allocator);
-                defer tree_diff.deinit();
-                try tree_diff.compare(state.readOnly(), ctx.io, &from.tree, &tree, null);
-                for (tree_diff.changes.keys(), tree_diff.changes.values()) |path, change| {
-                    try fileKey(ctx.allocator, &key, path);
-                    const oid = if (change.new) |*tree_entry| indexedOid(repo_opts.hash, tree_entry) else null;
-                    if (oid) |bytes| {
-                        try files.put(key.items, .{ .bytes = bytes });
-                    } else {
-                        _ = try files.remove(key.items);
+
+            for (ctx.work) |item| {
+                const index = try DB.HashMap(.read_write).init(try moment.putCursor(index_hash));
+                const tree = item.tree orelse {
+                    _ = try index.remove(item.branch_hash);
+                    continue;
+                };
+                // the entry this one starts from (null = index the whole tree)
+                const from = item.own orelse new_branch_base;
+
+                var tree_bytes: [hash.byteLen(repo_opts.hash)]u8 = undefined;
+                _ = try std.fmt.hexToBytes(&tree_bytes, &tree);
+                // putKey only fills an empty key slot, and this one changes
+                // whenever the branch moves
+                var tree_cursor = try index.putKeyCursor(item.branch_hash);
+                try tree_cursor.write(.{ .bytes = &tree_bytes });
+                var files_cursor = try index.putCursor(item.branch_hash);
+                if (from) |entry| try files_cursor.write(.{ .slot = entry.files });
+                const files = try DB.SortedMap(.read_write).init(files_cursor);
+
+                if (from) |entry| {
+                    var tree_diff = tr.TreeDiff(.xit, repo_opts).init(ctx.allocator);
+                    defer tree_diff.deinit();
+                    try tree_diff.compare(state.readOnly(), ctx.io, &entry.tree, &tree, null);
+                    for (tree_diff.changes.keys(), tree_diff.changes.values()) |path, change| {
+                        try fileKey(ctx.allocator, &key, path);
+                        const oid = if (change.new) |*tree_entry| indexedOid(repo_opts.hash, tree_entry) else null;
+                        if (oid) |bytes| {
+                            try files.put(key.items, .{ .bytes = bytes });
+                        } else {
+                            _ = try files.remove(key.items);
+                        }
                     }
+                } else {
+                    var paths = std.heap.ArenaAllocator.init(ctx.allocator);
+                    defer paths.deinit();
+                    try indexTree(repo_opts, state.readOnly(), ctx.io, ctx.allocator, paths.allocator(), files, &key, "", &tree);
                 }
-            } else {
-                var paths = std.heap.ArenaAllocator.init(ctx.allocator);
-                defer paths.deinit();
-                try indexTree(repo_opts, state.readOnly(), ctx.io, ctx.allocator, paths.allocator(), files, &key, "", &tree);
+
+                // the first entry ever written becomes the base for the next
+                // new branch, so only one branch walks a whole tree.
+                if (new_branch_base == null) new_branch_base = .{ .tree = tree, .files = (try index.getSlot(item.branch_hash)) orelse unreachable };
+                // a later entry copies an earlier one's slot, so everything
+                // written so far has to be shared rather than mutated
+                try ctx.core.db.freeze();
             }
         }
     };
 
-    // one transaction per changed ref, so a base copied into a new entry always
-    // predates the transaction that mutates it.
-    for (work.items) |item| {
-        const history = try DB.ArrayList(.read_write).init(repo.core.db.rootCursor());
-        try history.appendContext(.{ .slot = try history.getSlot(-1) }, Save{
-            .core = &repo.core,
-            .io = io,
-            .allocator = allocator,
-            .branch_hash = item.branch_hash,
-            .tree = item.tree,
-            .from = item.own orelse base,
-        });
-        // the first entry ever written becomes the base for the next new
-        // branch, so only one branch walks a whole tree.
-        if (base == null and item.tree != null) {
-            var moment = try repo.core.latestMoment();
-            const index_cursor = (try moment.getCursor(hash.hashInt(repo_opts.hash, index_key))) orelse unreachable;
-            const index = try DB.HashMap(.read_only).init(index_cursor);
-            base = try Entry.init((try index.getKeyValuePair(item.branch_hash)) orelse unreachable);
-        }
-    }
+    const history = try DB.ArrayList(.read_write).init(repo.core.db.rootCursor());
+    try history.appendContext(.{ .slot = try history.getSlot(-1) }, Save{
+        .core = &repo.core,
+        .io = io,
+        .allocator = allocator,
+        .work = work.items,
+        .base = base,
+    });
 }
 
 // insert every file under `oid` (a tree), as tr.Tree.read walks one.
