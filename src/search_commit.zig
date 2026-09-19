@@ -91,8 +91,9 @@ pub fn refresh(
 
     var work: std.ArrayList(Work) = .empty;
     var gone: std.ArrayList(Oid) = .empty;
-    var default_base: ?Oid = null;
-    var newest: ?Tip = null;
+    var default_tip: ?Oid = null;
+    // the versions a new tip can derive from
+    var versions: std.ArrayList(Tip) = .empty;
 
     // held across the reads and the writes, so a concurrent refresh can't
     // change the entries these decisions were made from.
@@ -157,25 +158,21 @@ pub fn refresh(
             if (entry.value_ptr.base == null) entry.value_ptr.base = pushedFrom(repo_opts, updates, &tip, existing);
         }
 
-        // the base a brand-new tip falls back to, preferring the default
-        // branch so most of its map is shared rather than rewritten.
         var head_buffer: [rf.MAX_REF_CONTENT_SIZE]u8 = undefined;
         if (repo.head(io, &head_buffer)) |head| switch (head) {
-            .ref => |ref| if (try repo.readRef(io, .{ .kind = .head, .name = ref.name })) |oid| {
-                if (existing.contains(oid)) default_base = oid;
-            },
+            .ref => |ref| default_tip = try repo.readRef(io, .{ .kind = .head, .name = ref.name }),
             .oid => {},
         } else |_| {}
 
-        // ... else the newest version there is, which only matters when a
-        // version has to be built without the default branch's. an entry whose
-        // commit is gone can't be walked from, so it isn't a candidate.
-        if (missing.count() > 0 and default_base == null) for (existing.keys()) |oid| {
+        // an entry whose commit is gone can't be walked from, so it isn't a
+        // candidate.
+        const unbased = for (missing.values()) |item| {
+            if (item.base == null) break true;
+        } else false;
+        if (unbased) for (existing.keys()) |oid| {
             var commit = obj.Object(.xit, repo_opts).initCommit(state, io, allocator, &oid) catch continue;
             defer commit.deinit();
-            const timestamp = commit.content.commit.metadata.timestamp;
-            if (newest) |tip| if (timestamp <= tip.timestamp) continue;
-            newest = .{ .oid = oid, .timestamp = timestamp };
+            try versions.append(aa, .{ .oid = oid, .timestamp = commit.content.commit.metadata.timestamp });
         };
 
         try work.appendSlice(aa, missing.values());
@@ -199,22 +196,21 @@ pub fn refresh(
         allocator: std.mem.Allocator,
         work: []const Work,
         gone: []const Oid,
-        default_base: ?Oid,
-        newest: ?Tip,
+        aa: std.mem.Allocator,
+        default_tip: ?Oid,
+        versions: *std.ArrayList(Tip),
 
         pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
             var moment = try DB.HashMap(.read_write).init(cursor.*);
             const state = Repo.State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
             const index_hash = hash.hashInt(repo_opts.hash, index_key);
-            var newest_built = ctx.newest;
 
             var message: std.ArrayList(u8) = .empty;
             defer message.deinit(ctx.allocator);
 
             for (ctx.work) |item| {
                 const index = try DB.HashMap(.read_write).init(try moment.putCursor(index_hash));
-                const fallback: ?Oid = if (newest_built) |tip| tip.oid else null;
-                const base = item.base orelse ctx.default_base orelse fallback;
+                const base = item.base orelse nearestVersion(repo_opts.hash, ctx.versions.items, ctx.default_tip, item.timestamp);
 
                 var oid_bytes: [hash.byteLen(repo_opts.hash)]u8 = undefined;
                 _ = try std.fmt.hexToBytes(&oid_bytes, &item.oid);
@@ -239,8 +235,7 @@ pub fn refresh(
                     try srch.add(DB, version, ctx.allocator, &key, message.items);
                 }
 
-                const supersedes = if (newest_built) |tip| item.timestamp > tip.timestamp else true;
-                if (supersedes) newest_built = .{ .oid = item.oid, .timestamp = item.timestamp };
+                try ctx.versions.append(ctx.aa, .{ .oid = item.oid, .timestamp = item.timestamp });
                 // the next version copies this one's slot, so everything
                 // written so far has to be shared rather than mutated
                 try ctx.core.db.freeze();
@@ -259,9 +254,33 @@ pub fn refresh(
         .allocator = allocator,
         .work = work.items,
         .gone = gone.items,
-        .default_base = default_base,
-        .newest = newest,
+        .aa = aa,
+        .default_tip = default_tip,
+        .versions = &versions,
     });
+}
+
+// the version a tip committed at `timestamp` derives from when no push names
+// one: the default branch's unless it is newer than the tip, else the nearest
+// older one, else the oldest. a guess by dates that only the cost rides on.
+fn nearestVersion(
+    comptime hash_kind: hash.HashKind,
+    versions: []const Commit(hash_kind),
+    default_tip: ?[hash.hexLen(hash_kind)]u8,
+    timestamp: u64,
+) ?[hash.hexLen(hash_kind)]u8 {
+    var older: ?Commit(hash_kind) = null;
+    var oldest: ?Commit(hash_kind) = null;
+    for (versions) |version| {
+        if (version.timestamp <= timestamp) {
+            if (default_tip) |oid| if (std.mem.eql(u8, &oid, &version.oid)) return oid;
+            const nearer = if (older) |found| version.timestamp > found.timestamp else true;
+            if (nearer) older = version;
+        }
+        const earlier = if (oldest) |found| version.timestamp < found.timestamp else true;
+        if (earlier) oldest = version;
+    }
+    return if (older orelse oldest) |version| version.oid else null;
 }
 
 // the commit this push moved a ref to `tip` from, when it has a version to
