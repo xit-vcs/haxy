@@ -11,7 +11,7 @@ test "preloaded thread forms receive typing after switching tabs" {
     defer arena.deinit();
     var session = ui.Session{ .arena = &arena, .page_arena = &arena, .is_terminal = true, .data = .{ .host_kind = .local } };
     session.data.current_page = ui.RoutablePage.repoIssuesRoute("", .open, "", "") orelse return error.BadRoute;
-    const data = try ui.Repo.Issues.emptyResult(arena.allocator(), "", "", "", "", 0, "", .open);
+    const data = try ui.Repo.Issues.emptyResult(arena.allocator(), "", "", "", "", "", 0, "", .open);
     var root = ui.Widget{ .repo_issues = try ui.Repo.Issues.View.init(allocator, &data, &session) };
     defer root.deinit(allocator);
     const focus = root.getFocus();
@@ -21,8 +21,9 @@ test "preloaded thread forms receive typing after switching tabs" {
     };
     try root.build(allocator, constraint, focus);
 
-    // switch to the preloaded new tab without recreating the page
-    for ([_]xit.xitui.input.Key{ .arrow_right, .arrow_right, .arrow_right, .arrow_down }) |key| {
+    // switch to the preloaded new tab without recreating the page (the
+    // sub-header starts on the search box, left of the tabs)
+    for ([_]xit.xitui.input.Key{ .arrow_right, .arrow_right, .arrow_right, .arrow_right, .arrow_down }) |key| {
         try ui.inputKey(allocator, &root, key, &session);
         try root.build(allocator, constraint, focus);
     }

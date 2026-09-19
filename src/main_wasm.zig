@@ -112,6 +112,7 @@ fn tick(min_height: u32, max_width: u32) !void {
 fn onKeyDown(key_code: u32) !void {
     const root_ptr = if (root) |*root_value| root_value else return error.NotStarted;
     const key: Key = switch (key_code) {
+        9 => .tab,
         13 => .enter,
         33 => .page_up,
         34 => .page_down,

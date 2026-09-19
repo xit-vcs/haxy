@@ -34,12 +34,16 @@ pub const Window = struct {
     prev_id: ?[]const u8,
     next_id: ?[]const u8,
     count: usize,
+    // whether a search stopped counting at its cap, so `count` is a floor.
+    more: bool = false,
 
     pub const empty: Window = .{ .items = &.{}, .prev_id = null, .next_id = null, .count = 0 };
 };
 
 identity: []const u8,
 tag: []const u8,
+// the decoded query the list is filtered to, or null when unfiltered.
+search: ?[]const u8 = null,
 selected_id: []const u8,
 comment_id: []const u8,
 comments_start: usize,
@@ -78,6 +82,7 @@ pub fn emptyResult(
     aa: std.mem.Allocator,
     identity: []const u8,
     tag: []const u8,
+    search: []const u8,
     selected_id: []const u8,
     comment_id: []const u8,
     comments_start: usize,
@@ -86,6 +91,7 @@ pub fn emptyResult(
     return .{
         .identity = try aa.dupe(u8, identity),
         .tag = try aa.dupe(u8, tag),
+        .search = if (search.len == 0) null else std.Uri.percentDecodeInPlace(try aa.dupe(u8, search)),
         .selected_id = try aa.dupe(u8, selected_id),
         .comment_id = try aa.dupe(u8, comment_id),
         .comments_start = comments_start,
@@ -105,12 +111,13 @@ pub fn init(
     admin_moment: ?evt.AdminDB.HashMap(.read_only),
     identity: []const u8,
     tag: []const u8,
+    search: []const u8,
     selected_id: []const u8,
     comment_id: []const u8,
     comments_start: usize,
     view: ui.RoutablePage.DiscussionsView,
 ) !Self {
-    const empty = try emptyResult(arena.allocator(), identity, tag, selected_id, comment_id, comments_start, view);
+    const empty = try emptyResult(arena.allocator(), identity, tag, search, selected_id, comment_id, comments_start, view);
     const aa = arena.allocator();
     const DB = evt.EventDB(repo_opts.hash);
     const rooted = empty.selected_id.len != 0;
@@ -161,7 +168,7 @@ pub fn init(
     }
 
     const discussion_comments_start = if (empty.comment_id.len == 0) comments_start else 0;
-    const loaded_window = try loadWindow(repo_opts.hash, arena, admin_moment, haxy_moment, records, set_maybe, root_key, empty.selected_id, discussion_comments_start);
+    const loaded_window = try thread.loadWindow(Self, .discuss, repo_opts.hash, arena, admin_moment, haxy_moment, records, set_maybe, root_key, null, empty.selected_id, discussion_comments_start, empty.search);
     const comment_page = if (empty.comment_id.len == 0)
         null
     else
@@ -182,6 +189,7 @@ pub fn init(
     return .{
         .identity = empty.identity,
         .tag = empty.tag,
+        .search = empty.search,
         .selected_id = empty.selected_id,
         .comment_id = empty.comment_id,
         .comments_start = comments_start,
@@ -193,71 +201,6 @@ pub fn init(
     };
 }
 
-fn loadWindow(
-    comptime hash_kind: hash.HashKind,
-    arena: *std.heap.ArenaAllocator,
-    admin_moment: ?evt.AdminDB.HashMap(.read_only),
-    haxy_moment: evt.EventDB(hash_kind).HashMap(.read_only),
-    records: evt.EventDB(hash_kind).HashMap(.read_only),
-    set_maybe: ?evt.EventDB(hash_kind).SortedSet(.read_only),
-    root_key: ?[]const u8,
-    selected_id: []const u8,
-    comments_start: usize,
-) !Window {
-    const set = set_maybe orelse return .empty;
-    const DB = evt.EventDB(hash_kind);
-    const aa = arena.allocator();
-
-    var prev_id: ?[]const u8 = null;
-    var iter = if (root_key) |key| blk: {
-        const rank = try set.rank(key);
-        if (rank > 0 and rank <= page_size) {
-            prev_id = "";
-        } else if (rank > page_size) {
-            const pair = try set.getIndexKeyValuePair(@intCast(rank - page_size)) orelse return error.NotFound;
-            var order_key: [@sizeOf(u64) + evt.event_id_size]u8 = undefined;
-            _ = try pair.key_cursor.readBytes(&order_key);
-            const hex = std.fmt.bytesToHex(order_key[@sizeOf(u64)..].*, .lower);
-            prev_id = try aa.dupe(u8, &hex);
-        }
-        break :blk try set.iteratorFrom(key);
-    } else try set.iteratorFromIndex(0);
-
-    var discussions: std.ArrayList(DiscussionWithId) = .empty;
-    var next_id: ?[]const u8 = null;
-    while (try iter.next()) |cursor| {
-        const id = try evt.readOrderKeyId(DB, cursor);
-        const id_hex = std.fmt.bytesToHex(id, .lower);
-        if (discussions.items.len == page_size) {
-            next_id = try aa.dupe(u8, &id_hex);
-            break;
-        }
-        const record_cursor = try records.getCursor(hash.hashInt(hash_kind, &id)) orelse continue;
-        const record = try evt.read(evt.Discussion.Record, DB, hash_kind, arena, try DB.HashMap(.read_only).init(record_cursor));
-        try discussions.append(aa, .{
-            .id = try aa.dupe(u8, &id_hex),
-            .record = record,
-            .author = try ui.Author.initFromEmail(admin_moment, arena, record.author_email),
-            .comments = try Comment.loadWindow(
-                hash_kind,
-                arena,
-                admin_moment,
-                haxy_moment,
-                evt.Comment.thread_id_to_comment_id_set_key,
-                &id_hex,
-                if (std.mem.eql(u8, &id_hex, selected_id)) comments_start else 0,
-            ),
-            .attachments = try Attachment.load(hash_kind, arena, haxy_moment, &id_hex),
-        });
-    }
-
-    return .{
-        .items = discussions.items,
-        .prev_id = prev_id,
-        .next_id = next_id,
-        .count = @intCast(try set.count()),
-    };
-}
 pub const View = thread.View(.discuss, Self);
 pub const Detail = thread.Detail(.discuss, Self);
 pub const detail_widget_name = "repo_discussion_detail";
@@ -273,7 +216,7 @@ const new_tab_label = "new";
 
 // tabs switching between the discussions page's views
 pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *const Self) !Header {
-    var header = try Header.init(allocator);
+    var header = try Header.init(allocator, session, data.search);
     errdefer header.deinit(allocator);
     const aa = session.page_arena.allocator();
     const selected_index = View.viewIndex(data.view);
@@ -281,16 +224,16 @@ pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *con
 
     // recent discussions
     {
-        const route = ui.RoutablePage.repoDiscussionsRoute(data.identity, data.tag, "") orelse return error.RouteTooLong;
+        const route = try thread.searchRoute(ui.RoutablePage.repoDiscussionsRoute(data.identity, data.tag, ""), data.search);
         const link = try ui.inPageTabLink(session, route, page_selected and selected_index == 0);
         var label_buf: [64]u8 = undefined;
-        const label = try std.fmt.bufPrint(&label_buf, recent_tab_label ++ " ({d})", .{data.recent.count});
+        const label = try thread.countLabel(&label_buf, recent_tab_label, data.recent);
         try header.addTab(allocator, label, link, 0);
     }
 
     // tags tab, labeled with the active tag filter
     {
-        const tags_route = ui.RoutablePage.repoThreadTagsRoute(.discuss, data.identity, data.tag) orelse return error.RouteTooLong;
+        const tags_route = try thread.searchRoute(ui.RoutablePage.repoThreadTagsRoute(.discuss, data.identity, data.tag), data.search);
         const tags_link = try ui.inPageTabLink(session, tags_route, page_selected and selected_index == View.viewIndex(.tags));
         const label = if (data.tag.len == 0) tags_tab_label else blk: {
             const decoded = std.Uri.percentDecodeInPlace(try aa.dupe(u8, data.tag));

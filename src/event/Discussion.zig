@@ -1,5 +1,6 @@
 const std = @import("std");
 const evt = @import("../event.zig");
+const srch = @import("../search_thread.zig");
 const xit = @import("xit");
 const rp = xit.repo;
 const hash = xit.hash;
@@ -89,6 +90,11 @@ pub fn consume(
         const ids = try DB.SortedSet(.read_write).init(try haxy_moment.putCursor(hash.hashInt(hash_kind, all_id_set_key)));
         try ids.put(&evt.orderKeyDesc(record_to_write.created_order, event_id));
     }
+
+    // the search index is keyed by creation, not activity: ordering is the
+    // list's business, so a comment moving the discussion up leaves it alone
+    const search_key = evt.orderKeyDesc(record_to_write.created_order, event_id);
+    try srch.update(DB, hash_kind, .discuss, haxy_moment, arena.child_allocator, if (existing_record_maybe) |existing| srch.doc(&search_key, existing) else null, srch.doc(&search_key, record_to_write));
 
     if (!record_to_write.removed) {
         try active.put(&order_key);

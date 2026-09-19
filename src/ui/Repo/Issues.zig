@@ -67,6 +67,8 @@ pub const Window = struct {
     next_id: ?[]const u8,
     // how many issues the listing holds across all windows.
     count: usize,
+    // whether a search stopped counting at its cap, so `count` is a floor.
+    more: bool = false,
 
     pub const empty: Window = .{ .items = &.{}, .prev_id = null, .next_id = null, .count = 0 };
 };
@@ -75,6 +77,8 @@ pub const Window = struct {
 identity: []const u8,
 // the url-encoded tag the lists are filtered to ("" = unfiltered).
 tag: []const u8,
+// the decoded query the lists are filtered to, or null when unfiltered.
+search: ?[]const u8 = null,
 // the hex event id of the issue its status's window is rooted at ("" = the
 // first window), mirrored into the url.
 selected_id: []const u8,
@@ -158,10 +162,11 @@ pub fn selectedThread(self: *const Self) ?*const IssueWithId {
 }
 
 // an empty listing, for the wasm / no-repo paths.
-pub fn emptyResult(aa: std.mem.Allocator, identity: []const u8, tag: []const u8, selected_id: []const u8, comment_id: []const u8, comments_start: usize, theirs_picks: []const u8, view: ui.RoutablePage.IssuesView) !Self {
+pub fn emptyResult(aa: std.mem.Allocator, identity: []const u8, tag: []const u8, search: []const u8, selected_id: []const u8, comment_id: []const u8, comments_start: usize, theirs_picks: []const u8, view: ui.RoutablePage.IssuesView) !Self {
     return .{
         .identity = try aa.dupe(u8, identity),
         .tag = try aa.dupe(u8, tag),
+        .search = if (search.len == 0) null else std.Uri.percentDecodeInPlace(try aa.dupe(u8, search)),
         .selected_id = try aa.dupe(u8, selected_id),
         .comment_id = try aa.dupe(u8, comment_id),
         .comments_start = comments_start,
@@ -197,13 +202,14 @@ pub fn init(
     admin_moment: ?evt.AdminDB.HashMap(.read_only),
     identity: []const u8,
     tag: []const u8,
+    search: []const u8,
     selected_id: []const u8,
     comment_id: []const u8,
     comments_start: usize,
     theirs_picks: []const u8,
     view: ui.RoutablePage.IssuesView,
 ) !Self {
-    const empty = try emptyResult(arena.allocator(), identity, tag, selected_id, comment_id, comments_start, theirs_picks, view);
+    const empty = try emptyResult(arena.allocator(), identity, tag, search, selected_id, comment_id, comments_start, theirs_picks, view);
 
     const aa = arena.allocator();
     const DB = evt.EventDB(repo_opts.hash);
@@ -317,9 +323,9 @@ pub fn init(
     }
 
     const thread_comments_start = if (empty.comment_id.len == 0) comments_start else 0;
-    const open_window = try thread.loadWindow(Self, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_issue, open_set, open_root, conflict_set, empty.selected_id, thread_comments_start);
-    const closed_window = try thread.loadWindow(Self, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_issue, closed_set, closed_root, conflict_set, empty.selected_id, thread_comments_start);
-    const conflicts_window = try thread.loadWindow(Self, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_issue, conflict_set, conflicts_root, conflict_set, empty.selected_id, thread_comments_start);
+    const open_window = try thread.loadWindow(Self, .issue, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_issue, open_set, open_root, conflict_set, empty.selected_id, thread_comments_start, empty.search);
+    const closed_window = try thread.loadWindow(Self, .issue, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_issue, closed_set, closed_root, conflict_set, empty.selected_id, thread_comments_start, empty.search);
+    const conflicts_window = try thread.loadWindow(Self, .issue, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_issue, conflict_set, conflicts_root, conflict_set, empty.selected_id, thread_comments_start, null);
     if (view == .conflicts and conflicts_window.count > 0) resolved_view = .conflicts;
 
     const comment_page = if (empty.comment_id.len == 0)
@@ -332,6 +338,7 @@ pub fn init(
     return .{
         .identity = empty.identity,
         .tag = empty.tag,
+        .search = empty.search,
         .selected_id = empty.selected_id,
         .comment_id = empty.comment_id,
         .comments_start = comments_start,
@@ -365,7 +372,7 @@ const conflicts_tab_label = "conflicts";
 
 // tabs switching between the issues page's views
 pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *const Self) !Header {
-    var header = try Header.init(allocator);
+    var header = try Header.init(allocator, session, data.search);
     errdefer header.deinit(allocator);
     const aa = session.page_arena.allocator();
     const selected_index = View.viewIndex(data.view);
@@ -374,16 +381,16 @@ pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *con
     // a list tab per status, labeled with its listing's issue count
     const status_labels = [_][]const u8{ open_tab_label, closed_tab_label };
     for ([_]evt.Issue.Status{ .open, .closed }, status_labels, 0..) |status, status_label, index| {
-        const route = ui.RoutablePage.repoIssuesRoute(data.identity, status, data.tag, "") orelse return error.RouteTooLong;
+        const route = try thread.searchRoute(ui.RoutablePage.repoIssuesRoute(data.identity, status, data.tag, ""), data.search);
         const link = try ui.inPageTabLink(session, route, page_selected and selected_index == index);
         var label_buf: [64]u8 = undefined;
-        const label = try std.fmt.bufPrint(&label_buf, "{s} ({d})", .{ status_label, data.window(status).count });
+        const label = try thread.countLabel(&label_buf, status_label, data.window(status).*);
         try header.addTab(allocator, label, link, index);
     }
 
     // tags tab, labeled with the active tag filter
     {
-        const tags_route = ui.RoutablePage.repoThreadTagsRoute(.issue, data.identity, data.tag) orelse return error.RouteTooLong;
+        const tags_route = try thread.searchRoute(ui.RoutablePage.repoThreadTagsRoute(.issue, data.identity, data.tag), data.search);
         const tags_link = try ui.inPageTabLink(session, tags_route, page_selected and selected_index == View.viewIndex(.tags));
         const label = if (data.tag.len == 0) tags_tab_label else blk: {
             const decoded = std.Uri.percentDecodeInPlace(try aa.dupe(u8, data.tag));

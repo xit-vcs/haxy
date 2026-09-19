@@ -52,6 +52,11 @@ function focusElements(id) {
     return control ? [control] : Array.from(grid.querySelectorAll(`[data-focus-id="${id}"]`));
 }
 
+// whether an input's caret sits past its last character, with nothing selected
+function caretAtEnd(input) {
+    return input.selectionStart === input.value.length && input.selectionEnd === input.value.length;
+}
+
 function focusedNativeScroll() {
     const id = grid.dataset.focusId;
     if (!id) return null;
@@ -374,6 +379,18 @@ WebAssembly.instantiateStreaming(fetch("/haxy.wasm"), importObject).then(async (
                     wasmInstance.exports._onKeyDown(event.keyCode);
                     wasmInstance.exports._tick(minRows(), maxCols());
                 }
+                return;
+            } else if (tag === "INPUT" && !document.activeElement.form && !document.activeElement.readOnly &&
+                (event.key === "Tab" && !event.shiftKey ||
+                    event.key === "ArrowRight" && caretAtEnd(document.activeElement))) {
+                // an input outside a form (a search box) reaches the widgets
+                // beside it: Tab, and ArrowRight once the caret is at the end.
+                // blurred first, so the next key isn't the input's; the tick
+                // refocuses it if the TUI focus stayed.
+                event.preventDefault();
+                document.activeElement.blur();
+                wasmInstance.exports._onKeyDown(event.keyCode);
+                wasmInstance.exports._tick(minRows(), maxCols());
                 return;
             } else if (tag === "INPUT" && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
                 // up/down moves between widgets; left/right stay in the input

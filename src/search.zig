@@ -11,9 +11,9 @@ const min_word_len = 2;
 // still reaches it.
 const max_word_len = 32;
 // how many distinct words one document contributes.
-const max_words_per_doc = 64;
+const max_words_per_doc = 256;
 // how much of a document is tokenized.
-pub const max_indexed_bytes = 4 * 1024;
+pub const max_indexed_bytes = 16 * 1024;
 // how many indexed words one typed word expands to.
 const max_expansions = 50;
 // the largest doc key, so results are read into a buffer rather than allocated.
@@ -93,19 +93,28 @@ pub fn Query(comptime DB: type) type {
         // one indexed word's doc keys, positioned at the current one.
         const Posting = struct {
             set: DB.SortedSet(.read_only),
+            iter: DB.Cursor(.read_only).Iter = undefined,
             key: [max_doc_key_len]u8 = undefined,
             key_len: usize = 0,
             done: bool = false,
             started: bool = false,
 
-            // move to the first key at or after `key`. seeking rather than
-            // stepping keeps the cost proportional to the results.
+            // move to the first key at or after `key`. one step reaches it in
+            // a dense posting, and a seek skips the rest of a sparse one.
             fn advance(self: *Posting, key: []const u8) !void {
                 if (self.done) return;
-                if (self.started and std.mem.order(u8, self.key[0..self.key_len], key) != .lt) return;
-                var iter = try self.set.iteratorFrom(key);
+                if (self.started) {
+                    if (std.mem.order(u8, self.key[0..self.key_len], key) != .lt) return;
+                    try self.step();
+                    if (self.done or std.mem.order(u8, self.key[0..self.key_len], key) != .lt) return;
+                }
+                self.iter = try self.set.iteratorFrom(key);
                 self.started = true;
-                const cursor = (try iter.next()) orelse {
+                try self.step();
+            }
+
+            fn step(self: *Posting) !void {
+                const cursor = (try self.iter.next()) orelse {
                     self.done = true;
                     return;
                 };
@@ -132,6 +141,19 @@ pub fn Query(comptime DB: type) type {
                 try terms.append(aa, .{ .postings = postings.items });
             }
             return .{ .terms = terms.items };
+        }
+
+        // narrow the results to the doc keys in `set`. it is one more term,
+        // with that set as its only posting. a query nothing can match stays
+        // empty, since requiring a set would turn it into every doc key in it.
+        pub fn require(self: *Self, aa: std.mem.Allocator, set: DB.SortedSet(.read_only)) !void {
+            if (self.terms.len == 0) return;
+            var terms: std.ArrayList(Term) = .empty;
+            try terms.appendSlice(aa, self.terms);
+            const postings = try aa.alloc(Posting, 1);
+            postings[0] = .{ .set = set };
+            try terms.append(aa, .{ .postings = postings });
+            self.terms = terms.items;
         }
 
         // start the next result at `key` rather than the first one.
