@@ -136,7 +136,7 @@ pub fn create(
                     else => |other| return other,
                 };
 
-                _ = try moment.remove(hash.hashInt(repo_opts.hash, evt.materialized_key));
+                _ = try moment.remove(hash.hashInt(repo_opts.hash, evt.history_key));
                 _ = try moment.remove(hash.hashInt(repo_opts.hash, evt.last_object_id_key));
 
                 if (head_oid_maybe) |*head_oid| {

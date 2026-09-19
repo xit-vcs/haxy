@@ -12,7 +12,7 @@ const fs = xit.fs;
 // haxy moment because pushes change it and events never do. each entry is
 // keyed by its branch name's hash: its value is the branch's file map, and its
 // key slot holds the root tree oid that map covers rather than the name.
-const index_key = "branch->file-name+path->oid";
+const index_key = "haxy/branch->file-name+path->oid";
 
 // what a search returns: the matching files and whether the cap cut the list
 // short.

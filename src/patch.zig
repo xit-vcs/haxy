@@ -424,8 +424,8 @@ fn refreshMergeCheck(
             const last_object_id_cursor = try moment.getCursor(hash.hashInt(repo_opts.hash, evt.last_object_id_key)) orelse return error.NotFound;
             var last_object_id: [hash.byteLen(repo_opts.hash)]u8 = undefined;
             _ = try last_object_id_cursor.readBytes(&last_object_id);
-            const haxy = try DB.ArrayList(.read_write).init(try moment.putCursor(hash.hashInt(repo_opts.hash, evt.materialized_key)));
-            const haxy_moments = try DB.HashMap(.read_write).init(try haxy.putCursor(-1));
+            const haxy_history = try DB.ArrayList(.read_write).init(try moment.putCursor(hash.hashInt(repo_opts.hash, evt.history_key)));
+            const haxy_moments = try DB.HashMap(.read_write).init(try haxy_history.putCursor(-1));
             const haxy_moment = try DB.HashMap(.read_write).init(try haxy_moments.putCursor(hash.bytesToInt(repo_opts.hash, &last_object_id)));
             const map = try DB.HashMap(.read_write).init(try haxy_moment.putCursor(hash.hashInt(repo_opts.hash, evt.Patch.patch_id_to_mergeability_key)));
             const entry = try DB.HashMap(.read_write).init(try map.putCursor(hash.hashInt(repo_opts.hash, &ctx.id)));

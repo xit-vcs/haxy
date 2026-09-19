@@ -23,8 +23,8 @@ pub const max_event_size: usize = 100 * 1024;
 // the branch haxy events are committed to before being consumed
 pub const events_ref: rf.Ref = .{ .kind = .head, .name = "haxy/events" };
 
-pub const materialized_key = "haxy";
-pub const last_object_id_key = "haxy-last-object-id";
+pub const history_key = "haxy/history";
+pub const last_object_id_key = "haxy/last-object-id";
 
 // options + db type for the admin repo
 pub const admin_repo_opts: rp.RepoOpts(.xit) = .{};
@@ -726,16 +726,16 @@ pub fn consumeInTransaction(
     // the reason it is a list is so we can keep every previous haxy
     // state, making it easy to revert to an older state if the user
     // rebases some of the past commits.
-    const haxy_cursor = try moment.putCursor(hash.hashInt(repo_opts.hash, materialized_key));
-    const haxy = try DB.ArrayList(.read_write).init(haxy_cursor);
+    const haxy_history_cursor = try moment.putCursor(hash.hashInt(repo_opts.hash, history_key));
+    const haxy_history = try DB.ArrayList(.read_write).init(haxy_history_cursor);
 
-    // add a new item to the haxy list created above.
+    // add a new item to the haxy history list created above.
     // we call the item haxy_moments. it is a map of object id to haxy moment.
     // in other words, it maps each object id to a hash map containing the
     // state that the database was in when that object id was consumed.
-    var haxy_moments_cursor = try haxy.appendCursor();
+    var haxy_moments_cursor = try haxy_history.appendCursor();
     // use the previous haxy_moments as the basis for this one if it exists
-    if (try haxy.getCursor(-2)) |last_haxy_moments_cursor| {
+    if (try haxy_history.getCursor(-2)) |last_haxy_moments_cursor| {
         try haxy_moments_cursor.write(.{ .slot = last_haxy_moments_cursor.slot() });
     }
     var haxy_moments = try DB.HashMap(.read_write).init(haxy_moments_cursor);
@@ -758,7 +758,7 @@ pub fn consumeInTransaction(
         const moment_index_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, "moment-index")) orelse return error.CursorNotFound;
         const moment_index = try moment_index_cursor.readUint();
 
-        try haxy.slice(moment_index + 1);
+        try haxy_history.slice(moment_index + 1);
         try moment.put(hash.hashInt(repo_opts.hash, last_object_id_key), .{ .bytes = &head_oid });
         return true;
     }
@@ -794,11 +794,12 @@ pub fn consumeInTransaction(
                 0 => {
                     // the branch was rebased all the way to the very beginning.
                     // we have a repo event with no parent, which means it is now
-                    // the very first event. all we need to do is set the haxy list
-                    // to be empty and make a new haxy_moments map to work with.
+                    // the very first event. all we need to do is set the haxy
+                    // history list to be empty and make a new haxy_moments map
+                    // to work with.
 
-                    try haxy.slice(0);
-                    haxy_moments_cursor = try haxy.appendCursor();
+                    try haxy_history.slice(0);
+                    haxy_moments_cursor = try haxy_history.appendCursor();
                     haxy_moments = try DB.HashMap(.read_write).init(haxy_moments_cursor);
 
                     last_object_id_maybe = null;
@@ -813,13 +814,13 @@ pub fn consumeInTransaction(
                     const old_moment_index_cursor = try old_moment.getCursor(hash.hashInt(repo_opts.hash, "moment-index")) orelse return error.CursorNotFound;
                     const old_moment_index = try old_moment_index_cursor.readUint();
 
-                    // resize the haxy list so we truncate all the moments that were
-                    // created after the parent_oid was consumed
-                    try haxy.slice(old_moment_index + 1);
+                    // resize the haxy history list so we truncate all the
+                    // moments that were created after the parent_oid was consumed
+                    try haxy_history.slice(old_moment_index + 1);
 
                     // make a new haxy moment and set its initial value to the last haxy moment
-                    haxy_moments_cursor = try haxy.appendCursor();
-                    const old_haxy_moments_cursor = try haxy.getCursor(old_moment_index) orelse return error.CursorNotFound;
+                    haxy_moments_cursor = try haxy_history.appendCursor();
+                    const old_haxy_moments_cursor = try haxy_history.getCursor(old_moment_index) orelse return error.CursorNotFound;
                     try haxy_moments_cursor.write(.{ .slot = old_haxy_moments_cursor.slot() });
                     haxy_moments = try DB.HashMap(.read_write).init(haxy_moments_cursor);
 
@@ -891,10 +892,10 @@ pub fn consumeInTransaction(
             }
         }
 
-        // associate this moment with the index it will first appear at in the haxy list.
-        // this will be important later so we can truncate that list if the user ever
-        // rebases starting at this object id.
-        try haxy_moment.put(hash.hashInt(repo_opts.hash, "moment-index"), .{ .uint = try haxy.count() - 1 });
+        // associate this moment with the index it will first appear at in the
+        // haxy history list. this will be important later so we can truncate
+        // that list if the user ever rebases starting at this object id.
+        try haxy_moment.put(hash.hashInt(repo_opts.hash, "moment-index"), .{ .uint = try haxy_history.count() - 1 });
 
         // consume the event unless it's a merge commit
         if (parent_oids.len <= 1) {
@@ -1415,9 +1416,9 @@ pub fn currentMomentFromRepoMoment(
     const last_object_id_cursor = try moment.getCursor(hash.hashInt(hash_kind, last_object_id_key)) orelse return error.NotFound;
     var last_object_id: [hash.byteLen(hash_kind)]u8 = undefined;
     _ = try last_object_id_cursor.readBytes(&last_object_id);
-    const haxy_cursor = try moment.getCursor(hash.hashInt(hash_kind, materialized_key)) orelse return error.NotFound;
-    const haxy = try DB.ArrayList(.read_only).init(haxy_cursor);
-    const haxy_moments_cursor = try haxy.getCursor(-1) orelse return error.NotFound;
+    const haxy_history_cursor = try moment.getCursor(hash.hashInt(hash_kind, history_key)) orelse return error.NotFound;
+    const haxy_history = try DB.ArrayList(.read_only).init(haxy_history_cursor);
+    const haxy_moments_cursor = try haxy_history.getCursor(-1) orelse return error.NotFound;
     const haxy_moments = try DB.HashMap(.read_only).init(haxy_moments_cursor);
     const haxy_moment_cursor = try haxy_moments.getCursor(hash.bytesToInt(hash_kind, &last_object_id)) orelse return error.NotFound;
     return try DB.HashMap(.read_only).init(haxy_moment_cursor);
