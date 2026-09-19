@@ -85,6 +85,10 @@ pub fn init(
         .repo_files => |f| f.line,
         else => 0,
     };
+    const files_find: []const u8 = switch (route) {
+        .repo_files => |*f| f.find.slice(),
+        else => "",
+    };
     // what the commits view's pane shows for the commit it walks from: a diff
     // window (with the file it's filtered to) or that commit's message.
     const commits_content: ui.RoutablePage.RepoCommitsRoute.Content = switch (route) {
@@ -249,7 +253,7 @@ pub fn init(
                             const files_data = if (patchrev_id.len != 0)
                                 try Files.initPatchRev(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, location, patchrev_id, files_dir, files_line)
                             else
-                                try Files.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, location, requested_ref_or_oid, requested_ref_value, files_dir, files_line);
+                                try Files.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, location, requested_ref_or_oid, requested_ref_value, files_dir, files_line, files_find);
                             const changes_data: Changes = if (route == .repo_diff)
                                 .{ .diff = try Diff.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, route.repo_diff) }
                             else if (patchrev_id.len != 0) diff: {
@@ -405,7 +409,9 @@ pub const View = struct {
         }
 
         var self = View{ .box = box };
-        self.getFocus().child_id = box.children.keys()[header_index];
+        // a page opens on its tabs, except that search results open in the
+        // files tab's search box.
+        self.getFocus().child_id = box.children.keys()[if (data.files.find != null) stack_index else header_index];
         return self;
     }
 
@@ -455,7 +461,7 @@ pub const View = struct {
                         switch (child.*) {
                             .repo_header => {
                                 if (stack.getSelected()) |selected_widget| switch (selected_widget.*) {
-                                    .repo_files => |*v| if (v.focusCloneUrl(root_focus)) return,
+                                    .repo_files => |*v| if (v.focusHeader(root_focus)) return,
                                     .repo_commits => |*v| if (v.focusCloneUrl(root_focus)) return,
                                     else => {},
                                 };

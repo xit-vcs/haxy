@@ -202,7 +202,6 @@ test "commits list next row is a cross-page link" {
             .{ .oid = oid0, .date = "2024-01-01", .message = "first", .window = .{} },
         },
         .next_start = next_oid,
-        .header = try Commits.Header.init(arena.allocator(), .object, oid0),
     };
 
     var session = ui.Session{ .arena = &arena, .page_arena = &arena, .is_terminal = true };

@@ -7,6 +7,7 @@ const obj = xit.object;
 const rf = xit.ref;
 const evt = @import("event.zig");
 const pch = @import("patch.zig");
+const find = @import("find.zig");
 const fork = @import("fork.zig");
 const serve_common = @import("serve_common.zig");
 
@@ -154,6 +155,9 @@ pub fn receivePackAndConsume(
     pch.refreshBranches(.server, .xit, repo_opts, io, allocator, repo, updates.items.items, &progress) catch |err| {
         serve_common.logError(io, error_writer, "failed to refresh branch patches: {s}\n", .{@errorName(err)});
         pch.refreshMergeability(repo_opts, io, allocator, repo, null);
+    };
+    find.refresh(repo_opts, io, allocator, repo) catch |err| {
+        serve_common.logError(io, error_writer, "failed to refresh file index: {s}\n", .{@errorName(err)});
     };
     try response.finish(writer, null);
 }
@@ -359,6 +363,9 @@ pub fn receiveFork(
     }
 
     if (!refreshed) pch.refreshMergeability(repo_opts, io, allocator, target_repo, patch_id);
+    find.refresh(repo_opts, io, allocator, fork_repo) catch |err| {
+        serve_common.logError(io, error_writer, "failed to refresh file index: {s}\n", .{@errorName(err)});
+    };
     progress.run(io, .{ .complete_one = .writing_patch }) catch {};
     progress.run(io, .{ .end = .writing_patch }) catch {};
 

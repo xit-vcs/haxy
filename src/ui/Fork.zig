@@ -120,6 +120,10 @@ pub fn init(arena: *std.heap.ArenaAllocator, session: *ui.Session, route: ui.Rou
         .fork_files => |f| f.line,
         else => 0,
     };
+    const files_find: []const u8 = switch (route) {
+        .fork_files => |*f| f.find.slice(),
+        else => "",
+    };
     const commits_content: ui.RoutablePage.RepoCommitsRoute.Content = switch (route) {
         .fork_commits => |c| c.content,
         else => .{ .diff = .{} },
@@ -128,7 +132,7 @@ pub fn init(arena: *std.heap.ArenaAllocator, session: *ui.Session, route: ui.Rou
         .identity = identity.identity,
         .id = &id_hex,
     } };
-    const files = try Files.init(.xit, .{}, arena, &fork_repo, io, arena.child_allocator, location, requested_ref, requested_value, files_path, files_line);
+    const files = try Files.init(.xit, .{}, arena, &fork_repo, io, arena.child_allocator, location, requested_ref, requested_value, files_path, files_line, files_find);
     var commits = try Commits.init(.xit, .{}, arena, &fork_repo, io, arena.child_allocator, haxy_moment, location, requested_ref, requested_value, commits_content, &commits_base_oid);
     commits.commit_count = if (newest_revision) |revision| revision.record.commit_count else 0;
     const diff_start: usize = switch (route) {
@@ -209,7 +213,9 @@ pub const View = struct {
             }
             try box.children.put(allocator, stack.getFocus().id, .{ .widget = .{ .stack = stack }, .rect = null, .min_size = null });
         }
-        box.getFocus().child_id = box.children.keys()[header_index];
+        // a page opens on its tabs, except that search results open in the
+        // files tab's search box.
+        box.getFocus().child_id = box.children.keys()[if (data.files.find != null) stack_index else header_index];
         return .{ .box = box };
     }
 
@@ -243,7 +249,7 @@ pub const View = struct {
                 .fork_header => {
                     if (stack.getSelected()) |selected| switch (selected.*) {
                         .repo_patch_detail => |*view| if (view.focusFirst(root_focus)) return,
-                        .repo_files => |*view| if (view.focusCloneUrl(root_focus)) return,
+                        .repo_files => |*view| if (view.focusHeader(root_focus)) return,
                         .repo_commits => |*view| if (view.focusCloneUrl(root_focus)) return,
                         else => {},
                     };

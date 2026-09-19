@@ -193,7 +193,7 @@ pub const RoutablePage = union(enum) {
 
     // the "key:value" segments of a url tail, collected in any order
     const Params = struct {
-        const ParamKey = enum { start, line, branch, tag, object, base, patchrev, theirs };
+        const ParamKey = enum { start, line, branch, tag, object, base, patchrev, theirs, find };
 
         // a branch:/tag:/object: param; the value stays url-encoded
         const RefParam = struct { kind: RefOrOid, value: []const u8 };
@@ -271,6 +271,7 @@ pub const RoutablePage = union(enum) {
     const tag_filter_seg = @tagName(Params.ParamKey.tag) ++ ":";
     const start_seg = @tagName(Params.ParamKey.start) ++ ":";
     const line_seg = @tagName(Params.ParamKey.line) ++ ":";
+    const find_seg = @tagName(Params.ParamKey.find) ++ ":";
     const base_seg = @tagName(Params.ParamKey.base) ++ ":";
     const theirs_seg = @tagName(Params.ParamKey.theirs) ++ ":";
     const issue_seg = "issue:";
@@ -305,6 +306,9 @@ pub const RoutablePage = union(enum) {
     // caps a url-encoded ref name in a route (a longer name doesn't route).
     pub const ref_route_max_len = 512;
 
+    // caps the files tab's url-encoded search term.
+    pub const find_route_max_len = 100 * 3;
+
     // the identity stored by every repo route. Local routes elide it.
     pub const RepoIdentity = struct {
         identity: []const u8, // "owner/name"
@@ -337,6 +341,9 @@ pub const RoutablePage = union(enum) {
         ref_kind: ?RefOrOid = null,
         ref_value: Array(ref_route_max_len) = .{},
         patchrev_id: Array(evt.event_id_size * 2) = .{},
+        // the url-encoded search term ("" = the plain directory listing). with
+        // one set, `path` names the selected result rather than a directory.
+        find: Array(find_route_max_len) = .{},
         path: Array(repo_route_max_len) = .{},
         // the selected file's first visible line (1-based; 0 = unset).
         line: usize = 0,
@@ -388,6 +395,7 @@ pub const RoutablePage = union(enum) {
     pub const ForkFilesRoute = struct {
         fork: ForkRoute,
         oid: Array(ref_route_max_len) = .{},
+        find: Array(find_route_max_len) = .{},
         path: Array(repo_route_max_len) = .{},
         line: usize = 0,
     };
@@ -518,6 +526,22 @@ pub const RoutablePage = union(enum) {
             .path = Array(repo_route_max_len).from(dir) orelse return null,
             .line = line,
         } };
+    }
+
+    // carry a search term on a files route, url-encoding it into the route.
+    // null when it doesn't fit.
+    pub fn withFind(self: RoutablePage, search: []const u8) ?RoutablePage {
+        var find: Array(find_route_max_len) = .{};
+        var writer: std.Io.Writer = .fixed(&find.bytes);
+        std.Uri.Component.percentEncode(&writer, search, isUnreserved) catch return null;
+        find.len = @intCast(writer.buffered().len);
+        var route = self;
+        switch (route) {
+            .repo_files => |*f| f.find = find,
+            .fork_files => |*f| f.find = find,
+            else => return null,
+        }
+        return route;
     }
 
     pub fn repoPatchRevFilesRoute(identity: []const u8, id: []const u8, path: []const u8, line: usize) ?RoutablePage {
@@ -894,11 +918,12 @@ pub const RoutablePage = union(enum) {
             .user_auth => |name| try std.fmt.allocPrint(arena.allocator(), user_segment ++ "{s}/auth", .{name.slice()}),
             .repo_files => |f| blk: {
                 const prefix = try repoUrlPrefix(arena, f.name.slice());
-                if (f.ref_kind == null and f.patchrev_id.len == 0 and f.line == 0) break :blk if (prefix.len == 0) "/" else prefix;
+                if (f.ref_kind == null and f.patchrev_id.len == 0 and f.find.len == 0 and f.line == 0) break :blk if (prefix.len == 0) "/" else prefix;
                 var out: std.Io.Writer.Allocating = .init(arena.allocator());
                 try out.writer.print("{s}/" ++ files_seg, .{prefix});
                 if (f.ref_kind) |kind| if (f.ref_value.len != 0) try out.writer.print("/{s}:{s}", .{ @tagName(kind), f.ref_value.slice() });
                 if (f.patchrev_id.len != 0) try out.writer.print("/patchrev:{s}", .{f.patchrev_id.slice()});
+                if (f.find.len != 0) try out.writer.print("/" ++ find_seg ++ "{s}", .{f.find.slice()});
                 if (f.line != 0) try out.writer.print("/" ++ line_seg ++ "{d}", .{f.line});
                 if (f.path.len != 0) try out.writer.print("/" ++ path_seg ++ "{s}", .{f.path.slice()});
                 break :blk out.written();
@@ -1053,6 +1078,7 @@ pub const RoutablePage = union(enum) {
                 var out: std.Io.Writer.Allocating = .init(arena.allocator());
                 try out.writer.print(fork_segment ++ "{s}/" ++ patch_seg ++ "{s}/" ++ files_seg, .{ f.fork.name.slice(), f.fork.id.slice() });
                 if (f.oid.len != 0) try out.writer.print("/object:{s}", .{f.oid.slice()});
+                if (f.find.len != 0) try out.writer.print("/" ++ find_seg ++ "{s}", .{f.find.slice()});
                 if (f.line != 0) try out.writer.print("/" ++ line_seg ++ "{d}", .{f.line});
                 if (f.path.len != 0) try out.writer.print("/" ++ path_seg ++ "{s}", .{f.path.slice()});
                 break :blk out.written();
@@ -1118,12 +1144,14 @@ pub const RoutablePage = union(enum) {
             }
             if (std.mem.eql(u8, tab, files_seg)) {
                 params.scanPairs(&segments) catch return null;
-                if (!params.only(&.{ .line, .object })) return null;
+                if (!params.only(&.{ .line, .object, .find })) return null;
                 const line = params.line() orelse return null;
                 const ref = params.ref() catch return null;
                 const oid = if (ref) |value| if (value.kind == .object) value.value else return null else "";
                 const file_path = pathValue(segments.rest()) orelse return null;
-                return forkFilesRoute(identity, id, oid, file_path, line);
+                var route = forkFilesRoute(identity, id, oid, file_path, line) orelse return null;
+                if (params.values.get(.find)) |find| route.fork_files.find = Array(find_route_max_len).from(find) orelse return null;
+                return route;
             }
             if (std.mem.eql(u8, tab, commits_seg)) {
                 params.scanPairs(&segments) catch return null;
@@ -1439,12 +1467,24 @@ pub const RoutablePage = union(enum) {
                 if (!params.only(&.{ .line, .patchrev })) return null;
                 return repoPatchRevFilesRoute(pair, id, pathValue(segments.rest()) orelse return null, params.line() orelse return null);
             }
-            if (!params.only(&.{ .line, .branch, .tag, .object })) return null;
+            if (!params.only(&.{ .line, .branch, .tag, .object, .find })) return null;
             const line = params.line() orelse return null;
             const dir = pathValue(segments.rest()) orelse return null;
-            const ref = (params.ref() catch return null) orelse
-                return if (dir.len == 0) repoFilesRoute(pair, null, "", "", line) else null;
-            return repoFilesRoute(pair, ref.kind, ref.value, dir, line);
+            const find = params.values.get(.find) orelse "";
+            const ref = params.ref() catch return null;
+            // a find route's `path` names the selected result, so unlike a
+            // directory path it doesn't need a ref beside it
+            var route = if (ref) |r|
+                repoFilesRoute(pair, r.kind, r.value, dir, line) orelse return null
+            else if (dir.len == 0 or find.len != 0)
+                repoFilesRoute(pair, null, "", "", line) orelse return null
+            else
+                return null;
+            if (find.len != 0) {
+                route.repo_files.find = Array(find_route_max_len).from(find) orelse return null;
+                route.repo_files.path = Array(repo_route_max_len).from(dir) orelse return null;
+            }
+            return route;
         }
         if (std.mem.eql(u8, tab, commits_seg)) {
             params.scanPairs(&segments) catch return null;
@@ -1490,6 +1530,7 @@ pub const RoutablePage = union(enum) {
                 a_f.ref_kind == b.repo_files.ref_kind and
                 std.mem.eql(u8, a_f.ref_value.slice(), b.repo_files.ref_value.slice()) and
                 std.mem.eql(u8, a_f.patchrev_id.slice(), b.repo_files.patchrev_id.slice()) and
+                std.mem.eql(u8, a_f.find.slice(), b.repo_files.find.slice()) and
                 std.mem.eql(u8, a_f.path.slice(), b.repo_files.path.slice()) and
                 a_f.line == b.repo_files.line,
             .repo_commits => |a_c| std.mem.eql(u8, a_c.name.slice(), b.repo_commits.name.slice()) and
@@ -1543,6 +1584,7 @@ pub const RoutablePage = union(enum) {
             .fork_files => |a_f| std.mem.eql(u8, a_f.fork.name.slice(), b.fork_files.fork.name.slice()) and
                 std.mem.eql(u8, a_f.fork.id.slice(), b.fork_files.fork.id.slice()) and
                 std.mem.eql(u8, a_f.oid.slice(), b.fork_files.oid.slice()) and
+                std.mem.eql(u8, a_f.find.slice(), b.fork_files.find.slice()) and
                 std.mem.eql(u8, a_f.path.slice(), b.fork_files.path.slice()) and
                 a_f.line == b.fork_files.line,
             .fork_commits => |a_c| std.mem.eql(u8, a_c.fork.name.slice(), b.fork_commits.fork.name.slice()) and

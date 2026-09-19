@@ -294,7 +294,11 @@ const importObject = {
 function sendTextInputValue(focusId, value) {
     const bytes = encoder.encode(value);
     const ptr = wasmInstance.exports._alloc(bytes.length);
-    new Uint8Array(wasmInstance.exports.memory.buffer, ptr, bytes.length).set(bytes);
+    // an empty allocation's pointer lies outside the buffer, so a view onto it
+    // would throw and leave the wasm holding the old value
+    if (bytes.length > 0) {
+        new Uint8Array(wasmInstance.exports.memory.buffer, ptr, bytes.length).set(bytes);
+    }
     wasmInstance.exports._setTextInputValue(focusId, ptr, bytes.length);
     wasmInstance.exports._tick(minRows(), maxCols());
 }
@@ -362,9 +366,14 @@ WebAssembly.instantiateStreaming(fetch("/haxy.wasm"), importObject).then(async (
                 wasmInstance.exports._tick(minRows(), maxCols());
                 return;
             } else if (tag === "INPUT" && event.key === "Enter") {
-                // enter in a text input never submits the form; only the
-                // submit button does
+                // enter in a form's text input never submits it; only the
+                // submit button does. an input outside a form has no submit
+                // button, so the TUI handles its enter instead.
                 event.preventDefault();
+                if (!document.activeElement.form) {
+                    wasmInstance.exports._onKeyDown(event.keyCode);
+                    wasmInstance.exports._tick(minRows(), maxCols());
+                }
                 return;
             } else if (tag === "INPUT" && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
                 // up/down moves between widgets; left/right stay in the input

@@ -12,6 +12,7 @@ const Key = xitui.input.Key;
 const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
 const inp = @import("../input.zig");
+const fnd = @import("../../find.zig");
 
 // how many lines of a file's content one window shows before a "next" link.
 const file_page = 5000;
@@ -19,6 +20,9 @@ const file_page = 5000;
 // budget for the total bytes of file content preloaded (windowed) per page,
 // so selecting a preloaded file shows its contents without a reload.
 const max_preloaded_bytes = 2 * 1024 * 1024;
+
+// how many rows a listing holds, for a directory and for search results alike.
+const max_list_entries = 1000;
 
 // one entry in the directory currently being viewed.
 pub const Entry = struct {
@@ -54,8 +58,14 @@ dir: []const u8,
 // route's path named a file rather than a directory.
 selected_file: ?[]const u8 = null,
 entries: []const Entry,
-// the "viewing <ref> <value>" banner shown above the listing.
-header: Header,
+// true when the listing stopped at max_list_entries.
+capped: bool = false,
+// the decoded search term this listing holds the results of, or null for a
+// plain directory listing.
+find: ?[]const u8 = null,
+// whether the viewed tree has a file index, so the search box shows and a
+// find: route resolves. travels in the page json for the wasm view.
+find_available: bool = false,
 
 const Self = @This();
 
@@ -74,9 +84,8 @@ pub fn initPatchRev(
     const id = evt.parseEventId(id_hex) catch return error.NotFound;
     const record = (try evt.readFromRepo(evt.PatchRev, repo_kind, repo_opts, io, gpa, arena, repo, &id)) orelse return error.NotFound;
     if (record.removed) return error.NotFound;
-    var data = try init(repo_kind, repo_opts, arena, repo, io, gpa, location, .object, record.head_tree_oid, path, line);
+    var data = try init(repo_kind, repo_opts, arena, repo, io, gpa, location, .object, record.head_tree_oid, path, line, "");
     data.patchrev_id = try arena.allocator().dupe(u8, id_hex);
-    data.header.content = try std.fmt.allocPrint(arena.allocator(), "patchrev {s}", .{id_hex});
     return data;
 }
 
@@ -85,7 +94,8 @@ pub fn filesRoute(self: *const Self, path: []const u8, line: usize) ?ui.Routable
         .repo => |identity| ui.RoutablePage.repoPatchRevFilesRoute(identity, id, path, line),
         .fork => null,
     };
-    return self.location.filesRoute(self.ref_or_oid, self.ref_or_oid_value, path, line);
+    const route = self.location.filesRoute(self.ref_or_oid, self.ref_or_oid_value, path, line) orelse return null;
+    return route.withFind(self.find orelse return route);
 }
 
 // build the listing for an opened repo. generic over the repo's backend and
@@ -104,14 +114,16 @@ pub fn init(
     requested_value: []const u8,
     path: []const u8,
     line: usize,
+    find: []const u8,
 ) !Self {
     const aa = arena.allocator();
+    const term: ?[]const u8 = if (find.len == 0) null else std.Uri.percentDecodeInPlace(try aa.dupe(u8, find));
 
     // resolve the requested ref (or the default branch) to the object oid whose
     // tree we list. a ref the route named explicitly that doesn't resolve is a
     // bad url (NotFound -> 404); the default-branch path falls through to empty.
     const resolved = (try ui.ResolvedRefOrOid(repo_kind, repo_opts).init(repo, io, aa, requested_ref_or_oid, requested_value)) orelse {
-        if (requested_ref_or_oid != null) return error.NotFound;
+        if (requested_ref_or_oid != null or term != null) return error.NotFound;
         return emptyResult(aa, location, .branch, requested_value, path);
     };
 
@@ -121,6 +133,51 @@ pub fn init(
     // is a bad url (404).
     var moment = repo.core.latestMoment() catch return emptyResult(aa, location, resolved.ref_or_oid, resolved.value, path);
     const state = rp.Repo(repo_kind, repo_opts).State(.read_only){ .core = &repo.core, .extra = .{ .moment = &moment } };
+
+    var entries: std.ArrayList(Entry) = .empty;
+    var capped = false;
+    var preloaded_bytes: usize = 0;
+    var find_available = false;
+
+    // the index covers branch tips only, so any other view gets no search box
+    // and refuses a find: url.
+    if (comptime repo_kind == .xit) index: {
+        if (resolved.ref_or_oid != .branch) break :index;
+        const branch = std.Uri.percentDecodeInPlace(try aa.dupe(u8, resolved.value));
+        const tree_oid = try fnd.rootTreeOid(repo_opts, state, io, gpa, &resolved.oid);
+        const files = (try fnd.lookup(repo_opts, moment, branch, &tree_oid)) orelse break :index;
+        find_available = true;
+        const value = term orelse break :index;
+        // a result's name is its full path, so the listing has no directory and
+        // the selected row is named in full.
+        const selected: ?[]const u8 = if (path.len == 0) null else try aa.dupe(u8, path);
+        const results = try fnd.search(repo_opts, files, aa, value, max_list_entries);
+        capped = results.capped;
+        var found = false;
+        for (results.matches) |match| {
+            if (selected) |sf| found = found or std.mem.eql(u8, sf, match.path);
+            try entries.append(aa, try fileEntry(repo_kind, repo_opts, state, io, gpa, aa, "", match.path, &match.oid, null, selected, line, &preloaded_bytes));
+        }
+        // the cap can cut off the row the url names, so bring it back
+        if (capped and !found) {
+            if (selected) |sf| if (try fnd.get(repo_opts, files, aa, sf)) |*oid| {
+                try entries.append(aa, try fileEntry(repo_kind, repo_opts, state, io, gpa, aa, "", sf, oid, null, selected, line, &preloaded_bytes));
+            };
+        }
+        return .{
+            .location = try location.dupe(aa),
+            .ref_or_oid = resolved.ref_or_oid,
+            .ref_or_oid_value = resolved.value,
+            .dir = "",
+            .selected_file = selected,
+            .entries = entries.items,
+            .capped = capped,
+            .find = value,
+            .find_available = true,
+        };
+    }
+    if (term != null) return error.NotFound;
+
     var tree_dir = tr.TreeDir(repo_kind, repo_opts).init(state, io, gpa, &resolved.oid, path) catch |err| switch (err) {
         error.TreeEntryNotFound => return error.NotFound,
         else => return emptyResult(aa, location, resolved.ref_or_oid, resolved.value, path),
@@ -142,35 +199,26 @@ pub fn init(
     // within each group, and dupe into the page arena. file contents are read
     // here (into the page arena) so the detail pane can show them without
     // another lookup.
-    const entries = try aa.alloc(Entry, tree_dir.entries.count());
-    var i: usize = 0;
-    var preloaded_bytes: usize = 0;
+    try entries.ensureTotalCapacity(aa, @min(tree_dir.entries.count(), max_list_entries));
     for ([_]bool{ true, false }) |want_dir| {
         for (tree_dir.entries.keys(), tree_dir.entries.values()) |name, tree_entry| {
             if (tree_entry.isTree() != want_dir) continue;
-            var entry: Entry = .{ .name = try aa.dupe(u8, name), .is_dir = want_dir };
-            if (!want_dir) {
-                // only the route's selected file paginates; the rest show
-                // their first window (for the in-page detail when selected).
-                const is_selected = if (selected_file) |sf| std.mem.eql(u8, sf, name) else false;
-                // the README always loads because it's the default selection.
-                if (preloaded_bytes < max_preloaded_bytes or is_selected or isReadme(name)) {
-                    const file_path = try childDir(aa, dir, name);
-                    // the url's `line` is 1-based (0 = unset); the window
-                    // index is 0-based.
-                    const window_start = if (is_selected) line -| 1 else 0;
-                    const content = readFileContent(repo_kind, repo_opts, state, io, gpa, aa, file_path, tree_entry, window_start) catch
-                        FileContent{ .lines = &.{} };
-                    for (content.lines) |l| preloaded_bytes += l.len;
-                    entry.lines = content.lines;
-                    entry.is_binary = content.is_binary;
-                    entry.window_start = window_start;
-                    entry.has_more = content.has_more;
-                    entry.loaded = true;
+            if (want_dir) {
+                if (entries.items.len >= max_list_entries) {
+                    capped = true;
+                    continue;
                 }
+                try entries.append(aa, .{ .name = try aa.dupe(u8, name), .is_dir = true });
+            } else {
+                // the rows the route and the default selection need are exempt
+                // from the cap, so a url naming a file always gets its row.
+                const exempt = isReadme(name) or (if (selected_file) |sf| std.mem.eql(u8, sf, name) else false);
+                if (entries.items.len >= max_list_entries and !exempt) {
+                    capped = true;
+                    continue;
+                }
+                try entries.append(aa, try fileEntry(repo_kind, repo_opts, state, io, gpa, aa, dir, name, &tree_entry.oid, tree_entry.mode, selected_file, line, &preloaded_bytes));
             }
-            entries[i] = entry;
-            i += 1;
         }
     }
 
@@ -180,9 +228,47 @@ pub fn init(
         .ref_or_oid_value = resolved.value,
         .dir = try aa.dupe(u8, dir),
         .selected_file = selected_file,
-        .entries = entries,
-        .header = try Header.init(aa, resolved.ref_or_oid, resolved.value),
+        .entries = entries.items,
+        .capped = capped,
+        .find_available = find_available,
     };
+}
+
+// build one file's row, reading its content window when the preload budget (or
+// the route) calls for it. only the route's selected file paginates; the rest
+// show their first window, for the in-page detail when selected.
+fn fileEntry(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    aa: std.mem.Allocator,
+    dir: []const u8,
+    name: []const u8,
+    oid: *const [xit.hash.byteLen(repo_opts.hash)]u8,
+    // null for a search result, which the index only holds files for
+    mode: ?xit.fs.Mode,
+    selected_file: ?[]const u8,
+    line: usize,
+    preloaded_bytes: *usize,
+) !Entry {
+    var entry: Entry = .{ .name = try aa.dupe(u8, name), .is_dir = false };
+    const is_selected = if (selected_file) |sf| std.mem.eql(u8, sf, name) else false;
+    // the README always loads because it's the default selection.
+    if (preloaded_bytes.* >= max_preloaded_bytes and !is_selected and !isReadme(name)) return entry;
+    const file_path = try childDir(aa, dir, name);
+    // the url's `line` is 1-based (0 = unset); the window index is 0-based.
+    const window_start = if (is_selected) line -| 1 else 0;
+    const content = readFileContent(repo_kind, repo_opts, state, io, gpa, aa, file_path, oid, mode, window_start) catch
+        FileContent{ .lines = &.{} };
+    for (content.lines) |l| preloaded_bytes.* += l.len;
+    entry.lines = content.lines;
+    entry.is_binary = content.is_binary;
+    entry.window_start = window_start;
+    entry.has_more = content.has_more;
+    entry.loaded = true;
+    return entry;
 }
 
 const FileContent = struct {
@@ -192,7 +278,7 @@ const FileContent = struct {
 };
 
 // read the window [start, start+file_page) of a committed file's contents at
-// `tree_entry` into `arena`-owned lines, flagging whether more follow. xit's
+// `oid` into `arena`-owned lines, flagging whether more follow. xit's
 // line iterator flags binary files (its source becomes `.binary`), in which case
 // we report no lines and let the view show a placeholder.
 fn readFileContent(
@@ -203,10 +289,11 @@ fn readFileContent(
     gpa: std.mem.Allocator,
     arena: std.mem.Allocator,
     path: []const u8,
-    tree_entry: tr.TreeEntry(repo_opts.hash),
+    oid: *const [xit.hash.byteLen(repo_opts.hash)]u8,
+    mode: ?xit.fs.Mode,
     start: usize,
 ) !FileContent {
-    var line_iter = try df.LineIterator(repo_kind, repo_opts).initFromTree(state, io, gpa, path, tree_entry);
+    var line_iter = try df.LineIterator(repo_kind, repo_opts).initFromOid(state, io, gpa, path, oid, mode);
     defer line_iter.deinit();
     if (line_iter.source == .binary) return .{ .lines = &.{}, .is_binary = true };
 
@@ -235,15 +322,14 @@ pub fn emptyResult(aa: std.mem.Allocator, location: ui.RoutablePage.RepoLocation
         .ref_or_oid_value = try aa.dupe(u8, ref_or_oid_value),
         .dir = try aa.dupe(u8, dir),
         .entries = &.{},
-        .header = try Header.init(aa, ref_or_oid, ref_or_oid_value),
     };
 }
 
 pub const View = struct {
-    // a vertical stack: the "viewing <ref>" banner on top, then a horizontal
+    // a vertical stack: the search box and clone url on top, then a horizontal
     // split with the file/directory list on the left and a detail pane on the
     // right showing the selected file's contents.
-    box: wgt.Box(ui.Widget), // vert: [header_index] = banner, [content_index] = split
+    box: wgt.Box(ui.Widget), // vert: [header_index] = header row, [content_index] = split
     data: *const Self,
     session: *ui.Session,
     // the list row whose contents the detail pane currently shows.
@@ -266,9 +352,9 @@ pub const View = struct {
         var outer = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert });
         errdefer outer.deinit(allocator);
 
-        // the ref banner at the top.
+        // the search box and the clone url at the top.
         {
-            var header_view = try Header.View.init(allocator, &data.header, session, data.location);
+            var header_view = try Header.View.init(allocator, data, session);
             errdefer header_view.deinit(allocator);
             try outer.children.put(allocator, header_view.getFocus().id, .{ .widget = .{ .repo_files_header = header_view }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
         }
@@ -287,25 +373,35 @@ pub const View = struct {
                 // copied by their text boxes.
                 const aa = session.page_arena.allocator();
                 if (data.dir.len != 0) {
-                    try addRow(allocator, &list_box, "..", try dirLink(session.page_arena, data, parentDir(data.dir)));
+                    try addRow(allocator, &list_box, "..", "", try dirLink(session.page_arena, data, parentDir(data.dir)));
                 }
                 for (data.entries) |entry| {
                     const path = try childDir(aa, data.dir, entry.name);
-                    const label = if (entry.is_dir) try std.fmt.allocPrint(aa, "{s}/", .{entry.name}) else entry.name;
+                    // a search result shows its file name, with its directory
+                    // in the bottom label.
+                    const label = if (data.find != null)
+                        std.fs.path.basenamePosix(entry.name)
+                    else if (entry.is_dir)
+                        try std.fmt.allocPrint(aa, "{s}/", .{entry.name})
+                    else
+                        entry.name;
+                    const bottom_label = if (data.find != null) try resultDirLabel(aa, entry.name) else "";
                     const link = if (entry.is_dir)
                         try dirLink(session.page_arena, data, path)
                     else
                         try fileLink(session.page_arena, data, path, entry.loaded, lineNumber(entry.window_start));
-                    try addRow(allocator, &list_box, label, link);
+                    try addRow(allocator, &list_box, label, bottom_label, link);
                 }
+                if (data.capped) try addRow(allocator, &list_box, "(list truncated)", "", "");
                 // select the file the route named, else prefer a README so its
                 // contents greet the visitor in the detail pane, else the first
                 // row. a non-root directory has a leading ".." row, so the entry
-                // index is offset by one there.
+                // index is offset by one there. search results have no README
+                // default: the term decides what matters.
                 var sel: usize = 0;
                 if (list_box.children.count() > 0) {
                     const base: usize = if (data.dir.len != 0) 1 else 0;
-                    const entry_idx = selectedFileIndex(data) orelse readmeIndex(data.entries);
+                    const entry_idx = selectedFileIndex(data) orelse if (data.find == null) readmeIndex(data.entries) else null;
                     sel = if (entry_idx) |i| i + base else 0;
                     list_box.getFocus().child_id = list_box.children.keys()[sel];
                 }
@@ -373,13 +469,14 @@ pub const View = struct {
         box.getFocus().child_id = box.children.keys()[list_index];
         try outer.children.put(allocator, box.getFocus().id, .{ .widget = .{ .box = box }, .rect = null, .min_size = null });
 
-        // focus lives in the split; the banner isn't focusable.
-        outer.getFocus().child_id = outer.children.keys()[content_index];
+        // focus lives in the split, except that search results start in the
+        // search box so the term can be refined right away.
+        outer.getFocus().child_id = outer.children.keys()[if (data.find != null) header_index else content_index];
         return .{ .box = outer, .data = data, .session = session, .shown_index = null };
     }
 
-    fn addRow(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8, link: []const u8) !void {
-        var row = try wgt.TextBox.init(allocator, label, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .none });
+    fn addRow(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8, bottom_label: []const u8, link: []const u8) !void {
+        var row = try wgt.TextBox.init(allocator, label, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .none, .bottom_label = bottom_label });
         errdefer row.deinit(allocator);
         row.getFocus().mode = .all;
         if (link.len != 0) row.getFocus().kind = .{ .custom = link };
@@ -609,7 +706,7 @@ pub const View = struct {
             }
             return;
         }
-        if (key == .arrow_up and self.contentAtTop() and self.header().focusCloneUrl(root_focus)) return;
+        if (key == .arrow_up and self.contentAtTop() and self.header().focusHeader(root_focus)) return;
         if (self.detailActive()) {
             try self.detailInput(key, root_focus);
         } else {
@@ -776,13 +873,13 @@ pub const View = struct {
         return lb.children.getIndex(cid) == 0;
     }
 
-    // only the clone-url row sits directly below the repository header.
+    // only the header's own row sits directly below the repository header.
     pub fn atTop(self: *View) bool {
-        return self.headerActive() or (!self.header().hasCloneUrl() and self.contentAtTop());
+        return self.headerActive() or (!self.header().hasHeaderFocus() and self.contentAtTop());
     }
 
-    pub fn focusCloneUrl(self: *View, root_focus: *Focus) bool {
-        return self.header().focusCloneUrl(root_focus);
+    pub fn focusHeader(self: *View, root_focus: *Focus) bool {
+        return self.header().focusHeader(root_focus);
     }
 };
 
@@ -864,45 +961,66 @@ fn parentDir(dir: []const u8) []const u8 {
     return dir[0..slash];
 }
 
-// the "<ref_or_oid> <value>" banner shown above the listing.
-pub const Header = struct {
-    content: []const u8,
+// a search result's bottom label: the directory it sits in, empty at the root.
+// a directory too wide for the list column is clipped from the left.
+fn resultDirLabel(aa: std.mem.Allocator, path: []const u8) ![]const u8 {
+    const slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return "";
+    const dir = path[0..slash];
+    // the row's border and the label's padding take two columns each
+    const max_width = View.list_max_width - 4;
+    var width = try xitui.width.displayWidth(dir);
+    if (width <= max_width) return std.fmt.allocPrint(aa, " {s} ", .{dir});
 
-    // `value` arrives url-encoded, so decode it for display.
-    pub fn init(aa: std.mem.Allocator, ref_or_oid: ui.RoutablePage.RefOrOid, value: []const u8) !Header {
-        const decoded = std.Uri.percentDecodeInPlace(try aa.dupe(u8, value));
-        return .{
-            .content = try std.fmt.allocPrint(aa, "{s} {s}", .{ @tagName(ref_or_oid), decoded }),
-        };
+    const ellipsis = "..";
+    var iter = (try std.unicode.Utf8View.init(dir)).iterator();
+    var start: usize = 0;
+    while (width > max_width - ellipsis.len) {
+        const slice = iter.nextCodepointSlice() orelse break;
+        width -= xitui.width.cellWidth(try std.unicode.utf8Decode(slice));
+        start += slice.len;
     }
+    return std.fmt.allocPrint(aa, " " ++ ellipsis ++ "{s} ", .{dir[start..]});
+}
 
+// the search box and the clone url shown above the listing.
+pub const Header = struct {
     pub const View = struct {
         box: wgt.Box(ui.Widget),
-        data: *const Header,
+        data: *const Self,
+        session: *ui.Session,
 
-        pub fn init(allocator: std.mem.Allocator, data: *const Header, session: *ui.Session, location: ui.RoutablePage.RepoLocation) !Header.View {
+        pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !Header.View {
             var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
             errdefer box.deinit(allocator);
 
+            // the search box only appears where an index can serve it.
+            if (data.find_available) {
+                var text_input = try wgt.TextInput.init(allocator, .{ .label = " find file ", .name = "find", .rounded_corners = true, .visible_width = 18, .render_content = session.is_terminal });
+                errdefer text_input.deinit(allocator);
+                text_input.getFocus().mode = .all;
+                if (data.find) |term| try text_input.setContent(allocator, term);
+                box.getFocus().child_id = text_input.getFocus().id;
+                try box.children.put(allocator, text_input.getFocus().id, .{ .widget = .{ .text_input = text_input }, .rect = null, .min_size = .{ .width = 20, .height = 3 } });
+            }
+
+            // the spacer pushes the clone url to the right edge.
+            {
+                var spacer = try ui.widget.Spacer.init(allocator);
+                errdefer spacer.deinit(allocator);
+                try box.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null });
+            }
+
             if (session.data.host_kind == .server) {
-                if (try ui.widget.CopyableText.initClone(allocator, session, location)) |value| {
+                if (try ui.widget.CopyableText.initClone(allocator, session, data.location)) |value| {
                     var clone_url = value;
                     errdefer clone_url.deinit(allocator);
                     const min_width = clone_url.minWidth();
-                    box.getFocus().child_id = clone_url.getFocus().id;
+                    if (box.getFocus().child_id == null) box.getFocus().child_id = clone_url.getFocus().id;
                     try box.children.put(allocator, clone_url.getFocus().id, .{ .widget = .{ .copyable_text = clone_url }, .rect = null, .min_size = .{ .width = min_width, .height = 3 }, .max_size = .{ .width = min_width, .height = 3 } });
                 }
             }
 
-            var spacer = try ui.widget.Spacer.init(allocator);
-            errdefer spacer.deinit(allocator);
-            try box.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null });
-
-            var text_box = try wgt.TextBox.init(allocator, data.content, .{ .border_style = .hidden, .wrap_kind = .none });
-            errdefer text_box.deinit(allocator);
-            try box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null, .flex = .shrink });
-
-            return .{ .box = box, .data = data };
+            return .{ .box = box, .data = data, .session = session };
         }
 
         pub fn deinit(self: *Header.View, allocator: std.mem.Allocator) void {
@@ -911,27 +1029,80 @@ pub const Header = struct {
 
         pub fn build(self: *Header.View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
             self.clearGrid();
+            if (self.findInput()) |text_input| {
+                text_input.options.bottom_label = if (root_focus.grandchild_id == text_input.getFocus().id) " press enter " else "";
+            }
             try self.box.build(allocator, constraint, root_focus);
+            if (!self.session.is_terminal) {
+                if (self.findInput()) |text_input| {
+                    try self.session.text_inputs.put(self.session.arena.allocator(), text_input.getFocus().id, text_input);
+                }
+            }
         }
 
         pub fn input(self: *Header.View, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
+            const current = self.box.getFocus().child_id orelse return;
+            if (self.findInput()) |text_input| {
+                if (current == text_input.getFocus().id) {
+                    switch (key) {
+                        .enter => return self.submit(allocator, text_input),
+                        .arrow_right => if (text_input.cursor == text_input.content.items.len) {
+                            if (self.cloneUrl()) |clone_url| {
+                                root_focus.setFocus(clone_url.getFocus().id);
+                                return;
+                            }
+                        },
+                        else => {},
+                    }
+                    return text_input.input(allocator, key, root_focus);
+                }
+            }
             const clone_url = self.cloneUrl() orelse return;
+            if (key == .arrow_left and clone_url.selected == 0) {
+                if (self.findInput()) |text_input| {
+                    root_focus.setFocus(text_input.getFocus().id);
+                    return;
+                }
+            }
             try clone_url.input(allocator, key, root_focus);
         }
 
-        pub fn focusCloneUrl(self: *Header.View, root_focus: *Focus) bool {
+        // navigate to the typed term's results, pinned to the listing's ref. an
+        // empty term leaves the results for the plain listing.
+        fn submit(self: *Header.View, allocator: std.mem.Allocator, text_input: *wgt.TextInput) !void {
+            const term = try text_input.text(allocator);
+            defer allocator.free(term);
+            if (term.len == 0 and self.data.find == null) return;
+            const route = self.data.filesRoute("", 0) orelse return;
+            try self.session.navigate(route.withFind(term) orelse return);
+        }
+
+        // enter the header, preferring the search box.
+        pub fn focusHeader(self: *Header.View, root_focus: *Focus) bool {
+            if (self.findInput()) |text_input| {
+                root_focus.setFocus(text_input.getFocus().id);
+                return true;
+            }
             const clone_url = self.cloneUrl() orelse return false;
             root_focus.setFocus(clone_url.getFocus().id);
             return true;
         }
 
-        pub fn hasCloneUrl(self: *Header.View) bool {
-            return self.cloneUrl() != null;
+        pub fn hasHeaderFocus(self: *Header.View) bool {
+            return self.cloneUrl() != null or self.findInput() != null;
         }
 
         fn cloneUrl(self: *Header.View) ?*ui.widget.CopyableText {
             for (self.box.children.values()) |*child| switch (child.widget) {
                 .copyable_text => |*copyable_text| return copyable_text,
+                else => {},
+            };
+            return null;
+        }
+
+        fn findInput(self: *Header.View) ?*wgt.TextInput {
+            for (self.box.children.values()) |*child| switch (child.widget) {
+                .text_input => |*text_input| return text_input,
                 else => {},
             };
             return null;

@@ -52,6 +52,14 @@ fn tick(min_height: u32, max_width: u32) !void {
     // apply actions queued during input. the wasm path has no repo, so this is
     // in-memory only; logged-in web persistence goes through the /ansi POST.
     session.applyPending();
+    // a widget asked to move to another page, so hand it to the host instead of
+    // rendering this one again.
+    if (session.next_page) |route| {
+        session.next_page = null;
+        const url = try route.toUrl(&page_arena);
+        _navigate(url.ptr, @intCast(url.len));
+        return;
+    }
     // bind the UI to the browser viewport (cols x rows) like the terminal:
     // min == max height fills it exactly, and each Scroll clips to its
     // viewport while handing its full content to a native-scrollable element.

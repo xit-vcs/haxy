@@ -12,6 +12,7 @@ const rp = xit.repo;
 const hash = xit.hash;
 const obj = xit.object;
 const ui = hx.ui;
+const find = hx.find;
 const fork = hx.fork;
 const pch = hx.pch;
 
@@ -821,6 +822,8 @@ pub fn main(init: std.process.Init) !void {
             try evt.consume(.local, .repo, .xit, .{}, io, allocator, &template_repo, evt.events_ref, &discussion_comment_events);
             try template_repo.patchAll(io, allocator, null);
             try template_repo.addConfig(io, allocator, .{ .name = "core.bare", .value = "true" });
+            // fixtures commit directly, so index the branch tips by hand
+            try find.refresh(.{}, io, allocator, &template_repo);
         }
 
         // copy the template to each repo's on-disk location, named by its
@@ -1065,6 +1068,8 @@ fn seedPatchRevision(
     }
     try fork_repo.patchAll(io, allocator, null);
     try fork_repo.addConfig(io, allocator, .{ .name = "core.bare", .value = "true" });
+    // the commits above skipped the push path, so index the patch branch by hand
+    try find.refresh(.{}, io, allocator, &fork_repo);
     try fork_dir.deleteFile(io, path);
     const revision_id = evt.EventWithId.randomId(random);
     const head_tree_oid = try commitTree(io, allocator, &fork_repo, &source_oid);

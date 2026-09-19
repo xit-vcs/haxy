@@ -45,8 +45,6 @@ commits: []const Commit,
 next_start: ?[]const u8,
 // what the pane shows for the commit the log walks from.
 content: Content = .{ .diff = .{} },
-// the ref banner shown above the log.
-header: Header,
 
 const Self = @This();
 
@@ -169,7 +167,6 @@ pub fn init(
         .commits = try aa.dupe(Commit, buf[0..count]),
         .next_start = next_start,
         .content = try pageContent(aa, content),
-        .header = try Header.init(aa, resolved.ref_or_oid, resolved.value),
     };
 }
 
@@ -184,7 +181,6 @@ pub fn emptyResult(aa: std.mem.Allocator, location: ui.RoutablePage.RepoLocation
         .commits = &.{},
         .next_start = null,
         .content = try pageContent(aa, content),
-        .header = try Header.init(aa, ref_or_oid, value),
     };
 }
 
@@ -296,10 +292,10 @@ fn firstLine(message: []const u8) []const u8 {
 }
 
 pub const View = struct {
-    // a vertical stack: the ref banner on top, then a horizontal
+    // a vertical stack: the clone url row on top, then a horizontal
     // split with the commit list on the left and a diff pane on the right
     // showing the selected commit's diff.
-    box: wgt.Box(ui.Widget), // vert: [header_index] = banner, [content_index] = split
+    box: wgt.Box(ui.Widget), // vert: [header_index] = clone url row, [content_index] = split
     data: *const Self,
     session: *ui.Session,
     // the commit whose diff the pane currently shows (index into data.commits).
@@ -317,9 +313,9 @@ pub const View = struct {
         var outer = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert });
         errdefer outer.deinit(allocator);
 
-        // the ref banner at the top.
+        // the clone url at the top.
         {
-            var header_view = try Header.View.init(allocator, &data.header, session, data.location);
+            var header_view = try Header.View.init(allocator, session, data.location);
             errdefer header_view.deinit(allocator);
             try outer.children.put(allocator, header_view.getFocus().id, .{ .widget = .{ .repo_commits_header = header_view }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
         }
@@ -732,25 +728,21 @@ fn messageLink(page_arena: *std.heap.ArenaAllocator, data: *const Self, oid: []c
     return std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{url});
 }
 
-// the "<ref_or_oid> <value>" banner shown above the log.
+// the clone url shown above the log.
 pub const Header = struct {
-    content: []const u8,
-
-    // `value` arrives url-encoded, so decode it for display.
-    pub fn init(aa: std.mem.Allocator, ref_or_oid: ui.RoutablePage.RefOrOid, value: []const u8) !Header {
-        const decoded = std.Uri.percentDecodeInPlace(try aa.dupe(u8, value));
-        return .{
-            .content = try std.fmt.allocPrint(aa, "{s} {s}", .{ @tagName(ref_or_oid), decoded }),
-        };
-    }
-
     pub const View = struct {
         box: wgt.Box(ui.Widget),
-        data: *const Header,
 
-        pub fn init(allocator: std.mem.Allocator, data: *const Header, session: *ui.Session, location: ui.RoutablePage.RepoLocation) !Header.View {
+        pub fn init(allocator: std.mem.Allocator, session: *ui.Session, location: ui.RoutablePage.RepoLocation) !Header.View {
             var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
             errdefer box.deinit(allocator);
+
+            // the spacer pushes the clone url to the right edge.
+            {
+                var spacer = try ui.widget.Spacer.init(allocator);
+                errdefer spacer.deinit(allocator);
+                try box.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null });
+            }
 
             if (session.data.host_kind == .server) {
                 if (try ui.widget.CopyableText.initClone(allocator, session, location)) |value| {
@@ -762,15 +754,7 @@ pub const Header = struct {
                 }
             }
 
-            var spacer = try ui.widget.Spacer.init(allocator);
-            errdefer spacer.deinit(allocator);
-            try box.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null });
-
-            var text_box = try wgt.TextBox.init(allocator, data.content, .{ .border_style = .hidden, .wrap_kind = .none });
-            errdefer text_box.deinit(allocator);
-            try box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null, .flex = .shrink });
-
-            return .{ .box = box, .data = data };
+            return .{ .box = box };
         }
 
         pub fn deinit(self: *Header.View, allocator: std.mem.Allocator) void {

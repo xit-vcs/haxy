@@ -1,5 +1,6 @@
 const std = @import("std");
 const evt = @import("event.zig");
+const find = @import("find.zig");
 const xit = @import("xit");
 const rp = xit.repo;
 const hash = xit.hash;
@@ -160,6 +161,12 @@ pub fn create(
 
     try fork_repo.addConfig(io, allocator, .{ .name = "core.bare", .value = "true" });
     try fork_repo.addConfig(io, allocator, .{ .name = "receive.denydeletes", .value = "true" });
+
+    // the copied db carries the target's file index, so the patch branch's
+    // entry starts from one of those rather than walking the tree
+    find.refresh(repo_opts, io, allocator, &fork_repo) catch |err| {
+        std.log.warn("failed to refresh file index: {s}", .{@errorName(err)});
+    };
 
     // create the patch event
     try evt.consume(.server, .fork, .xit, repo_opts, io, allocator, &fork_repo, evt.events_ref, &.{.{
