@@ -9,6 +9,10 @@ const Key = xitui.input.Key;
 const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
 
+const repos_tab_label = "repos";
+const users_tab_label = "users";
+const settings_tab_label = "settings";
+
 pub const AuthTab = @import("./../AuthTab.zig");
 
 title: ui.Title,
@@ -86,7 +90,7 @@ pub const View = struct {
 
         // repos tab
         {
-            var text_box = try wgt.TextBox.init(allocator, "repos", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            var text_box = try wgt.TextBox.init(allocator, repos_tab_label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().mode = .all;
             text_box.getFocus().kind = .{ .custom = repos_link };
@@ -95,13 +99,13 @@ pub const View = struct {
             try box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
-                .min_size = .{ .width = "repos".len + 2, .height = null },
+                .min_size = .{ .width = repos_tab_label.len + 2, .height = null },
             });
         }
 
         // users tab
         {
-            var text_box = try wgt.TextBox.init(allocator, "users", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            var text_box = try wgt.TextBox.init(allocator, users_tab_label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().mode = .all;
             text_box.getFocus().kind = .{ .custom = users_link };
@@ -110,7 +114,7 @@ pub const View = struct {
             try box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
-                .min_size = .{ .width = "users".len + 2, .height = null },
+                .min_size = .{ .width = users_tab_label.len + 2, .height = null },
             });
         }
 
@@ -128,7 +132,7 @@ pub const View = struct {
 
         // settings tab. settings are account preferences, so it needs a login.
         if (session.data.user_id != null) {
-            var text_box = try wgt.TextBox.init(allocator, "settings", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            var text_box = try wgt.TextBox.init(allocator, settings_tab_label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().mode = .all;
             text_box.getFocus().kind = .{ .custom = settings_link };
@@ -137,7 +141,7 @@ pub const View = struct {
             try box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
-                .min_size = .{ .width = "settings".len + 2, .height = null },
+                .min_size = .{ .width = settings_tab_label.len + 2, .height = null },
             });
         }
 

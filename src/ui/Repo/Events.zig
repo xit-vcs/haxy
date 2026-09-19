@@ -14,6 +14,9 @@ const Key = xitui.input.Key;
 const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
 
+const active_tab_label = "active";
+const removed_tab_label = "removed";
+
 const page_size = 20;
 
 pub const Item = struct {
@@ -578,11 +581,12 @@ pub const Header = struct {
             var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
             errdefer box.deinit(allocator);
             var tab_ids: [2]usize = undefined;
-            inline for ([_]ui.RoutablePage.EventsView{ .active, .removed }, 0..) |view, i| {
+            const view_labels = [_][]const u8{ active_tab_label, removed_tab_label };
+            inline for ([_]ui.RoutablePage.EventsView{ .active, .removed }, view_labels, 0..) |view, view_label, i| {
                 const route = ui.RoutablePage.repoEventsRoute(data.identity, view, null, "") orelse return error.RouteTooLong;
                 const count = data.window(view).count;
                 var label_buf: [64]u8 = undefined;
-                const label = try std.fmt.bufPrint(&label_buf, "{s} ({d})", .{ @tagName(view), count });
+                const label = try std.fmt.bufPrint(&label_buf, "{s} ({d})", .{ view_label, count });
                 var tab = try wgt.TextBox.init(allocator, label, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .none });
                 errdefer tab.deinit(allocator);
                 tab.getFocus().mode = .all;

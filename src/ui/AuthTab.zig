@@ -8,6 +8,9 @@ const Key = xitui.input.Key;
 const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
 
+const login_tab_label = "login";
+const logout_tab_label = "logout";
+
 pub const View = struct {
     text_box: wgt.TextBox,
     session: *ui.Session,
@@ -15,7 +18,7 @@ pub const View = struct {
     bottom_label_buf: [ui.clipped_bottom_label_max_len]u8,
 
     pub fn init(allocator: std.mem.Allocator, session: *ui.Session) !View {
-        var text_box = try wgt.TextBox.init(allocator, "login", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+        var text_box = try wgt.TextBox.init(allocator, login_tab_label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
         errdefer text_box.deinit(allocator);
         text_box.getFocus().mode = .all;
         text_box.getFocus().kind = .{ .custom = "ai:/auth" };
@@ -31,7 +34,7 @@ pub const View = struct {
     }
 
     fn text(self: *const View) []const u8 {
-        return if (self.session.data.user_id == null) "login" else "logout";
+        return if (self.session.data.user_id == null) login_tab_label else logout_tab_label;
     }
 
     fn bottomLabel(self: *View) []const u8 {

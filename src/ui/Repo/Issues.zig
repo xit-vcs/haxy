@@ -353,6 +353,16 @@ pub const detail_widget_name = "repo_issue_detail";
 
 pub const Header = thread.Header;
 
+const open_tab_label = "open";
+const closed_tab_label = "closed";
+const tags_tab_label = "tags";
+const edit_tab_label = "edit";
+const reply_tab_label = "reply";
+const remove_tab_label = "remove";
+const resolve_tab_label = "resolve";
+const new_tab_label = "new";
+const conflicts_tab_label = "conflicts";
+
 // tabs switching between the issues page's views
 pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *const Self) !Header {
     var header = try Header.init(allocator);
@@ -362,11 +372,12 @@ pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *con
     const page_selected = std.meta.activeTag(session.data.current_page) == .repo_issues;
 
     // a list tab per status, labeled with its listing's issue count
-    for ([_]evt.Issue.Status{ .open, .closed }, 0..) |status, index| {
+    const status_labels = [_][]const u8{ open_tab_label, closed_tab_label };
+    for ([_]evt.Issue.Status{ .open, .closed }, status_labels, 0..) |status, status_label, index| {
         const route = ui.RoutablePage.repoIssuesRoute(data.identity, status, data.tag, "") orelse return error.RouteTooLong;
         const link = try ui.inPageTabLink(session, route, page_selected and selected_index == index);
         var label_buf: [64]u8 = undefined;
-        const label = try std.fmt.bufPrint(&label_buf, "{s} ({d})", .{ @tagName(status), data.window(status).count });
+        const label = try std.fmt.bufPrint(&label_buf, "{s} ({d})", .{ status_label, data.window(status).count });
         try header.addTab(allocator, label, link, index);
     }
 
@@ -374,9 +385,9 @@ pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *con
     {
         const tags_route = ui.RoutablePage.repoThreadTagsRoute(.issue, data.identity, data.tag) orelse return error.RouteTooLong;
         const tags_link = try ui.inPageTabLink(session, tags_route, page_selected and selected_index == View.viewIndex(.tags));
-        const label = if (data.tag.len == 0) "tags" else blk: {
+        const label = if (data.tag.len == 0) tags_tab_label else blk: {
             const decoded = std.Uri.percentDecodeInPlace(try aa.dupe(u8, data.tag));
-            break :blk try std.fmt.allocPrint(aa, "tags ({s})", .{decoded});
+            break :blk try std.fmt.allocPrint(aa, tags_tab_label ++ " ({s})", .{decoded});
         };
         try header.addTab(allocator, label, tags_link, View.viewIndex(.tags));
     }
@@ -393,12 +404,12 @@ pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *con
         };
         const link = try ui.inPageTabLink(session, route, page_selected and selected_index == View.viewIndex(.new));
         const label: []const u8 = switch (data.view) {
-            .edit => "edit",
-            .new_comment => "reply",
-            .edit_comment => "edit",
-            .remove => "remove",
-            .resolve => "resolve",
-            else => "new",
+            .edit => edit_tab_label,
+            .new_comment => reply_tab_label,
+            .edit_comment => edit_tab_label,
+            .remove => remove_tab_label,
+            .resolve => resolve_tab_label,
+            else => new_tab_label,
         };
         try header.addTab(allocator, label, link, View.viewIndex(.new));
     }
@@ -408,7 +419,7 @@ pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *con
         const route = ui.RoutablePage.repoIssuesConflictsRoute(data.identity, "") orelse return error.RouteTooLong;
         const link = try ui.inPageTabLink(session, route, page_selected and selected_index == View.viewIndex(.conflicts));
         var label_buf: [64]u8 = undefined;
-        const label = try std.fmt.bufPrint(&label_buf, "conflicts ({d})", .{data.conflicts.count});
+        const label = try std.fmt.bufPrint(&label_buf, conflicts_tab_label ++ " ({d})", .{data.conflicts.count});
         try header.addTab(allocator, label, link, View.viewIndex(.conflicts));
     }
 

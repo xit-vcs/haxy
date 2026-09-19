@@ -10,6 +10,16 @@ const Key = xitui.input.Key;
 const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
 
+const diff_tab_label = "diff";
+const commits_tab_label = "commits";
+const files_tab_label = "files";
+const refs_tab_label = "refs";
+const issues_tab_label = "issues";
+const patches_tab_label = "patches";
+const discuss_tab_label = "discuss";
+const events_tab_label = "events";
+const settings_tab_label = "settings";
+
 pub const AuthTab = @import("./../AuthTab.zig");
 
 const RefOrOid = ui.RoutablePage.RefOrOid;
@@ -70,8 +80,8 @@ pub const View = struct {
         const bottom_label = try ui.clippedBottomLabel(try aa.alloc(u8, ui.clipped_bottom_label_max_len), ref_name);
         const bottom_label_width = try xitui.width.displayWidth(bottom_label);
         const changes_label = switch (page.changes) {
-            .diff => "diff",
-            .commits => |c| if (c.commit_count) |count| try std.fmt.allocPrint(aa, "commits ({d})", .{count}) else "commits",
+            .diff => diff_tab_label,
+            .commits => |c| if (c.commit_count) |count| try std.fmt.allocPrint(aa, commits_tab_label ++ " ({d})", .{count}) else commits_tab_label,
         };
         const changes_label_width = try xitui.width.displayWidth(changes_label);
         var first_group_width = try data.title.width();
@@ -166,7 +176,7 @@ pub const View = struct {
 
         // files tab
         {
-            var text_box = try wgt.TextBox.init(allocator, "files", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none, .bottom_label = bottom_label });
+            var text_box = try wgt.TextBox.init(allocator, files_tab_label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none, .bottom_label = bottom_label });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().mode = .all;
             text_box.getFocus().kind = .{ .custom = files_link };
@@ -175,7 +185,7 @@ pub const View = struct {
             try tabs_box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
-                .min_size = .{ .width = @max("files".len, bottom_label_width) + 2, .height = null },
+                .min_size = .{ .width = @max(files_tab_label.len, bottom_label_width) + 2, .height = null },
             });
         }
 
@@ -196,7 +206,7 @@ pub const View = struct {
 
         // refs tab
         {
-            var text_box = try wgt.TextBox.init(allocator, "refs", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            var text_box = try wgt.TextBox.init(allocator, refs_tab_label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().mode = .all;
             text_box.getFocus().kind = .{ .custom = refs_link };
@@ -205,13 +215,13 @@ pub const View = struct {
             try tabs_box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
-                .min_size = .{ .width = "refs".len + 2, .height = null },
+                .min_size = .{ .width = refs_tab_label.len + 2, .height = null },
             });
         }
 
         // issues tab
         {
-            var text_box = try wgt.TextBox.init(allocator, "issues", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            var text_box = try wgt.TextBox.init(allocator, issues_tab_label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().mode = .all;
             text_box.getFocus().kind = .{ .custom = issues_link };
@@ -220,13 +230,13 @@ pub const View = struct {
             try tabs_box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
-                .min_size = .{ .width = "issues".len + 2, .height = null },
+                .min_size = .{ .width = issues_tab_label.len + 2, .height = null },
             });
         }
 
         // patches tab
         {
-            var text_box = try wgt.TextBox.init(allocator, "patches", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            var text_box = try wgt.TextBox.init(allocator, patches_tab_label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().mode = .all;
             text_box.getFocus().kind = .{ .custom = patches_link };
@@ -235,13 +245,13 @@ pub const View = struct {
             try tabs_box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
-                .min_size = .{ .width = "patches".len + 2, .height = null },
+                .min_size = .{ .width = patches_tab_label.len + 2, .height = null },
             });
         }
 
-        // discussions tab
+        // discuss tab
         {
-            var text_box = try wgt.TextBox.init(allocator, "discussions", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            var text_box = try wgt.TextBox.init(allocator, discuss_tab_label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().mode = .all;
             text_box.getFocus().kind = .{ .custom = discussions_link };
@@ -250,13 +260,13 @@ pub const View = struct {
             try tabs_box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
-                .min_size = .{ .width = "discussions".len + 2, .height = null },
+                .min_size = .{ .width = discuss_tab_label.len + 2, .height = null },
             });
         }
 
         // events
         {
-            var text_box = try wgt.TextBox.init(allocator, "events", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            var text_box = try wgt.TextBox.init(allocator, events_tab_label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().mode = .all;
             text_box.getFocus().kind = .{ .custom = events_link };
@@ -265,7 +275,7 @@ pub const View = struct {
             try tabs_box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
-                .min_size = .{ .width = "events".len + 2, .height = null },
+                .min_size = .{ .width = events_tab_label.len + 2, .height = null },
             });
         }
 
@@ -284,7 +294,7 @@ pub const View = struct {
         // settings tab. settings are account preferences, so it needs a login
         // (which also rules out local mode, which has no accounts).
         if (session.data.user_id != null) {
-            var text_box = try wgt.TextBox.init(allocator, "settings", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            var text_box = try wgt.TextBox.init(allocator, settings_tab_label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().mode = .all;
             text_box.getFocus().kind = .{ .custom = settings_link };
@@ -293,7 +303,7 @@ pub const View = struct {
             try tabs_box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,
-                .min_size = .{ .width = "settings".len + 2, .height = null },
+                .min_size = .{ .width = settings_tab_label.len + 2, .height = null },
             });
         }
 

@@ -10,6 +10,12 @@ const Key = xitui.input.Key;
 const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
 
+const commits_tab_label = "commits";
+const patch_tab_label = "patch";
+const diff_tab_label = "diff";
+const files_tab_label = "files";
+const settings_tab_label = "settings";
+
 pub const AuthTab = @import("../AuthTab.zig");
 
 name: []const u8,
@@ -54,7 +60,7 @@ pub const View = struct {
 
         const aa = session.page_arena.allocator();
         const identity = try std.fmt.allocPrint(aa, "{s}/{s}", .{ data.owner_name, data.name });
-        const commits_label = if (commit_count) |count| try std.fmt.allocPrint(aa, "commits ({d})", .{count}) else "commits";
+        const commits_label = if (commit_count) |count| try std.fmt.allocPrint(aa, commits_tab_label ++ " ({d})", .{count}) else commits_tab_label;
         var first_group_width = try data.title.width();
 
         try ui.widget.addBackButton(allocator, &title_box, session);
@@ -96,7 +102,7 @@ pub const View = struct {
             ui.RoutablePage.forkCommitsRoute(identity, data.id, data.oid, 0, "") orelse return error.RouteTooLong,
         };
         const tags = [_]std.meta.Tag(ui.RoutablePage){ .fork_patch, .fork_diff, .fork_files, .fork_commits };
-        const labels = [_][]const u8{ "patch", "diff", "files", commits_label };
+        const labels = [_][]const u8{ patch_tab_label, diff_tab_label, files_tab_label, commits_label };
         var selected_tab: ?usize = null;
 
         for (routes, tags, labels) |route, tag, label| {
@@ -128,13 +134,13 @@ pub const View = struct {
 
         // settings are account preferences, so they require a login.
         if (session.data.user_id != null) {
-            var settings = try wgt.TextBox.init(allocator, "settings", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            var settings = try wgt.TextBox.init(allocator, settings_tab_label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer settings.deinit(allocator);
             settings.getFocus().mode = .all;
             settings.getFocus().kind = .{ .custom = settings_link };
             try tab_ids.put(allocator, settings.getFocus().id, {});
             if (current_tag == .fork_settings) selected_tab = settings.getFocus().id;
-            try tabs_box.children.put(allocator, settings.getFocus().id, .{ .widget = .{ .text_box = settings }, .rect = null, .min_size = .{ .width = "settings".len + 2, .height = null } });
+            try tabs_box.children.put(allocator, settings.getFocus().id, .{ .widget = .{ .text_box = settings }, .rect = null, .min_size = .{ .width = settings_tab_label.len + 2, .height = null } });
         }
 
         // keep authentication within the fork page.
