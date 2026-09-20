@@ -178,12 +178,10 @@ pub fn handleRequest(allocator: std.mem.Allocator, session: *ui.Session, target:
 // the repository; the web handler uses its matching http authorization path.
 pub fn perform(allocator: std.mem.Allocator, session: *ui.Session, target: ui.RoutablePage.RepoUndoRoute) !void {
     const identity = target.name.slice();
+    const index = if (target.clear) null else target.index orelse return error.InvalidHistoryIndex;
     const source = try authorizedSource(session, identity) orelse return error.Forbidden;
     const io = session.io orelse return error.NotFound;
-    if (target.clear)
-        try clearHistory(io, allocator, source)
-    else
-        try execute(io, allocator, source, target.index orelse return error.InvalidHistoryIndex);
+    if (index) |value| try execute(io, allocator, source, value) else try clearHistory(io, allocator, source);
     try session.navigate(ui.RoutablePage.repoUndoRoute(identity, null) orelse return error.RouteTooLong);
 }
 
@@ -247,7 +245,7 @@ pub const View = struct {
                     try addText(allocator, &rows, "next →", try std.fmt.allocPrint(session.page_arena.allocator(), "a:{s}", .{try route.toUrl(session.page_arena)}), .hidden);
                 }
                 if (data.items.len == 0) try addText(allocator, &rows, "no undo history", null, .hidden);
-                if (rows.children.count() > 0) rows.getFocus().child_id = rows.children.keys()[0];
+                rows.getFocus().child_id = rows.children.keys()[0];
                 break :blk try wgt.Scroll(ui.Widget).init(allocator, .{ .box = rows }, .{ .direction = .vert, .web_native = !session.is_terminal, .fill = true });
             };
             errdefer scroll.deinit(allocator);
@@ -304,6 +302,23 @@ pub const View = struct {
         row.getFocus().mode = .all;
         if (link) |value| row.getFocus().kind = .{ .custom = value };
         try box.children.put(allocator, row.getFocus().id, .{ .widget = .{ .text_box = row }, .rect = null, .min_size = null });
+    }
+
+    // enter counts only on the focused button; a click counts anywhere on it
+    fn activated(root_focus: *Focus, button_id: usize, key: Key) bool {
+        return switch (key) {
+            .enter => root_focus.grandchild_id == button_id,
+            .mouse => |mouse| inp.leftClickOn(root_focus, button_id, mouse),
+            else => false,
+        };
+    }
+
+    // the terminal hosts run the action after rendering; the web renderer
+    // posts the form instead, and wasm has no repository to act on
+    fn requestUndo(self: *View, route: ui.RoutablePage) void {
+        if (builtin.target.cpu.arch == .wasm32) return;
+        if (!self.session.is_terminal or self.session.host_request != null) return;
+        self.session.host_request = .{ .undo = route.repo_undo };
     }
 
     fn headerBox(self: *View) *wgt.Box(ui.Widget) {
@@ -412,17 +427,8 @@ pub const View = struct {
         if (self.detailActive()) {
             const details = &self.detailScroll().child.box;
             if (self.selected()) |index| {
-                const button_id = details.children.keys()[0];
-                const activated = switch (key) {
-                    .enter => root_focus.grandchild_id == button_id,
-                    .mouse => |mouse| inp.leftClickOn(root_focus, button_id, mouse),
-                    else => false,
-                };
-                if (activated and self.data.can_undo and self.data.items[index].index > 0) {
-                    if (builtin.target.cpu.arch != .wasm32 and self.session.is_terminal and self.session.host_request == null) {
-                        const route = ui.RoutablePage.repoUndoRoute(self.data.identity, self.data.items[index].index) orelse return error.RouteTooLong;
-                        self.session.host_request = .{ .undo = route.repo_undo };
-                    }
+                if (activated(root_focus, details.children.keys()[0], key) and self.data.can_undo and self.data.items[index].index > 0) {
+                    self.requestUndo(ui.RoutablePage.repoUndoRoute(self.data.identity, self.data.items[index].index) orelse return error.RouteTooLong);
                     return;
                 }
             }
@@ -441,16 +447,8 @@ pub const View = struct {
     fn clearInput(self: *View, key: Key, root_focus: *Focus) !void {
         const center = &self.box.children.values()[content_index].widget.center;
         const button_id = center.child.box.getFocus().child_id orelse return;
-        const activated = switch (key) {
-            .enter => root_focus.grandchild_id == button_id,
-            .mouse => |mouse| inp.leftClickOn(root_focus, button_id, mouse),
-            else => false,
-        };
-        if (!activated or !self.data.can_undo) return;
-        if (builtin.target.cpu.arch != .wasm32 and self.session.is_terminal and self.session.host_request == null) {
-            const route = ui.RoutablePage.repoUndoClearRoute(self.data.identity) orelse return error.RouteTooLong;
-            self.session.host_request = .{ .undo = route.repo_undo };
-        }
+        if (!activated(root_focus, button_id, key) or !self.data.can_undo) return;
+        self.requestUndo(ui.RoutablePage.repoUndoClearRoute(self.data.identity) orelse return error.RouteTooLong);
     }
 
     fn contentAtTop(self: *View) bool {
