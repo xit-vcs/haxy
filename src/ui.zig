@@ -87,7 +87,7 @@ pub const Page = union(PageKind) {
                 };
             },
             .repo => switch (route) {
-                .repo_files, .repo_commits, .repo_diff, .repo_refs, .repo_issues, .repo_patches, .repo_discussions, .repo_events, .repo_settings, .repo_auth => .{ .repo = try Repo.init(arena, session, route) },
+                .repo_files, .repo_commits, .repo_diff, .repo_refs, .repo_issues, .repo_patches, .repo_discussions, .repo_events, .repo_undo, .repo_settings, .repo_auth => .{ .repo = try Repo.init(arena, session, route) },
                 else => return error.UnexpectedRoute,
             },
             .fork => switch (route) {
@@ -168,6 +168,7 @@ pub const RoutablePage = union(enum) {
         comment: Array(evt.event_id_size * 2) = .{},
     },
     repo_events: RepoEventsRoute,
+    repo_undo: RepoUndoRoute,
     repo_settings: Array(repo_route_max_len),
     repo_auth: Array(repo_route_max_len),
     fork_patch: ForkRoute,
@@ -393,6 +394,15 @@ pub const RoutablePage = union(enum) {
             message,
         };
     };
+
+    pub const RepoUndoRoute = struct {
+        name: Array(repo_identity_max_len),
+        index: ?u64 = null,
+    };
+
+    pub fn repoUndoRoute(identity: []const u8, index: ?u64) ?RoutablePage {
+        return .{ .repo_undo = .{ .name = Array(repo_identity_max_len).from(identity) orelse return null, .index = index } };
+    }
 
     pub const RepoEventsRoute = struct {
         name: Array(repo_identity_max_len),
@@ -1137,6 +1147,10 @@ pub const RoutablePage = union(enum) {
                 try writeListFilters(&out.writer, t.tag.slice(), t.search.slice());
                 break :blk out.written();
             },
+            .repo_undo => |u| blk: {
+                const prefix = try repoUrlPrefix(arena, u.name.slice());
+                break :blk if (u.index) |index| try std.fmt.allocPrint(arena.allocator(), "{s}/undo/{d}", .{ prefix, index }) else try std.fmt.allocPrint(arena.allocator(), "{s}/undo", .{prefix});
+            },
             .repo_events => |e| blk: {
                 const prefix = try repoUrlPrefix(arena, e.name.slice());
                 break :blk if (e.kind) |kind|
@@ -1302,6 +1316,7 @@ pub const RoutablePage = union(enum) {
             .repo_patches => |*p| p.name.slice(),
             .repo_discussions => |*t| t.name.slice(),
             .repo_events => |*e| e.name.slice(),
+            .repo_undo => |*u| u.name.slice(),
             .repo_settings, .repo_auth => |*name| name.slice(),
             else => null,
         };
@@ -1343,7 +1358,7 @@ pub const RoutablePage = union(enum) {
         return switch (self) {
             .home_users, .home_repos, .home_settings, .home_auth => .home,
             .user_repos, .user_forks, .user_settings, .user_auth => .user,
-            .repo_files, .repo_commits, .repo_diff, .repo_refs, .repo_issues, .repo_patches, .repo_discussions, .repo_events, .repo_settings, .repo_auth => .repo,
+            .repo_files, .repo_commits, .repo_diff, .repo_refs, .repo_issues, .repo_patches, .repo_discussions, .repo_events, .repo_undo, .repo_settings, .repo_auth => .repo,
             .fork_patch, .fork_diff, .fork_files, .fork_commits, .fork_settings, .fork_auth => .fork,
         };
     }
@@ -1529,6 +1544,10 @@ pub const RoutablePage = union(enum) {
             if (std.mem.eql(u8, view, "new")) return if (tag_value.len == 0 and search_value.len == 0) repoThreadNewRoute(.discuss, pair) else null;
             return null;
         }
+        if (std.mem.eql(u8, tab, "undo")) {
+            const index = if (segments.next()) |word| std.fmt.parseInt(u64, word, 10) catch return null else null;
+            return if (segments.next() == null) repoUndoRoute(pair, index) else null;
+        }
         if (std.mem.eql(u8, tab, "events")) {
             const view = if (segments.next()) |word|
                 std.meta.stringToEnum(EventsView, word) orelse return null
@@ -1668,6 +1687,7 @@ pub const RoutablePage = union(enum) {
                 a_p.view == b.repo_patches.view and
                 a_p.comments_start == b.repo_patches.comments_start and
                 std.mem.eql(u8, a_p.comment.slice(), b.repo_patches.comment.slice()),
+            .repo_undo => |a_u| std.mem.eql(u8, a_u.name.slice(), b.repo_undo.name.slice()) and a_u.index == b.repo_undo.index,
             .repo_events => |a_e| std.mem.eql(u8, a_e.name.slice(), b.repo_events.name.slice()) and
                 a_e.view == b.repo_events.view and
                 a_e.kind == b.repo_events.kind and
@@ -2017,6 +2037,7 @@ pub const Session = struct {
     pub const HostRequest = union(enum) {
         show_copyable_text: []const u8,
         sync_events,
+        undo: RoutablePage.RepoUndoRoute,
     };
 
     pub const FormFeedback = union(enum) {
@@ -2292,6 +2313,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, session: *Session, repo_may
                     terminal_live = true;
                     term.setActive(&terminal);
                 },
+                .undo => |target| try Repo.Undo.perform(allocator, session, target),
                 .sync_events => {
                     try nav.root.build(allocator, .{
                         .min_size = .{ .width = null, .height = null },

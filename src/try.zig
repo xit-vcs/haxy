@@ -826,6 +826,13 @@ pub fn main(init: std.process.Init) !void {
             // fixtures commit directly, so index the ref tips by hand
             try find.refresh(.{}, io, allocator, &template_repo);
             try cms.refresh(.{}, io, allocator, &template_repo, null);
+            // clear history only after indexing has written its transactions.
+            {
+                const moment = try evt.currentMoment(.{}, &template_repo);
+                const roots = try evt.PatchRev.gcRoots(rp.Repo(.xit, .{}).DB, .sha1, allocator, moment);
+                defer allocator.free(roots);
+                _ = try template_repo.garbageCollect(io, allocator, .{ .extra_roots = roots });
+            }
         }
 
         // copy the template to each repo's on-disk location, named by its
@@ -1072,6 +1079,7 @@ fn seedPatchRevision(
     try fork_repo.addConfig(io, allocator, .{ .name = "core.bare", .value = "true" });
     // the commits above skipped the push path, so index the patch branch by hand
     try find.refresh(.{}, io, allocator, &fork_repo);
+    _ = try fork_repo.garbageCollect(io, allocator, .{});
     try fork_dir.deleteFile(io, path);
     const revision_id = evt.EventWithId.randomId(random);
     const head_tree_oid = try commitTree(io, allocator, &fork_repo, &source_oid);

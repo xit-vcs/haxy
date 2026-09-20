@@ -4,4 +4,5 @@ comptime {
     _ = @import("test/event/patch.zig");
     _ = @import("test/ssh.zig");
     _ = @import("test/ui.zig");
+    _ = @import("test/undo.zig");
 }

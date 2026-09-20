@@ -264,8 +264,8 @@ pub const View = struct {
             });
         }
 
-        // events
-        {
+        // events, which a server only shows to whoever it shows undo to
+        if (session.data.host_kind == .local or page.undo != null) {
             var text_box = try wgt.TextBox.init(allocator, events_tab_label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().mode = .all;
@@ -276,6 +276,21 @@ pub const View = struct {
                 .widget = .{ .text_box = text_box },
                 .rect = null,
                 .min_size = .{ .width = events_tab_label.len + 2, .height = null },
+            });
+        }
+
+        if (page.undo != null) {
+            const route = ui.RoutablePage.repoUndoRoute(identity, null) orelse return error.RouteTooLong;
+            var text_box = try wgt.TextBox.init(allocator, "undo", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            errdefer text_box.deinit(allocator);
+            text_box.getFocus().mode = .all;
+            text_box.getFocus().kind = .{ .custom = try ui.inPageTabLink(session, route, current_tag == .repo_undo) };
+            try tab_ids.put(allocator, text_box.getFocus().id, {});
+            if (current_tag == .repo_undo) selected_tab = text_box.getFocus().id;
+            try tabs_box.children.put(allocator, text_box.getFocus().id, .{
+                .widget = .{ .text_box = text_box },
+                .rect = null,
+                .min_size = .{ .width = 6, .height = null },
             });
         }
 

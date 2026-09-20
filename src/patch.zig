@@ -68,7 +68,7 @@ pub fn writeBranchPatch(
                 const parent = if (try rf.readRecur(repo_kind, repo_opts, state.readOnly(), ctx.io, .{ .ref = evt.events_ref }) == null) ctx.first_parent else null;
                 try evt.commitEvents(repo_kind, repo_opts, state, ctx.io, ctx.arena.child_allocator, evt.events_ref, &events, parent);
                 if (!try evt.consumeInTransaction(.repo, repo_kind, repo_opts, state, &ctx.repo.core.db, &moment, ctx.io, ctx.arena.child_allocator, evt.events_ref)) return error.CancelTransaction;
-                try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action = "update_branch_patch" } });
+                try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action = "update_patch" } });
             }
         };
         {

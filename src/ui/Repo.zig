@@ -21,6 +21,7 @@ pub const Issues = @import("./Repo/Issues.zig");
 pub const Patches = @import("./Repo/Patches.zig");
 pub const Discussions = @import("./Repo/Discussions.zig");
 pub const Comment = @import("./Repo/Comment.zig");
+pub const Undo = @import("./Repo/Undo.zig");
 pub const Events = @import("./Repo/Events.zig");
 pub const Settings = @import("./Settings.zig");
 pub const Auth = @import("./Auth.zig");
@@ -35,6 +36,7 @@ issues: Issues,
 patches: Patches,
 discussions: Discussions,
 events: Events,
+undo: ?Undo = null,
 settings: Settings,
 auth: Auth,
 quit: Quit,
@@ -254,6 +256,12 @@ pub fn init(
 
     // open the repo once for every tab. files and changes share a ref or revision.
     // no filesystem (wasm), nowhere to look, or a failed open: empty tabs.
+    const undo_allowed = if (session.local) |local| local.repo_kind == .xit else session.userId() != null and evt.Repo.roleOf(repo, session.userId()).atLeast(.write);
+    if (route == .repo_undo and !undo_allowed) return error.NotFound;
+    // a server shows events to whoever it shows undo to, so the route follows
+    if (route == .repo_events and session.data.host_kind != .local and !undo_allowed) return error.NotFound;
+    const undo_index = if (route == .repo_undo) route.repo_undo.index else null;
+    var undo_data: ?Undo = null;
     const files, const changes, const refs, var issues, var patches, var discussions, const events = blk: {
         read: {
             const io = session.io orelse break :read;
@@ -270,6 +278,7 @@ pub fn init(
                                 try evt.consume(.local, .repo, repo_kind, opened.self_repo_opts, io, gpa, opened, evt.events_ref, &.{});
                                 try pch.refreshBranches(.local, repo_kind, opened.self_repo_opts, io, gpa, opened, null, null);
                             }
+                            if (repo_kind == .xit and undo_allowed) undo_data = try Undo.init(opened.self_repo_opts, arena, opened, repo_identity.identity, undo_index);
                             const files_data = if (patchrev_id.len != 0)
                                 try Files.initPatchRev(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, location, patchrev_id, files_dir, files_line)
                             else
@@ -306,6 +315,7 @@ pub fn init(
             try Events.empty(aa, repo_identity.identity, events_view, session.local != null, session.data.sync_failure),
         };
     };
+    if (route == .repo_undo and undo_data == null) return error.NotFound;
     issues.repo_source = source;
     patches.repo_source = source;
     patches.repo_id = repo_id_maybe;
@@ -322,6 +332,7 @@ pub fn init(
         .patches = patches,
         .discussions = discussions,
         .events = events,
+        .undo = undo_data,
         .settings = Settings.init(),
         .auth = Auth.init(),
         .quit = Quit.init(),
@@ -398,10 +409,16 @@ pub const View = struct {
                 try stack.children.put(allocator, discussions_view.getFocus().id, .{ .repo_discussions = discussions_view });
             }
 
-            {
+            if (session.data.host_kind == .local or data.undo != null) {
                 var events_view = try Events.View.init(allocator, &data.events, session);
                 errdefer events_view.deinit(allocator);
                 try stack.children.put(allocator, events_view.getFocus().id, .{ .repo_events = events_view });
+            }
+
+            if (data.undo) |*undo| {
+                var undo_view = try Undo.View.init(allocator, undo, session);
+                errdefer undo_view.deinit(allocator);
+                try stack.children.put(allocator, undo_view.getFocus().id, .{ .repo_undo = undo_view });
             }
 
             // the header only shows the settings tab with a login and the auth
