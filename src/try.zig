@@ -1340,9 +1340,10 @@ fn seedPatches(
     }, null, patch_author);
 }
 
-// commit `events` onto `ref`, rooted at `parent`, as one undoable step.
+// commit `events` onto `ref`, rooted at `parent`, as one transaction.
 // consume always roots a new branch at nothing, so the divergent fixtures
-// write their side branch here instead, recording the action consume would
+// write their side branch here instead. nothing is consumed, so it records
+// xit's own commit action rather than one of haxy's event actions
 fn commitEventsAtRef(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -1362,10 +1363,14 @@ fn commitEventsAtRef(
         parent: [hash.hexLen(.sha1)]u8,
 
         pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
+            const opts: rp.RepoOpts(.xit) = .{};
             var moment = try DB.HashMap(.read_write).init(cursor.*);
             const state = Repo.State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
-            try evt.commitEvents(.xit, .{}, state, ctx.io, ctx.allocator, ctx.ref, ctx.events, .{ctx.parent});
-            try xit.undo.write(.{}, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action = evt.undo_action } });
+            try evt.commitEvents(.xit, opts, state, ctx.io, ctx.allocator, ctx.ref, ctx.events, .{ctx.parent});
+            const tip = (try xit.ref.readRecur(.xit, opts, state.readOnly(), ctx.io, .{ .ref = ctx.ref })) orelse return error.NotFound;
+            try xit.undo.write(opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{
+                .commit = try .init("seed conflicting events", tip, opts.max_read_size),
+            });
         }
     };
 
