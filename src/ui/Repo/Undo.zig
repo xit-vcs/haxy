@@ -391,16 +391,18 @@ pub const View = struct {
     }
 
     pub fn input(self: *View, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
-        // the sub header sits above whichever content the route selects
+        // the sub header sits above whichever content the route selects.
+        // scrolling crosses the boundary the same way the arrow keys do
+        const direction = inp.vertDirection(key);
         if (self.headerActive()) {
-            if (key == .arrow_down) root_focus.setFocus(self.box.children.values()[content_index].widget.getFocus().id);
+            if (direction == .down) root_focus.setFocus(self.box.children.values()[content_index].widget.getFocus().id);
             return;
         }
         if (self.data.clear) {
-            if (key == .arrow_up) root_focus.setFocus(self.headerBox().getFocus().id) else try self.clearInput(key, root_focus);
+            if (direction == .up) root_focus.setFocus(self.headerBox().getFocus().id) else try self.clearInput(key, root_focus);
             return;
         }
-        if (key == .arrow_up and self.contentAtTop()) {
+        if (direction == .up and self.contentAtTop()) {
             root_focus.setFocus(self.headerBox().getFocus().id);
             return;
         }

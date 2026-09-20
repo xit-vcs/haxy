@@ -540,11 +540,13 @@ pub const View = struct {
     }
 
     pub fn input(self: *View, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
+        // scrolling crosses the sub header boundary the same way arrows do
+        const direction = inp.vertDirection(key);
         if (self.headerActive()) {
-            if (key == .arrow_down) root_focus.setFocus(self.content().getFocus().id) else try self.header().input(allocator, key, root_focus);
+            if (direction == .down) root_focus.setFocus(self.content().getFocus().id) else try self.header().input(allocator, key, root_focus);
             return;
         }
-        if (key == .arrow_up and self.contentAtTop()) {
+        if (direction == .up and self.contentAtTop()) {
             self.header().focusCurrent(root_focus);
             return;
         }
