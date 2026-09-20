@@ -70,6 +70,23 @@ pub fn writeReceivedPatches(
     try xit.patch.writePatches(repo_opts, state, io, allocator, &iter, &progress);
 }
 
+fn writeUndo(
+    comptime repo_opts: rp.RepoOpts(.xit),
+    state: rp.Repo(.xit, repo_opts).State(.read_write),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    author: ?evt.CommitAuthor,
+) !void {
+    var author_json: std.json.ObjectMap = if (author) |user|
+        try .init(allocator, &.{ "username", "email" }, &.{ .{ .string = user.name }, .{ .string = user.email } })
+    else
+        .empty;
+    defer author_json.deinit(allocator);
+    var payload: std.json.ObjectMap = try .init(allocator, &.{"author"}, &.{if (author != null) .{ .object = author_json } else .null});
+    defer payload.deinit(allocator);
+    try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(io, .real).toSeconds(), .{ .custom = .{ .action = "push", .payload = payload } });
+}
+
 // serve a receive-pack and consume any events it pushed to the events branch,
 // all in one transaction: the push and the views derived from it commit
 // atomically, and a failed consume cancels the push
@@ -81,6 +98,7 @@ pub fn receivePackAndConsume(
     reader: *std.Io.Reader,
     writer: *std.Io.Writer,
     options: xit.net_server_receive_pack.Options,
+    author: ?evt.CommitAuthor,
     repo_root_path: []const u8,
     error_writer: *std.Io.Writer,
 ) !void {
@@ -100,6 +118,7 @@ pub fn receivePackAndConsume(
         reader: *std.Io.Reader,
         writer: *std.Io.Writer,
         options: xit.net_server_receive_pack.Options,
+        author: ?evt.CommitAuthor,
         response: *xit.net_server_receive_pack.Response,
         repo_root_path: []const u8,
         error_writer: *std.Io.Writer,
@@ -121,7 +140,7 @@ pub fn receivePackAndConsume(
                 _ = try evt.consumeInTransaction(.repo, .xit, repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, evt.events_ref);
                 try pch.detectMerged(repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, ctx.repo_root_path, ctx.updates.items.items, ctx.error_writer);
             }
-            try xit.undo.writeMessage(repo_opts, state, .push);
+            try writeUndo(repo_opts, state, ctx.io, ctx.allocator, ctx.author);
         }
     };
 
@@ -140,6 +159,7 @@ pub fn receivePackAndConsume(
                 .reader = reader,
                 .writer = writer,
                 .options = options,
+                .author = author,
                 .response = &response,
                 .repo_root_path = repo_root_path,
                 .error_writer = error_writer,
@@ -298,7 +318,7 @@ pub fn receiveFork(
                     try evt.commitEvents(.xit, repo_opts, state, ctx.io, ctx.allocator, evt.events_ref, events[0..event_count], null);
                     if (!try evt.consumeInTransaction(.fork, .xit, repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, evt.events_ref)) return error.CancelTransaction;
                 }
-                try xit.undo.writeMessage(repo_opts, state, .push);
+                try writeUndo(repo_opts, state, ctx.io, ctx.allocator, ctx.author);
             }
         };
 

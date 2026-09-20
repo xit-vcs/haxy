@@ -364,7 +364,7 @@ pub fn consume(
 
                     try commitEvents(.xit, repo_opts, state, ctx.io, ctx.allocator, ctx.ref, ctx.events, ctx.first_parent_oids);
                     if (!try consumeInTransaction(role, .xit, repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, ctx.ref)) return error.CancelTransaction;
-                    try xit.undo.writeMessage(repo_opts, state, .{ .custom = "event" });
+                    try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action = "event" } });
                 }
             };
 
@@ -429,7 +429,7 @@ pub fn mergeEvents(
                     var moment = try DB.HashMap(.read_write).init(cursor.*);
                     const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
                     if (!try mergeEventsInTransaction(.xit, repo_opts, state, ctx.io, ctx.allocator, ctx.remote_ref)) return error.CancelTransaction;
-                    try xit.undo.writeMessage(repo_opts, state, .{ .custom = "event" });
+                    try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action = "event" } });
                 }
             };
 

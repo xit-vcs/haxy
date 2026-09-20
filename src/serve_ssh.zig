@@ -376,14 +376,16 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, exec: ss
     const create_if_missing = parsed.service == .receive_pack;
 
     const owner_repo = evt.parseOwnerRepoPath(repo_identity) orelse return writeError(sess, "repo path must be <owner>/<repo>");
-    switch (try authorizeRepoKey(io, allocator, handler.admin_repo_path, owner_repo.owner, owner_repo.name, parsed.service, &sess.fingerprint)) {
-        .allowed => {},
+    var author_arena = std.heap.ArenaAllocator.init(allocator);
+    defer author_arena.deinit();
+    const author = switch (try authorizeRepoKey(io, &author_arena, handler.admin_repo_path, owner_repo.owner, owner_repo.name, parsed.service, &sess.fingerprint)) {
+        .allowed => |user| user,
         .denied => return switch (parsed.service) {
             .upload_pack => writeError(sess, "unauthorized: this SSH key cannot read this repo"),
             .receive_pack => writeError(sess, "unauthorized: this SSH key cannot push to this repo"),
         },
         .not_found => return writeError(sess, "repo not found"),
-    }
+    };
 
     const repo_path = switch (try serve_common.resolveRepoPath(io, allocator, handler.repo_root_path, handler.admin_repo_path, repo_identity, create_if_missing)) {
         .ok => |p| p,
@@ -392,14 +394,14 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, exec: ss
     };
     defer allocator.free(repo_path);
 
-    if (try serveIfExists(repo_path, handler.repo_root_path, &reader.interface, &writer.interface, io, allocator, parsed.service, protocol_version, handler.err)) return;
+    if (try serveIfExists(repo_path, handler.repo_root_path, &reader.interface, &writer.interface, io, allocator, parsed.service, protocol_version, author, handler.err)) return;
 
     if (!create_if_missing) return writeError(sess, "repo not found");
 
     // create the on-disk repo for the just-minted event and serve the push
     var repo = try createRepo(any_repo_opts.toRepoOpts(), io, allocator, repo_path);
     defer repo.deinit(io, allocator);
-    try servePack(repo.self_repo_opts, &repo, handler.repo_root_path, &reader.interface, &writer.interface, io, allocator, parsed.service, protocol_version, handler.err);
+    try servePack(repo.self_repo_opts, &repo, handler.repo_root_path, &reader.interface, &writer.interface, io, allocator, parsed.service, protocol_version, author, handler.err);
 }
 
 // serve a patch draft: anyone may fetch it, only its author may push to it
@@ -472,6 +474,7 @@ fn serveIfExists(
     allocator: std.mem.Allocator,
     service: GitService,
     protocol_version: xit.net_server_common.ProtocolVersion,
+    author: ?evt.CommitAuthor,
     error_writer: *std.Io.Writer,
 ) !bool {
     // a bare open() creates the directory while probing for the repo, so only
@@ -485,7 +488,7 @@ fn serveIfExists(
     defer any_repo.deinit(io, allocator);
 
     switch (any_repo) {
-        inline else => |*repo| try servePack(repo.self_repo_opts, repo, repo_root_path, reader, writer, io, allocator, service, protocol_version, error_writer),
+        inline else => |*repo| try servePack(repo.self_repo_opts, repo, repo_root_path, reader, writer, io, allocator, service, protocol_version, author, error_writer),
     }
     return true;
 }
@@ -513,11 +516,12 @@ fn servePack(
     allocator: std.mem.Allocator,
     service: GitService,
     protocol_version: xit.net_server_common.ProtocolVersion,
+    author: ?evt.CommitAuthor,
     error_writer: *std.Io.Writer,
 ) !void {
     switch (service) {
         .upload_pack => try repo.uploadPack(io, allocator, reader, writer, .{ .protocol_version = protocol_version }),
-        .receive_pack => try push.receivePackAndConsume(repo_opts, io, allocator, repo, reader, writer, .{ .protocol_version = protocol_version }, repo_root_path, error_writer),
+        .receive_pack => try push.receivePackAndConsume(repo_opts, io, allocator, repo, reader, writer, .{ .protocol_version = protocol_version }, author, repo_root_path, error_writer),
     }
 }
 
@@ -539,20 +543,18 @@ fn parseGitCommand(allocator: std.mem.Allocator, command: []const u8) !ParsedGit
     return .{ .service = service, .dir = try allocator.dupe(u8, dir_token) };
 }
 
-const RepoAuthorization = enum { allowed, denied, not_found };
+const RepoAuthorization = union(enum) { allowed: ?evt.CommitAuthor, denied, not_found };
 
 fn authorizeRepoKey(
     io: std.Io,
-    allocator: std.mem.Allocator,
+    arena: *std.heap.ArenaAllocator,
     admin_repo_path: []const u8,
     owner_name: []const u8,
     repo_name: []const u8,
     service: GitService,
     fingerprint: *const [ssh.fingerprint_len]u8,
 ) !RepoAuthorization {
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-
+    const allocator = arena.child_allocator;
     var admin = rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = admin_repo_path }) catch |err| switch (err) {
         error.RepoNotFound => return .not_found,
         else => |e| return e,
@@ -560,10 +562,13 @@ fn authorizeRepoKey(
     defer admin.deinit(io, allocator);
 
     const moment = try evt.currentMoment(evt.admin_repo_opts, &admin);
-    const repo = (try evt.Repo.readByOwnerAndName(evt.AdminDB, evt.admin_repo_opts.hash, moment, &arena, owner_name, repo_name)) orelse {
+    const repo = (try evt.Repo.readByOwnerAndName(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, owner_name, repo_name)) orelse {
         if (service == .upload_pack) return .not_found;
-        const owner = (try evt.User.readByName(io, allocator, admin_repo_path, &arena, owner_name)) orelse return .not_found;
-        return if (isKeyInAuthorizedKeys(owner.event.ssh_keys, fingerprint)) .allowed else .denied;
+        const owner = (try evt.User.readByName(io, allocator, admin_repo_path, arena, owner_name)) orelse return .not_found;
+        return if (isKeyInAuthorizedKeys(owner.event.ssh_keys, fingerprint))
+            .{ .allowed = .{ .name = owner.event.name, .email = owner.event.email } }
+        else
+            .denied;
     };
 
     const min_role: evt.Repo.Role = switch (service) {
@@ -571,11 +576,17 @@ fn authorizeRepoKey(
         .receive_pack => .write,
     };
     // skip the key lookups when the base role is enough
-    if (evt.Repo.roleOf(repo.repo, null).atLeast(min_role)) return .allowed;
+    if (evt.Repo.roleOf(repo.repo, null).atLeast(min_role)) return .{ .allowed = null };
 
-    const user_id_maybe = try repoUserWithKey(moment, &arena, repo.repo.event, fingerprint);
-    return if (evt.Repo.roleOf(repo.repo, user_id_maybe).atLeast(min_role)) .allowed else .denied;
+    const user = (try repoUserWithKey(moment, arena, repo.repo.event, fingerprint)) orelse return .denied;
+    if (!evt.Repo.roleOf(repo.repo, user.id).atLeast(min_role)) return .denied;
+    return .{ .allowed = user.author };
 }
+
+const UserWithKey = struct {
+    id: [evt.event_id_size]u8,
+    author: evt.CommitAuthor,
+};
 
 // the repo's owner or collaborator holding the key, or null for anyone else
 fn repoUserWithKey(
@@ -583,28 +594,31 @@ fn repoUserWithKey(
     arena: *std.heap.ArenaAllocator,
     repo: evt.Repo,
     fingerprint: *const [ssh.fingerprint_len]u8,
-) !?[evt.event_id_size]u8 {
-    // a user found by this id has a full-size id
-    if (try keyBelongsToUser(moment, arena, repo.user_id, fingerprint)) return repo.user_id[0..evt.event_id_size].*;
+) !?UserWithKey {
+    if (try userWithKey(moment, arena, repo.user_id, fingerprint)) |user| return user;
 
     for ([_][]const u8{ repo.write_user_ids, repo.read_user_ids }) |user_ids| {
         var lines = std.mem.tokenizeScalar(u8, user_ids, '\n');
         while (lines.next()) |id| {
             const user_id = try evt.parseEventId(id);
-            if (try keyBelongsToUser(moment, arena, &user_id, fingerprint)) return user_id;
+            if (try userWithKey(moment, arena, &user_id, fingerprint)) |user| return user;
         }
     }
     return null;
 }
 
-fn keyBelongsToUser(
+fn userWithKey(
     moment: evt.AdminDB.HashMap(.read_only),
     arena: *std.heap.ArenaAllocator,
     user_id: []const u8,
     fingerprint: *const [ssh.fingerprint_len]u8,
-) !bool {
-    const user = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, user_id)) orelse return false;
-    return !user.removed and isKeyInAuthorizedKeys(user.event.ssh_keys, fingerprint);
+) !?UserWithKey {
+    const user = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, user_id)) orelse return null;
+    if (user.removed or !isKeyInAuthorizedKeys(user.event.ssh_keys, fingerprint)) return null;
+    return .{
+        .id = user_id[0..evt.event_id_size].*,
+        .author = .{ .name = user.event.name, .email = user.event.email },
+    };
 }
 
 fn isKeyInAuthorizedKeys(ssh_keys: []const u8, fingerprint: *const [ssh.fingerprint_len]u8) bool {

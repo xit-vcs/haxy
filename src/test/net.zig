@@ -1765,7 +1765,7 @@ fn commitServer(repo: anytype, io: std.Io, allocator: std.mem.Allocator, files: 
             var head_buffer: [rf.MAX_REF_CONTENT_SIZE]u8 = undefined;
             const head = try rf.readHead(.xit, opts, state.readOnly(), ctx.io, &head_buffer) orelse return error.HeadNotFound;
             ctx.result.* = try xit.object.writeCommit(.xit, opts, state, ctx.io, ctx.allocator, ctx.metadata, &tree, head.ref);
-            try xit.undo.writeMessage(opts, state, .{ .commit = ctx.metadata });
+            try xit.undo.write(opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .commit = try .init(ctx.metadata.message, ctx.result.*, opts.max_read_size) });
         }
     };
     try repo.core.db_file.lock(io, .exclusive);
