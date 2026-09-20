@@ -597,7 +597,7 @@ fn repoUserWithKey(
 ) !?UserWithKey {
     if (try userWithKey(moment, arena, repo.user_id, fingerprint)) |user| return user;
 
-    for ([_][]const u8{ repo.write_user_ids, repo.read_user_ids }) |user_ids| {
+    for ([_][]const u8{ repo.owner_user_ids, repo.write_user_ids, repo.read_user_ids }) |user_ids| {
         var lines = std.mem.tokenizeScalar(u8, user_ids, '\n');
         while (lines.next()) |id| {
             const user_id = try evt.parseEventId(id);

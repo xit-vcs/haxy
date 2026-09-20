@@ -10,6 +10,8 @@ read_access: Access = .private,
 write_access: Access = .private,
 read_user_ids: []const u8 = "",
 write_user_ids: []const u8 = "",
+// collaborators who hold the owner's role without being the creator
+owner_user_ids: []const u8 = "",
 
 // what the db stores: the event's data plus the commit-derived fields
 pub const Record = struct {
@@ -63,6 +65,7 @@ pub fn roleOf(record: Record, user_id_maybe: ?[evt.event_id_size]u8) Role {
     if (std.mem.eql(u8, event.user_id, &user_id)) return .owner;
 
     const user_id_hex = std.fmt.bytesToHex(user_id, .lower);
+    if (containsUserId(event.owner_user_ids, &user_id_hex)) return .owner;
     if (base == .write or containsUserId(event.write_user_ids, &user_id_hex)) return .write;
     if (base == .read or containsUserId(event.read_user_ids, &user_id_hex)) return .read;
     return .none;
@@ -129,6 +132,7 @@ pub fn consume(
         try validateName(record_to_write.event.name);
         try validateUserIds(record_to_write.event.read_user_ids);
         try validateUserIds(record_to_write.event.write_user_ids);
+        try validateUserIds(record_to_write.event.owner_user_ids);
     }
 
     const user_id_to_repo_id_set_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, "user-id->repo-id-set"));

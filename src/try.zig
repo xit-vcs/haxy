@@ -229,8 +229,8 @@ pub fn main(init: std.process.Init) !void {
                 },
             };
         }
-        // admin collaborates on every repo, so it can write everywhere while the
-        // other users can only write to their own
+        // admin co-owns every repo, so it has full privileges everywhere
+        // (including undo) while the other users only own their own
         const admin_user_id_hex = std.fmt.bytesToHex(admin_user_id, .lower);
         for (repo_data, 0..) |r, i| {
             events_to_consume[user_data.len + i] = .{
@@ -243,7 +243,7 @@ pub fn main(init: std.process.Init) !void {
                         .name = r.name,
                         .description = r.description,
                         .read_access = r.read_access,
-                        .write_user_ids = &admin_user_id_hex,
+                        .owner_user_ids = &admin_user_id_hex,
                     },
                 },
             };
