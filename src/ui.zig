@@ -421,7 +421,8 @@ pub const RoutablePage = union(enum) {
         view: EventsView = .active,
         kind: ?evt.EventKind = null,
         selected: Array(evt.event_id_size * 2) = .{},
-        // limits the list to the events one transaction wrote
+        // a transaction's index in the repo history, limiting the list to the
+        // events it wrote. the page reads that transaction's own state
         moment: ?u64 = null,
     };
 

@@ -74,7 +74,9 @@ pub fn init(
     const gpa = arena.child_allocator;
     var event_db_maybe: ?evt.LocalEventDB(repo_opts.hash) = if (repo_kind == .git) try evt.LocalEventDB(repo_opts.hash).openReadOnly(io, gpa, repo.core.repo_dir) else null;
     defer if (event_db_maybe) |*event_db| event_db.deinit(io, gpa);
-    const haxy_moment = (if (event_db_maybe) |*event_db|
+    const haxy_moment = (if (moment_index) |index|
+        transactionMoment(repo_kind, repo_opts, repo, index)
+    else if (event_db_maybe) |*event_db|
         evt.currentMomentFromDb(repo_opts.hash, event_db.db)
     else if (repo_kind == .git)
         return result
@@ -107,8 +109,8 @@ pub fn init(
         root_key = evt.orderKeyDesc(meta.updated_order, &id);
     }
 
-    if (moment_index) |index| {
-        try readMomentEvents(repo_kind, repo_opts, arena, &result, haxy_moment, kind_map, admin_moment, identity, index, selected);
+    if (moment_index != null) {
+        try readMomentEvents(repo_kind, repo_opts, arena, &result, haxy_moment, kind_map, admin_moment, identity, selected);
         return result;
     }
 
@@ -146,6 +148,22 @@ pub fn init(
     return result;
 }
 
+// the haxy state as of one transaction in the repo history. a moment page
+// reads from it, so undoing or rebasing later transactions cannot change what
+// it shows, and the events read as they were when the transaction ran
+fn transactionMoment(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    repo: *rp.Repo(repo_kind, repo_opts),
+    index: u64,
+) !evt.EventDB(repo_opts.hash).HashMap(.read_only) {
+    if (repo_kind == .git) return error.NotFound;
+    const DB = evt.EventDB(repo_opts.hash);
+    const history = try DB.ArrayList(.read_only).init(repo.core.db.rootCursor().readOnly());
+    const cursor = try history.getCursor(index) orelse return error.NotFound;
+    return try evt.currentMomentFromRepoMoment(repo_opts.hash, try DB.HashMap(.read_only).init(cursor));
+}
+
 // the moment's set is keyed on the event order, not the update order the
 // active and removed sets use, so it gets its own walk. one transaction's
 // events are few, so the whole set is scanned to count both views.
@@ -158,12 +176,16 @@ fn readMomentEvents(
     kind_map: evt.EventDB(repo_opts.hash).HashMap(.read_only),
     admin_moment: ?evt.AdminDB.HashMap(.read_only),
     identity: []const u8,
-    moment_index: u64,
     selected: []const u8,
 ) !void {
     const DB = evt.EventDB(repo_opts.hash);
     const aa = arena.allocator();
-    const ids = try evt.momentEventIds(DB, repo_opts.hash, haxy_moment, moment_index) orelse return error.NotFound;
+    // the moment names its own position, so the page needs no index from the
+    // url. a transaction that consumed nothing has no set of its own, which
+    // leaves the list empty rather than failing the page: the terminal hosts
+    // build their pages inside the run loop, where an error ends the session
+    const index_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.moment_index_key)) orelse return;
+    const ids = try evt.momentEventIds(DB, repo_opts.hash, haxy_moment, try index_cursor.readUint()) orelse return;
 
     var events: [2]std.ArrayList(Item) = .{ .empty, .empty };
     // the selected event's window starts at it, not at the top
@@ -192,7 +214,8 @@ fn readMomentEvents(
         const item = (try readItem(repo_opts.hash, arena, haxy_moment, kind_map, admin_moment, identity, view == .active, kind, &id)) orelse continue;
         try window_events.append(aa, item);
     }
-    if (awaiting_selected) return error.NotFound;
+    // the window start can name an event this batch no longer holds
+    if (awaiting_selected) return;
     result.active.events = events[@intFromEnum(ui.RoutablePage.EventsView.active)].items;
     result.removed.events = events[@intFromEnum(ui.RoutablePage.EventsView.removed)].items;
 }

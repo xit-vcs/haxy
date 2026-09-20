@@ -55,7 +55,7 @@ pub fn init(comptime opts: rp.RepoOpts(.xit), arena: *std.heap.ArenaAllocator, r
         const moment = try DB.HashMap(.read_only).init(cursor);
         const record = try xit.undo.read(opts, moment, &buffer);
         var description: std.Io.Writer.Allocating = .init(aa);
-        const detail = if (record) |value| try eventDetail(opts, arena, identity, value, moment) else null;
+        const detail = if (record) |value| try eventDetail(opts, arena, identity, value, moment, remaining) else null;
         if (detail) |value| {
             try description.writer.writeAll(value.description);
         } else if (record) |value| {
@@ -92,35 +92,35 @@ fn eventDetail(
     identity: []const u8,
     record: xit.undo.UndoRecord,
     moment: rp.Repo(.xit, opts).DB.HashMap(.read_only),
+    history_index: u64,
 ) !?Detail {
     if (std.mem.eql(u8, record.action, evt.merge_undo_action)) return .{ .action = "merge events", .description = "merged the events ref from a remote" };
     if (!std.mem.eql(u8, record.action, evt.undo_action)) return null;
 
     const description = "updated the event database";
-    const batch = try momentBatch(opts, moment) orelse return .{ .action = "events", .description = description };
+    const count = try momentEventCount(opts, moment) orelse return .{ .action = "events", .description = description };
 
+    // the page reads the transaction's own moment, so the url names the
+    // transaction rather than the state it produced
     const aa = arena.allocator();
-    const route = ui.RoutablePage.repoEventsRoute(identity, .active, null, "", batch.index) orelse return error.RouteTooLong;
+    const route = ui.RoutablePage.repoEventsRoute(identity, .active, null, "", history_index) orelse return error.RouteTooLong;
     return .{
-        .action = try std.fmt.allocPrint(aa, "events ({d})", .{batch.count}),
+        .action = try std.fmt.allocPrint(aa, "events ({d})", .{count}),
         .description = description,
         .events = .{
-            .label = try std.fmt.allocPrint(aa, "view events ({d})", .{batch.count}),
+            .label = try std.fmt.allocPrint(aa, "view events ({d})", .{count}),
             .link = try std.fmt.allocPrint(aa, "a:{s}", .{try route.toUrl(arena)}),
         },
     };
 }
 
-const Batch = struct { index: u64, count: u64 };
-
-// the events the transaction's moment wrote, or null when it wrote none
-fn momentBatch(comptime opts: rp.RepoOpts(.xit), moment: rp.Repo(.xit, opts).DB.HashMap(.read_only)) !?Batch {
+// how many events the transaction's moment wrote, or null when it wrote none
+fn momentEventCount(comptime opts: rp.RepoOpts(.xit), moment: rp.Repo(.xit, opts).DB.HashMap(.read_only)) !?u64 {
     const DB = rp.Repo(.xit, opts).DB;
     const haxy_moment = evt.currentMomentFromRepoMoment(opts.hash, moment) catch return null;
     const index_cursor = try haxy_moment.getCursor(hash.hashInt(opts.hash, evt.moment_index_key)) orelse return null;
-    const moment_index = try index_cursor.readUint();
-    const ids = try evt.momentEventIds(DB, opts.hash, haxy_moment, moment_index) orelse return null;
-    return .{ .index = moment_index, .count = try ids.count() };
+    const ids = try evt.momentEventIds(DB, opts.hash, haxy_moment, try index_cursor.readUint()) orelse return null;
+    return try ids.count();
 }
 
 pub fn formatTimestamp(aa: std.mem.Allocator, timestamp: i64) ![]const u8 {
