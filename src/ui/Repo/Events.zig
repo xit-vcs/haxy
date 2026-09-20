@@ -380,7 +380,7 @@ pub const View = struct {
         }
         content_stack.getFocus().child_id = content_stack.children.keys()[@intFromEnum(data.view)];
         try outer.children.put(allocator, content_stack.getFocus().id, .{ .widget = .{ .stack = content_stack }, .rect = null, .min_size = null });
-        outer.getFocus().child_id = outer.children.keys()[header_index];
+        outer.getFocus().child_id = outer.children.keys()[content_index];
         return .{ .box = outer, .data = data, .session = session, .detailed_index = .{ null, null } };
     }
 
@@ -572,6 +572,12 @@ pub const View = struct {
 
     pub fn atTop(self: *View) bool {
         return self.headerActive();
+    }
+
+    // arriving from the page's tabs lands on the sub header, not the content
+    pub fn focusHeader(self: *View, root_focus: *Focus) bool {
+        self.header().focusCurrent(root_focus);
+        return true;
     }
 
     pub fn clearGrid(self: *View) void {

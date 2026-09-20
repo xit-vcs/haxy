@@ -519,6 +519,7 @@ pub const View = struct {
                                 if (stack.getSelected()) |selected_widget| switch (selected_widget.*) {
                                     .repo_files => |*v| if (v.focusHeader(root_focus)) return,
                                     .repo_commits => |*v| if (v.focusHeader(root_focus)) return,
+                                    .repo_events => |*v| if (v.focusHeader(root_focus)) return,
                                     .repo_undo => |*v| if (v.focusHeader(root_focus)) return,
                                     else => {},
                                 };
