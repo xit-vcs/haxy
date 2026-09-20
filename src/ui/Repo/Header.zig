@@ -163,7 +163,7 @@ pub const View = struct {
         const patches_link = try ui.inPageTabLink(session, patches_route, current_tag == .repo_patches);
         const discussions_route = ui.RoutablePage.repoDiscussionsRoute(identity, data.discussions_tag, "") orelse return error.RouteTooLong;
         const discussions_link = try ui.inPageTabLink(session, discussions_route, current_tag == .repo_discussions);
-        const events_route = ui.RoutablePage.repoEventsRoute(identity, .active, null, "") orelse return error.RouteTooLong;
+        const events_route = ui.RoutablePage.repoEventsRoute(identity, .active, null, "", null) orelse return error.RouteTooLong;
         const events_link = try ui.inPageTabLink(session, events_route, current_tag == .repo_events);
         const settings_route = ui.RoutablePage{ .repo_settings = Array.from(identity) orelse return error.RouteTooLong };
         const settings_link = try ui.inPageTabLink(session, settings_route, current_tag == .repo_settings);

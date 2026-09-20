@@ -1721,7 +1721,7 @@ fn handleUndo(io: std.Io, request: *std.http.Server.Request, allocator: std.mem.
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const repo_base = if (target.name.len == 0) "" else try std.fmt.allocPrint(arena.allocator(), "/repo/{s}", .{target.name.slice()});
-    _ = (try authorizeWrite(io, allocator, &arena, request, host, repo_base, .write)) orelse return;
+    _ = (try authorizeWrite(io, allocator, &arena, request, host, repo_base, .owner)) orelse return;
     const resolved = (try requestRepoSource(io, allocator, host, repo_base)) orelse return respondRepoNotFound(request);
     defer resolved.deinit(allocator);
     ui.Repo.Undo.execute(io, allocator, resolved.source, index) catch |err| switch (err) {

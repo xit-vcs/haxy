@@ -1369,7 +1369,7 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
             }
 
             const id_hex = std.fmt.bytesToHex(id, .lower);
-            const route = ui.RoutablePage.repoEventsRoute(self.data.identity, .removed, event_kind, &id_hex) orelse return;
+            const route = ui.RoutablePage.repoEventsRoute(self.data.identity, .removed, event_kind, &id_hex, null) orelse return;
             try self.session.navigate(route);
         }
 
@@ -2958,7 +2958,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             }
 
             const id_hex = std.fmt.bytesToHex(id, .lower);
-            const route = ui.RoutablePage.repoEventsRoute(self.data.identity, .removed, event_kind, &id_hex) orelse return;
+            const route = ui.RoutablePage.repoEventsRoute(self.data.identity, .removed, event_kind, &id_hex, null) orelse return;
             try self.session.navigate(route);
         }
 

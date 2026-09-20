@@ -291,7 +291,7 @@ fn runTui(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh.PtySiz
                     continue;
                 },
                 .sync_events => {},
-                .undo => |target| try ui.Repo.Undo.perform(allocator, &ui_session, target),
+                .undo => |target| ui.Repo.Undo.handleRequest(allocator, &ui_session, target),
             }
         }
 

@@ -209,6 +209,10 @@ pub fn init(
         .repo_events => |e| e.view,
         else => .active,
     };
+    const events_moment: ?u64 = switch (route) {
+        .repo_events => |e| e.moment,
+        else => null,
+    };
     const events_selected: []const u8 = switch (route) {
         .repo_events => |*e| e.selected.slice(),
         else => "",
@@ -261,7 +265,8 @@ pub fn init(
     // a server shows events to whoever it shows undo to, so the route follows
     if (route == .repo_events and session.data.host_kind != .local and !undo_allowed) return error.NotFound;
     const undo_index = if (route == .repo_undo) route.repo_undo.index else null;
-    var undo_data: ?Undo = null;
+    // an unreadable repo still shows the tab, like every other tab
+    var undo_data: ?Undo = if (undo_allowed) .{ .identity = repo_identity.identity } else null;
     const files, const changes, const refs, var issues, var patches, var discussions, const events = blk: {
         read: {
             const io = session.io orelse break :read;
@@ -278,7 +283,13 @@ pub fn init(
                                 try evt.consume(.local, .repo, repo_kind, opened.self_repo_opts, io, gpa, opened, evt.events_ref, &.{});
                                 try pch.refreshBranches(.local, repo_kind, opened.self_repo_opts, io, gpa, opened, null, null);
                             }
-                            if (repo_kind == .xit and undo_allowed) undo_data = try Undo.init(opened.self_repo_opts, arena, opened, repo_identity.identity, undo_index);
+                            // tabs switch in-page, so every tab's data is read here
+                            if (repo_kind == .xit and undo_allowed) {
+                                undo_data = Undo.init(opened.self_repo_opts, arena, opened, repo_identity.identity, undo_index) catch |err| switch (err) {
+                                    error.OutOfMemory => return err,
+                                    else => .{ .identity = repo_identity.identity, .failure = @errorName(err) },
+                                };
+                            }
                             const files_data = if (patchrev_id.len != 0)
                                 try Files.initPatchRev(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, location, patchrev_id, files_dir, files_line)
                             else
@@ -297,7 +308,7 @@ pub fn init(
                                 try Issues.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, issues_tag, issues_search, issues_selected, issues_comment, issues_comments_start, issues_theirs, issues_view),
                                 try Patches.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, session, repo_id_maybe, repo_identity.identity, target_branch, patches_tag, patches_search, patches_selected, patches_comment, patches_comments_start, patches_theirs, patches_view),
                                 try Discussions.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, discussions_tag, discussions_search, discussions_selected, discussions_comment, discussions_comments_start, discussions_view),
-                                try Events.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, events_view, events_kind, events_selected, session.local != null, session.data.sync_failure),
+                                try Events.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, events_view, events_kind, events_selected, events_moment, session.local != null, session.data.sync_failure),
                             };
                         },
                     }
@@ -315,6 +326,7 @@ pub fn init(
             try Events.empty(aa, repo_identity.identity, events_view, session.local != null, session.data.sync_failure),
         };
     };
+    if (undo_data) |*undo| undo.can_undo = session.local != null or evt.Repo.roleOf(repo, session.userId()) == .owner;
     if (route == .repo_undo and undo_data == null) return error.NotFound;
     issues.repo_source = source;
     patches.repo_source = source;

@@ -123,6 +123,14 @@ fn testBranchPatch(comptime kind: rp.RepoKind, comptime hash_kind: hash.HashKind
     invalid.target_branch = "missing";
     try std.testing.expectError(error.InvalidTargetBranch, pch.writeBranchPatch(.local, kind, opts, io, allocator, &repo, std.fmt.bytesToHex(id, .lower), invalid, retargeted.event, author));
 
+    // editing metadata without changing the target must also record a patch edit.
+    try evt.Patch.update(.local, kind, opts, io, allocator, &repo, &id, .{ .fields = .{
+        .title = "renamed patch",
+        .tags = patch.tags,
+        .description = patch.description,
+        .target_branch = "other-target",
+    } }, author);
+
     // removing the patch leaves its branch intact
     try evt.remove(.local, .repo, kind, opts, io, allocator, &repo, &id, .patch, author);
     try pch.refreshBranches(.local, kind, opts, io, allocator, &repo, null, null);
@@ -174,6 +182,7 @@ fn testBranchMerge(selection: evt.Patch.MergeRevision) !void {
     }
     const id = [_]u8{9} ** evt.event_id_size;
     const id_hex = std.fmt.bytesToHex(id, .lower);
+    const before_new = try repo.core.db.rootCursor().count();
     try pch.writeBranchPatch(.server, .xit, opts, io, allocator, &repo, id_hex, .{
         .title = "merge branch",
         .description = "",
@@ -181,6 +190,7 @@ fn testBranchMerge(selection: evt.Patch.MergeRevision) !void {
         .source_branch = "feature",
         .target_branch = "master",
     }, null, author);
+    try std.testing.expectEqual(before_new + 1, try repo.core.db.rootCursor().count());
 
     // updating a branch and checking its mergeability counts as one patch
     _ = try repo.commitAtRef(io, allocator, .{ .message = "revise feature" }, null, .{ .kind = .head, .name = "feature" });
@@ -190,7 +200,9 @@ fn testBranchMerge(selection: evt.Patch.MergeRevision) !void {
     var output = std.Io.Writer.Allocating.init(allocator);
     defer output.deinit();
     var progress = push.PushProgress{ .response = &response, .writer = &output.writer, .label = "Updating patches" };
+    const before_refresh = try repo.core.db.rootCursor().count();
     try pch.refreshBranches(.server, .xit, opts, io, allocator, &repo, null, &progress);
+    try std.testing.expectEqual(before_refresh + 1, try repo.core.db.rootCursor().count());
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "Updating patches: 100% (1/1)\n") != null);
 
     // closed patches skip source updates and contribute no progress
@@ -203,7 +215,9 @@ fn testBranchMerge(selection: evt.Patch.MergeRevision) !void {
     try std.testing.expectEqual(closed_progress_len, output.written().len);
 
     // reopening captures the latest source and checks both merge styles
+    const before_reopen = try repo.core.db.rootCursor().count();
     try evt.Patch.update(.server, .xit, opts, io, allocator, &repo, &id, .{ .status = .open }, author);
+    try std.testing.expectEqual(before_reopen + 1, try repo.core.db.rootCursor().count());
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const before = (try evt.readFromRepo(evt.Patch, .xit, opts, io, allocator, &arena, &repo, &id)) orelse return error.NotFound;
@@ -998,6 +1012,7 @@ fn patchLifecycle(merge_revision: evt.Patch.MergeRevision) !void {
     // publish the metadata and revision pointer
     //
 
+    const before_publish = try target.core.db.rootCursor().count();
     try pch.publish(repo_opts, io, allocator, &admin, &target, draft_path, .{
         .id = patch_id_hex,
         .user_id = user_id,
@@ -1005,6 +1020,7 @@ fn patchLifecycle(merge_revision: evt.Patch.MergeRevision) !void {
         .author = author,
         .timestamp = 5,
     });
+    try std.testing.expectEqual(before_publish + 1, try target.core.db.rootCursor().count());
     try pch.publish(repo_opts, io, allocator, &admin, &target, draft_path, .{
         .id = patch_id_hex,
         .user_id = user_id,
@@ -1209,7 +1225,9 @@ fn testMergeability(
 
     // a server patch edit refreshes its mergeability
     edit.fields.title = patch.title;
+    const before_edit = try target.core.db.rootCursor().count();
     try evt.Patch.update(.server, .xit, repo_opts, io, allocator, target, id, edit, author);
+    try std.testing.expectEqual(before_edit + 1, try target.core.db.rootCursor().count());
     const events_before = try target.readRef(io, evt.events_ref);
     try std.testing.expectEqualDeep(pch.Mergeability{ .source = .conflict, .squash = .conflict }, try readMergeability(target, io, allocator, id, patch));
     try expectMergeabilityShortBytes(try target.core.latestMoment(), id);

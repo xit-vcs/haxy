@@ -43,6 +43,8 @@ selected: ?EventRef,
 active: Window,
 removed: Window,
 header: Header,
+// set when the list is limited to the events one transaction wrote
+moment: ?u64 = null,
 
 const Self = @This();
 
@@ -57,11 +59,13 @@ pub fn init(
     requested_view: ui.RoutablePage.EventsView,
     selected_kind: ?evt.EventKind,
     selected: []const u8,
+    moment_index: ?u64,
     local: bool,
     failure: ?[]const u8,
 ) !Self {
     const aa = arena.allocator();
     var result = try empty(aa, identity, requested_view, local, failure);
+    result.moment = moment_index;
     if (local) result.header = try Header.local(repo_kind, repo_opts, aa, repo, io, failure);
     const require_selected_event = selected_kind != null or selected.len != 0;
     if ((selected_kind == null) != (selected.len == 0)) return error.NotFound;
@@ -103,6 +107,11 @@ pub fn init(
         root_key = evt.orderKeyDesc(meta.updated_order, &id);
     }
 
+    if (moment_index) |index| {
+        try readMomentEvents(repo_kind, repo_opts, arena, &result, haxy_moment, kind_map, admin_moment, identity, index, selected);
+        return result;
+    }
+
     for ([_]ui.RoutablePage.EventsView{ .active, .removed }) |view| {
         const id_set_cursor = switch (view) {
             .active => active_cursor,
@@ -135,6 +144,57 @@ pub fn init(
         event_window.events = events.items;
     }
     return result;
+}
+
+// the moment's set is keyed on the event order, not the update order the
+// active and removed sets use, so it gets its own walk. one transaction's
+// events are few, so the whole set is scanned to count both views.
+fn readMomentEvents(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    arena: *std.heap.ArenaAllocator,
+    result: *Self,
+    haxy_moment: evt.EventDB(repo_opts.hash).HashMap(.read_only),
+    kind_map: evt.EventDB(repo_opts.hash).HashMap(.read_only),
+    admin_moment: ?evt.AdminDB.HashMap(.read_only),
+    identity: []const u8,
+    moment_index: u64,
+    selected: []const u8,
+) !void {
+    const DB = evt.EventDB(repo_opts.hash);
+    const aa = arena.allocator();
+    const ids = try evt.momentEventIds(DB, repo_opts.hash, haxy_moment, moment_index) orelse return error.NotFound;
+
+    var events: [2]std.ArrayList(Item) = .{ .empty, .empty };
+    // the selected event's window starts at it, not at the top
+    var awaiting_selected = selected.len != 0;
+
+    var iter = try ids.iterator();
+    while (try iter.next()) |cursor_value| {
+        const id = try evt.readOrderKeyId(DB, cursor_value);
+        const kind = (try evt.readEventKind(repo_opts.hash, kind_map, &id)) orelse continue;
+        const meta = try readMeta(repo_opts.hash, arena, haxy_moment, kind, &id);
+        const view: ui.RoutablePage.EventsView = if (meta.removed) .removed else .active;
+        const event_window = switch (view) {
+            .active => &result.active,
+            .removed => &result.removed,
+        };
+        event_window.count += 1;
+        if (awaiting_selected and view == result.view) {
+            if (!std.mem.eql(u8, selected, &std.fmt.bytesToHex(id, .lower))) continue;
+            awaiting_selected = false;
+        }
+        const window_events = &events[@intFromEnum(view)];
+        if (window_events.items.len == page_size) {
+            if (event_window.next == null) event_window.next = .{ .id = try formatId(aa, &id), .kind = kind };
+            continue;
+        }
+        const item = (try readItem(repo_opts.hash, arena, haxy_moment, kind_map, admin_moment, identity, view == .active, kind, &id)) orelse continue;
+        try window_events.append(aa, item);
+    }
+    if (awaiting_selected) return error.NotFound;
+    result.active.events = events[@intFromEnum(ui.RoutablePage.EventsView.active)].items;
+    result.removed.events = events[@intFromEnum(ui.RoutablePage.EventsView.removed)].items;
 }
 
 pub fn empty(aa: std.mem.Allocator, identity: []const u8, view: ui.RoutablePage.EventsView, local: bool, failure: ?[]const u8) !Self {
@@ -332,12 +392,12 @@ pub const View = struct {
         errdefer list_box.deinit(allocator);
         const event_window = data.window(view);
         for (event_window.events) |event| {
-            const route = ui.RoutablePage.repoEventsRoute(data.identity, view, event.kind, event.id) orelse return error.RouteTooLong;
+            const route = ui.RoutablePage.repoEventsRoute(data.identity, view, event.kind, event.id, data.moment) orelse return error.RouteTooLong;
             const link = try std.fmt.allocPrint(session.page_arena.allocator(), "ai:{s}", .{try route.toUrl(session.page_arena)});
             try addRow(allocator, &list_box, @tagName(event.kind), link);
         }
         if (event_window.next) |next| {
-            const route = ui.RoutablePage.repoEventsRoute(data.identity, view, next.kind, next.id) orelse return error.RouteTooLong;
+            const route = ui.RoutablePage.repoEventsRoute(data.identity, view, next.kind, next.id, data.moment) orelse return error.RouteTooLong;
             const link = try std.fmt.allocPrint(session.page_arena.allocator(), "a:{s}", .{try route.toUrl(session.page_arena)});
             try addRow(allocator, &list_box, "next →", link);
         }
@@ -583,7 +643,7 @@ pub const Header = struct {
             var tab_ids: [2]usize = undefined;
             const view_labels = [_][]const u8{ active_tab_label, removed_tab_label };
             inline for ([_]ui.RoutablePage.EventsView{ .active, .removed }, view_labels, 0..) |view, view_label, i| {
-                const route = ui.RoutablePage.repoEventsRoute(data.identity, view, null, "") orelse return error.RouteTooLong;
+                const route = ui.RoutablePage.repoEventsRoute(data.identity, view, null, "", data.moment) orelse return error.RouteTooLong;
                 const count = data.window(view).count;
                 var label_buf: [64]u8 = undefined;
                 const label = try std.fmt.bufPrint(&label_buf, "{s} ({d})", .{ view_label, count });
@@ -706,7 +766,7 @@ pub fn performSync(allocator: std.mem.Allocator, session: *ui.Session) !void {
     session.data.sync_failure = null;
     switch (session.data.current_page) {
         .repo_events => |route| {
-            if (ui.RoutablePage.repoEventsRoute(route.name.slice(), route.view, null, "")) |first|
+            if (ui.RoutablePage.repoEventsRoute(route.name.slice(), route.view, null, "", route.moment)) |first|
                 session.data.current_page = first;
         },
         else => {},

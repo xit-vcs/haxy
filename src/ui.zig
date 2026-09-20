@@ -198,7 +198,7 @@ pub const RoutablePage = union(enum) {
 
     // the "key:value" segments of a url tail, collected in any order
     const Params = struct {
-        const ParamKey = enum { start, line, branch, tag, object, base, patchrev, theirs, find, search, from };
+        const ParamKey = enum { start, line, branch, tag, object, base, patchrev, theirs, find, search, from, moment };
 
         // a branch:/tag:/object: param; the value stays url-encoded
         const RefParam = struct { kind: RefOrOid, value: []const u8 };
@@ -244,6 +244,12 @@ pub const RoutablePage = union(enum) {
         fn start(self: Params) ?usize {
             const value = self.values.get(.start) orelse return 0;
             return std.fmt.parseInt(usize, value, 10) catch null;
+        }
+
+        // the "moment:<n>" event filter, null when absent
+        fn moment(self: Params) error{BadUrl}!?u64 {
+            const value = self.values.get(.moment) orelse return null;
+            return std.fmt.parseInt(u64, value, 10) catch error.BadUrl;
         }
 
         // the "line:<n>" first-line param (0 when absent), null when malformed
@@ -409,6 +415,8 @@ pub const RoutablePage = union(enum) {
         view: EventsView = .active,
         kind: ?evt.EventKind = null,
         selected: Array(evt.event_id_size * 2) = .{},
+        // limits the list to the events one transaction wrote
+        moment: ?u64 = null,
     };
 
     pub const ForkRoute = struct {
@@ -694,13 +702,14 @@ pub const RoutablePage = union(enum) {
     }
 
     // build the events list or a window rooted at one event.
-    pub fn repoEventsRoute(identity: []const u8, view: EventsView, kind: ?evt.EventKind, selected: []const u8) ?RoutablePage {
+    pub fn repoEventsRoute(identity: []const u8, view: EventsView, kind: ?evt.EventKind, selected: []const u8, moment: ?u64) ?RoutablePage {
         if ((kind == null) != (selected.len == 0)) return null;
         return .{ .repo_events = .{
             .name = Array(repo_identity_max_len).from(identity) orelse return null,
             .view = view,
             .kind = kind,
             .selected = Array(evt.event_id_size * 2).from(selected) orelse return null,
+            .moment = moment,
         } };
     }
 
@@ -1153,10 +1162,11 @@ pub const RoutablePage = union(enum) {
             },
             .repo_events => |e| blk: {
                 const prefix = try repoUrlPrefix(arena, e.name.slice());
+                const moment = if (e.moment) |value| try std.fmt.allocPrint(arena.allocator(), "/moment:{d}", .{value}) else "";
                 break :blk if (e.kind) |kind|
-                    try std.fmt.allocPrint(arena.allocator(), "{s}/event:{s}/kind:{s}", .{ prefix, e.selected.slice(), @tagName(kind) })
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/event:{s}/kind:{s}{s}", .{ prefix, e.selected.slice(), @tagName(kind), moment })
                 else
-                    try std.fmt.allocPrint(arena.allocator(), "{s}/events/{s}", .{ prefix, @tagName(e.view) });
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/events/{s}{s}", .{ prefix, @tagName(e.view), moment });
             },
             .repo_settings => |name| try std.fmt.allocPrint(arena.allocator(), "{s}/settings", .{try repoUrlPrefix(arena, name.slice())}),
             .repo_auth => |name| try std.fmt.allocPrint(arena.allocator(), "{s}/auth", .{try repoUrlPrefix(arena, name.slice())}),
@@ -1549,19 +1559,20 @@ pub const RoutablePage = union(enum) {
             return if (segments.next() == null) repoUndoRoute(pair, index) else null;
         }
         if (std.mem.eql(u8, tab, "events")) {
-            const view = if (segments.next()) |word|
-                std.meta.stringToEnum(EventsView, word) orelse return null
-            else
-                .active;
-            return if (segments.next() == null) repoEventsRoute(pair, view, null, "") else null;
+            const word = params.scanTail(&segments) catch return null;
+            if (!params.only(&.{.moment})) return null;
+            const view = if (word) |value| std.meta.stringToEnum(EventsView, value) orelse return null else .active;
+            return repoEventsRoute(pair, view, null, "", params.moment() catch return null);
         }
         if (std.mem.startsWith(u8, tab, "event:")) {
             const event_id = tab["event:".len..];
             const kind_segment = segments.next() orelse return null;
             if (!std.mem.startsWith(u8, kind_segment, "kind:")) return null;
             const kind = std.meta.stringToEnum(evt.EventKind, kind_segment["kind:".len..]) orelse return null;
-            if (event_id.len == 0 or segments.next() != null) return null;
-            return repoEventsRoute(pair, .active, kind, event_id);
+            if (event_id.len == 0) return null;
+            params.scanPairs(&segments) catch return null;
+            if (!params.only(&.{.moment}) or segments.next() != null) return null;
+            return repoEventsRoute(pair, .active, kind, event_id, params.moment() catch return null);
         }
         if (std.mem.eql(u8, tab, files_seg)) {
             params.scanPairs(&segments) catch return null;
@@ -1690,6 +1701,7 @@ pub const RoutablePage = union(enum) {
             .repo_undo => |a_u| std.mem.eql(u8, a_u.name.slice(), b.repo_undo.name.slice()) and a_u.index == b.repo_undo.index,
             .repo_events => |a_e| std.mem.eql(u8, a_e.name.slice(), b.repo_events.name.slice()) and
                 a_e.view == b.repo_events.view and
+                a_e.moment == b.repo_events.moment and
                 a_e.kind == b.repo_events.kind and
                 std.mem.eql(u8, a_e.selected.slice(), b.repo_events.selected.slice()),
             .repo_settings => |a_name| std.mem.eql(u8, a_name.slice(), b.repo_settings.slice()),
@@ -2105,6 +2117,8 @@ pub const Session = struct {
         form_feedback: ?FormFeedback = null,
         // a transient local event-sync error
         sync_failure: ?[]const u8 = null,
+        // a failed terminal undo retained on the current tab
+        undo_failure: ?[]const u8 = null,
         current_page: RoutablePage = .default,
         // whether to render the ANSI art backdrop
         enable_ansi: bool = true,
@@ -2313,7 +2327,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, session: *Session, repo_may
                     terminal_live = true;
                     term.setActive(&terminal);
                 },
-                .undo => |target| try Repo.Undo.perform(allocator, session, target),
+                .undo => |target| Repo.Undo.handleRequest(allocator, session, target),
                 .sync_events => {
                     try nav.root.build(allocator, .{
                         .min_size = .{ .width = null, .height = null },

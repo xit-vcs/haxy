@@ -679,22 +679,7 @@ pub fn main(init: std.process.Init) !void {
 
                 try evt.consume(.local, .repo, .xit, .{}, io, allocator, &template_repo, evt.events_ref, &ours);
 
-                // consume can't root a new branch, so theirs commits by hand
-                var json: std.Io.Writer.Allocating = .init(allocator);
-                defer json.deinit();
-                for (theirs, 0..) |event, i| {
-                    json.clearRetainingCapacity();
-                    try std.json.Stringify.value(event, .{}, &json.writer);
-                    const author = try std.fmt.allocPrint(allocator, "{s} <{s}>", .{ event.author.name, event.author.email });
-                    defer allocator.free(author);
-                    _ = try template_repo.commitAtRef(io, allocator, .{
-                        .author = author,
-                        .message = json.written(),
-                        .timestamp = event.timestamp,
-                        // root the branch at the shared seed tip
-                        .parent_oids = if (i == 0) &.{seed_tip} else null,
-                    }, null, other_ref);
-                }
+                try commitEventsAtRef(io, allocator, &template_repo, other_ref, &theirs, seed_tip);
 
                 {
                     var to_events = try template_repo.switchDir(io, allocator, .{ .target = .{ .ref = evt.events_ref } });
@@ -1338,20 +1323,7 @@ fn seedPatches(
     theirs[2].event.patch = theirs_values[2];
 
     try evt.consume(.server, .repo, .xit, .{}, io, allocator, target_repo, evt.events_ref, &ours);
-    var json: std.Io.Writer.Allocating = .init(allocator);
-    defer json.deinit();
-    for (theirs, 0..) |event, i| {
-        json.clearRetainingCapacity();
-        try std.json.Stringify.value(event, .{}, &json.writer);
-        const author = try std.fmt.allocPrint(allocator, "{s} <{s}>", .{ event.author.name, event.author.email });
-        defer allocator.free(author);
-        _ = try target_repo.commitAtRef(io, allocator, .{
-            .author = author,
-            .message = json.written(),
-            .timestamp = event.timestamp,
-            .parent_oids = if (i == 0) &.{seed_tip} else null,
-        }, null, other_ref);
-    }
+    try commitEventsAtRef(io, allocator, target_repo, other_ref, &theirs, seed_tip);
     {
         var merge = try target_repo.mergeAtRef(io, allocator, .{ .kind = .full, .action = .{ .new = .{ .source = &.{.{ .ref = other_ref }} } } }, evt.events_ref, null);
         defer merge.deinit();
@@ -1366,6 +1338,49 @@ fn seedPatches(
         .source_branch = "feature",
         .target_branch = "master",
     }, null, patch_author);
+}
+
+// commit `events` onto `ref`, rooted at `parent`, as one undoable step.
+// consume always roots a new branch at nothing, so the divergent fixtures
+// write their side branch here instead, recording the action consume would
+fn commitEventsAtRef(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    repo: *rp.Repo(.xit, .{}),
+    ref: xit.ref.Ref,
+    events: []const evt.EventWithId,
+    parent: [hash.hexLen(.sha1)]u8,
+) !void {
+    const Repo = rp.Repo(.xit, .{});
+    const DB = Repo.DB;
+    const Ctx = struct {
+        core: *Repo.Core,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        ref: xit.ref.Ref,
+        events: []const evt.EventWithId,
+        parent: [hash.hexLen(.sha1)]u8,
+
+        pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
+            var moment = try DB.HashMap(.read_write).init(cursor.*);
+            const state = Repo.State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
+            try evt.commitEvents(.xit, .{}, state, ctx.io, ctx.allocator, ctx.ref, ctx.events, .{ctx.parent});
+            try xit.undo.write(.{}, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action = evt.undo_action } });
+        }
+    };
+
+    try repo.core.db_file.lock(io, .exclusive);
+    defer repo.core.db_file.unlock(io);
+
+    const history = try DB.ArrayList(.read_write).init(repo.core.db.rootCursor());
+    try history.appendContext(.{ .slot = try history.getSlot(-1) }, Ctx{
+        .core = &repo.core,
+        .io = io,
+        .allocator = allocator,
+        .ref = ref,
+        .events = events,
+        .parent = parent,
+    });
 }
 
 // recursively copy the contents of src_dir into dest_dir

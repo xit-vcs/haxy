@@ -291,11 +291,40 @@ pub fn remove(
     }});
 }
 
+pub const undo_action = "haxy/events";
+pub const merge_undo_action = "haxy/merge-events";
+
+// index that tracks the events consumed in a given haxy moment
+pub const moment_index_to_event_id_set_key = "moment-index->event-id-set";
+
+// a haxy moment's own position in the haxy history
+pub const moment_index_key = "moment-index";
+
+// a moment's key in the set map
+fn momentIndexKey(comptime hash_kind: hash.HashKind, moment_index: u64) hash.HashInt(hash_kind) {
+    var buffer: [@sizeOf(u64)]u8 = undefined;
+    std.mem.writeInt(u64, &buffer, moment_index, .big);
+    return hash.hashInt(hash_kind, &buffer);
+}
+
+// the ids of the events a moment wrote, newest first, or null when it wrote none
+pub fn momentEventIds(
+    comptime DB: type,
+    comptime hash_kind: hash.HashKind,
+    haxy_moment: DB.HashMap(.read_only),
+    moment_index: u64,
+) !?DB.SortedSet(.read_only) {
+    const sets_cursor = try haxy_moment.getCursor(hash.hashInt(hash_kind, moment_index_to_event_id_set_key)) orelse return null;
+    const sets = try DB.HashMap(.read_only).init(sets_cursor);
+    const ids_cursor = try sets.getCursor(momentIndexKey(hash_kind, moment_index)) orelse return null;
+    return try DB.SortedSet(.read_only).init(ids_cursor);
+}
+
 // commit `events` (if any) as JSON commit messages on `ref`, then consume the
 // events on `ref` into the db the repo's views read: the repo's own db for a
 // xit repo, or the standalone event db next to a git repo. for a xit repo the
-// commits and the consume run in one transaction. server writes refresh
-// mergeability after the transaction releases its lock.
+// commits and the consume run in one transaction, which also saves the
+// mergeability of the patches the events touched.
 pub fn consume(
     host_kind: HostKind,
     comptime role: RepoRole,
@@ -349,6 +378,13 @@ pub fn consume(
         .xit => {
             const DB = rp.Repo(.xit, repo_opts).DB;
             const State = rp.Repo(.xit, repo_opts).State;
+            var checks: pch.MergeCheckInputs(repo_opts) = .{};
+            defer checks.deinit(io, allocator);
+            if (role == .repo and host_kind == .server) {
+                checks.prepare(io, allocator, repo, events) catch |err| {
+                    std.log.warn("failed to prepare mergeability: {s}", .{@errorName(err)});
+                };
+            }
 
             const Ctx = struct {
                 core: *rp.Repo(.xit, repo_opts).Core,
@@ -356,6 +392,7 @@ pub fn consume(
                 allocator: std.mem.Allocator,
                 ref: rf.Ref,
                 events: []const EventWithId,
+                checks: *pch.MergeCheckInputs(repo_opts),
                 first_parent_oids: ?[1][hash.hexLen(repo_opts.hash)]u8,
 
                 pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
@@ -364,7 +401,8 @@ pub fn consume(
 
                     try commitEvents(.xit, repo_opts, state, ctx.io, ctx.allocator, ctx.ref, ctx.events, ctx.first_parent_oids);
                     if (!try consumeInTransaction(role, .xit, repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, ctx.ref)) return error.CancelTransaction;
-                    try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action = "event" } });
+                    _ = try ctx.checks.update(state, ctx.io, ctx.allocator);
+                    try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action = undo_action } });
                 }
             };
 
@@ -378,6 +416,7 @@ pub fn consume(
                 .allocator = allocator,
                 .ref = resolved_ref,
                 .events = events,
+                .checks = &checks,
                 .first_parent_oids = first_parent_oids,
             }) catch |err| switch (err) {
                 error.CancelTransaction => return,
@@ -386,20 +425,10 @@ pub fn consume(
         },
     }
 
-    if (role == .repo and repo_kind == .xit and host_kind == .server) {
-        // since patches may have been updated, we need to recheck their mergeability
-        if (events.len == 0) {
-            // we consumed events already on the ref, and we don't know what specific
-            // patches may have been updated, so refresh all of them
-            pch.refreshMergeability(repo_opts, io, allocator, repo, null);
-        } else {
-            // we consumed specific events so we can refresh only the patches that were updated
-            for (events) |event| {
-                if (event.event != .patch) continue;
-                const id = parseEventId(&event.id) catch continue;
-                pch.refreshMergeability(repo_opts, io, allocator, repo, id);
-            }
-        }
+    // consuming an existing ref does not provide the set of changed patches
+    // explicit patch writes already saved their checks in the event transaction
+    if (role == .repo and repo_kind == .xit and host_kind == .server and events.len == 0) {
+        pch.refreshMergeability(repo_opts, io, allocator, repo, null);
     }
 }
 
@@ -429,7 +458,7 @@ pub fn mergeEvents(
                     var moment = try DB.HashMap(.read_write).init(cursor.*);
                     const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
                     if (!try mergeEventsInTransaction(.xit, repo_opts, state, ctx.io, ctx.allocator, ctx.remote_ref)) return error.CancelTransaction;
-                    try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action = "event" } });
+                    try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action = merge_undo_action } });
                 }
             };
 
@@ -755,7 +784,7 @@ pub fn consumeInTransaction(
         const haxy_moment_cursor = try haxy_moments.getCursor(hash.bytesToInt(repo_opts.hash, &head_oid)) orelse return error.CursorNotFound;
         const haxy_moment = try DB.HashMap(.read_only).init(haxy_moment_cursor);
 
-        const moment_index_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, "moment-index")) orelse return error.CursorNotFound;
+        const moment_index_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, moment_index_key)) orelse return error.CursorNotFound;
         const moment_index = try moment_index_cursor.readUint();
 
         try haxy_history.slice(moment_index + 1);
@@ -811,7 +840,7 @@ pub fn consumeInTransaction(
                     const old_moment_cursor = try haxy_moments.getCursor(hash.bytesToInt(repo_opts.hash, &oid)) orelse return error.CursorNotFound;
                     const old_moment = try DB.HashMap(.read_only).init(old_moment_cursor);
 
-                    const old_moment_index_cursor = try old_moment.getCursor(hash.hashInt(repo_opts.hash, "moment-index")) orelse return error.CursorNotFound;
+                    const old_moment_index_cursor = try old_moment.getCursor(hash.hashInt(repo_opts.hash, moment_index_key)) orelse return error.CursorNotFound;
                     const old_moment_index = try old_moment_index_cursor.readUint();
 
                     // resize the haxy history list so we truncate all the
@@ -895,7 +924,8 @@ pub fn consumeInTransaction(
         // associate this moment with the index it will first appear at in the
         // haxy history list. this will be important later so we can truncate
         // that list if the user ever rebases starting at this object id.
-        try haxy_moment.put(hash.hashInt(repo_opts.hash, "moment-index"), .{ .uint = try haxy_history.count() - 1 });
+        const moment_index = try haxy_history.count() - 1;
+        try haxy_moment.put(hash.hashInt(repo_opts.hash, moment_index_key), .{ .uint = moment_index });
 
         // consume the event unless it's a merge commit
         if (parent_oids.len <= 1) {
@@ -910,6 +940,15 @@ pub fn consumeInTransaction(
             if (!role.allows(std.meta.activeTag(event_with_id.event))) return error.EventKindNotAllowed;
 
             const current_event_id = try parseEventId(&event_with_id.id);
+
+            // associate the transaction with the events it writes. this is
+            // used by the undo tab to link the events that were affected
+            // by a given transaction.
+            {
+                const sets = try DB.HashMap(.read_write).init(try haxy_moment.putCursor(hash.hashInt(repo_opts.hash, moment_index_to_event_id_set_key)));
+                const ids = try DB.SortedSet(.read_write).init(try sets.putCursor(momentIndexKey(repo_opts.hash, moment_index)));
+                try ids.put(&orderKeyDesc(event_order, &current_event_id));
+            }
 
             // wrap the payload into the record `consume` stores, with its
             // commit-derived fields; on update, `consume` preserves the

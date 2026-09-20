@@ -5,6 +5,7 @@ const evt = @import("../../event.zig");
 const inp = @import("../input.zig");
 const xit = @import("xit");
 const rp = xit.repo;
+const hash = xit.hash;
 const wgt = xit.xitui.widget;
 const layout = xit.xitui.layout;
 const Key = xit.xitui.input.Key;
@@ -13,18 +14,29 @@ const Focus = xit.xitui.focus.Focus;
 const Self = @This();
 
 pub const page_size = 20;
+
+// replaces the description for a transaction that wrote events
+pub const EventsLink = struct {
+    label: []const u8,
+    link: []const u8,
+};
+
 pub const Item = struct {
     index: u64,
     action: []const u8,
     description: []const u8,
+    timestamp: []const u8,
     link: []const u8,
     form: []const u8,
+    events: ?EventsLink = null,
 };
 
 identity: []const u8,
-count: u64,
-items: []const Item,
-next: ?u64,
+count: u64 = 0,
+items: []const Item = &.{},
+next: ?u64 = null,
+failure: ?[]const u8 = null,
+can_undo: bool = false,
 
 pub fn init(comptime opts: rp.RepoOpts(.xit), arena: *std.heap.ArenaAllocator, repo: *rp.Repo(.xit, opts), identity: []const u8, selected: ?u64) !Self {
     const aa = arena.allocator();
@@ -39,28 +51,74 @@ pub fn init(comptime opts: rp.RepoOpts(.xit), arena: *std.heap.ArenaAllocator, r
         remaining -= 1;
         const cursor = try history.getCursor(remaining) orelse return error.TransactionNotFound;
         const moment = try DB.HashMap(.read_only).init(cursor);
-        var record = try xit.undo.read(opts, moment, &buffer);
-        if (record) |*value| {
-            if (std.mem.eql(u8, value.action, "update_branch_patch")) value.action = "update_patch";
-        }
+        const record = try xit.undo.read(opts, moment, &buffer);
         var description: std.Io.Writer.Allocating = .init(aa);
-        if (record) |value| {
+        const detail = if (record) |value| try eventDetail(opts, arena, identity, value, moment) else null;
+        if (detail) |value| {
+            try description.writer.writeAll(value.description);
+        } else if (record) |value| {
             try xit.undo.format(opts, &repo.core.db, arena.child_allocator, value, &description.writer);
-            try description.writer.print("\n\n{s}", .{try formatTimestamp(aa, value.timestamp)});
         } else {
-            try description.writer.writeAll("(empty description)\n\ntimestamp unavailable");
+            try description.writer.writeAll("no undo record");
         }
         const route = ui.RoutablePage.repoUndoRoute(identity, remaining) orelse return error.RouteTooLong;
         const url = try route.toUrl(arena);
         try items.append(aa, .{
             .index = remaining,
-            .action = if (record) |value| try aa.dupe(u8, value.action) else "(empty description)",
+            .action = if (detail) |value| value.action else if (record) |value| try aa.dupe(u8, value.action) else "unknown",
             .description = description.written(),
+            .events = if (detail) |value| value.events else null,
+            .timestamp = if (record) |value| try formatTimestamp(aa, value.timestamp) else "timestamp unavailable",
             .link = try std.fmt.allocPrint(aa, "ai:{s}", .{url}),
             .form = try std.fmt.allocPrint(aa, "form:{s}/undo", .{url}),
         });
     }
     return .{ .identity = try aa.dupe(u8, identity), .count = count, .items = items.items, .next = if (remaining > 0) remaining - 1 else null };
+}
+
+const Detail = struct {
+    action: []const u8,
+    description: []const u8,
+    events: ?EventsLink = null,
+};
+
+// every haxy event transaction shares one action, and the events it wrote are
+// named by the moment's index rather than by the record
+fn eventDetail(
+    comptime opts: rp.RepoOpts(.xit),
+    arena: *std.heap.ArenaAllocator,
+    identity: []const u8,
+    record: xit.undo.UndoRecord,
+    moment: rp.Repo(.xit, opts).DB.HashMap(.read_only),
+) !?Detail {
+    if (std.mem.eql(u8, record.action, evt.merge_undo_action)) return .{ .action = "merge events", .description = "merged the events ref from a remote" };
+    if (!std.mem.eql(u8, record.action, evt.undo_action)) return null;
+
+    const description = "updated the event database";
+    const batch = try momentBatch(opts, moment) orelse return .{ .action = "events", .description = description };
+
+    const aa = arena.allocator();
+    const route = ui.RoutablePage.repoEventsRoute(identity, .active, null, "", batch.index) orelse return error.RouteTooLong;
+    return .{
+        .action = try std.fmt.allocPrint(aa, "events ({d})", .{batch.count}),
+        .description = description,
+        .events = .{
+            .label = try std.fmt.allocPrint(aa, "view events ({d})", .{batch.count}),
+            .link = try std.fmt.allocPrint(aa, "a:{s}", .{try route.toUrl(arena)}),
+        },
+    };
+}
+
+const Batch = struct { index: u64, count: u64 };
+
+// the events the transaction's moment wrote, or null when it wrote none
+fn momentBatch(comptime opts: rp.RepoOpts(.xit), moment: rp.Repo(.xit, opts).DB.HashMap(.read_only)) !?Batch {
+    const DB = rp.Repo(.xit, opts).DB;
+    const haxy_moment = evt.currentMomentFromRepoMoment(opts.hash, moment) catch return null;
+    const index_cursor = try haxy_moment.getCursor(hash.hashInt(opts.hash, evt.moment_index_key)) orelse return null;
+    const moment_index = try index_cursor.readUint();
+    const ids = try evt.momentEventIds(DB, opts.hash, haxy_moment, moment_index) orelse return null;
+    return .{ .index = moment_index, .count = try ids.count() };
 }
 
 pub fn formatTimestamp(aa: std.mem.Allocator, timestamp: i64) ![]const u8 {
@@ -82,12 +140,21 @@ pub fn execute(io: std.Io, allocator: std.mem.Allocator, source: ui.RepoSource, 
     }
 }
 
+// keep action failures on the current tab without rebuilding a stale route.
+pub fn handleRequest(allocator: std.mem.Allocator, session: *ui.Session, target: ui.RoutablePage.RepoUndoRoute) void {
+    perform(allocator, session, target) catch |err| {
+        session.data.undo_failure = @errorName(err);
+        return;
+    };
+    session.data.undo_failure = null;
+}
+
 // both terminal hosts resolve and authorize the request afresh before opening
 // the repository; the web handler uses its matching http authorization path.
 pub fn perform(allocator: std.mem.Allocator, session: *ui.Session, target: ui.RoutablePage.RepoUndoRoute) !void {
     const index = target.index orelse return error.InvalidHistoryIndex;
     const identity = target.name.slice();
-    if (try session.authorize(identity, .write) == null) return error.Forbidden;
+    if (try session.authorize(identity, .owner) == null) return error.Forbidden;
     const io = session.io orelse return error.NotFound;
     const source = session.local orelse blk: {
         const admin_repo = session.admin_repo orelse return error.NotFound;
@@ -106,6 +173,8 @@ pub const View = struct {
     data: *const Self,
     session: *ui.Session,
     detailed_index: ?usize = null,
+    failure_id: ?usize = null,
+    shown_failure: ?[]const u8 = null,
 
     const list_max_width = 20;
     const detail_min_width = 40;
@@ -136,6 +205,9 @@ pub const View = struct {
                 if (data.items.len > 0) {
                     try addText(allocator, &details, "", null, .single);
                     try addText(allocator, &details, "", null, .single);
+                    details.children.values()[1].widget.text_box.options.label = " timestamp ";
+                    try addText(allocator, &details, "", null, .single);
+                    details.children.values()[2].widget.text_box.options.label = " description ";
                     details.getFocus().child_id = details.children.keys()[0];
                 }
                 break :blk try wgt.Scroll(ui.Widget).init(allocator, .{ .box = details }, .{ .direction = .vert, .web_native = !session.is_terminal, .fill = true });
@@ -173,15 +245,37 @@ pub const View = struct {
 
     fn refreshDetail(self: *View, allocator: std.mem.Allocator) !void {
         const index = self.selected() orelse return;
-        if (self.detailed_index == index) return;
+        const failure = self.session.data.undo_failure orelse self.data.failure;
+        if (self.detailed_index == index and std.meta.eql(self.shown_failure, failure)) return;
         const details = &self.detailScroll().child.box;
+        if (self.failure_id) |id| {
+            if (details.children.getPtr(id)) |child| child.widget.deinit(allocator);
+            _ = details.children.orderedRemove(id);
+            self.failure_id = null;
+        }
         const item = self.data.items[index];
         const button = &details.children.values()[0].widget.text_box;
-        const description = &details.children.values()[1].widget.text_box;
+        const description = &details.children.values()[2].widget.text_box;
         try button.setContent(allocator, if (item.index == 0) "initial state cannot be undone" else if (item.index == self.data.count - 1) "undo this" else "undo this and all above it");
-        try description.setContent(allocator, item.description);
-        details.getFocus().kind = if (item.index > 0) .{ .custom = item.form } else .container;
-        button.getFocus().kind = if (item.index > 0) .{ .custom = "submit" } else .text_box;
+        // a transaction that wrote events links to them instead of describing itself
+        if (item.events) |events| {
+            try description.setContent(allocator, events.label);
+            description.options.label = " events ";
+            description.getFocus().kind = .{ .custom = events.link };
+        } else {
+            try description.setContent(allocator, item.description);
+            description.options.label = " description ";
+            description.getFocus().kind = .text_box;
+        }
+        const enabled = self.data.can_undo and item.index > 0;
+        button.getFocus().kind = if (enabled) .{ .custom = "submit" } else .text_box;
+        try details.children.values()[1].widget.text_box.setContent(allocator, item.timestamp);
+        if (failure) |message| {
+            try addText(allocator, details, try std.fmt.allocPrint(self.session.page_arena.allocator(), "error: {s}", .{message}), null, .single);
+            self.failure_id = details.children.keys()[details.children.count() - 1];
+        }
+        self.shown_failure = failure;
+        details.getFocus().kind = if (enabled) .{ .custom = item.form } else .container;
         details.getFocus().child_id = details.children.keys()[0];
         self.detailScroll().x = 0;
         self.detailScroll().y = 0;
@@ -193,6 +287,14 @@ pub const View = struct {
         self.clearGrid();
         try self.refreshDetail(allocator);
         const rows = &self.listScroll().child.box;
+        if (self.data.items.len == 0) {
+            const failure = self.session.data.undo_failure orelse self.data.failure;
+            if (!std.meta.eql(self.shown_failure, failure)) {
+                const message = if (failure) |name| try std.fmt.allocPrint(self.session.page_arena.allocator(), "error: {s}", .{name}) else "no undo history";
+                try rows.children.values()[0].widget.text_box.setContent(allocator, message);
+                self.shown_failure = failure;
+            }
+        }
         for (rows.children.keys(), rows.children.values()) |id, *child| child.widget.text_box.options.border_style = if (rows.getFocus().child_id == id) .single else .hidden;
         const both_fit = if (constraint.max_size.width) |width| width >= list_max_width + detail_min_width else true;
         self.box.children.values()[0].max_size = if (both_fit) .{ .width = list_max_width, .height = null } else null;
@@ -213,7 +315,7 @@ pub const View = struct {
                     .mouse => |mouse| inp.leftClickOn(root_focus, button_id, mouse),
                     else => false,
                 };
-                if (activated and self.data.items[index].index > 0) {
+                if (activated and self.data.can_undo and self.data.items[index].index > 0) {
                     if (builtin.target.cpu.arch != .wasm32 and self.session.is_terminal and self.session.host_request == null) {
                         const route = ui.RoutablePage.repoUndoRoute(self.data.identity, self.data.items[index].index) orelse return error.RouteTooLong;
                         self.session.host_request = .{ .undo = route.repo_undo };
