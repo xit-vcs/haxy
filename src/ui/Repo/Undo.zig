@@ -97,8 +97,9 @@ fn eventDetail(
     if (std.mem.eql(u8, record.action, evt.merge_undo_action)) return .{ .action = "merge events", .description = "merged the events ref from a remote" };
     if (!std.mem.eql(u8, record.action, evt.undo_action)) return null;
 
-    const description = "updated the event database";
-    const count = try momentEventCount(opts, moment) orelse return .{ .action = "events", .description = description };
+    const count = try momentEventCount(opts, moment) orelse return .{ .action = "events", .description = "updated the event database" };
+    // a transaction that consumed only merge commits indexed no events of its own
+    if (count == 0) return .{ .action = "events", .description = "merged the event history" };
 
     // the page reads the transaction's own moment, so the url names the
     // transaction rather than the state it produced
@@ -106,7 +107,7 @@ fn eventDetail(
     const route = ui.RoutablePage.repoEventsRoute(identity, .active, null, "", history_index) orelse return error.RouteTooLong;
     return .{
         .action = try std.fmt.allocPrint(aa, "events ({d})", .{count}),
-        .description = description,
+        .description = "updated the event database",
         .events = .{
             .label = try std.fmt.allocPrint(aa, "view events ({d})", .{count}),
             .link = try std.fmt.allocPrint(aa, "a:{s}", .{try route.toUrl(arena)}),
@@ -114,12 +115,13 @@ fn eventDetail(
     };
 }
 
-// how many events the transaction's moment wrote, or null when it wrote none
+// how many events the transaction's moment wrote: zero when it named a moment
+// but indexed nothing, null when its state cannot be read at all
 fn momentEventCount(comptime opts: rp.RepoOpts(.xit), moment: rp.Repo(.xit, opts).DB.HashMap(.read_only)) !?u64 {
     const DB = rp.Repo(.xit, opts).DB;
     const haxy_moment = evt.currentMomentFromRepoMoment(opts.hash, moment) catch return null;
     const index_cursor = try haxy_moment.getCursor(hash.hashInt(opts.hash, evt.moment_index_key)) orelse return null;
-    const ids = try evt.momentEventIds(DB, opts.hash, haxy_moment, try index_cursor.readUint()) orelse return null;
+    const ids = try evt.momentEventIds(DB, opts.hash, haxy_moment, try index_cursor.readUint()) orelse return 0;
     return try ids.count();
 }
 
