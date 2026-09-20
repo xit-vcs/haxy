@@ -37,6 +37,8 @@ items: []const Item = &.{},
 next: ?u64 = null,
 failure: ?[]const u8 = null,
 can_undo: bool = false,
+// the clear-history confirmation stands in for the list
+clear: bool = false,
 
 pub fn init(comptime opts: rp.RepoOpts(.xit), arena: *std.heap.ArenaAllocator, repo: *rp.Repo(.xit, opts), identity: []const u8, selected: ?u64) !Self {
     const aa = arena.allocator();
@@ -140,6 +142,27 @@ pub fn execute(io: std.Io, allocator: std.mem.Allocator, source: ui.RepoSource, 
     }
 }
 
+// discard every earlier transaction by compacting the database. the patch
+// revisions events point at are unreachable from the refs, so they are named
+// as extra roots to survive the collection.
+pub fn clearHistory(io: std.Io, allocator: std.mem.Allocator, source: ui.RepoSource) !void {
+    if (source.repo_kind != .xit) return error.NotFound;
+    var any_repo = try rp.AnyRepo(.xit, .{}).open(io, allocator, source.localInitOpts());
+    defer any_repo.deinit(io, allocator);
+    switch (any_repo) {
+        inline else => |*repo| {
+            const opts = repo.self_repo_opts;
+            // a repo that has consumed no events has no revisions to protect
+            const roots = if (evt.currentMoment(opts, repo)) |moment|
+                try evt.PatchRev.gcRoots(rp.Repo(.xit, opts).DB, opts.hash, allocator, moment)
+            else |_|
+                &.{};
+            defer allocator.free(roots);
+            _ = try repo.garbageCollect(io, allocator, .{ .extra_roots = roots });
+        },
+    }
+}
+
 // keep action failures on the current tab without rebuilding a stale route.
 pub fn handleRequest(allocator: std.mem.Allocator, session: *ui.Session, target: ui.RoutablePage.RepoUndoRoute) void {
     perform(allocator, session, target) catch |err| {
@@ -152,20 +175,26 @@ pub fn handleRequest(allocator: std.mem.Allocator, session: *ui.Session, target:
 // both terminal hosts resolve and authorize the request afresh before opening
 // the repository; the web handler uses its matching http authorization path.
 pub fn perform(allocator: std.mem.Allocator, session: *ui.Session, target: ui.RoutablePage.RepoUndoRoute) !void {
-    const index = target.index orelse return error.InvalidHistoryIndex;
     const identity = target.name.slice();
-    if (try session.authorize(identity, .owner) == null) return error.Forbidden;
+    const source = try authorizedSource(session, identity) orelse return error.Forbidden;
     const io = session.io orelse return error.NotFound;
-    const source = session.local orelse blk: {
-        const admin_repo = session.admin_repo orelse return error.NotFound;
-        const moment = try evt.currentMoment(evt.admin_repo_opts, admin_repo);
-        const pair = ui.RoutablePage.RepoIdentity.parse(identity) orelse return error.NotFound;
-        const found = try evt.Repo.readByOwnerAndName(evt.AdminDB, evt.admin_repo_opts.hash, moment, session.page_arena, pair.owner, pair.name) orelse return error.NotFound;
-        const hex = std.fmt.bytesToHex(found.event_id, .lower);
-        break :blk ui.RepoSource{ .path = try std.fs.path.join(session.page_arena.allocator(), &.{ session.repos_dir orelse return error.NotFound, &hex }), .repo_kind = .xit };
-    };
-    try execute(io, allocator, source, index);
+    if (target.clear)
+        try clearHistory(io, allocator, source)
+    else
+        try execute(io, allocator, source, target.index orelse return error.InvalidHistoryIndex);
     try session.navigate(ui.RoutablePage.repoUndoRoute(identity, null) orelse return error.RouteTooLong);
+}
+
+// the repo an owner may act on, or null when they may not
+fn authorizedSource(session: *ui.Session, identity: []const u8) !?ui.RepoSource {
+    if (try session.authorize(identity, .owner) == null) return null;
+    if (session.local) |local| return local;
+    const admin_repo = session.admin_repo orelse return error.NotFound;
+    const moment = try evt.currentMoment(evt.admin_repo_opts, admin_repo);
+    const pair = ui.RoutablePage.RepoIdentity.parse(identity) orelse return error.NotFound;
+    const found = try evt.Repo.readByOwnerAndName(evt.AdminDB, evt.admin_repo_opts.hash, moment, session.page_arena, pair.owner, pair.name) orelse return error.NotFound;
+    const hex = std.fmt.bytesToHex(found.event_id, .lower);
+    return .{ .path = try std.fs.path.join(session.page_arena.allocator(), &.{ session.repos_dir orelse return error.NotFound, &hex }), .repo_kind = .xit };
 }
 
 pub const View = struct {
@@ -178,8 +207,32 @@ pub const View = struct {
 
     const list_max_width = 20;
     const detail_min_width = 40;
+    const header_index = 0;
+    const content_index = 1;
 
     pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !View {
+        var outer = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert });
+        errdefer outer.deinit(allocator);
+
+        // the sub header carries the tab's only action
+        {
+            var header = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
+            errdefer header.deinit(allocator);
+            const route = ui.RoutablePage.repoUndoClearRoute(data.identity) orelse return error.RouteTooLong;
+            const link = try std.fmt.allocPrint(session.page_arena.allocator(), "a:{s}", .{try route.toUrl(session.page_arena)});
+            try addText(allocator, &header, "clear undo history", link, .single);
+            header.getFocus().child_id = header.children.keys()[0];
+            try outer.children.put(allocator, header.getFocus().id, .{ .widget = .{ .box = header }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
+        }
+
+        if (data.clear) {
+            var center = try initClearForm(allocator, data, session);
+            errdefer center.deinit(allocator);
+            try outer.children.put(allocator, center.getFocus().id, .{ .widget = .{ .center = center }, .rect = null, .min_size = null });
+            outer.getFocus().child_id = outer.children.keys()[content_index];
+            return .{ .box = outer, .data = data, .session = session };
+        }
+
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
         errdefer box.deinit(allocator);
         {
@@ -217,7 +270,30 @@ pub const View = struct {
             try box.children.put(allocator, scroll.getFocus().id, .{ .widget = .{ .scroll = scroll }, .rect = null, .min_size = .{ .width = detail_min_width, .height = null } });
         }
         box.getFocus().child_id = box.children.keys()[0];
-        return .{ .box = box, .data = data, .session = session };
+        try outer.children.put(allocator, box.getFocus().id, .{ .widget = .{ .box = box }, .rect = null, .min_size = null });
+        outer.getFocus().child_id = outer.children.keys()[content_index];
+        return .{ .box = outer, .data = data, .session = session };
+    }
+
+    // the same shape the thread views use to confirm a removal
+    fn initClearForm(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !ui.widget.Center {
+        var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .rounded_corners = true, .direction = .vert });
+        errdefer box.deinit(allocator);
+        const route = ui.RoutablePage.repoUndoClearRoute(data.identity) orelse return error.RouteTooLong;
+        box.getFocus().kind = .{ .custom = try std.fmt.allocPrint(session.page_arena.allocator(), "form:{s}", .{try route.toUrl(session.page_arena)}) };
+
+        var prompt = try wgt.Text.init(allocator, "are you sure?");
+        errdefer prompt.deinit(allocator);
+        try box.children.put(allocator, prompt.getFocus().id, .{ .widget = .{ .text = prompt }, .rect = null, .min_size = null });
+
+        var button = try wgt.TextBox.init(allocator, "clear undo history", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+        errdefer button.deinit(allocator);
+        button.getFocus().mode = .all;
+        button.getFocus().kind = if (data.can_undo) .{ .custom = "submit" } else .text_box;
+        try box.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = null });
+        box.getFocus().child_id = button.getFocus().id;
+
+        return ui.widget.Center.init(allocator, .{ .box = box });
     }
 
     fn addText(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), text: []const u8, link: ?[]const u8, border: wgt.BorderStyle) !void {
@@ -228,11 +304,20 @@ pub const View = struct {
         try box.children.put(allocator, row.getFocus().id, .{ .widget = .{ .text_box = row }, .rect = null, .min_size = null });
     }
 
+    fn headerBox(self: *View) *wgt.Box(ui.Widget) {
+        return &self.box.children.values()[header_index].widget.box;
+    }
+    fn headerActive(self: *View) bool {
+        return self.box.getFocus().child_id == self.headerBox().getFocus().id;
+    }
+    fn contentBox(self: *View) *wgt.Box(ui.Widget) {
+        return &self.box.children.values()[content_index].widget.box;
+    }
     fn listScroll(self: *View) *wgt.Scroll(ui.Widget) {
-        return &self.box.children.values()[0].widget.scroll;
+        return &self.contentBox().children.values()[0].widget.scroll;
     }
     fn detailScroll(self: *View) *wgt.Scroll(ui.Widget) {
-        return &self.box.children.values()[1].widget.scroll;
+        return &self.contentBox().children.values()[1].widget.scroll;
     }
     fn selected(self: *View) ?usize {
         const rows = &self.listScroll().child.box;
@@ -240,7 +325,7 @@ pub const View = struct {
         return if (index < self.data.items.len) index else null;
     }
     fn detailActive(self: *View) bool {
-        return self.box.getFocus().child_id == self.detailScroll().getFocus().id;
+        return self.contentBox().getFocus().child_id == self.detailScroll().getFocus().id;
     }
 
     fn refreshDetail(self: *View, allocator: std.mem.Allocator) !void {
@@ -285,6 +370,7 @@ pub const View = struct {
 
     pub fn build(self: *View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
         self.clearGrid();
+        if (self.data.clear) return try self.box.build(allocator, constraint, root_focus);
         try self.refreshDetail(allocator);
         const rows = &self.listScroll().child.box;
         if (self.data.items.len == 0) {
@@ -297,14 +383,27 @@ pub const View = struct {
         }
         for (rows.children.keys(), rows.children.values()) |id, *child| child.widget.text_box.options.border_style = if (rows.getFocus().child_id == id) .single else .hidden;
         const both_fit = if (constraint.max_size.width) |width| width >= list_max_width + detail_min_width else true;
-        self.box.children.values()[0].max_size = if (both_fit) .{ .width = list_max_width, .height = null } else null;
+        self.contentBox().children.values()[0].max_size = if (both_fit) .{ .width = list_max_width, .height = null } else null;
         const width = if (constraint.max_size.width) |value| if (both_fit) value - list_max_width else value else detail_min_width;
-        self.box.children.values()[1].min_size = .{ .width = width, .height = null };
+        self.contentBox().children.values()[1].min_size = .{ .width = width, .height = null };
         for (self.detailScroll().child.box.children.values()) |*child| child.max_size = .{ .width = width -| 2, .height = null };
         try self.box.build(allocator, constraint, root_focus);
     }
 
     pub fn input(self: *View, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
+        // the sub header sits above whichever content the route selects
+        if (self.headerActive()) {
+            if (key == .arrow_down) root_focus.setFocus(self.box.children.values()[content_index].widget.getFocus().id);
+            return;
+        }
+        if (self.data.clear) {
+            if (key == .arrow_up) root_focus.setFocus(self.headerBox().getFocus().id) else try self.clearInput(key, root_focus);
+            return;
+        }
+        if (key == .arrow_up and self.contentAtTop()) {
+            root_focus.setFocus(self.headerBox().getFocus().id);
+            return;
+        }
         try self.refreshDetail(allocator);
         if (self.detailActive()) {
             const details = &self.detailScroll().child.box;
@@ -334,11 +433,38 @@ pub const View = struct {
         }
     }
 
-    pub fn atTop(self: *View) bool {
+    // the confirm button submits the form the web renderer posts
+    fn clearInput(self: *View, key: Key, root_focus: *Focus) !void {
+        const center = &self.box.children.values()[content_index].widget.center;
+        const button_id = center.child.box.getFocus().child_id orelse return;
+        const activated = switch (key) {
+            .enter => root_focus.grandchild_id == button_id,
+            .mouse => |mouse| inp.leftClickOn(root_focus, button_id, mouse),
+            else => false,
+        };
+        if (!activated or !self.data.can_undo) return;
+        if (builtin.target.cpu.arch != .wasm32 and self.session.is_terminal and self.session.host_request == null) {
+            const route = ui.RoutablePage.repoUndoClearRoute(self.data.identity) orelse return error.RouteTooLong;
+            self.session.host_request = .{ .undo = route.repo_undo };
+        }
+    }
+
+    fn contentAtTop(self: *View) bool {
         const scroll = if (self.detailActive()) self.detailScroll() else self.listScroll();
         const rows = &scroll.child.box;
         const id = rows.getFocus().child_id orelse return true;
         return rows.children.getIndex(id) == 0 and scroll.y == 0;
+    }
+
+    // moving up from the sub header returns to the page's tabs
+    pub fn atTop(self: *View) bool {
+        return self.headerActive();
+    }
+
+    // arriving from the page's tabs lands on the sub header, not the content
+    pub fn focusHeader(self: *View, root_focus: *Focus) bool {
+        root_focus.setFocus(self.headerBox().getFocus().id);
+        return true;
     }
     pub fn deinit(self: *View, allocator: std.mem.Allocator) void {
         self.box.deinit(allocator);

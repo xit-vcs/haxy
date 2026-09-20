@@ -265,6 +265,7 @@ pub fn init(
     // a server shows events to whoever it shows undo to, so the route follows
     if (route == .repo_events and session.data.host_kind != .local and !undo_allowed) return error.NotFound;
     const undo_index = if (route == .repo_undo) route.repo_undo.index else null;
+    const undo_clear = route == .repo_undo and route.repo_undo.clear;
     // an unreadable repo still shows the tab, like every other tab
     var undo_data: ?Undo = if (undo_allowed) .{ .identity = repo_identity.identity } else null;
     const files, const changes, const refs, var issues, var patches, var discussions, const events = blk: {
@@ -326,7 +327,10 @@ pub fn init(
             try Events.empty(aa, repo_identity.identity, events_view, session.local != null, session.data.sync_failure),
         };
     };
-    if (undo_data) |*undo| undo.can_undo = session.local != null or evt.Repo.roleOf(repo, session.userId()) == .owner;
+    if (undo_data) |*undo| {
+        undo.can_undo = session.local != null or evt.Repo.roleOf(repo, session.userId()) == .owner;
+        undo.clear = undo_clear;
+    }
     if (route == .repo_undo and undo_data == null) return error.NotFound;
     issues.repo_source = source;
     patches.repo_source = source;
@@ -515,6 +519,7 @@ pub const View = struct {
                                 if (stack.getSelected()) |selected_widget| switch (selected_widget.*) {
                                     .repo_files => |*v| if (v.focusHeader(root_focus)) return,
                                     .repo_commits => |*v| if (v.focusHeader(root_focus)) return,
+                                    .repo_undo => |*v| if (v.focusHeader(root_focus)) return,
                                     else => {},
                                 };
                                 index = stack_index;

@@ -404,10 +404,16 @@ pub const RoutablePage = union(enum) {
     pub const RepoUndoRoute = struct {
         name: Array(repo_identity_max_len),
         index: ?u64 = null,
+        // the clear-history confirmation page, which has no selected entry
+        clear: bool = false,
     };
 
     pub fn repoUndoRoute(identity: []const u8, index: ?u64) ?RoutablePage {
         return .{ .repo_undo = .{ .name = Array(repo_identity_max_len).from(identity) orelse return null, .index = index } };
+    }
+
+    pub fn repoUndoClearRoute(identity: []const u8) ?RoutablePage {
+        return .{ .repo_undo = .{ .name = Array(repo_identity_max_len).from(identity) orelse return null, .clear = true } };
     }
 
     pub const RepoEventsRoute = struct {
@@ -1158,7 +1164,12 @@ pub const RoutablePage = union(enum) {
             },
             .repo_undo => |u| blk: {
                 const prefix = try repoUrlPrefix(arena, u.name.slice());
-                break :blk if (u.index) |index| try std.fmt.allocPrint(arena.allocator(), "{s}/undo/{d}", .{ prefix, index }) else try std.fmt.allocPrint(arena.allocator(), "{s}/undo", .{prefix});
+                break :blk if (u.clear)
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/undo/clear", .{prefix})
+                else if (u.index) |index|
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/undo/{d}", .{ prefix, index })
+                else
+                    try std.fmt.allocPrint(arena.allocator(), "{s}/undo", .{prefix});
             },
             .repo_events => |e| blk: {
                 const prefix = try repoUrlPrefix(arena, e.name.slice());
@@ -1555,8 +1566,11 @@ pub const RoutablePage = union(enum) {
             return null;
         }
         if (std.mem.eql(u8, tab, "undo")) {
-            const index = if (segments.next()) |word| std.fmt.parseInt(u64, word, 10) catch return null else null;
-            return if (segments.next() == null) repoUndoRoute(pair, index) else null;
+            const word = segments.next();
+            if (segments.next() != null) return null;
+            const value = word orelse return repoUndoRoute(pair, null);
+            if (std.mem.eql(u8, value, "clear")) return repoUndoClearRoute(pair);
+            return repoUndoRoute(pair, std.fmt.parseInt(u64, value, 10) catch return null);
         }
         if (std.mem.eql(u8, tab, "events")) {
             const word = params.scanTail(&segments) catch return null;
@@ -1698,7 +1712,9 @@ pub const RoutablePage = union(enum) {
                 a_p.view == b.repo_patches.view and
                 a_p.comments_start == b.repo_patches.comments_start and
                 std.mem.eql(u8, a_p.comment.slice(), b.repo_patches.comment.slice()),
-            .repo_undo => |a_u| std.mem.eql(u8, a_u.name.slice(), b.repo_undo.name.slice()) and a_u.index == b.repo_undo.index,
+            .repo_undo => |a_u| std.mem.eql(u8, a_u.name.slice(), b.repo_undo.name.slice()) and
+                a_u.index == b.repo_undo.index and
+                a_u.clear == b.repo_undo.clear,
             .repo_events => |a_e| std.mem.eql(u8, a_e.name.slice(), b.repo_events.name.slice()) and
                 a_e.view == b.repo_events.view and
                 a_e.moment == b.repo_events.moment and
