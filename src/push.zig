@@ -316,6 +316,7 @@ pub fn receiveFork(
     var revision_id_maybe: ?[evt.event_id_size]u8 = null;
     var response = xit.net_server_receive_pack.Response.init(allocator);
     defer response.deinit();
+    var progress = PushProgress{ .response = &response, .writer = writer };
 
     // execute a transaction that receives the push and materializes its revision
     const result = blk: {
@@ -338,12 +339,13 @@ pub fn receiveFork(
             timestamp: u64,
             newest: ?evt.PatchRev.WithId,
             revision_id_maybe: *?[evt.event_id_size]u8,
+            progress: *PushProgress,
 
             pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
                 // receive the branch update
                 var moment = try DB.HashMap(.read_write).init(cursor.*);
                 const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
-                try xit.net_server_receive_pack.run(.xit, repo_opts, state, ctx.io, ctx.allocator, ctx.reader, ctx.writer, .{ .allowed_ref = "refs/heads/" ++ fork.ref.name, .deferred_response = ctx.response });
+                try xit.net_server_receive_pack.run(.xit, repo_opts, state, ctx.io, ctx.allocator, ctx.reader, ctx.writer, .{ .allowed_ref = "refs/heads/" ++ fork.ref.name, .deferred_response = ctx.response }, ctx.progress);
                 try writeReceivedPatches(repo_opts, state, ctx.io, ctx.allocator, ctx.response, ctx.writer);
 
                 // copy the target history needed to preserve the merge base
@@ -430,6 +432,7 @@ pub fn receiveFork(
             .timestamp = timestamp,
             .newest = newest,
             .revision_id_maybe = &revision_id_maybe,
+            .progress = &progress,
         });
     };
     result catch |err| {
@@ -443,7 +446,7 @@ pub fn receiveFork(
     };
     if (!published) return response.finish(writer, null);
 
-    var progress = PushProgress{ .response = &response, .writer = writer, .label = "Updating patches" };
+    progress.run(io, .{ .text = "Updating patches" }) catch {};
     progress.run(io, .{ .start = .{ .kind = .writing_patch, .estimated_total_items = 1 } }) catch {};
 
     // best-effort update the published patch so it has the new revision
