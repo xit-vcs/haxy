@@ -70,7 +70,11 @@ pub fn writeReceivedPatches(
     try xit.patch.writePatches(repo_opts, state, io, allocator, &iter, &progress);
 }
 
-fn writeUndo(
+// the action a received push records
+pub const undo_action = "haxy/push";
+
+// the fixture records a stand-in push with this too, so both write one shape
+pub fn writeUndo(
     comptime repo_opts: rp.RepoOpts(.xit),
     state: rp.Repo(.xit, repo_opts).State(.read_write),
     io: std.Io,
@@ -84,7 +88,7 @@ fn writeUndo(
     defer author_json.deinit(allocator);
     var payload: std.json.ObjectMap = try .init(allocator, &.{"author"}, &.{if (author != null) .{ .object = author_json } else .null});
     defer payload.deinit(allocator);
-    try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(io, .real).toSeconds(), .{ .custom = .{ .action = "push", .payload = payload } });
+    try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(io, .real).toSeconds(), .{ .custom = .{ .action = undo_action, .payload = payload } });
 }
 
 // serve a receive-pack and consume any events it pushed to the events branch,

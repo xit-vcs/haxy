@@ -16,6 +16,7 @@ const find = hx.find;
 const cms = hx.search_commit;
 const fork = hx.fork;
 const pch = hx.pch;
+const push = hx.push;
 
 // cook the terminal before a panic/segfault trace is printed, so the trace
 // isn't mangled by raw mode and the alternate buffer
@@ -1338,6 +1339,45 @@ fn seedPatches(
         .source_branch = "feature",
         .target_branch = "master",
     }, null, patch_author);
+
+    // a push onto the branch that patch tracks, so the undo tab shows the
+    // action and the patch refresh it sets off
+    try seedPush(io, allocator, target_repo, patch_author);
+    try pch.refreshBranches(.server, .xit, .{}, io, allocator, target_repo, null, null);
+}
+
+// stand in for a client push, which the fixture has no server to receive: one
+// transaction moves the branch and records the action, the way receive-pack
+// does, and the caller refreshes the affected patches after it
+fn seedPush(io: std.Io, allocator: std.mem.Allocator, repo: *rp.Repo(.xit, .{}), author: evt.CommitAuthor) !void {
+    const Repo = rp.Repo(.xit, .{});
+    const DB = Repo.DB;
+    const Ctx = struct {
+        core: *Repo.Core,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        author: evt.CommitAuthor,
+
+        pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
+            const opts: rp.RepoOpts(.xit) = .{};
+            var moment = try DB.HashMap(.read_write).init(cursor.*);
+            const state = Repo.State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
+
+            // a null tree keeps the parent's content, so the branch advances
+            // without the fixture having to build one
+            const author_line = try std.fmt.allocPrint(ctx.allocator, "{s} <{s}>", .{ ctx.author.name, ctx.author.email });
+            defer ctx.allocator.free(author_line);
+            _ = try obj.writeCommit(.xit, opts, state, ctx.io, ctx.allocator, .{
+                .message = "Revise the feature branch",
+                .author = author_line,
+                .timestamp = 820,
+            }, null, .{ .kind = .head, .name = "feature" });
+
+            try push.writeUndo(opts, state, ctx.io, ctx.allocator, ctx.author);
+        }
+    };
+
+    try transaction(io, repo, Ctx{ .core = &repo.core, .io = io, .allocator = allocator, .author = author });
 }
 
 // commit `events` onto `ref`, rooted at `parent`, as one transaction.
@@ -1374,11 +1414,7 @@ fn commitEventsAtRef(
         }
     };
 
-    try repo.core.db_file.lock(io, .exclusive);
-    defer repo.core.db_file.unlock(io);
-
-    const history = try DB.ArrayList(.read_write).init(repo.core.db.rootCursor());
-    try history.appendContext(.{ .slot = try history.getSlot(-1) }, Ctx{
+    try transaction(io, repo, Ctx{
         .core = &repo.core,
         .io = io,
         .allocator = allocator,
@@ -1386,6 +1422,17 @@ fn commitEventsAtRef(
         .events = events,
         .parent = parent,
     });
+}
+
+// append `ctx` to the repo's history as one transaction. the fixtures write a
+// few states the normal paths have no way to produce
+fn transaction(io: std.Io, repo: *rp.Repo(.xit, .{}), ctx: anytype) !void {
+    const DB = rp.Repo(.xit, .{}).DB;
+    try repo.core.db_file.lock(io, .exclusive);
+    defer repo.core.db_file.unlock(io);
+
+    const history = try DB.ArrayList(.read_write).init(repo.core.db.rootCursor());
+    try history.appendContext(.{ .slot = try history.getSlot(-1) }, ctx);
 }
 
 // recursively copy the contents of src_dir into dest_dir
