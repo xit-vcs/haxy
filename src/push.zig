@@ -143,6 +143,9 @@ pub fn receivePackAndConsume(
             if (null != try rf.readRecur(.xit, repo_opts, state.readOnly(), ctx.io, .{ .ref = evt.events_ref })) {
                 _ = try evt.consumeInTransaction(.repo, .xit, repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, evt.events_ref);
                 try pch.detectMerged(repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, ctx.repo_root_path, ctx.updates.items.items, ctx.error_writer);
+
+                // the revisions the pushed branches cause belong to the push
+                try pch.refreshBranchesInTransaction(repo_opts, state, &moment, ctx.io, ctx.allocator, ctx.updates.items.items);
             }
             try writeUndo(repo_opts, state, ctx.io, ctx.allocator, ctx.author);
         }

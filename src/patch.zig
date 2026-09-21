@@ -74,23 +74,7 @@ pub fn writeBranchPatch(
                     var moment = try DB.HashMap(.read_write).init(cursor.*);
                     const state = rp.Repo(repo_kind, repo_opts).State(.read_write){ .core = &ctx.repo.core, .extra = .{ .moment = &moment } };
 
-                    // recheck the expected patch under the repository lock
-                    if (ctx.expected_patch) |expected| {
-                        const events_moment = try evt.currentMomentFromRepoMoment(repo_opts.hash, moment.readOnly());
-                        const current = (try evt.Patch.readById(DB, repo_opts.hash, events_moment, ctx.arena, &try evt.parseEventId(&ctx.id))) orelse return error.PatchOutOfDate;
-                        if (current.removed or !evt.fieldEqual(evt.Patch, current.event, expected)) return error.PatchOutOfDate;
-                    }
-
-                    // capture and consume the branch revision
-                    const events = try branchEvents(repo_kind, repo_opts, state, ctx.io, ctx.arena, ctx.id, ctx.patch, ctx.author);
-                    {
-                        const parent = if (try rf.readRecur(repo_kind, repo_opts, state.readOnly(), ctx.io, .{ .ref = evt.events_ref }) == null) ctx.first_parent else null;
-                        try evt.commitEvents(repo_kind, repo_opts, state, ctx.io, ctx.arena.child_allocator, evt.events_ref, &events, parent);
-                        if (!try evt.consumeInTransaction(.repo, repo_kind, repo_opts, state, &ctx.repo.core.db, &moment, ctx.io, ctx.arena.child_allocator, evt.events_ref)) return error.CancelTransaction;
-                    }
-
-                    // save mergeability before finishing the patch transaction
-                    _ = try ctx.checks.update(state, ctx.io, ctx.arena.child_allocator);
+                    try writeBranchPatchInTransaction(repo_opts, state, &moment, ctx.io, ctx.arena, ctx.id, ctx.patch, ctx.expected_patch, ctx.author, ctx.first_parent, ctx.checks);
 
                     // record the user action for undo
                     try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action = evt.undo_action } });
@@ -100,7 +84,7 @@ pub fn writeBranchPatch(
             // a branch patch has no fork, so this only names the patch to check
             var checks: MergeCheckInputs(repo_opts) = .{};
             defer checks.deinit(io, allocator);
-            if (host_kind == .server) try checks.add(io, allocator, repo, try evt.parseEventId(&id), patch);
+            if (host_kind == .server) try checks.add(io, allocator, repo.core.work_path, try evt.parseEventId(&id), patch);
 
             try repo.core.db_file.lock(io, .exclusive);
             defer repo.core.db_file.unlock(io);
@@ -109,6 +93,43 @@ pub fn writeBranchPatch(
             try history.appendContext(.{ .slot = try history.getSlot(-1) }, Ctx{ .repo = repo, .io = io, .arena = &arena, .id = id, .patch = patch, .expected_patch = expected_patch, .author = author, .checks = &checks, .first_parent = first_parent });
         }
     }
+}
+
+// write one branch patch's revision into a transaction the caller owns. the
+// undo record is the caller's to write, since the transaction may be theirs.
+// git repos never reach here: they write through the local event database
+pub fn writeBranchPatchInTransaction(
+    comptime repo_opts: rp.RepoOpts(.xit),
+    state: rp.Repo(.xit, repo_opts).State(.read_write),
+    moment: *evt.EventDB(repo_opts.hash).HashMap(.read_write),
+    io: std.Io,
+    arena: *std.heap.ArenaAllocator,
+    id: [evt.event_id_size * 2]u8,
+    patch: evt.Patch,
+    expected_patch: ?evt.Patch,
+    author: evt.CommitAuthor,
+    first_parent: ?[1][hash.hexLen(repo_opts.hash)]u8,
+    checks: *MergeCheckInputs(repo_opts),
+) !void {
+    const DB = evt.EventDB(repo_opts.hash);
+
+    // recheck the expected patch under the repository lock
+    if (expected_patch) |expected| {
+        const events_moment = try evt.currentMomentFromRepoMoment(repo_opts.hash, moment.readOnly());
+        const current = (try evt.Patch.readById(DB, repo_opts.hash, events_moment, arena, &try evt.parseEventId(&id))) orelse return error.PatchOutOfDate;
+        if (current.removed or !evt.fieldEqual(evt.Patch, current.event, expected)) return error.PatchOutOfDate;
+    }
+
+    // capture and consume the branch revision
+    const events = try branchEvents(.xit, repo_opts, state, io, arena, id, patch, author);
+    {
+        const parent = if (try rf.readRecur(.xit, repo_opts, state.readOnly(), io, .{ .ref = evt.events_ref }) == null) first_parent else null;
+        try evt.commitEvents(.xit, repo_opts, state, io, arena.child_allocator, evt.events_ref, &events, parent);
+        if (!try evt.consumeInTransaction(.repo, .xit, repo_opts, state, &state.core.db, moment, io, arena.child_allocator, evt.events_ref)) return error.CancelTransaction;
+    }
+
+    // save mergeability before finishing the patch transaction
+    _ = try checks.update(state, io, arena.child_allocator);
 }
 
 fn branchEvents(
@@ -147,6 +168,101 @@ fn branchEvents(
     };
 }
 
+// the open patches whose source branch has moved past the revision they
+// stored, mapped to the record the refresh rewrites. `updates` limits the
+// search to the branches one push changed
+fn collectOutdatedBranchPatches(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    arena: *std.heap.ArenaAllocator,
+    state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+    moment: evt.EventDB(repo_opts.hash).HashMap(.read_only),
+    updates: ?[]const xit.net_server_receive_pack.AppliedRefUpdate,
+    host_kind: evt.HostKind,
+    patches: *std.AutoArrayHashMapUnmanaged([evt.event_id_size]u8, evt.Patch.Record),
+) !void {
+    const DB = evt.EventDB(repo_opts.hash);
+    // find tracked source branches and skip conflicting patches
+    const source_cursor = try moment.getCursor(hash.hashInt(repo_opts.hash, evt.Patch.source_to_id_set_key)) orelse return;
+    const sources = try DB.SortedMap(.read_only).init(source_cursor);
+    const conflicts = if (try moment.getCursor(hash.hashInt(repo_opts.hash, evt.Patch.conflicts_key))) |cursor| try DB.SortedMap(.read_only).init(cursor) else null;
+    var iter = try sources.iterator();
+    while (try iter.next()) |cursor| {
+        const pair = try cursor.readKeyValuePair();
+        const branch = try pair.key_cursor.readBytesAlloc(arena.allocator(), null);
+
+        // limit source refreshes to branches changed by this push
+        if (updates) |changed| {
+            var found = false;
+            for (changed) |update| {
+                if (std.mem.startsWith(u8, update.ref_name, "refs/heads/") and std.mem.eql(u8, update.ref_name["refs/heads/".len..], branch)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) continue;
+        }
+
+        // read the source tip before comparing stored revisions
+        const source = (try rf.readRecur(repo_kind, repo_opts, state, io, .{ .ref = .{ .kind = .head, .name = branch } })) orelse {
+            if (host_kind == .server) std.log.warn("patch source branch missing: {s}", .{branch});
+            continue;
+        };
+
+        // collect open patches whose stored source tip is outdated
+        const ids = try DB.CountedHashSet(.read_only).init(pair.value_cursor);
+        var ids_iter = try ids.iterator();
+        while (try ids_iter.next()) |id_cursor| {
+            const id_pair = try id_cursor.readKeyValuePair();
+            var id: [evt.event_id_size]u8 = undefined;
+            if ((try id_pair.key_cursor.readBytes(&id)).len != id.len) return error.InvalidPatch;
+            const record = (try evt.Patch.readById(DB, repo_opts.hash, moment, arena, &id)) orelse continue;
+            if (record.removed or record.event.status.kind() != .open) continue;
+            if (conflicts) |map| if (try map.getCursor(&evt.orderKeyDesc(record.created_order, &id)) != null) continue;
+            if (record.event.revision) |revision| if (std.mem.eql(u8, revision.source_oid, &source)) continue;
+            try patches.put(allocator, id, record);
+        }
+    }
+}
+
+// refresh the patches their source branch has outrun, inside the caller's
+// transaction, so a push and the revisions it causes land together. fork
+// backed patches are left to `refreshBranches`: their mergeability needs a
+// fork's lock, which has to be taken before this transaction opened
+pub fn refreshBranchesInTransaction(
+    comptime repo_opts: rp.RepoOpts(.xit),
+    state: rp.Repo(.xit, repo_opts).State(.read_write),
+    moment: *evt.EventDB(repo_opts.hash).HashMap(.read_write),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    updates: ?[]const xit.net_server_receive_pack.AppliedRefUpdate,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var patches: std.AutoArrayHashMapUnmanaged([evt.event_id_size]u8, evt.Patch.Record) = .empty;
+    defer patches.deinit(allocator);
+
+    const events_moment = evt.currentMomentFromRepoMoment(repo_opts.hash, moment.readOnly()) catch |err| switch (err) {
+        error.NotFound => return,
+        else => return err,
+    };
+    try collectOutdatedBranchPatches(.xit, repo_opts, io, allocator, &arena, state.readOnly(), events_moment, updates, .server, &patches);
+
+    for (patches.keys(), patches.values()) |id, record| {
+        // a branch patch opens no fork, so its checks need no lock of their own
+        var checks: MergeCheckInputs(repo_opts) = .{};
+        defer checks.deinit(io, allocator);
+        try checks.add(io, allocator, state.core.work_path, id, record.event);
+
+        const author = evt.CommitAuthor{ .name = "haxy", .email = record.author_email orelse "user@haxy" };
+        writeBranchPatchInTransaction(repo_opts, state, moment, io, &arena, std.fmt.bytesToHex(id, .lower), record.event, record.event, author, null, &checks) catch |err| {
+            std.log.warn("failed to refresh branch patch: {s}", .{@errorName(err)});
+        };
+    }
+}
+
 // refresh open patches' tracked branches and, on the server, their mergeability.
 // this runs outside the caller's transaction.
 pub fn refreshBranches(
@@ -164,6 +280,8 @@ pub fn refreshBranches(
     defer arena.deinit();
     var patches: std.AutoArrayHashMapUnmanaged([evt.event_id_size]u8, ?evt.Patch.Record) = .empty;
     defer patches.deinit(allocator);
+    var outdated: std.AutoArrayHashMapUnmanaged([evt.event_id_size]u8, evt.Patch.Record) = .empty;
+    defer outdated.deinit(allocator);
 
     // collect patches whose source or mergeability may have changed
     collect: {
@@ -184,47 +302,14 @@ pub fn refreshBranches(
             while (try iter.next()) |cursor| try patches.put(allocator, try evt.readOrderKeyId(DB, cursor), null);
         }
 
-        // find tracked source branches and skip conflicting patches
-        const source_cursor = try moment.getCursor(hash.hashInt(repo_opts.hash, evt.Patch.source_to_id_set_key)) orelse break :collect;
-        const sources = try DB.SortedMap(.read_only).init(source_cursor);
-        const conflicts = if (try moment.getCursor(hash.hashInt(repo_opts.hash, evt.Patch.conflicts_key))) |cursor| try DB.SortedMap(.read_only).init(cursor) else null;
-        var iter = try sources.iterator();
-        while (try iter.next()) |cursor| {
-            const pair = try cursor.readKeyValuePair();
-            const branch = try pair.key_cursor.readBytesAlloc(arena.allocator(), null);
-
-            // limit source refreshes to branches changed by this push
-            if (updates) |changed| {
-                var found = false;
-                for (changed) |update| {
-                    if (std.mem.startsWith(u8, update.ref_name, "refs/heads/") and std.mem.eql(u8, update.ref_name["refs/heads/".len..], branch)) {
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found) continue;
-            }
-
-            // read the source tip before comparing stored revisions
-            const source = (try repo.readRef(io, .{ .kind = .head, .name = branch })) orelse {
-                if (host_kind == .server) std.log.warn("patch source branch missing: {s}", .{branch});
-                continue;
-            };
-
-            // collect open patches whose stored source tip is outdated
-            const ids = try DB.CountedHashSet(.read_only).init(pair.value_cursor);
-            var ids_iter = try ids.iterator();
-            while (try ids_iter.next()) |id_cursor| {
-                const id_pair = try id_cursor.readKeyValuePair();
-                var id: [evt.event_id_size]u8 = undefined;
-                if ((try id_pair.key_cursor.readBytes(&id)).len != id.len) return error.InvalidPatch;
-                const record = (try evt.Patch.readById(DB, repo_opts.hash, moment, &arena, &id)) orelse continue;
-                if (record.removed or record.event.status.kind() != .open) continue;
-                if (conflicts) |map| if (try map.getCursor(&evt.orderKeyDesc(record.created_order, &id)) != null) continue;
-                if (record.event.revision) |revision| if (std.mem.eql(u8, revision.source_oid, &source)) continue;
-                try patches.put(allocator, id, record);
-            }
+        switch (repo_kind) {
+            .git => try collectOutdatedBranchPatches(repo_kind, repo_opts, io, allocator, &arena, .{ .core = &repo.core, .extra = .{} }, moment, updates, host_kind, &outdated),
+            .xit => {
+                var repo_moment = try repo.core.latestMoment();
+                try collectOutdatedBranchPatches(repo_kind, repo_opts, io, allocator, &arena, .{ .core = &repo.core, .extra = .{ .moment = &repo_moment } }, moment, updates, host_kind, &outdated);
+            },
         }
+        for (outdated.keys(), outdated.values()) |id, record| try patches.put(allocator, id, record);
     }
 
     // start progress reporting after the patch count is known
@@ -408,7 +493,7 @@ fn refreshMergeCheck(
     // acquire fork locks before the target repository lock
     var checks: MergeCheckInputs(repo_opts) = .{};
     defer checks.deinit(io, allocator);
-    try checks.add(io, allocator, target_repo, id.*, initial.event);
+    try checks.add(io, allocator, target_repo.core.work_path, id.*, initial.event);
 
     // cancel the cache transaction when the result is unchanged
     {
@@ -453,11 +538,11 @@ pub fn MergeCheckInputs(comptime repo_opts: rp.RepoOpts(.xit)) type {
             for (events) |event| {
                 if (event.event != .patch) continue;
                 const patch = event.event.patch orelse continue;
-                try self.add(io, allocator, repo, try evt.parseEventId(&event.id), patch);
+                try self.add(io, allocator, repo.core.work_path, try evt.parseEventId(&event.id), patch);
             }
         }
 
-        fn add(self: *Self, io: std.Io, allocator: std.mem.Allocator, repo: *Repo, id: [evt.event_id_size]u8, patch: evt.Patch) !void {
+        fn add(self: *Self, io: std.Io, allocator: std.mem.Allocator, work_path: []const u8, id: [evt.event_id_size]u8, patch: evt.Patch) !void {
             // track each open patch once, including branch-backed patches
             if (patch.status.kind() != .open) return;
             const entry = try self.forks.getOrPut(allocator, id);
@@ -466,7 +551,7 @@ pub fn MergeCheckInputs(comptime repo_opts: rp.RepoOpts(.xit)) type {
             if (patch.source_branch != null) return;
 
             // open the fork before acquiring its shared lock
-            const path = try fork.forkPath(allocator, std.fs.path.dirname(repo.core.work_path) orelse ".", &std.fmt.bytesToHex(id, .lower));
+            const path = try fork.forkPath(allocator, std.fs.path.dirname(work_path) orelse ".", &std.fmt.bytesToHex(id, .lower));
             defer allocator.free(path);
             var opened = Repo.open(io, allocator, .{ .path = path, .require_repo_root = true }) catch |err| {
                 std.log.warn("mergeability fork unavailable: {s}", .{@errorName(err)});

@@ -1347,8 +1347,8 @@ fn seedPatches(
 }
 
 // stand in for a client push, which the fixture has no server to receive: one
-// transaction moves the branch and records the action, the way receive-pack
-// does, and the caller refreshes the affected patches after it
+// transaction moves the branch, refreshes the patches tracking it and records
+// the action, the way receive-pack does
 fn seedPush(io: std.Io, allocator: std.mem.Allocator, repo: *rp.Repo(.xit, .{}), author: evt.CommitAuthor) !void {
     const Repo = rp.Repo(.xit, .{});
     const DB = Repo.DB;
@@ -1373,6 +1373,7 @@ fn seedPush(io: std.Io, allocator: std.mem.Allocator, repo: *rp.Repo(.xit, .{}),
                 .timestamp = 820,
             }, null, .{ .kind = .head, .name = "feature" });
 
+            try pch.refreshBranchesInTransaction(opts, state, &moment, ctx.io, ctx.allocator, null);
             try push.writeUndo(opts, state, ctx.io, ctx.allocator, ctx.author);
         }
     };
