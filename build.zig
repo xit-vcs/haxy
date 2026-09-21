@@ -3,6 +3,7 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const xit_dep = b.dependency("xit", .{});
     const ansi_art = ansiArtModule(b);
+    const test_filters = b.option([]const []const u8, "test-filter", "Skip tests that do not match any filter") orelse &[0][]const u8{};
 
     // wasm
     const wasm_exe = blk: {
@@ -75,6 +76,7 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = optimize,
             }),
+            .filters = test_filters,
         });
         unit_tests.root_module.addImport("xit", xit_dep.module("xit"));
         unit_tests.root_module.addImport("ansi_art", ansi_art);
@@ -143,6 +145,7 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = optimize,
             }),
+            .filters = test_filters,
         });
         unit_tests.root_module.addImport("haxy", haxy);
 
