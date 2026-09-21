@@ -85,15 +85,61 @@ pub fn writeUndo(
     io: std.Io,
     allocator: std.mem.Allocator,
     author: ?evt.CommitAuthor,
+    updates: []const xit.net_server_receive_pack.AppliedRefUpdate,
 ) !void {
-    var author_json: std.json.ObjectMap = if (author) |user|
-        try .init(allocator, &.{ "username", "email" }, &.{ .{ .string = user.name }, .{ .string = user.email } })
+    // what the payload may take up: the record holds a timestamp and the
+    // action kind in the same fixed buffer
+    const payload_max_len = repo_opts.max_read_size - @sizeOf(i64) - undo_action.len - 1;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const aa = arena.allocator();
+
+    const author_json: std.json.ObjectMap = if (author) |user|
+        try .init(aa, &.{ "username", "email" }, &.{ .{ .string = user.name }, .{ .string = user.email } })
     else
         .empty;
-    defer author_json.deinit(allocator);
-    var payload: std.json.ObjectMap = try .init(allocator, &.{"author"}, &.{if (author != null) .{ .object = author_json } else .null});
-    defer payload.deinit(allocator);
+    var payload: std.json.ObjectMap = try .init(aa, &.{"author"}, &.{if (author != null) .{ .object = author_json } else .null});
+
+    // where each ref landed, so the undo tab can say what the push did to it.
+    // an oid of all zeros means the ref has no side there, which is how a
+    // create and a remove are told apart
+    var refs: std.json.Array = .init(aa);
+    for (updates) |update| {
+        const entry: std.json.ObjectMap = try .init(aa, &.{ "name", "old", "new" }, &.{
+            .{ .string = update.ref_name },
+            .{ .string = if (zeroOid(update.old_oid)) "" else update.old_oid },
+            .{ .string = if (zeroOid(update.new_oid)) "" else update.new_oid },
+        });
+        try refs.append(.{ .object = entry });
+        try payload.put(aa, "refs", .{ .array = refs });
+
+        // the record is written into one fixed buffer, so a ref that no
+        // longer fits is left out rather than failing the push
+        if (try payloadLen(payload) > payload_max_len) {
+            _ = refs.pop();
+            break;
+        }
+    }
+
+    // the array is stored by value, so the one the payload holds still counts
+    // the entry that was popped until it is replaced here
+    try payload.put(aa, "refs", .{ .array = refs });
+
     try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(io, .real).toSeconds(), .{ .custom = .{ .action_kind = undo_action, .payload = payload } });
+}
+
+// the oid a ref update sends when it has no side: all zeros
+fn zeroOid(oid: []const u8) bool {
+    for (oid) |char| if (char != '0') return false;
+    return true;
+}
+
+// how long the record's payload would be, to keep it within the buffer
+fn payloadLen(payload: std.json.ObjectMap) !u64 {
+    var discarding = std.Io.Writer.Discarding.init(&.{});
+    try std.json.Stringify.value(std.json.Value{ .object = payload }, .{}, &discarding.writer);
+    return discarding.fullCount();
 }
 
 // serve a receive-pack and consume any events it pushed to the events branch,
@@ -160,7 +206,7 @@ pub fn receivePackAndConsume(
             _ = try find.refreshInTransaction(repo_opts, state, &moment, ctx.io, ctx.allocator);
             _ = try srch_cmmt.refreshInTransaction(repo_opts, state, &moment, ctx.io, ctx.allocator, ctx.updates.items.items);
 
-            try writeUndo(repo_opts, state, ctx.io, ctx.allocator, ctx.author);
+            try writeUndo(repo_opts, state, ctx.io, ctx.allocator, ctx.author, ctx.updates.items.items);
         }
     };
 
@@ -332,7 +378,8 @@ pub fn receiveFork(
                     try evt.commitEvents(.xit, repo_opts, state, ctx.io, ctx.allocator, evt.events_ref, events[0..event_count], null);
                     if (!try evt.consumeInTransaction(.fork, .xit, repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, evt.events_ref)) return error.CancelTransaction;
                 }
-                try writeUndo(repo_opts, state, ctx.io, ctx.allocator, ctx.author);
+                // a fork push tracks no ref updates, so it records no ranges
+                try writeUndo(repo_opts, state, ctx.io, ctx.allocator, ctx.author, &.{});
             }
         };
 

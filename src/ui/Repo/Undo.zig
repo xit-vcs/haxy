@@ -148,6 +148,7 @@ fn eventDetail(
         if (try pushUser(arena, haxy_moment, record.payload)) |button| try buttons.append(aa, button);
         const count = try momentEventCount(opts, core, moment, history_index) orelse 0;
         if (count > 0) try buttons.append(aa, try eventsButton(arena, identity, history_index, count));
+        try pushRefs(arena, identity, record.payload, &buttons);
         return .{ .action = "push", .description = "received a push", .buttons = buttons.items };
     }
     if (!std.mem.eql(u8, record.action_kind, evt.undo_action)) return null;
@@ -205,6 +206,50 @@ fn eventsButton(arena: *std.heap.ArenaAllocator, identity: []const u8, history_i
         .text = try std.fmt.allocPrint(aa, "view events ({d})", .{count}),
         .link = try std.fmt.allocPrint(aa, "a:{s}", .{try route.toUrl(arena)}),
     };
+}
+
+// a button per ref the push moved, naming what it did to it: a changed branch
+// links to the commits it added, anything still there to the ref itself
+fn pushRefs(arena: *std.heap.ArenaAllocator, identity: []const u8, payload: []const u8, buttons: *std.ArrayList(DetailButton)) !void {
+    const head_prefix = "refs/heads/";
+    const tag_prefix = "refs/tags/";
+    const Payload = struct {
+        const Ref = struct { name: []const u8, old: []const u8, new: []const u8 };
+        refs: []const Ref = &.{},
+    };
+    const parsed = std.json.parseFromSlice(Payload, arena.child_allocator, payload, .{ .ignore_unknown_fields = true }) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return,
+    };
+    defer parsed.deinit();
+
+    const aa = arena.allocator();
+    for (parsed.value.refs) |ref| {
+        // anything that is neither a head nor a tag is skipped
+        const head = std.mem.startsWith(u8, ref.name, head_prefix);
+        const prefix = if (head) head_prefix else tag_prefix;
+        if (!std.mem.startsWith(u8, ref.name, prefix)) continue;
+        const name = ref.name[prefix.len..];
+
+        // a removed ref has nothing left to link to. a branch that was created
+        // has no range to show either: what it added is whatever the other
+        // refs did not already reach, which a base cannot express
+        const removed = ref.new.len == 0;
+        const created = ref.old.len == 0;
+        const route = if (removed)
+            null
+        else if (head and !created)
+            ui.RoutablePage.repoCommitsRoute(identity, .object, ref.new, 0, "", ref.old) orelse continue
+        else
+            ui.RoutablePage.repoFilesRoute(identity, if (head) .branch else .tag, try ui.urlEncodeRef(aa, name), "", 0) orelse continue;
+
+        const action = if (removed) "removed" else if (created) "created" else "changed";
+        try buttons.append(aa, .{
+            .label = try std.fmt.allocPrint(aa, " {s} {s} ", .{ if (head) "branch" else "tag", action }),
+            .text = try aa.dupe(u8, name),
+            .link = if (route) |value| try std.fmt.allocPrint(aa, "a:{s}", .{try value.toUrl(arena)}) else null,
+        });
+    }
 }
 
 // the push record stores the email of the user whose key the server accepted.

@@ -11,6 +11,8 @@ const xit = hx.xit;
 const rp = xit.repo;
 const hash = xit.hash;
 const obj = xit.object;
+const rf = xit.ref;
+const bch = xit.branch;
 const ui = hx.ui;
 const find = hx.find;
 const srch_cmmt = hx.search_commit;
@@ -1362,19 +1364,39 @@ fn seedPush(io: std.Io, allocator: std.mem.Allocator, repo: *rp.Repo(.xit, .{}),
             const opts: rp.RepoOpts(.xit) = .{};
             var moment = try DB.HashMap(.read_write).init(cursor.*);
             const state = Repo.State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
+            var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+            defer arena.deinit();
+            const aa = arena.allocator();
 
             // a null tree keeps the parent's content, so the branch advances
             // without the fixture having to build one
-            const author_line = try std.fmt.allocPrint(ctx.allocator, "{s} <{s}>", .{ ctx.author.name, ctx.author.email });
-            defer ctx.allocator.free(author_line);
-            _ = try obj.writeCommit(.xit, opts, state, ctx.io, ctx.allocator, .{
+            const author_line = try std.fmt.allocPrint(aa, "{s} <{s}>", .{ ctx.author.name, ctx.author.email });
+            const feature_old = (try rf.readRecur(.xit, opts, state.readOnly(), ctx.io, .{ .ref = .{ .kind = .head, .name = "feature" } })) orelse return error.NotFound;
+            const feature_new = try obj.writeCommit(.xit, opts, state, ctx.io, ctx.allocator, .{
                 .message = "Revise the feature branch",
                 .author = author_line,
                 .timestamp = 820,
             }, null, .{ .kind = .head, .name = "feature" });
 
-            _ = try pch.refreshBranchesInTransaction(.server, opts, state, &moment, ctx.io, ctx.allocator, null, null, null);
-            try push.writeUndo(opts, state, ctx.io, ctx.allocator, ctx.author);
+            // a branch the push creates has no old tip, so its range is open
+            try bch.add(.xit, opts, state, ctx.io, .{ .name = "docs" });
+            const docs_new = (try rf.readRecur(.xit, opts, state.readOnly(), ctx.io, .{ .ref = .{ .kind = .head, .name = "docs" } })) orelse return error.NotFound;
+
+            const updates = [_]xit.net_server_receive_pack.AppliedRefUpdate{
+                .{
+                    .ref_name = try aa.dupe(u8, "refs/heads/feature"),
+                    .old_oid = try aa.dupe(u8, &feature_old),
+                    .new_oid = try aa.dupe(u8, &feature_new),
+                },
+                .{
+                    .ref_name = try aa.dupe(u8, "refs/heads/docs"),
+                    .old_oid = try aa.dupe(u8, "0" ** hash.hexLen(opts.hash)),
+                    .new_oid = try aa.dupe(u8, &docs_new),
+                },
+            };
+
+            _ = try pch.refreshBranchesInTransaction(.server, opts, state, &moment, ctx.io, ctx.allocator, &updates, null, null);
+            try push.writeUndo(opts, state, ctx.io, ctx.allocator, ctx.author, &updates);
         }
     };
 
