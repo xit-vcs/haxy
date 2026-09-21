@@ -117,13 +117,13 @@ fn eventDetail(
         // a push consumes the events it carried in its own transaction
         var buttons: std.ArrayList(DetailButton) = .empty;
         if (try pushUser(arena, haxy_moment, record.payload)) |button| try buttons.append(aa, button);
-        const count = try momentEventCount(opts, moment) orelse 0;
+        const count = try momentEventCount(opts, core, moment, history_index) orelse 0;
         if (count > 0) try buttons.append(aa, try eventsButton(arena, identity, history_index, count));
         return .{ .action = "push", .description = "received a push", .buttons = buttons.items };
     }
     if (!std.mem.eql(u8, record.action_kind, evt.undo_action)) return null;
 
-    const count = try momentEventCount(opts, moment) orelse return .{ .action = "events", .description = "updated the event database" };
+    const count = try momentEventCount(opts, core, moment, history_index) orelse return .{ .action = "events", .description = "updated the event database" };
     // a transaction that consumed only merge commits indexed no events of its own
     if (count == 0) return .{ .action = "events", .description = "merged the event history" };
     const buttons = try aa.dupe(DetailButton, &.{try eventsButton(arena, identity, history_index, count)});
@@ -196,14 +196,34 @@ fn pushUser(arena: *std.heap.ArenaAllocator, haxy_moment: ?evt.AdminDB.HashMap(.
     };
 }
 
-// how many events the transaction's moment wrote: zero when it named a moment
-// but indexed nothing, null when its state cannot be read at all
-fn momentEventCount(comptime opts: rp.RepoOpts(.xit), moment: rp.Repo(.xit, opts).DB.HashMap(.read_only)) !?u64 {
+// how many events the transaction wrote: zero when it consumed nothing, null
+// when its state cannot be read at all
+fn momentEventCount(
+    comptime opts: rp.RepoOpts(.xit),
+    core: *rp.Repo(.xit, opts).Core,
+    moment: rp.Repo(.xit, opts).DB.HashMap(.read_only),
+    history_index: u64,
+) !?u64 {
     const DB = rp.Repo(.xit, opts).DB;
     const haxy_moment = evt.currentMomentFromRepoMoment(opts.hash, moment) catch return null;
-    const index_cursor = try haxy_moment.getCursor(hash.hashInt(opts.hash, evt.moment_index_key)) orelse return null;
-    const ids = try evt.momentEventIds(DB, opts.hash, haxy_moment, try index_cursor.readUint()) orelse return 0;
+    const index = try momentIndex(opts, haxy_moment) orelse return null;
+
+    // a transaction that consumed nothing inherits the moment it was cloned
+    // from, whose events belong to the transaction that wrote it
+    inherited: {
+        if (history_index == 0) break :inherited;
+        const previous = evt.currentMomentFromRepoMoment(opts.hash, try core.momentAt(history_index - 1)) catch break :inherited;
+        if (try momentIndex(opts, previous)) |value| if (value == index) return 0;
+    }
+
+    const ids = try evt.momentEventIds(DB, opts.hash, haxy_moment, index) orelse return 0;
     return try ids.count();
+}
+
+// the moment's own position in the haxy history
+fn momentIndex(comptime opts: rp.RepoOpts(.xit), haxy_moment: evt.EventDB(opts.hash).HashMap(.read_only)) !?u64 {
+    const cursor = try haxy_moment.getCursor(hash.hashInt(opts.hash, evt.moment_index_key)) orelse return null;
+    return try cursor.readUint();
 }
 
 pub fn formatTimestamp(aa: std.mem.Allocator, timestamp: i64) ![]const u8 {
