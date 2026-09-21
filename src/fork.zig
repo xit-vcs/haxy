@@ -152,7 +152,7 @@ pub fn create(
                     try bch.add(.xit, repo_opts, state, ctx.io, .{ .name = ref.name, .target = .none });
                 }
                 try rf.replaceHead(.xit, repo_opts, state, ctx.io, .{ .ref = ref });
-                try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action = undo_action } });
+                try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action_kind = undo_action } });
             }
         };
 

@@ -158,10 +158,7 @@ fn transactionMoment(
     index: u64,
 ) !evt.EventDB(repo_opts.hash).HashMap(.read_only) {
     if (repo_kind == .git) return error.NotFound;
-    const DB = evt.EventDB(repo_opts.hash);
-    const history = try DB.ArrayList(.read_only).init(repo.core.db.rootCursor().readOnly());
-    const cursor = try history.getCursor(index) orelse return error.NotFound;
-    return try evt.currentMomentFromRepoMoment(repo_opts.hash, try DB.HashMap(.read_only).init(cursor));
+    return try evt.currentMomentFromRepoMoment(repo_opts.hash, try repo.core.momentAt(index));
 }
 
 // the moment's set is keyed on the event order, not the update order the

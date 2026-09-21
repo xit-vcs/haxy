@@ -18,6 +18,9 @@ const Self = @This();
 
 pub const page_size = 20;
 
+// the action kind xit writes when a transaction is undone
+const undo_action_kind = @tagName(xit.undo.ActionKind.undo);
+
 // stands in for the description, as a focusable box that may link somewhere
 pub const DetailButton = struct {
     label: []const u8,
@@ -55,13 +58,12 @@ pub fn init(comptime opts: rp.RepoOpts(.xit), arena: *std.heap.ArenaAllocator, r
     var buffer: [opts.max_read_size]u8 = undefined;
     while (remaining > 0 and items.items.len < page_size) {
         remaining -= 1;
-        const cursor = try history.getCursor(remaining) orelse return error.TransactionNotFound;
-        const moment = try DB.HashMap(.read_only).init(cursor);
+        const moment = try repo.core.momentAt(remaining);
         const record = try xit.undo.read(opts, moment, &buffer);
-        const detail = if (record) |value| try eventDetail(opts, arena, &repo.core.db, haxy_moment, identity, value, moment, remaining) else null;
+        const detail = if (record) |value| try eventDetail(opts, arena, &repo.core, haxy_moment, identity, value, moment, remaining) else null;
         const shown = detail orelse Detail{
-            .action = if (record) |value| try aa.dupe(u8, value.action) else "unknown",
-            .description = try formatRecord(opts, arena, &repo.core.db, record),
+            .action = if (record) |value| try aa.dupe(u8, value.action_kind) else "unknown",
+            .description = try formatRecord(opts, arena, &repo.core, record),
         };
         const route = ui.RoutablePage.repoUndoRoute(identity, remaining) orelse return error.RouteTooLong;
         const url = try route.toUrl(arena);
@@ -89,30 +91,29 @@ const Detail = struct {
 fn eventDetail(
     comptime opts: rp.RepoOpts(.xit),
     arena: *std.heap.ArenaAllocator,
-    db: *rp.Repo(.xit, opts).DB,
+    core: *rp.Repo(.xit, opts).Core,
     haxy_moment: ?evt.AdminDB.HashMap(.read_only),
     identity: []const u8,
-    record: xit.undo.UndoRecord,
+    record: xit.undo.Record,
     moment: rp.Repo(.xit, opts).DB.HashMap(.read_only),
     history_index: u64,
 ) !?Detail {
     const aa = arena.allocator();
-    if (std.mem.eql(u8, record.action, undoTag(opts))) {
-        // parsing here is what bounds the recursion below: a record that does
-        // not parse is left to xit, so `undoneButton` always starts the chain
-        // at a transaction other than this one
-        const parsed = std.json.parseFromSlice(UndoPayload, arena.child_allocator, record.payload, .{ .ignore_unknown_fields = true }) catch |err| switch (err) {
+    if (std.mem.eql(u8, record.action_kind, undo_action_kind)) {
+        // an undo names a transaction earlier than itself, so the chain
+        // below always moves down the history and ends
+        const parsed = std.json.parseFromSlice(xit.undo.Undo, arena.child_allocator, record.payload, .{ .ignore_unknown_fields = true }) catch |err| switch (err) {
             error.OutOfMemory => return err,
             else => return null,
         };
         defer parsed.deinit();
-        const button = try undoneButton(opts, arena, db, haxy_moment, identity, parsed.value.index);
-        return .{ .action = undoTag(opts), .description = button.text, .buttons = try aa.dupe(DetailButton, &.{button}) };
+        const button = try undoneButton(opts, arena, core, haxy_moment, identity, parsed.value);
+        return .{ .action = undo_action_kind, .description = button.text, .buttons = try aa.dupe(DetailButton, &.{button}) };
     }
-    if (std.mem.eql(u8, record.action, evt.merge_undo_action)) return .{ .action = "merge events", .description = "merged the events ref from a remote" };
-    if (std.mem.eql(u8, record.action, pch.merge_undo_action)) return .{ .action = "merge patch", .description = "merged a patch into its target branch" };
-    if (std.mem.eql(u8, record.action, fork.undo_action)) return .{ .action = "fork", .description = "created a fork to draft a patch in" };
-    if (std.mem.eql(u8, record.action, push.undo_action)) {
+    if (std.mem.eql(u8, record.action_kind, evt.merge_undo_action)) return .{ .action = "merge events", .description = "merged the events ref from a remote" };
+    if (std.mem.eql(u8, record.action_kind, pch.merge_undo_action)) return .{ .action = "merge patch", .description = "merged a patch into its target branch" };
+    if (std.mem.eql(u8, record.action_kind, fork.undo_action)) return .{ .action = "fork", .description = "created a fork to draft a patch in" };
+    if (std.mem.eql(u8, record.action_kind, push.undo_action)) {
         // a push consumes the events it carried in its own transaction
         var buttons: std.ArrayList(DetailButton) = .empty;
         if (try pushUser(arena, haxy_moment, record.payload)) |button| try buttons.append(aa, button);
@@ -120,7 +121,7 @@ fn eventDetail(
         if (count > 0) try buttons.append(aa, try eventsButton(arena, identity, history_index, count));
         return .{ .action = "push", .description = "received a push", .buttons = buttons.items };
     }
-    if (!std.mem.eql(u8, record.action, evt.undo_action)) return null;
+    if (!std.mem.eql(u8, record.action_kind, evt.undo_action)) return null;
 
     const count = try momentEventCount(opts, moment) orelse return .{ .action = "events", .description = "updated the event database" };
     // a transaction that consumed only merge commits indexed no events of its own
@@ -133,20 +134,11 @@ fn eventDetail(
     };
 }
 
-// xit names its own commands after their tag
-fn undoTag(comptime opts: rp.RepoOpts(.xit)) []const u8 {
-    return @tagName(std.meta.Tag(xit.undo.UndoCommand(opts.hash)).undo);
-}
-
-// what an undo record carries: the transaction it restored, and the last one
-// it discarded
-const UndoPayload = struct { index: u64, last_index: u64 };
-
 // xit formats the transactions haxy has no name of its own for
-fn formatRecord(comptime opts: rp.RepoOpts(.xit), arena: *std.heap.ArenaAllocator, db: *rp.Repo(.xit, opts).DB, record: ?xit.undo.UndoRecord) ![]const u8 {
+fn formatRecord(comptime opts: rp.RepoOpts(.xit), arena: *std.heap.ArenaAllocator, core: *rp.Repo(.xit, opts).Core, record: ?xit.undo.Record) ![]const u8 {
     const value = record orelse return "no undo record";
     var description: std.Io.Writer.Allocating = .init(arena.allocator());
-    try xit.undo.format(opts, db, arena.child_allocator, value, &description.writer);
+    try xit.undo.format(opts, core, arena.child_allocator, value, &description.writer);
     return description.written();
 }
 
@@ -155,36 +147,21 @@ fn formatRecord(comptime opts: rp.RepoOpts(.xit), arena: *std.heap.ArenaAllocato
 fn undoneButton(
     comptime opts: rp.RepoOpts(.xit),
     arena: *std.heap.ArenaAllocator,
-    db: *rp.Repo(.xit, opts).DB,
+    core: *rp.Repo(.xit, opts).Core,
     haxy_moment: ?evt.AdminDB.HashMap(.read_only),
     identity: []const u8,
-    index: u64,
+    undo: xit.undo.Undo,
 ) anyerror!DetailButton {
-    const DB = rp.Repo(.xit, opts).DB;
-    const history = try DB.ArrayList(.read_only).init(db.rootCursor().readOnly());
     var buffer: [opts.max_read_size]u8 = undefined;
+    const target = try xit.undo.undoneTarget(opts, core, arena.child_allocator, undo, &buffer);
 
-    // an undo of an undo is a redo, so the chain is followed the way xit's own
-    // formatting does, until it reaches the transaction that was restored
-    var target = index;
-    var redo = false;
-    while (true) {
-        const moment = try DB.HashMap(.read_only).init(try history.getCursor(target) orelse return error.TransactionNotFound);
-        const record = try xit.undo.read(opts, moment, &buffer) orelse break;
-        if (!std.mem.eql(u8, record.action, undoTag(opts))) break;
-        const parsed = std.json.parseFromSlice(UndoPayload, arena.child_allocator, record.payload, .{ .ignore_unknown_fields = true }) catch break;
-        defer parsed.deinit();
-        redo = !redo;
-        target = if (redo) parsed.value.last_index else parsed.value.index;
-    }
-
-    const moment = try DB.HashMap(.read_only).init(try history.getCursor(target) orelse return error.TransactionNotFound);
-    const record = try xit.undo.read(opts, moment, &buffer);
-    const detail = if (record) |value| try eventDetail(opts, arena, db, haxy_moment, identity, value, moment, target) else null;
-    const route = ui.RoutablePage.repoUndoRoute(identity, target) orelse return error.RouteTooLong;
+    // the detail reads the event count out of the transaction's own moment
+    const moment = try core.momentAt(target.index);
+    const detail = if (target.record) |value| try eventDetail(opts, arena, core, haxy_moment, identity, value, moment, target.index) else null;
+    const route = ui.RoutablePage.repoUndoRoute(identity, target.index) orelse return error.RouteTooLong;
     return .{
-        .label = if (redo) " what was redone " else " what was undone ",
-        .text = if (detail) |value| value.action else try formatRecord(opts, arena, db, record),
+        .label = if (target.redo) " what was redone " else " what was undone ",
+        .text = if (detail) |value| value.action else try formatRecord(opts, arena, core, target.record),
         .link = try std.fmt.allocPrint(arena.allocator(), "a:{s}", .{try route.toUrl(arena)}),
     };
 }

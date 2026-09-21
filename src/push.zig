@@ -93,7 +93,7 @@ pub fn writeUndo(
     defer author_json.deinit(allocator);
     var payload: std.json.ObjectMap = try .init(allocator, &.{"author"}, &.{if (author != null) .{ .object = author_json } else .null});
     defer payload.deinit(allocator);
-    try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(io, .real).toSeconds(), .{ .custom = .{ .action = undo_action, .payload = payload } });
+    try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(io, .real).toSeconds(), .{ .custom = .{ .action_kind = undo_action, .payload = payload } });
 }
 
 // serve a receive-pack and consume any events it pushed to the events branch,

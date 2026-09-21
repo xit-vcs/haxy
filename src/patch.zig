@@ -82,7 +82,7 @@ pub fn writeBranchPatch(
                     try writeBranchPatchInTransaction(repo_opts, state, &moment, ctx.io, ctx.arena, ctx.id, ctx.patch, ctx.expected_patch, ctx.author, ctx.first_parent, ctx.checks);
 
                     // record the user action for undo
-                    try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action = evt.undo_action } });
+                    try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action_kind = evt.undo_action } });
                 }
             };
 
@@ -329,7 +329,7 @@ pub fn refreshBranches(
                     if (!try refreshBranchesInTransaction(ctx.host_kind, repo_opts, state, &moment, ctx.io, ctx.allocator, ctx.updates, ctx.first_parent, ctx.progress_ctx_maybe)) return error.CancelTransaction;
 
                     // record the user action for undo
-                    try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action = evt.undo_action } });
+                    try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action_kind = evt.undo_action } });
                 }
             };
 
@@ -1126,7 +1126,7 @@ pub fn merge(
                 if (!try importMergedRevision(repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, ctx.fork_repo, &ctx.patch_id, .{ .revision = ctx.revision, .before_oid = &before_oid, .after_oid = &after_oid }, ctx.expected_patch, ctx.author, ctx.timestamp)) return error.PatchOutOfDate;
 
                 // record the merge as one undoable action.
-                try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action = merge_undo_action } });
+                try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action_kind = merge_undo_action } });
             }
         };
 
