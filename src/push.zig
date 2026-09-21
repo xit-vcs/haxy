@@ -145,7 +145,7 @@ pub fn receivePackAndConsume(
                 try pch.detectMerged(repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, ctx.repo_root_path, ctx.updates.items.items, ctx.error_writer);
 
                 // the revisions the pushed branches cause belong to the push
-                try pch.refreshBranchesInTransaction(repo_opts, state, &moment, ctx.io, ctx.allocator, ctx.updates.items.items);
+                _ = try pch.refreshBranchesInTransaction(.server, repo_opts, state, &moment, ctx.io, ctx.allocator, ctx.updates.items.items, null);
             }
             try writeUndo(repo_opts, state, ctx.io, ctx.allocator, ctx.author);
         }
@@ -182,7 +182,7 @@ pub fn receivePackAndConsume(
     var progress = PushProgress{ .response = &response, .writer = writer, .label = "Updating patches" };
     pch.refreshBranches(.server, .xit, repo_opts, io, allocator, repo, updates.items.items, &progress) catch |err| {
         serve_common.logError(io, error_writer, "failed to refresh branch patches: {s}\n", .{@errorName(err)});
-        pch.refreshMergeability(repo_opts, io, allocator, repo, null);
+        pch.refreshOpenMergeability(repo_opts, io, allocator, repo, null);
     };
     find.refresh(repo_opts, io, allocator, repo) catch |err| {
         serve_common.logError(io, error_writer, "failed to refresh file index: {s}\n", .{@errorName(err)});

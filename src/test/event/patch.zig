@@ -1243,7 +1243,7 @@ fn testMergeability(
         defer detached.deinit();
     }
     try target.removeBranch(io, .{ .name = "master" });
-    pch.refreshMergeability(repo_opts, io, allocator, target, null);
+    pch.refreshOpenMergeability(repo_opts, io, allocator, target, null);
     try std.testing.expectEqualDeep(pch.Mergeability{}, try readMergeability(target, io, allocator, id, patch));
     try expectMergeabilityShortBytes(try target.core.latestMoment(), id);
     try target.addBranch(io, .{ .name = "master" });
@@ -1251,7 +1251,7 @@ fn testMergeability(
         var restored = try target.switchDir(io, allocator, .{ .target = .{ .ref = .{ .kind = .head, .name = "master" } } });
         defer restored.deinit();
     }
-    pch.refreshMergeability(repo_opts, io, allocator, target, null);
+    pch.refreshOpenMergeability(repo_opts, io, allocator, target, null);
     try std.testing.expectEqualDeep(clean, try readMergeability(target, io, allocator, id, patch));
 
     // a missing fork disables merging without changing the accepted events
