@@ -8,7 +8,7 @@ const rf = xit.ref;
 const evt = @import("event.zig");
 const pch = @import("patch.zig");
 const find = @import("find.zig");
-const cms = @import("search_commit.zig");
+const srch_cmmt = @import("search_commit.zig");
 const fork = @import("fork.zig");
 const serve_common = @import("serve_common.zig");
 
@@ -155,6 +155,11 @@ pub fn receivePackAndConsume(
                 // the revisions the pushed branches cause belong to the push
                 _ = try pch.refreshBranchesInTransaction(.server, repo_opts, state, &moment, ctx.io, ctx.allocator, ctx.updates.items.items, null, ctx.progress);
             }
+
+            // the indexes the pushed refs invalidate belong to the push too
+            _ = try find.refreshInTransaction(repo_opts, state, &moment, ctx.io, ctx.allocator);
+            _ = try srch_cmmt.refreshInTransaction(repo_opts, state, &moment, ctx.io, ctx.allocator, ctx.updates.items.items);
+
             try writeUndo(repo_opts, state, ctx.io, ctx.allocator, ctx.author);
         }
     };
@@ -191,12 +196,6 @@ pub fn receivePackAndConsume(
     pch.refreshBranches(.server, .xit, repo_opts, io, allocator, repo, updates.items.items, &progress) catch |err| {
         serve_common.logError(io, error_writer, "failed to refresh branch patches: {s}\n", .{@errorName(err)});
         pch.refreshOpenMergeability(repo_opts, io, allocator, repo, null, &progress);
-    };
-    find.refresh(repo_opts, io, allocator, repo) catch |err| {
-        serve_common.logError(io, error_writer, "failed to refresh file index: {s}\n", .{@errorName(err)});
-    };
-    cms.refresh(repo_opts, io, allocator, repo, updates.items.items) catch |err| {
-        serve_common.logError(io, error_writer, "failed to refresh commit index: {s}\n", .{@errorName(err)});
     };
     try response.finish(writer, null);
 }

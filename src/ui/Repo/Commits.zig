@@ -6,7 +6,7 @@ const xit = @import("xit");
 const rp = xit.repo;
 const Diff = @import("Diff.zig");
 const obj = xit.object;
-const cms = @import("../../search_commit.zig");
+const srch_cmmt = @import("../../search_commit.zig");
 const srch = @import("../../search.zig");
 const xitui = xit.xitui;
 const wgt = xitui.widget;
@@ -147,7 +147,7 @@ pub fn init(
     // bounded by a base, whose version also covers the commits before it.
     if (comptime repo_kind == .xit) index: {
         if (location != .repo or resolved.ref_or_oid == .object or base_oid.len != 0) break :index;
-        const index = (try cms.lookup(repo_opts, moment, &resolved.oid)) orelse break :index;
+        const index = (try srch_cmmt.lookup(repo_opts, moment, &resolved.oid)) orelse break :index;
         search_available = true;
         const text = query orelse break :index;
 
@@ -155,11 +155,11 @@ pub fn init(
         if (from.len != 0) {
             var start = obj.Object(.xit, repo_opts).initCommit(state, io, gpa, from[0..hex_len]) catch return error.NotFound;
             defer start.deinit();
-            const key = try cms.docKey(repo_opts.hash, start.content.commit.metadata.timestamp, &start.oid);
+            const key = try srch_cmmt.docKey(repo_opts.hash, start.content.commit.metadata.timestamp, &start.oid);
             results.seek(&key);
         }
         while (try results.next()) |key| {
-            const oid = try cms.keyOid(repo_opts.hash, key);
+            const oid = try srch_cmmt.keyOid(repo_opts.hash, key);
             if (count == page_size) {
                 next_start = try aa.dupe(u8, &oid);
                 break;

@@ -1,7 +1,7 @@
 const std = @import("std");
 const evt = @import("../event.zig");
 const diff3 = @import("../diff3.zig");
-const srch = @import("../search_thread.zig");
+const srch_thrd = @import("../search_thread.zig");
 const xit = @import("xit");
 const rp = xit.repo;
 const hash = xit.hash;
@@ -141,7 +141,7 @@ pub fn consume(
     }
 
     // the search index is keyed by the same order key as the sets above
-    try srch.update(DB, hash_kind, .issue, haxy_moment, arena.child_allocator, if (existing_record_maybe) |existing| srch.doc(&order_key, existing) else null, srch.doc(&order_key, record_to_write));
+    try srch_thrd.update(DB, hash_kind, .issue, haxy_moment, arena.child_allocator, if (existing_record_maybe) |existing| srch_thrd.doc(&order_key, existing) else null, srch_thrd.doc(&order_key, record_to_write));
 
     if (!record_to_write.removed) {
         const status_set = try statusSet(DB, status_to_issues, record_to_write.event.status);

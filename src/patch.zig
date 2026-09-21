@@ -7,12 +7,15 @@ const obj = xit.object;
 const rf = xit.ref;
 const mrg = xit.merge;
 const find = @import("find.zig");
-const cms = @import("search_commit.zig");
+const srch_cmmt = @import("search_commit.zig");
 const fork = @import("fork.zig");
 const serve_common = @import("serve_common.zig");
 
 // the action a patch merge records
 pub const merge_undo_action = "haxy/merge";
+
+// the action a mergeability recheck records
+pub const mergeability_undo_action = "haxy/mergeability";
 
 // progress is optional and best effort: a failed report must not fail a refresh
 fn reportProgress(comptime repo_opts: rp.RepoOpts(.xit), io: std.Io, progress_ctx_maybe: ?repo_opts.ProgressCtx, event: rp.ProgressEvent) void {
@@ -594,6 +597,9 @@ fn refreshMergeCheck(
                 var moment = try DB.HashMap(.read_write).init(cursor.*);
                 const state = Repo.State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
                 if (!try ctx.checks.update(state, ctx.io, ctx.allocator)) return error.CancelTransaction;
+
+                // name the transaction, which no user action owns
+                try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action_kind = mergeability_undo_action } });
             }
         };
 
@@ -1160,7 +1166,7 @@ pub fn merge(
     find.refresh(repo_opts, io, allocator, target_repo) catch |err| {
         std.log.warn("failed to refresh file index: {s}", .{@errorName(err)});
     };
-    cms.refresh(repo_opts, io, allocator, target_repo, null) catch |err| {
+    srch_cmmt.refresh(repo_opts, io, allocator, target_repo, null) catch |err| {
         std.log.warn("failed to refresh commit index: {s}", .{@errorName(err)});
     };
 }

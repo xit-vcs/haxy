@@ -14,7 +14,7 @@ const Key = xitui.input.Key;
 const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
 const inp = @import("../input.zig");
-const srch = @import("../../search_thread.zig");
+const srch_thrd = @import("../../search_thread.zig");
 const diff3 = @import("../../diff3.zig");
 const Comment = @import("../Repo/Comment.zig");
 const Attachment = @import("../Repo/Attachment.zig");
@@ -312,7 +312,7 @@ fn loadSearchWindow(
         // discussions list by activity but are indexed by creation, so the
         // matching ids are gathered and the listed set is walked in its order
         var matches: std.AutoHashMapUnmanaged([evt.event_id_size]u8, void) = .empty;
-        var results = try srch.query(DB, hash_kind, kind, haxy_moment, aa, query_text, null);
+        var results = try srch_thrd.query(DB, hash_kind, kind, haxy_moment, aa, query_text, null);
         while (try results.next()) |key| try matches.put(aa, (try resultKey(key))[@sizeOf(u64)..].*, {});
 
         var iter = try set.iteratorFromIndex(0);
@@ -327,7 +327,7 @@ fn loadSearchWindow(
     } else {
         // issues and patches list in the index's own order, so the listed set
         // narrows the query and the results stream out already sorted
-        var results = try srch.query(DB, hash_kind, kind, haxy_moment, aa, query_text, set);
+        var results = try srch_thrd.query(DB, hash_kind, kind, haxy_moment, aa, query_text, set);
         while (try results.next()) |key| {
             try keys.append(aa, try resultKey(key));
             if (windowKnown(Data, keys.items, root)) break;

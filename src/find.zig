@@ -107,15 +107,56 @@ pub fn rootTreeOid(
     }
 }
 
-// reconcile every branch tip's index. this runs outside the caller's
-// transaction, and reconciles unconditionally: an up-to-date branch costs one
-// ref read and an oid compare.
+// the action a file index refresh records when it runs on its own
+pub const undo_action = "haxy/find-index";
+
+// reconcile every branch tip's index, in a transaction of its own
 pub fn refresh(
     comptime repo_opts: rp.RepoOpts(.xit),
     io: std.Io,
     allocator: std.mem.Allocator,
     repo: *rp.Repo(.xit, repo_opts),
 ) !void {
+    const Repo = rp.Repo(.xit, repo_opts);
+    const DB = Repo.DB;
+    const Save = struct {
+        core: *Repo.Core,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+
+        pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
+            var moment = try DB.HashMap(.read_write).init(cursor.*);
+            const state = Repo.State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
+            if (!try refreshInTransaction(repo_opts, state, &moment, ctx.io, ctx.allocator)) return error.CancelTransaction;
+
+            // record the user action for undo
+            try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action_kind = undo_action } });
+        }
+    };
+
+    // held across the reads and the writes, so a concurrent refresh can't
+    // change the entries these decisions were made from.
+    try repo.core.db_file.lock(io, .exclusive);
+    defer repo.core.db_file.unlock(io);
+
+    const history = try DB.ArrayList(.read_write).init(repo.core.db.rootCursor());
+    history.appendContext(.{ .slot = try history.getSlot(-1) }, Save{ .core = &repo.core, .io = io, .allocator = allocator }) catch |err| switch (err) {
+        error.CancelTransaction => {},
+        else => return err,
+    };
+}
+
+// reconcile them inside the caller's transaction, so the index lands with the
+// push that invalidated it. every branch is reconciled, since an up-to-date
+// one costs a ref read and an oid compare. reports whether anything was
+// written, so a caller that owns an otherwise empty transaction can cancel it
+pub fn refreshInTransaction(
+    comptime repo_opts: rp.RepoOpts(.xit),
+    state: rp.Repo(.xit, repo_opts).State(.read_write),
+    moment: *rp.Repo(.xit, repo_opts).DB.HashMap(.read_write),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+) !bool {
     const Repo = rp.Repo(.xit, repo_opts);
     const DB = Repo.DB;
     const HashInt = hash.HashInt(repo_opts.hash);
@@ -146,14 +187,8 @@ pub fn refresh(
     var work: std.ArrayList(Work) = .empty;
     var base: ?Entry = null;
 
-    // held across the reads and the writes, so a concurrent refresh can't
-    // change the entries these decisions were made from.
-    try repo.core.db_file.lock(io, .exclusive);
-    defer repo.core.db_file.unlock(io);
-
     {
-        var moment = try repo.core.latestMoment();
-        const state = Repo.State(.read_only){ .core = &repo.core, .extra = .{ .moment = &moment } };
+        const read_state = state.readOnly();
 
         // entries carry no branch name, so branches are matched by hash
         var existing: std.AutoArrayHashMapUnmanaged(HashInt, Entry) = .empty;
@@ -170,21 +205,21 @@ pub fn refresh(
         // else any other branch's, so only its own changes are written.
         if (existing.count() > 0) base = existing.values()[0];
         var head_buffer: [rf.MAX_REF_CONTENT_SIZE]u8 = undefined;
-        if (repo.head(io, &head_buffer)) |head| switch (head) {
+        if (rf.readHead(.xit, repo_opts, read_state, io, &head_buffer) catch null) |head| switch (head) {
             .ref => |ref| if (existing.get(hash.hashInt(repo_opts.hash, ref.name))) |entry| {
                 base = entry;
             },
             .oid => {},
-        } else |_| {}
+        };
 
-        var branches = try repo.listBranches(io, allocator, .beginning);
+        var branches = try rf.RefIterator(.xit, repo_opts).init(read_state, io, allocator, .head, .beginning);
         defer branches.deinit();
         while (try branches.next()) |ref| {
             if (std.mem.eql(u8, ref.name, evt.events_ref.name)) continue;
             const branch_hash = hash.hashInt(repo_opts.hash, ref.name);
             const own = if (existing.fetchSwapRemove(branch_hash)) |kv| kv.value else null;
-            const oid = (try repo.readRef(io, .{ .kind = .head, .name = ref.name })) orelse continue;
-            const tree = try rootTreeOid(repo_opts, state, io, allocator, &oid);
+            const oid = (try rf.readRecur(.xit, repo_opts, read_state, io, .{ .ref = .{ .kind = .head, .name = ref.name } })) orelse continue;
+            const tree = try rootTreeOid(repo_opts, read_state, io, allocator, &oid);
             if (own) |entry| if (std.mem.eql(u8, &entry.tree, &tree)) continue;
             try work.append(aa, .{ .branch_hash = branch_hash, .tree = tree, .own = own });
         }
@@ -193,80 +228,62 @@ pub fn refresh(
         for (existing.keys()) |branch_hash| try work.append(aa, .{ .branch_hash = branch_hash, .tree = null, .own = null });
     }
 
-    if (work.items.len == 0) return;
+    if (work.items.len == 0) return false;
 
-    const Save = struct {
-        core: *Repo.Core,
-        io: std.Io,
-        allocator: std.mem.Allocator,
-        work: []const Work,
-        base: ?Entry,
+    {
+        const index_hash = hash.hashInt(repo_opts.hash, index_key);
+        var new_branch_base = base;
 
-        pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
-            var moment = try DB.HashMap(.read_write).init(cursor.*);
-            const state = Repo.State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
-            const index_hash = hash.hashInt(repo_opts.hash, index_key);
-            var new_branch_base = ctx.base;
+        var key: std.ArrayList(u8) = .empty;
+        defer key.deinit(allocator);
 
-            var key: std.ArrayList(u8) = .empty;
-            defer key.deinit(ctx.allocator);
+        for (work.items) |item| {
+            const index = try DB.HashMap(.read_write).init(try moment.putCursor(index_hash));
+            const tree = item.tree orelse {
+                _ = try index.remove(item.branch_hash);
+                continue;
+            };
+            // the entry this one starts from (null = index the whole tree)
+            const from = item.own orelse new_branch_base;
 
-            for (ctx.work) |item| {
-                const index = try DB.HashMap(.read_write).init(try moment.putCursor(index_hash));
-                const tree = item.tree orelse {
-                    _ = try index.remove(item.branch_hash);
-                    continue;
-                };
-                // the entry this one starts from (null = index the whole tree)
-                const from = item.own orelse new_branch_base;
+            var tree_bytes: [hash.byteLen(repo_opts.hash)]u8 = undefined;
+            _ = try std.fmt.hexToBytes(&tree_bytes, &tree);
+            // putKey only fills an empty key slot, and this one changes
+            // whenever the branch moves
+            var tree_cursor = try index.putKeyCursor(item.branch_hash);
+            try tree_cursor.write(.{ .bytes = &tree_bytes });
+            var files_cursor = try index.putCursor(item.branch_hash);
+            if (from) |entry| try files_cursor.write(.{ .slot = entry.files });
+            const files = try DB.SortedMap(.read_write).init(files_cursor);
 
-                var tree_bytes: [hash.byteLen(repo_opts.hash)]u8 = undefined;
-                _ = try std.fmt.hexToBytes(&tree_bytes, &tree);
-                // putKey only fills an empty key slot, and this one changes
-                // whenever the branch moves
-                var tree_cursor = try index.putKeyCursor(item.branch_hash);
-                try tree_cursor.write(.{ .bytes = &tree_bytes });
-                var files_cursor = try index.putCursor(item.branch_hash);
-                if (from) |entry| try files_cursor.write(.{ .slot = entry.files });
-                const files = try DB.SortedMap(.read_write).init(files_cursor);
-
-                if (from) |entry| {
-                    var tree_diff = tr.TreeDiff(.xit, repo_opts).init(ctx.allocator);
-                    defer tree_diff.deinit();
-                    try tree_diff.compare(state.readOnly(), ctx.io, &entry.tree, &tree, null);
-                    for (tree_diff.changes.keys(), tree_diff.changes.values()) |path, change| {
-                        try fileKey(ctx.allocator, &key, path);
-                        const oid = if (change.new) |*tree_entry| indexedOid(repo_opts.hash, tree_entry) else null;
-                        if (oid) |bytes| {
-                            try files.put(key.items, .{ .bytes = bytes });
-                        } else {
-                            _ = try files.remove(key.items);
-                        }
+            if (from) |entry| {
+                var tree_diff = tr.TreeDiff(.xit, repo_opts).init(allocator);
+                defer tree_diff.deinit();
+                try tree_diff.compare(state.readOnly(), io, &entry.tree, &tree, null);
+                for (tree_diff.changes.keys(), tree_diff.changes.values()) |path, change| {
+                    try fileKey(allocator, &key, path);
+                    const oid = if (change.new) |*tree_entry| indexedOid(repo_opts.hash, tree_entry) else null;
+                    if (oid) |bytes| {
+                        try files.put(key.items, .{ .bytes = bytes });
+                    } else {
+                        _ = try files.remove(key.items);
                     }
-                } else {
-                    var paths = std.heap.ArenaAllocator.init(ctx.allocator);
-                    defer paths.deinit();
-                    try indexTree(repo_opts, state.readOnly(), ctx.io, ctx.allocator, paths.allocator(), files, &key, "", &tree);
                 }
-
-                // the first entry ever written becomes the base for the next
-                // new branch, so only one branch walks a whole tree.
-                if (new_branch_base == null) new_branch_base = .{ .tree = tree, .files = (try index.getSlot(item.branch_hash)) orelse unreachable };
-                // a later entry copies an earlier one's slot, so everything
-                // written so far has to be shared rather than mutated
-                try ctx.core.db.freeze();
+            } else {
+                var paths = std.heap.ArenaAllocator.init(allocator);
+                defer paths.deinit();
+                try indexTree(repo_opts, state.readOnly(), io, allocator, paths.allocator(), files, &key, "", &tree);
             }
-        }
-    };
 
-    const history = try DB.ArrayList(.read_write).init(repo.core.db.rootCursor());
-    try history.appendContext(.{ .slot = try history.getSlot(-1) }, Save{
-        .core = &repo.core,
-        .io = io,
-        .allocator = allocator,
-        .work = work.items,
-        .base = base,
-    });
+            // the first entry ever written becomes the base for the next
+            // new branch, so only one branch walks a whole tree.
+            if (new_branch_base == null) new_branch_base = .{ .tree = tree, .files = (try index.getSlot(item.branch_hash)) orelse unreachable };
+            // a later entry copies an earlier one's slot, so everything
+            // written so far has to be shared rather than mutated
+            try state.core.db.freeze();
+        }
+    }
+    return true;
 }
 
 // insert every file under `oid` (a tree), as tr.Tree.read walks one.

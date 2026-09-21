@@ -62,9 +62,11 @@ fn docKeyLen(comptime hash_kind: hash.HashKind) usize {
     return @sizeOf(u64) + hash.byteLen(hash_kind);
 }
 
-// reconcile the index versions with the repo's ref tips, in one transaction.
-// `updates` is the push that prompted this, whose old oids are the cheapest
-// bases to derive the new tips from.
+// the action a commit index refresh records when it runs on its own
+pub const undo_action = "haxy/commit-index";
+
+// reconcile the index versions with the repo's ref tips, in a transaction of
+// its own
 pub fn refresh(
     comptime repo_opts: rp.RepoOpts(.xit),
     io: std.Io,
@@ -72,6 +74,48 @@ pub fn refresh(
     repo: *rp.Repo(.xit, repo_opts),
     updates: ?[]const xit.net_server_receive_pack.AppliedRefUpdate,
 ) !void {
+    const Repo = rp.Repo(.xit, repo_opts);
+    const DB = Repo.DB;
+    const Save = struct {
+        core: *Repo.Core,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        updates: ?[]const xit.net_server_receive_pack.AppliedRefUpdate,
+
+        pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
+            var moment = try DB.HashMap(.read_write).init(cursor.*);
+            const state = Repo.State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
+            if (!try refreshInTransaction(repo_opts, state, &moment, ctx.io, ctx.allocator, ctx.updates)) return error.CancelTransaction;
+
+            // record the user action for undo
+            try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action_kind = undo_action } });
+        }
+    };
+
+    // held across the reads and the writes, so a concurrent refresh can't
+    // change the entries these decisions were made from.
+    try repo.core.db_file.lock(io, .exclusive);
+    defer repo.core.db_file.unlock(io);
+
+    const history = try DB.ArrayList(.read_write).init(repo.core.db.rootCursor());
+    history.appendContext(.{ .slot = try history.getSlot(-1) }, Save{ .core = &repo.core, .io = io, .allocator = allocator, .updates = updates }) catch |err| switch (err) {
+        error.CancelTransaction => {},
+        else => return err,
+    };
+}
+
+// reconcile them inside the caller's transaction, so the index lands with the
+// push that invalidated it. `updates` is that push, whose old oids are the
+// cheapest bases to derive the new tips from. reports whether anything was
+// written, so a caller that owns an otherwise empty transaction can cancel it
+pub fn refreshInTransaction(
+    comptime repo_opts: rp.RepoOpts(.xit),
+    state: rp.Repo(.xit, repo_opts).State(.read_write),
+    moment: *rp.Repo(.xit, repo_opts).DB.HashMap(.read_write),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    updates: ?[]const xit.net_server_receive_pack.AppliedRefUpdate,
+) !bool {
     const Repo = rp.Repo(.xit, repo_opts);
     const DB = Repo.DB;
     const Oid = [hash.hexLen(repo_opts.hash)]u8;
@@ -95,14 +139,8 @@ pub fn refresh(
     // the versions a new tip can derive from
     var versions: std.ArrayList(Tip) = .empty;
 
-    // held across the reads and the writes, so a concurrent refresh can't
-    // change the entries these decisions were made from.
-    try repo.core.db_file.lock(io, .exclusive);
-    defer repo.core.db_file.unlock(io);
-
     {
-        var moment = try repo.core.latestMoment();
-        const state = Repo.State(.read_only){ .core = &repo.core, .extra = .{ .moment = &moment } };
+        const read_state = state.readOnly();
 
         // the commits that already have a version
         var existing: std.AutoArrayHashMapUnmanaged(Oid, void) = .empty;
@@ -120,18 +158,18 @@ pub fn refresh(
         // what every head except the events branch and every tag points at
         var tips: std.ArrayList(Oid) = .empty;
         {
-            var branches = try repo.listBranches(io, allocator, .beginning);
+            var branches = try rf.RefIterator(.xit, repo_opts).init(read_state, io, allocator, .head, .beginning);
             defer branches.deinit();
             while (try branches.next()) |ref| {
                 if (std.mem.eql(u8, ref.name, evt.events_ref.name)) continue;
-                try tips.append(aa, (try repo.readRef(io, .{ .kind = .head, .name = ref.name })) orelse continue);
+                try tips.append(aa, (try rf.readRecur(.xit, repo_opts, read_state, io, .{ .ref = .{ .kind = .head, .name = ref.name } })) orelse continue);
             }
         }
         {
-            var tags = try repo.listTags(io, allocator, .beginning);
+            var tags = try rf.RefIterator(.xit, repo_opts).init(read_state, io, allocator, .tag, .beginning);
             defer tags.deinit();
             while (try tags.next()) |ref| {
-                try tips.append(aa, (try repo.readRef(io, .{ .kind = .tag, .name = ref.name })) orelse continue);
+                try tips.append(aa, (try rf.readRecur(.xit, repo_opts, read_state, io, .{ .ref = .{ .kind = .tag, .name = ref.name } })) orelse continue);
             }
         }
 
@@ -145,7 +183,7 @@ pub fn refresh(
                 try wanted.put(aa, tip, {});
                 continue;
             }
-            var commit = obj.Object(.xit, repo_opts).initCommit(state, io, allocator, &tip) catch continue;
+            var commit = obj.Object(.xit, repo_opts).initCommit(read_state, io, allocator, &tip) catch continue;
             defer commit.deinit();
             try wanted.put(aa, commit.oid, {});
             if (existing.contains(commit.oid)) continue;
@@ -159,10 +197,10 @@ pub fn refresh(
         }
 
         var head_buffer: [rf.MAX_REF_CONTENT_SIZE]u8 = undefined;
-        if (repo.head(io, &head_buffer)) |head| switch (head) {
-            .ref => |ref| default_tip = try repo.readRef(io, .{ .kind = .head, .name = ref.name }),
+        if (rf.readHead(.xit, repo_opts, read_state, io, &head_buffer) catch null) |head| switch (head) {
+            .ref => |ref| default_tip = try rf.readRecur(.xit, repo_opts, read_state, io, .{ .ref = .{ .kind = .head, .name = ref.name } }),
             .oid => {},
-        } else |_| {}
+        };
 
         // an entry whose commit is gone can't be walked from, so it isn't a
         // candidate.
@@ -170,7 +208,7 @@ pub fn refresh(
             if (item.base == null) break true;
         } else false;
         if (unbased) for (existing.keys()) |oid| {
-            var commit = obj.Object(.xit, repo_opts).initCommit(state, io, allocator, &oid) catch continue;
+            var commit = obj.Object(.xit, repo_opts).initCommit(read_state, io, allocator, &oid) catch continue;
             defer commit.deinit();
             try versions.append(aa, .{ .oid = oid, .timestamp = commit.content.commit.metadata.timestamp });
         };
@@ -188,76 +226,52 @@ pub fn refresh(
         }
     }
 
-    if (work.items.len == 0 and gone.items.len == 0) return;
+    if (work.items.len == 0 and gone.items.len == 0) return false;
 
-    const Save = struct {
-        core: *Repo.Core,
-        io: std.Io,
-        allocator: std.mem.Allocator,
-        work: []const Work,
-        gone: []const Oid,
-        aa: std.mem.Allocator,
-        default_tip: ?Oid,
-        versions: *std.ArrayList(Tip),
+    {
+        const index_hash = hash.hashInt(repo_opts.hash, index_key);
 
-        pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
-            var moment = try DB.HashMap(.read_write).init(cursor.*);
-            const state = Repo.State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
-            const index_hash = hash.hashInt(repo_opts.hash, index_key);
+        var message: std.ArrayList(u8) = .empty;
+        defer message.deinit(allocator);
 
-            var message: std.ArrayList(u8) = .empty;
-            defer message.deinit(ctx.allocator);
+        for (work.items) |item| {
+            const index = try DB.HashMap(.read_write).init(try moment.putCursor(index_hash));
+            const base = item.base orelse nearestVersion(repo_opts.hash, versions.items, default_tip, item.timestamp);
 
-            for (ctx.work) |item| {
-                const index = try DB.HashMap(.read_write).init(try moment.putCursor(index_hash));
-                const base = item.base orelse nearestVersion(repo_opts.hash, ctx.versions.items, ctx.default_tip, item.timestamp);
+            var oid_bytes: [hash.byteLen(repo_opts.hash)]u8 = undefined;
+            _ = try std.fmt.hexToBytes(&oid_bytes, &item.oid);
+            const oid_int = hash.bytesToInt(repo_opts.hash, &oid_bytes);
+            try index.putKey(oid_int, .{ .bytes = &oid_bytes });
+            var version_cursor = try index.putCursor(oid_int);
+            if (base) |base_oid| {
+                const base_cursor = (try index.getCursor(try hash.hexToInt(repo_opts.hash, &base_oid))) orelse return error.InvalidCommitIndex;
+                try version_cursor.write(.{ .slot = base_cursor.slot() });
+            }
+            const version = try DB.SortedMap(.read_write).init(version_cursor);
 
-                var oid_bytes: [hash.byteLen(repo_opts.hash)]u8 = undefined;
-                _ = try std.fmt.hexToBytes(&oid_bytes, &item.oid);
-                const oid_int = hash.bytesToInt(repo_opts.hash, &oid_bytes);
-                try index.putKey(oid_int, .{ .bytes = &oid_bytes });
-                var version_cursor = try index.putCursor(oid_int);
-                if (base) |base_oid| {
-                    const base_cursor = (try index.getCursor(try hash.hexToInt(repo_opts.hash, &base_oid))) orelse return error.InvalidCommitIndex;
-                    try version_cursor.write(.{ .slot = base_cursor.slot() });
-                }
-                const version = try DB.SortedMap(.read_write).init(version_cursor);
-
-                var diff_arena = std.heap.ArenaAllocator.init(ctx.allocator);
-                defer diff_arena.deinit();
-                const diff = try commitDiff(repo_opts, state.readOnly(), ctx.io, ctx.allocator, diff_arena.allocator(), if (base) |*base_oid| base_oid else null, &item.oid);
-                for (diff.removed) |commit| {
-                    const key = try readPosting(repo_opts, state.readOnly(), ctx.io, ctx.allocator, &message, commit);
-                    try srch.remove(DB, version, ctx.allocator, &key, message.items);
-                }
-                for (diff.added) |commit| {
-                    const key = try readPosting(repo_opts, state.readOnly(), ctx.io, ctx.allocator, &message, commit);
-                    try srch.add(DB, version, ctx.allocator, &key, message.items);
-                }
-
-                try ctx.versions.append(ctx.aa, .{ .oid = item.oid, .timestamp = item.timestamp });
-                // the next version copies this one's slot, so everything
-                // written so far has to be shared rather than mutated
-                try ctx.core.db.freeze();
+            var diff_arena = std.heap.ArenaAllocator.init(allocator);
+            defer diff_arena.deinit();
+            const diff = try commitDiff(repo_opts, state.readOnly(), io, allocator, diff_arena.allocator(), if (base) |*base_oid| base_oid else null, &item.oid);
+            for (diff.removed) |commit| {
+                const key = try readPosting(repo_opts, state.readOnly(), io, allocator, &message, commit);
+                try srch.remove(DB, version, allocator, &key, message.items);
+            }
+            for (diff.added) |commit| {
+                const key = try readPosting(repo_opts, state.readOnly(), io, allocator, &message, commit);
+                try srch.add(DB, version, allocator, &key, message.items);
             }
 
-            // removing last keeps a tip that is going away available as a base
-            const index = try DB.HashMap(.read_write).init(try moment.putCursor(index_hash));
-            for (ctx.gone) |oid| _ = try index.remove(try hash.hexToInt(repo_opts.hash, &oid));
+            try versions.append(aa, .{ .oid = item.oid, .timestamp = item.timestamp });
+            // the next version copies this one's slot, so everything
+            // written so far has to be shared rather than mutated
+            try state.core.db.freeze();
         }
-    };
 
-    const history = try DB.ArrayList(.read_write).init(repo.core.db.rootCursor());
-    try history.appendContext(.{ .slot = try history.getSlot(-1) }, Save{
-        .core = &repo.core,
-        .io = io,
-        .allocator = allocator,
-        .work = work.items,
-        .gone = gone.items,
-        .aa = aa,
-        .default_tip = default_tip,
-        .versions = &versions,
-    });
+        // removing last keeps a tip that is going away available as a base
+        const index = try DB.HashMap(.read_write).init(try moment.putCursor(index_hash));
+        for (gone.items) |oid| _ = try index.remove(try hash.hexToInt(repo_opts.hash, &oid));
+    }
+    return true;
 }
 
 // the version a tip committed at `timestamp` derives from when no push names
