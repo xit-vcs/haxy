@@ -38,6 +38,7 @@ pub const Item = struct {
     link: []const u8,
     form: []const u8,
     buttons: []const DetailButton = &.{},
+    undone: bool = false,
 };
 
 identity: []const u8,
@@ -58,10 +59,32 @@ pub fn init(comptime opts: rp.RepoOpts(.xit), arena: *std.heap.ArenaAllocator, r
     var items: std.ArrayList(Item) = .empty;
     var remaining = if (selected) |index| index + 1 else count;
     var buffer: [opts.max_read_size]u8 = undefined;
+
+    // an undo above the page discards transactions on it, so the walk starts
+    // at the newest transaction. an undo discards everything from the one it
+    // restored to down to the row below itself, so walking down, that row is
+    // all the walk has to carry. the rows it discarded are skipped, since a
+    // discarded undo discards nothing itself
+    var undone_from: ?u64 = null;
+    var scanned = count;
+    while (scanned > remaining) {
+        scanned -= 1;
+        if (undone_from) |from| if (scanned >= from) {
+            scanned = from;
+            continue;
+        };
+        const record = try xit.undo.read(opts, try repo.core.momentAt(scanned), &buffer);
+        if (try undoneFrom(arena, record)) |from| undone_from = from;
+    }
+
     while (remaining > 0 and items.items.len < page_size) {
         remaining -= 1;
         const moment = try repo.core.momentAt(remaining);
         const record = try xit.undo.read(opts, moment, &buffer);
+        const row_undone = if (undone_from) |from| remaining >= from else false;
+        if (!row_undone) {
+            if (try undoneFrom(arena, record)) |from| undone_from = from;
+        }
         const detail = if (record) |value| try eventDetail(opts, arena, &repo.core, haxy_moment, identity, value, moment, remaining) else null;
         const shown = detail orelse Detail{
             .action = if (record) |value| try aa.dupe(u8, value.action_kind) else "unknown",
@@ -77,6 +100,7 @@ pub fn init(comptime opts: rp.RepoOpts(.xit), arena: *std.heap.ArenaAllocator, r
             .timestamp = if (record) |value| try formatTimestamp(aa, value.timestamp) else "timestamp unavailable",
             .link = try std.fmt.allocPrint(aa, "ai:{s}", .{url}),
             .form = try std.fmt.allocPrint(aa, "form:{s}/undo", .{url}),
+            .undone = row_undone,
         });
     }
     return .{ .identity = try aa.dupe(u8, identity), .count = count, .items = items.items, .next = if (remaining > 0) remaining - 1 else null };
@@ -225,6 +249,18 @@ fn momentEventCount(
     return try ids.count();
 }
 
+// the oldest transaction `record` discarded, or null when it is not an undo
+fn undoneFrom(arena: *std.heap.ArenaAllocator, record: ?xit.undo.Record) !?u64 {
+    const value = record orelse return null;
+    if (!std.mem.eql(u8, value.action_kind, undo_action_kind)) return null;
+    const parsed = std.json.parseFromSlice(xit.undo.Undo, arena.child_allocator, value.payload, .{ .ignore_unknown_fields = true }) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return null,
+    };
+    defer parsed.deinit();
+    return parsed.value.index;
+}
+
 // the moment's own position in the haxy history
 fn momentIndex(comptime opts: rp.RepoOpts(.xit), haxy_moment: evt.EventDB(opts.hash).HashMap(.read_only)) !?u64 {
     const cursor = try haxy_moment.getCursor(hash.hashInt(opts.hash, evt.moment_index_key)) orelse return null;
@@ -346,7 +382,11 @@ pub const View = struct {
             var scroll = blk: {
                 var rows = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert, .stretch = true });
                 errdefer rows.deinit(allocator);
-                for (data.items) |item| try addText(allocator, &rows, item.action, item.link, .hidden);
+                for (data.items) |item| {
+                    try addText(allocator, &rows, item.action, item.link, .hidden);
+                    // a transaction a later undo discarded says so on its border
+                    if (item.undone) rows.children.values()[rows.children.count() - 1].widget.text_box.options.bottom_label = "(undone)";
+                }
                 if (data.next) |next| {
                     const route = ui.RoutablePage.repoUndoRoute(data.identity, next) orelse return error.RouteTooLong;
                     try addText(allocator, &rows, "next →", try std.fmt.allocPrint(session.page_arena.allocator(), "a:{s}", .{try route.toUrl(session.page_arena)}), .hidden);
