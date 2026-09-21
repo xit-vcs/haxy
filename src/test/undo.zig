@@ -17,21 +17,21 @@ test "undo history paginates backwards and undo appends a restorable state" {
     defer repo.deinit(io, allocator);
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    const initial = try Undo.init(opts, &arena, &repo, "", null);
+    const initial = try Undo.init(opts, &arena, &repo, null, "", null);
     try std.testing.expectEqual(1, initial.count);
     for (0..25) |index| {
         const value = try std.fmt.allocPrint(arena.allocator(), "{d}", .{index});
         try repo.addConfig(io, allocator, .{ .name = "undo.value", .value = value });
     }
-    const first = try Undo.init(opts, &arena, &repo, "", null);
+    const first = try Undo.init(opts, &arena, &repo, null, "", null);
     try std.testing.expectEqual(20, first.items.len);
     try std.testing.expectEqual(25, first.items[0].index);
-    const second = try Undo.init(opts, &arena, &repo, "", first.next);
+    const second = try Undo.init(opts, &arena, &repo, null, "", first.next);
     try std.testing.expectEqual(6, second.items.len);
     try std.testing.expectEqual(5, second.items[0].index);
     try std.testing.expectEqual(0, second.items[5].index);
     try std.testing.expectEqual(null, second.next);
-    try std.testing.expectError(error.NotFound, Undo.init(opts, &arena, &repo, "", 26));
+    try std.testing.expectError(error.NotFound, Undo.init(opts, &arena, &repo, null, "", 26));
     try std.testing.expectError(error.InvalidHistoryIndex, repo.undo(io, 0));
     try std.testing.expectError(error.InvalidHistoryIndex, repo.undo(io, 26));
 
@@ -40,7 +40,7 @@ test "undo history paginates backwards and undo appends a restorable state" {
     try expectConfig(&repo, "23");
     try repo.undo(io, 10);
     try expectConfig(&repo, "8");
-    const undone = try Undo.init(opts, &arena, &repo, "", null);
+    const undone = try Undo.init(opts, &arena, &repo, null, "", null);
     try std.testing.expectEqual(28, undone.count);
     try std.testing.expectEqualStrings("undo", undone.items[0].action);
     try repo.undo(io, undone.items[0].index);
@@ -121,7 +121,7 @@ test "repo undo visibility and fresh owner authorization" {
         var repo = try xit.repo.Repo(.xit, .{}).open(io, allocator, .{ .path = path });
         defer repo.deinit(io, allocator);
         try expectConfig(&repo, "first");
-        const data = try Undo.init(.{}, &arena, &repo, "alice/demo", null);
+        const data = try Undo.init(.{}, &arena, &repo, null, "alice/demo", null);
         try std.testing.expectEqualStrings("undo", data.items[0].action);
     }
     // keep the old session/page moment, but transfer ownership to the writer.
@@ -183,7 +183,7 @@ test "commit undo records use the formatted description" {
     var repo = try xit.repo.Repo(.xit, opts).init(io, allocator, .{ .path = path });
     defer repo.deinit(io, allocator);
     _ = try repo.commitAtRef(io, allocator, .{ .message = "example commit" }, null, .{ .kind = .head, .name = "master" });
-    const data = try Undo.init(opts, &arena, &repo, "", null);
+    const data = try Undo.init(opts, &arena, &repo, null, "", null);
     try std.testing.expect(std.mem.startsWith(u8, data.items[0].description, "commit -m \"example commit\""));
 }
 

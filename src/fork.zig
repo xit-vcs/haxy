@@ -10,6 +10,9 @@ const rf = xit.ref;
 
 pub const ref = rf.Ref{ .kind = .head, .name = "patch" };
 
+// the action creating a fork records
+pub const undo_action = "haxy/fork";
+
 pub const Route = struct {
     identity: []const u8,
     id: [evt.event_id_size * 2]u8,
@@ -149,7 +152,7 @@ pub fn create(
                     try bch.add(.xit, repo_opts, state, ctx.io, .{ .name = ref.name, .target = .none });
                 }
                 try rf.replaceHead(.xit, repo_opts, state, ctx.io, .{ .ref = ref });
-                try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action = "create_fork" } });
+                try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action = undo_action } });
             }
         };
 

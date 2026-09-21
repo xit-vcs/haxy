@@ -286,7 +286,7 @@ pub fn init(
                             }
                             // tabs switch in-page, so every tab's data is read here
                             if (repo_kind == .xit and undo_allowed) {
-                                undo_data = Undo.init(opened.self_repo_opts, arena, opened, repo_identity.identity, undo_index) catch |err| switch (err) {
+                                undo_data = Undo.init(opened.self_repo_opts, arena, opened, session.haxy_moment, repo_identity.identity, undo_index) catch |err| switch (err) {
                                     error.OutOfMemory => return err,
                                     else => .{ .identity = repo_identity.identity, .failure = @errorName(err) },
                                 };

@@ -11,6 +11,9 @@ const cms = @import("search_commit.zig");
 const fork = @import("fork.zig");
 const serve_common = @import("serve_common.zig");
 
+// the action a patch merge records
+pub const merge_undo_action = "haxy/merge";
+
 // capture an existing branch without creating a fork
 pub fn writeBranchPatch(
     host_kind: evt.HostKind,
@@ -951,7 +954,7 @@ pub fn merge(
                 if (!try importMergedRevision(repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, ctx.fork_repo, &ctx.patch_id, .{ .revision = ctx.revision, .before_oid = &before_oid, .after_oid = &after_oid }, ctx.expected_patch, ctx.author, ctx.timestamp)) return error.PatchOutOfDate;
 
                 // record the merge as one undoable action.
-                try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action = "merge_patch" } });
+                try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action = merge_undo_action } });
             }
         };
 

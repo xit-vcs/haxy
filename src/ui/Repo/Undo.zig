@@ -2,6 +2,9 @@ const std = @import("std");
 const builtin = @import("builtin");
 const ui = @import("../../ui.zig");
 const evt = @import("../../event.zig");
+const pch = @import("../../patch.zig");
+const push = @import("../../push.zig");
+const fork = @import("../../fork.zig");
 const inp = @import("../input.zig");
 const xit = @import("xit");
 const rp = xit.repo;
@@ -15,10 +18,11 @@ const Self = @This();
 
 pub const page_size = 20;
 
-// replaces the description for a transaction that wrote events
-pub const EventsLink = struct {
+// stands in for the description, as a focusable box that may link somewhere
+pub const DetailButton = struct {
     label: []const u8,
-    link: []const u8,
+    text: []const u8,
+    link: ?[]const u8 = null,
 };
 
 pub const Item = struct {
@@ -28,7 +32,7 @@ pub const Item = struct {
     timestamp: []const u8,
     link: []const u8,
     form: []const u8,
-    events: ?EventsLink = null,
+    button: ?DetailButton = null,
 };
 
 identity: []const u8,
@@ -40,7 +44,7 @@ can_undo: bool = false,
 // the clear-history confirmation stands in for the list
 clear: bool = false,
 
-pub fn init(comptime opts: rp.RepoOpts(.xit), arena: *std.heap.ArenaAllocator, repo: *rp.Repo(.xit, opts), identity: []const u8, selected: ?u64) !Self {
+pub fn init(comptime opts: rp.RepoOpts(.xit), arena: *std.heap.ArenaAllocator, repo: *rp.Repo(.xit, opts), haxy_moment: ?evt.AdminDB.HashMap(.read_only), identity: []const u8, selected: ?u64) !Self {
     const aa = arena.allocator();
     const DB = rp.Repo(.xit, opts).DB;
     const history = try DB.ArrayList(.read_only).init(repo.core.db.rootCursor().readOnly());
@@ -55,7 +59,7 @@ pub fn init(comptime opts: rp.RepoOpts(.xit), arena: *std.heap.ArenaAllocator, r
         const moment = try DB.HashMap(.read_only).init(cursor);
         const record = try xit.undo.read(opts, moment, &buffer);
         var description: std.Io.Writer.Allocating = .init(aa);
-        const detail = if (record) |value| try eventDetail(opts, arena, identity, value, moment, remaining) else null;
+        const detail = if (record) |value| try eventDetail(opts, arena, haxy_moment, identity, value, moment, remaining) else null;
         if (detail) |value| {
             try description.writer.writeAll(value.description);
         } else if (record) |value| {
@@ -69,7 +73,7 @@ pub fn init(comptime opts: rp.RepoOpts(.xit), arena: *std.heap.ArenaAllocator, r
             .index = remaining,
             .action = if (detail) |value| value.action else if (record) |value| try aa.dupe(u8, value.action) else "unknown",
             .description = description.written(),
-            .events = if (detail) |value| value.events else null,
+            .button = if (detail) |value| value.button else null,
             .timestamp = if (record) |value| try formatTimestamp(aa, value.timestamp) else "timestamp unavailable",
             .link = try std.fmt.allocPrint(aa, "ai:{s}", .{url}),
             .form = try std.fmt.allocPrint(aa, "form:{s}/undo", .{url}),
@@ -81,7 +85,7 @@ pub fn init(comptime opts: rp.RepoOpts(.xit), arena: *std.heap.ArenaAllocator, r
 const Detail = struct {
     action: []const u8,
     description: []const u8,
-    events: ?EventsLink = null,
+    button: ?DetailButton = null,
 };
 
 // every haxy event transaction shares one action, and the events it wrote are
@@ -89,12 +93,20 @@ const Detail = struct {
 fn eventDetail(
     comptime opts: rp.RepoOpts(.xit),
     arena: *std.heap.ArenaAllocator,
+    haxy_moment: ?evt.AdminDB.HashMap(.read_only),
     identity: []const u8,
     record: xit.undo.UndoRecord,
     moment: rp.Repo(.xit, opts).DB.HashMap(.read_only),
     history_index: u64,
 ) !?Detail {
     if (std.mem.eql(u8, record.action, evt.merge_undo_action)) return .{ .action = "merge events", .description = "merged the events ref from a remote" };
+    if (std.mem.eql(u8, record.action, pch.merge_undo_action)) return .{ .action = "merge patch", .description = "merged a patch into its target branch" };
+    if (std.mem.eql(u8, record.action, fork.undo_action)) return .{ .action = "fork", .description = "created a fork to draft a patch in" };
+    if (std.mem.eql(u8, record.action, push.undo_action)) return .{
+        .action = "push",
+        .description = "received a push",
+        .button = try pushUser(arena, haxy_moment, record.payload),
+    };
     if (!std.mem.eql(u8, record.action, evt.undo_action)) return null;
 
     const count = try momentEventCount(opts, moment) orelse return .{ .action = "events", .description = "updated the event database" };
@@ -108,10 +120,29 @@ fn eventDetail(
     return .{
         .action = try std.fmt.allocPrint(aa, "events ({d})", .{count}),
         .description = "updated the event database",
-        .events = .{
-            .label = try std.fmt.allocPrint(aa, "view events ({d})", .{count}),
+        .button = .{
+            .label = " events ",
+            .text = try std.fmt.allocPrint(aa, "view events ({d})", .{count}),
             .link = try std.fmt.allocPrint(aa, "a:{s}", .{try route.toUrl(arena)}),
         },
+    };
+}
+
+// the push record stores the email of the user whose key the server accepted.
+// resolving it names them as they are now, and leaves the email when no user
+// holds it, which is also what local mode sees with no admin db to read
+fn pushUser(arena: *std.heap.ArenaAllocator, haxy_moment: ?evt.AdminDB.HashMap(.read_only), payload: []const u8) !?DetailButton {
+    const Payload = struct { author: ?struct { email: []const u8 } = null };
+    const parsed = std.json.parseFromSlice(Payload, arena.child_allocator, payload, .{ .ignore_unknown_fields = true }) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return null,
+    };
+    defer parsed.deinit();
+    const author = parsed.value.author orelse return null;
+    return switch (try ui.Author.initFromEmail(haxy_moment, arena, author.email)) {
+        .unknown => null,
+        .email => |email| .{ .label = " user ", .text = email },
+        .user_name => |name| .{ .label = " user ", .text = name, .link = try ui.userLink(arena, name) },
     };
 }
 
@@ -359,11 +390,11 @@ pub const View = struct {
         const button = &details.children.values()[0].widget.text_box;
         const description = &details.children.values()[2].widget.text_box;
         try button.setContent(allocator, if (item.index == 0) "initial state cannot be undone" else if (item.index == self.data.count - 1) "undo this" else "undo this and all above it");
-        // a transaction that wrote events links to them instead of describing itself
-        if (item.events) |events| {
-            try description.setContent(allocator, events.label);
-            description.options.label = " events ";
-            description.getFocus().kind = .{ .custom = events.link };
+        // some actions put a button where the description would go
+        if (item.button) |detail_button| {
+            try description.setContent(allocator, detail_button.text);
+            description.options.label = detail_button.label;
+            description.getFocus().kind = if (detail_button.link) |link| .{ .custom = link } else .text_box;
         } else {
             try description.setContent(allocator, item.description);
             description.options.label = " description ";
