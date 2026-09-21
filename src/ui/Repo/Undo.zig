@@ -32,7 +32,7 @@ pub const Item = struct {
     timestamp: []const u8,
     link: []const u8,
     form: []const u8,
-    button: ?DetailButton = null,
+    buttons: []const DetailButton = &.{},
 };
 
 identity: []const u8,
@@ -73,7 +73,7 @@ pub fn init(comptime opts: rp.RepoOpts(.xit), arena: *std.heap.ArenaAllocator, r
             .index = remaining,
             .action = if (detail) |value| value.action else if (record) |value| try aa.dupe(u8, value.action) else "unknown",
             .description = description.written(),
-            .button = if (detail) |value| value.button else null,
+            .buttons = if (detail) |value| value.buttons else &.{},
             .timestamp = if (record) |value| try formatTimestamp(aa, value.timestamp) else "timestamp unavailable",
             .link = try std.fmt.allocPrint(aa, "ai:{s}", .{url}),
             .form = try std.fmt.allocPrint(aa, "form:{s}/undo", .{url}),
@@ -85,7 +85,7 @@ pub fn init(comptime opts: rp.RepoOpts(.xit), arena: *std.heap.ArenaAllocator, r
 const Detail = struct {
     action: []const u8,
     description: []const u8,
-    button: ?DetailButton = null,
+    buttons: []const DetailButton = &.{},
 };
 
 // every haxy event transaction shares one action, and the events it wrote are
@@ -99,32 +99,40 @@ fn eventDetail(
     moment: rp.Repo(.xit, opts).DB.HashMap(.read_only),
     history_index: u64,
 ) !?Detail {
+    const aa = arena.allocator();
     if (std.mem.eql(u8, record.action, evt.merge_undo_action)) return .{ .action = "merge events", .description = "merged the events ref from a remote" };
     if (std.mem.eql(u8, record.action, pch.merge_undo_action)) return .{ .action = "merge patch", .description = "merged a patch into its target branch" };
     if (std.mem.eql(u8, record.action, fork.undo_action)) return .{ .action = "fork", .description = "created a fork to draft a patch in" };
-    if (std.mem.eql(u8, record.action, push.undo_action)) return .{
-        .action = "push",
-        .description = "received a push",
-        .button = try pushUser(arena, haxy_moment, record.payload),
-    };
+    if (std.mem.eql(u8, record.action, push.undo_action)) {
+        // a push consumes the events it carried in its own transaction
+        var buttons: std.ArrayList(DetailButton) = .empty;
+        if (try pushUser(arena, haxy_moment, record.payload)) |button| try buttons.append(aa, button);
+        const count = try momentEventCount(opts, moment) orelse 0;
+        if (count > 0) try buttons.append(aa, try eventsButton(arena, identity, history_index, count));
+        return .{ .action = "push", .description = "received a push", .buttons = buttons.items };
+    }
     if (!std.mem.eql(u8, record.action, evt.undo_action)) return null;
 
     const count = try momentEventCount(opts, moment) orelse return .{ .action = "events", .description = "updated the event database" };
     // a transaction that consumed only merge commits indexed no events of its own
     if (count == 0) return .{ .action = "events", .description = "merged the event history" };
-
-    // the page reads the transaction's own moment, so the url names the
-    // transaction rather than the state it produced
-    const aa = arena.allocator();
-    const route = ui.RoutablePage.repoEventsRoute(identity, .active, null, "", history_index) orelse return error.RouteTooLong;
+    const buttons = try aa.dupe(DetailButton, &.{try eventsButton(arena, identity, history_index, count)});
     return .{
         .action = try std.fmt.allocPrint(aa, "events ({d})", .{count}),
         .description = "updated the event database",
-        .button = .{
-            .label = " events ",
-            .text = try std.fmt.allocPrint(aa, "view events ({d})", .{count}),
-            .link = try std.fmt.allocPrint(aa, "a:{s}", .{try route.toUrl(arena)}),
-        },
+        .buttons = buttons,
+    };
+}
+
+// the page reads the transaction's own moment, so the url names the
+// transaction rather than the state it produced
+fn eventsButton(arena: *std.heap.ArenaAllocator, identity: []const u8, history_index: u64, count: u64) !DetailButton {
+    const aa = arena.allocator();
+    const route = ui.RoutablePage.repoEventsRoute(identity, .active, null, "", history_index) orelse return error.RouteTooLong;
+    return .{
+        .label = " events ",
+        .text = try std.fmt.allocPrint(aa, "view events ({d})", .{count}),
+        .link = try std.fmt.allocPrint(aa, "a:{s}", .{try route.toUrl(arena)}),
     };
 }
 
@@ -233,13 +241,14 @@ pub const View = struct {
     data: *const Self,
     session: *ui.Session,
     detailed_index: ?usize = null,
-    failure_id: ?usize = null,
     shown_failure: ?[]const u8 = null,
 
     const list_max_width = 20;
     const detail_min_width = 40;
     const header_index = 0;
     const content_index = 1;
+    // the undo button and the timestamp; everything below them is rebuilt
+    const fixed_rows = 2;
 
     pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !View {
         var outer = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert });
@@ -288,10 +297,7 @@ pub const View = struct {
                 errdefer details.deinit(allocator);
                 if (data.items.len > 0) {
                     try addText(allocator, &details, "", null, .single);
-                    try addText(allocator, &details, "", null, .single);
-                    details.children.values()[1].widget.text_box.options.label = " timestamp ";
-                    try addText(allocator, &details, "", null, .single);
-                    details.children.values()[2].widget.text_box.options.label = " description ";
+                    try addLabeled(allocator, &details, " timestamp ", "", null);
                     details.getFocus().child_id = details.children.keys()[0];
                 }
                 break :blk try wgt.Scroll(ui.Widget).init(allocator, .{ .box = details }, .{ .direction = .vert, .web_native = !session.is_terminal, .fill = true });
@@ -333,6 +339,12 @@ pub const View = struct {
         row.getFocus().mode = .all;
         if (link) |value| row.getFocus().kind = .{ .custom = value };
         try box.children.put(allocator, row.getFocus().id, .{ .widget = .{ .text_box = row }, .rect = null, .min_size = null });
+    }
+
+    // a labeled row below the timestamp, added as the selected action needs it
+    fn addLabeled(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8, text: []const u8, link: ?[]const u8) !void {
+        try addText(allocator, box, text, link, .single);
+        box.children.values()[box.children.count() - 1].widget.text_box.options.label = label;
     }
 
     // enter counts only on the focused button; a click counts anywhere on it
@@ -381,32 +393,29 @@ pub const View = struct {
         const failure = self.session.data.undo_failure orelse self.data.failure;
         if (self.detailed_index == index and std.meta.eql(self.shown_failure, failure)) return;
         const details = &self.detailScroll().child.box;
-        if (self.failure_id) |id| {
-            if (details.children.getPtr(id)) |child| child.widget.deinit(allocator);
-            _ = details.children.orderedRemove(id);
-            self.failure_id = null;
+        while (details.children.count() > fixed_rows) {
+            var entry = details.children.pop() orelse break;
+            entry.value.widget.deinit(allocator);
         }
         const item = self.data.items[index];
-        const button = &details.children.values()[0].widget.text_box;
-        const description = &details.children.values()[2].widget.text_box;
-        try button.setContent(allocator, if (item.index == 0) "initial state cannot be undone" else if (item.index == self.data.count - 1) "undo this" else "undo this and all above it");
-        // some actions put a button where the description would go
-        if (item.button) |detail_button| {
-            try description.setContent(allocator, detail_button.text);
-            description.options.label = detail_button.label;
-            description.getFocus().kind = if (detail_button.link) |link| .{ .custom = link } else .text_box;
-        } else {
-            try description.setContent(allocator, item.description);
-            description.options.label = " description ";
-            description.getFocus().kind = .text_box;
-        }
         const enabled = self.data.can_undo and item.index > 0;
-        button.getFocus().kind = if (enabled) .{ .custom = "submit" } else .text_box;
-        try details.children.values()[1].widget.text_box.setContent(allocator, item.timestamp);
-        if (failure) |message| {
-            try addText(allocator, details, try std.fmt.allocPrint(self.session.page_arena.allocator(), "error: {s}", .{message}), null, .single);
-            self.failure_id = details.children.keys()[details.children.count() - 1];
+
+        // the fixed rows are filled first, since adding the ones below
+        // invalidates every pointer into the box
+        {
+            const button = &details.children.values()[0].widget.text_box;
+            try button.setContent(allocator, if (item.index == 0) "initial state cannot be undone" else if (item.index == self.data.count - 1) "undo this" else "undo this and all above it");
+            button.getFocus().kind = if (enabled) .{ .custom = "submit" } else .text_box;
         }
+        try details.children.values()[1].widget.text_box.setContent(allocator, item.timestamp);
+
+        // some actions put buttons where the description would go
+        if (item.buttons.len == 0) {
+            try addLabeled(allocator, details, " description ", item.description, null);
+        } else for (item.buttons) |detail_button| {
+            try addLabeled(allocator, details, detail_button.label, detail_button.text, detail_button.link);
+        }
+        if (failure) |message| try addText(allocator, details, try std.fmt.allocPrint(self.session.page_arena.allocator(), "error: {s}", .{message}), null, .single);
         self.shown_failure = failure;
         details.getFocus().kind = if (enabled) .{ .custom = item.form } else .container;
         details.getFocus().child_id = details.children.keys()[0];
