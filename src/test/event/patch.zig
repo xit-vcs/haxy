@@ -199,11 +199,11 @@ fn testBranchMerge(selection: evt.Patch.MergeRevision) !void {
     response.sideband = true;
     var output = std.Io.Writer.Allocating.init(allocator);
     defer output.deinit();
-    var progress = push.PushProgress{ .response = &response, .writer = &output.writer, .label = "Updating patches" };
+    var progress = push.PushProgress{ .response = &response, .writer = &output.writer };
     const before_refresh = try repo.core.db.rootCursor().count();
     try pch.refreshBranches(.server, .xit, opts, io, allocator, &repo, null, &progress);
     try std.testing.expectEqual(before_refresh + 1, try repo.core.db.rootCursor().count());
-    try std.testing.expect(std.mem.indexOf(u8, output.written(), "Updating patches: 100% (1/1)\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "Checking mergeability: 100% (1/1)\n") != null);
 
     // closed patches skip source updates and contribute no progress
     try evt.Patch.update(.server, .xit, opts, io, allocator, &repo, &id, .{ .status = .closed }, author);
@@ -1243,7 +1243,7 @@ fn testMergeability(
         defer detached.deinit();
     }
     try target.removeBranch(io, .{ .name = "master" });
-    pch.refreshOpenMergeability(repo_opts, io, allocator, target, null);
+    pch.refreshOpenMergeability(repo_opts, io, allocator, target, null, null);
     try std.testing.expectEqualDeep(pch.Mergeability{}, try readMergeability(target, io, allocator, id, patch));
     try expectMergeabilityShortBytes(try target.core.latestMoment(), id);
     try target.addBranch(io, .{ .name = "master" });
@@ -1251,7 +1251,7 @@ fn testMergeability(
         var restored = try target.switchDir(io, allocator, .{ .target = .{ .ref = .{ .kind = .head, .name = "master" } } });
         defer restored.deinit();
     }
-    pch.refreshOpenMergeability(repo_opts, io, allocator, target, null);
+    pch.refreshOpenMergeability(repo_opts, io, allocator, target, null, null);
     try std.testing.expectEqualDeep(clean, try readMergeability(target, io, allocator, id, patch));
 
     // a missing fork disables merging without changing the accepted events

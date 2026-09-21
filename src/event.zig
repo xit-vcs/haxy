@@ -428,7 +428,7 @@ pub fn consume(
     // consuming an existing ref does not provide the set of changed patches
     // explicit patch writes already saved their checks in the event transaction
     if (role == .repo and repo_kind == .xit and host_kind == .server and events.len == 0) {
-        pch.refreshOpenMergeability(repo_opts, io, allocator, repo, null);
+        pch.refreshOpenMergeability(repo_opts, io, allocator, repo, null, null);
     }
 }
 

@@ -33,6 +33,11 @@ pub const PushProgress = struct {
             .end => |kind| {
                 if (kind != .writing_patch) return;
             },
+            // each phase names itself before reporting its count
+            .text => |text| {
+                self.label = text;
+                return;
+            },
             else => return,
         }
         if (self.total == 0) return;
@@ -114,6 +119,8 @@ pub fn receivePackAndConsume(
 
     var updates = xit.net_server_receive_pack.AppliedRefUpdates.init(allocator);
     defer updates.deinit();
+
+    var progress = PushProgress{ .response = &response, .writer = writer };
     const Ctx = struct {
         updates: *xit.net_server_receive_pack.AppliedRefUpdates,
         core: *rp.Repo(.xit, repo_opts).Core,
@@ -126,6 +133,7 @@ pub fn receivePackAndConsume(
         response: *xit.net_server_receive_pack.Response,
         repo_root_path: []const u8,
         error_writer: *std.Io.Writer,
+        progress: *PushProgress,
 
         pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
             var moment = try DB.HashMap(.read_write).init(cursor.*);
@@ -145,7 +153,7 @@ pub fn receivePackAndConsume(
                 try pch.detectMerged(repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, ctx.repo_root_path, ctx.updates.items.items, ctx.error_writer);
 
                 // the revisions the pushed branches cause belong to the push
-                _ = try pch.refreshBranchesInTransaction(.server, repo_opts, state, &moment, ctx.io, ctx.allocator, ctx.updates.items.items, null);
+                _ = try pch.refreshBranchesInTransaction(.server, repo_opts, state, &moment, ctx.io, ctx.allocator, ctx.updates.items.items, null, ctx.progress);
             }
             try writeUndo(repo_opts, state, ctx.io, ctx.allocator, ctx.author);
         }
@@ -170,6 +178,7 @@ pub fn receivePackAndConsume(
                 .response = &response,
                 .repo_root_path = repo_root_path,
                 .error_writer = error_writer,
+                .progress = &progress,
             },
         );
     };
@@ -179,10 +188,9 @@ pub fn receivePackAndConsume(
         return err;
     };
 
-    var progress = PushProgress{ .response = &response, .writer = writer, .label = "Updating patches" };
     pch.refreshBranches(.server, .xit, repo_opts, io, allocator, repo, updates.items.items, &progress) catch |err| {
         serve_common.logError(io, error_writer, "failed to refresh branch patches: {s}\n", .{@errorName(err)});
-        pch.refreshOpenMergeability(repo_opts, io, allocator, repo, null);
+        pch.refreshOpenMergeability(repo_opts, io, allocator, repo, null, &progress);
     };
     find.refresh(repo_opts, io, allocator, repo) catch |err| {
         serve_common.logError(io, error_writer, "failed to refresh file index: {s}\n", .{@errorName(err)});
