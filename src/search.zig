@@ -30,8 +30,7 @@ pub fn add(
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     for (try tokenize(arena.allocator(), text)) |word| {
-        const set = try DB.SortedSet(.read_write).init(try index.putCursor(word));
-        try set.put(doc_key);
+        try addWord(DB, index, doc_key, word);
     }
 }
 
@@ -47,11 +46,54 @@ pub fn remove(
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     for (try tokenize(arena.allocator(), text)) |word| {
-        if (null == try index.getCursor(word)) continue;
-        const set = try DB.SortedSet(.read_write).init(try index.putCursor(word));
-        _ = try set.remove(doc_key);
-        if (0 == try set.count()) _ = try index.remove(word);
+        try removeWord(DB, index, doc_key, word);
     }
+}
+
+// move `doc_key` from `old_text`'s words to `new_text`'s. the words they share
+// are left alone, so editing a long description costs what the edit changed
+// rather than the whole text.
+pub fn replace(
+    comptime DB: type,
+    index: DB.SortedMap(.read_write),
+    allocator: std.mem.Allocator,
+    doc_key: []const u8,
+    old_text: []const u8,
+    new_text: []const u8,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    const old_words = try tokenize(aa, old_text);
+    const new_words = try tokenize(aa, new_text);
+
+    for (old_words) |word| {
+        if (!contains(new_words, word)) try removeWord(DB, index, doc_key, word);
+    }
+    for (new_words) |word| {
+        if (!contains(old_words, word)) try addWord(DB, index, doc_key, word);
+    }
+}
+
+// a document contributes at most max_words_per_doc words, so a scan costs less
+// than building a second map
+fn contains(words: []const []const u8, word: []const u8) bool {
+    for (words) |candidate| {
+        if (std.mem.eql(u8, candidate, word)) return true;
+    }
+    return false;
+}
+
+fn addWord(comptime DB: type, index: DB.SortedMap(.read_write), doc_key: []const u8, word: []const u8) !void {
+    const set = try DB.SortedSet(.read_write).init(try index.putCursor(word));
+    try set.put(doc_key);
+}
+
+fn removeWord(comptime DB: type, index: DB.SortedMap(.read_write), doc_key: []const u8, word: []const u8) !void {
+    if (null == try index.getCursor(word)) return;
+    const set = try DB.SortedSet(.read_write).init(try index.putCursor(word));
+    _ = try set.remove(doc_key);
+    if (0 == try set.count()) _ = try index.remove(word);
 }
 
 // the doc keys holding every typed word, in key order. a stream, so callers

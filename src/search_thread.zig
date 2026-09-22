@@ -38,8 +38,9 @@ pub fn doc(key: []const u8, record: anytype) ?Doc {
     };
 }
 
-// replace `old`'s postings with `new`'s. an unchanged doc costs nothing: a
-// status change or an edit that leaves the indexed fields alone returns here.
+// move `old`'s postings to `new`'s. an unchanged doc costs nothing: a status
+// change or an edit that leaves the indexed fields alone returns here. both
+// sides share a doc key, since a thread keeps the one it was created with.
 pub fn update(
     comptime DB: type,
     comptime hash_kind: hash.HashKind,
@@ -59,9 +60,17 @@ pub fn update(
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
+    const aa = arena.allocator();
     const index = try DB.SortedMap(.read_write).init(try haxy_moment.putCursor(hash.hashInt(hash_kind, indexKey(kind))));
-    if (old) |before| try srch.remove(DB, index, allocator, before.key, try text(arena.allocator(), before));
-    if (new) |after| try srch.add(DB, index, allocator, after.key, try text(arena.allocator(), after));
+    if (old) |before| {
+        if (new) |after| {
+            try srch.replace(DB, index, allocator, after.key, try text(aa, before), try text(aa, after));
+        } else {
+            try srch.remove(DB, index, allocator, before.key, try text(aa, before));
+        }
+    } else if (new) |after| {
+        try srch.add(DB, index, allocator, after.key, try text(aa, after));
+    }
 }
 
 // the doc keys matching `query_text`, in key order, narrowed to `filter` when
