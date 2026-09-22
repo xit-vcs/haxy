@@ -36,7 +36,7 @@ pub fn writeReceivedPatches(
             try iter.include(&oid);
         }
     }
-    var progress = serve_common.PushProgress{ .response = response, .writer = writer };
+    var progress = serve_common.SidebandProgress{ .response = response, .writer = writer };
     try xit.patch.writePatches(repo_opts, state, io, allocator, &iter, &progress);
 }
 
@@ -132,7 +132,7 @@ pub fn receivePackAndConsume(
     var updates = xit.net_server_receive_pack.AppliedRefUpdates.init(allocator);
     defer updates.deinit();
 
-    var progress = serve_common.PushProgress{ .response = &response, .writer = writer, .sess = sess };
+    var progress = serve_common.SidebandProgress{ .response = &response, .writer = writer, .sess = sess };
     const Ctx = struct {
         updates: *xit.net_server_receive_pack.AppliedRefUpdates,
         core: *rp.Repo(.xit, repo_opts).Core,
@@ -145,7 +145,7 @@ pub fn receivePackAndConsume(
         response: *xit.net_server_receive_pack.Response,
         repo_root_path: []const u8,
         error_writer: *std.Io.Writer,
-        progress: *serve_common.PushProgress,
+        progress: *serve_common.SidebandProgress,
 
         pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
             var moment = try DB.HashMap(.read_write).init(cursor.*);
@@ -260,7 +260,7 @@ pub fn receiveFork(
     var revision_id_maybe: ?[evt.event_id_size]u8 = null;
     var response = xit.net_server_receive_pack.Response.init(allocator);
     defer response.deinit();
-    var progress = serve_common.PushProgress{ .response = &response, .writer = writer, .sess = sess };
+    var progress = serve_common.SidebandProgress{ .response = &response, .writer = writer, .sess = sess };
 
     // execute a transaction that receives the push and materializes its revision
     const result = blk: {
@@ -283,7 +283,7 @@ pub fn receiveFork(
             timestamp: u64,
             newest: ?evt.PatchRev.WithId,
             revision_id_maybe: *?[evt.event_id_size]u8,
-            progress: *serve_common.PushProgress,
+            progress: *serve_common.SidebandProgress,
 
             pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
                 // receive the branch update

@@ -23,7 +23,7 @@ const escape_timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromMillisecond
 
 var active_connections: std.atomic.Value(u32) = .init(0);
 
-const any_repo_opts: rp.AnyRepoOpts(.xit) = .{ .ProgressCtx = *serve_common.PushProgress };
+const any_repo_opts: rp.AnyRepoOpts(.xit) = .{ .ProgressCtx = *serve_common.SidebandProgress };
 
 pub const SessionHandler = struct {
     admin_repo_path: []const u8,
@@ -442,8 +442,9 @@ fn runForkSession(
         return writeError(sess, "patch draft not found");
     defer draft.deinit(io, allocator);
     if (service == .upload_pack) {
+        var progress = serve_common.SidebandProgress{ .writer = writer, .sess = sess };
         switch (draft) {
-            inline else => |*repo| try repo.uploadPack(io, allocator, reader, writer, .{ .protocol_version = protocol_version }),
+            inline else => |*repo| try repo.uploadPack(io, allocator, reader, writer, .{ .protocol_version = protocol_version }, &progress),
         }
     } else {
         const target = (try evt.Repo.readByOwnerAndName(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &admin_arena, owner_repo.owner, owner_repo.name)) orelse
@@ -523,7 +524,10 @@ fn servePack(
     sess: ?*ssh.SessionCtx,
 ) !void {
     switch (service) {
-        .upload_pack => try repo.uploadPack(io, allocator, reader, writer, .{ .protocol_version = protocol_version }),
+        .upload_pack => {
+            var progress = serve_common.SidebandProgress{ .writer = writer, .sess = sess };
+            try repo.uploadPack(io, allocator, reader, writer, .{ .protocol_version = protocol_version }, &progress);
+        },
         .receive_pack => try push.receivePackAndConsume(repo_opts, io, allocator, repo, reader, writer, .{ .protocol_version = protocol_version }, author, repo_root_path, error_writer, sess),
     }
 }

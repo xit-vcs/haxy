@@ -155,7 +155,7 @@ test "branch patches merge without a fork" {
 fn testBranchMerge(selection: evt.Patch.MergeRevision) !void {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    const opts: rp.RepoOpts(.xit) = .{ .is_test = true, .ProgressCtx = *serve_common.PushProgress };
+    const opts: rp.RepoOpts(.xit) = .{ .is_test = true, .ProgressCtx = *serve_common.SidebandProgress };
     var temp = std.testing.tmpDir(.{});
     defer temp.cleanup();
     const path = try temp.dir.realPathFileAlloc(io, ".", allocator);
@@ -200,7 +200,7 @@ fn testBranchMerge(selection: evt.Patch.MergeRevision) !void {
     response.sideband = true;
     var output = std.Io.Writer.Allocating.init(allocator);
     defer output.deinit();
-    var progress = serve_common.PushProgress{ .response = &response, .writer = &output.writer };
+    var progress = serve_common.SidebandProgress{ .response = &response, .writer = &output.writer };
     const before_refresh = try repo.core.db.rootCursor().count();
     try pch.refreshBranches(.server, .xit, opts, io, allocator, &repo, null, &progress);
     try std.testing.expectEqual(before_refresh + 1, try repo.core.db.rootCursor().count());

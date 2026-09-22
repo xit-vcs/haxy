@@ -11,9 +11,11 @@ pub fn reportProgress(comptime repo_opts: rp.RepoOpts(.xit), io: std.Io, progres
     }
 }
 
-// progress for a push, sent on the pack stream's sideband
-pub const PushProgress = struct {
-    response: *xit.net_server_receive_pack.Response,
+// progress for a push or a clone, sent on the pack stream's sideband
+pub const SidebandProgress = struct {
+    // a push reports through its deferred response, which knows whether the
+    // client wanted sideband at all. a clone has none and writes band 2 itself.
+    response: ?*xit.net_server_receive_pack.Response = null,
     writer: *std.Io.Writer,
     // the client to probe, absent when nothing is listening
     sess: ?*ssh.SessionCtx = null,
@@ -28,18 +30,27 @@ pub const PushProgress = struct {
     // how many items a phase with no total advances between reports
     const report_every = 1000;
 
-    // the phases a push reports: the objects unpacked from the pack it
-    // received, then everything counted after it
+    // the phases a client is told about, listed so a new kind has to be
+    // decided on rather than inherit whatever label was last set
     fn reported(kind: rp.ProgressKind) bool {
-        return kind == .writing_object_from_pack or kind == .writing_patch;
+        return switch (kind) {
+            .writing_object_from_pack, .enumerating_object, .compressing_object, .writing_patch => true,
+            .writing_object, .sending_bytes, .receiving_bytes => false,
+        };
     }
 
-    pub fn run(self: *PushProgress, _: std.Io, event: rp.ProgressEvent) !void {
+    pub fn run(self: *SidebandProgress, _: std.Io, event: rp.ProgressEvent) !void {
         switch (event) {
             .start => |start| {
                 if (!reported(start.kind)) return;
-                // the unpack phase sends no label of its own
-                if (start.kind == .writing_object_from_pack) self.label = "Unpacking objects";
+                // a pack phase carries no label of its own; the rest send a
+                // .text first
+                switch (start.kind) {
+                    .writing_object_from_pack => self.label = "Unpacking objects",
+                    .enumerating_object => self.label = "Enumerating objects",
+                    .compressing_object => self.label = "Compressing objects",
+                    else => {},
+                }
                 self.total = start.estimated_total_items;
                 self.count = 0;
                 self.step = 0;
@@ -80,7 +91,12 @@ pub const PushProgress = struct {
             try std.fmt.bufPrint(&buffer, "{s}: {d}% ({d}/{d}){s}", .{ self.label, step, self.count, self.total, suffix })
         else
             try std.fmt.bufPrint(&buffer, "{s}: {d}{s}", .{ self.label, self.count, suffix });
-        try self.response.progress(self.writer, text);
+        if (self.response) |response| {
+            try response.progress(self.writer, text);
+        } else {
+            try xit.net_server_pkt.sendSideband(self.writer, 2, text);
+            try self.writer.flush();
+        }
     }
 };
 
