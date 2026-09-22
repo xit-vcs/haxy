@@ -33,8 +33,8 @@ pub const Sideband = struct {
     // decided on rather than inherit whatever label was last set
     fn reported(kind: rp.ProgressKind) bool {
         return switch (kind) {
-            .writing_object_from_pack, .checking_object, .walking_commit, .enumerating_object, .compressing_object, .writing_patch => true,
-            .writing_object, .sending_bytes, .receiving_bytes => false,
+            .writing_object_from_pack, .writing_object, .checking_object, .walking_commit, .enumerating_object, .compressing_object, .writing_patch => true,
+            .sending_bytes, .receiving_bytes => false,
         };
     }
 
@@ -46,6 +46,7 @@ pub const Sideband = struct {
                 // .text first
                 switch (start.kind) {
                     .writing_object_from_pack => self.label = "Unpacking objects",
+                    .writing_object => self.label = "Copying objects",
                     .checking_object => self.label = "Checking connectivity",
                     .walking_commit => self.label = "Walking commits",
                     .enumerating_object => self.label = "Enumerating objects",

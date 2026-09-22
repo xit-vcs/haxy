@@ -301,7 +301,7 @@ pub fn receiveFork(
                 var objects = try obj.ObjectIterator(.xit, repo_opts).init(target_state, ctx.io, ctx.allocator, .{ .kind = .all });
                 defer objects.deinit();
                 try objects.include(&ctx.target_oid);
-                try obj.copyFromObjectIterator(.xit, repo_opts, state, .xit, repo_opts, &objects, ctx.io, null);
+                try obj.copyFromObjectIterator(.xit, repo_opts, state, .xit, repo_opts, &objects, ctx.io, ctx.sideband);
 
                 const base_oid = try mrg.commonAncestor(.xit, repo_opts, state.readOnly(), ctx.io, ctx.allocator, &ctx.target_oid, &source_oid);
                 const existing_revision = if (ctx.newest) |latest|
