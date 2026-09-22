@@ -30,11 +30,13 @@ pub const Sideband = struct {
     const report_every = 1000;
 
     // the phases a client is told about, listed so a new kind has to be
-    // decided on rather than inherit whatever label was last set
+    // decided on rather than inherit whatever label was last set. unpacking is
+    // left out because it runs while the client is still sending, so its line
+    // fights with the client's own upload bar over the same row.
     fn reported(kind: rp.ProgressKind) bool {
         return switch (kind) {
-            .writing_object_from_pack, .writing_object, .checking_object, .walking_commit, .enumerating_object, .compressing_object, .writing_patch => true,
-            .sending_bytes, .receiving_bytes => false,
+            .writing_object, .checking_object, .walking_commit, .enumerating_object, .compressing_object, .writing_patch => true,
+            .writing_object_from_pack, .sending_bytes, .receiving_bytes => false,
         };
     }
 
@@ -45,7 +47,6 @@ pub const Sideband = struct {
                 // a pack phase carries no label of its own; the rest send a
                 // .text first
                 switch (start.kind) {
-                    .writing_object_from_pack => self.label = "Unpacking objects",
                     .writing_object => self.label = "Copying objects",
                     .checking_object => self.label = "Checking connectivity",
                     .walking_commit => self.label = "Walking commits",
