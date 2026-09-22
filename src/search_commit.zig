@@ -367,7 +367,11 @@ fn commitDiff(
         const Ancestry = mrg.Ancestry(.xit, repo_opts);
         var ancestry = try Ancestry.init(state, io, allocator, base, tip);
         defer ancestry.deinit();
-        try ancestry.finish();
+
+        // the walk is bracketed here because it may run twice
+        progress.report(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .walking_commit, .estimated_total_items = 0 } });
+        defer progress.report(repo_opts, io, progress_ctx_maybe, .{ .end = .walking_commit });
+        try ancestry.finish(progress_ctx_maybe);
 
         // timestamps only choose the walk's order, so a commit the base reached
         // can be passed before the tip turns out to reach it too. that can only
@@ -382,7 +386,9 @@ fn commitDiff(
             while (flagged.next()) |node| {
                 if (node.flags & Ancestry.both == Ancestry.one) candidates = true;
             }
-            if (candidates) while (try ancestry.step()) {};
+            if (candidates) while (try ancestry.step()) {
+                progress.report(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .walking_commit });
+            };
         }
 
         var iter = ancestry.nodes.iterator();
@@ -399,17 +405,16 @@ fn commitDiff(
     } else {
         // a whole history has no count until it is walked, so the walk reports
         // the commits it has reached so far
-        progress.report(repo_opts, io, progress_ctx_maybe, .{ .text = "Walking commits" });
-        progress.report(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .writing_patch, .estimated_total_items = 0 } });
+        progress.report(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .walking_commit, .estimated_total_items = 0 } });
         var iter = try obj.ObjectIterator(.xit, repo_opts).init(state, io, allocator, .{ .kind = .commit });
         defer iter.deinit();
         try iter.include(tip);
         while (try iter.next(allocator)) |object| {
             defer object.deinit();
             try added.append(aa, .{ .oid = object.oid, .timestamp = object.content.commit.metadata.timestamp });
-            progress.report(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .writing_patch });
+            progress.report(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .walking_commit });
         }
-        progress.report(repo_opts, io, progress_ctx_maybe, .{ .end = .writing_patch });
+        progress.report(repo_opts, io, progress_ctx_maybe, .{ .end = .walking_commit });
     }
 
     return .{ .removed = removed.items, .added = added.items };
