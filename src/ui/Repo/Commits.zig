@@ -387,8 +387,8 @@ pub const View = struct {
     // the commit whose diff the pane currently shows (index into data.commits).
     diffed_index: ?usize,
 
+    // the sub-header leads the box where there is one; local mode has none
     const header_index: usize = 0;
-    const content_index: usize = 1;
     // indices within the content box (the horizontal split).
     const list_index: usize = 0;
     const diff_index: usize = 1;
@@ -399,8 +399,8 @@ pub const View = struct {
         var outer = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert });
         errdefer outer.deinit(allocator);
 
-        // the search box and the clone url at the top.
-        {
+        // the search box and the clone url at the top. local mode has neither.
+        if (session.data.host_kind == .server) {
             var header_view = try ui.widget.SearchHeader.init(allocator, session, data.location, " search ", "search", data.search, data.search_available);
             errdefer header_view.deinit(allocator);
             try outer.children.put(allocator, header_view.getFocus().id, .{ .widget = .{ .search_header = header_view }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
@@ -456,7 +456,7 @@ pub const View = struct {
 
         // focus lives in the split, except that search results start in the
         // search box so the query can be refined right away.
-        outer.getFocus().child_id = outer.children.keys()[if (data.search != null) header_index else content_index];
+        outer.getFocus().child_id = outer.children.keys()[if (data.search != null) header_index else outer.children.count() - 1];
 
         return .{
             .box = outer,
@@ -517,16 +517,25 @@ pub const View = struct {
         self.box.deinit(allocator);
     }
 
-    fn contentBox(self: *View) *wgt.Box(ui.Widget) {
-        return &self.box.children.values()[content_index].widget.box;
+    // the split is last, after the sub-header where there is one
+    fn contentIndex(self: *View) usize {
+        return self.box.children.count() - 1;
     }
 
-    fn header(self: *View) *ui.widget.SearchHeader {
-        return &self.box.children.values()[header_index].widget.search_header;
+    fn contentBox(self: *View) *wgt.Box(ui.Widget) {
+        return &self.box.children.values()[self.contentIndex()].widget.box;
+    }
+
+    fn header(self: *View) ?*ui.widget.SearchHeader {
+        switch (self.box.children.values()[header_index].widget) {
+            .search_header => |*header_view| return header_view,
+            else => return null,
+        }
     }
 
     fn headerActive(self: *View) bool {
-        return self.box.getFocus().child_id == self.header().getFocus().id;
+        const header_view = self.header() orelse return false;
+        return self.box.getFocus().child_id == header_view.getFocus().id;
     }
 
     fn listScroll(self: *View) *wgt.Scroll(ui.Widget) {
@@ -695,17 +704,19 @@ pub const View = struct {
         // scrolling crosses the sub header boundary the same way arrows do
         const direction = inp.vertDirection(key);
         if (self.headerActive()) {
+            // active means there is one
+            const header_view = self.header() orelse unreachable;
             if (direction == .down) {
                 root_focus.setFocus(self.contentBox().getFocus().id);
                 return;
             }
-            if (key == .enter) if (try self.header().submittedText(allocator)) |text| {
+            if (key == .enter) if (try header_view.submittedText(allocator)) |text| {
                 defer allocator.free(text);
                 return self.submit(text);
             };
-            return self.header().input(allocator, key, root_focus);
+            return header_view.input(allocator, key, root_focus);
         }
-        if (direction == .up and self.contentAtTop() and self.header().focusHeader(root_focus)) return;
+        if (direction == .up and self.contentAtTop() and self.focusHeader(root_focus)) return;
         if (self.diffActive()) {
             if (key == .arrow_left and self.diffScroll().x == 0) {
                 self.focusList(root_focus);
@@ -784,11 +795,13 @@ pub const View = struct {
 
     // only the header's own row sits directly below the repository header.
     pub fn atTop(self: *View) bool {
-        return self.headerActive() or (!self.header().hasFocusable() and self.contentAtTop());
+        const focusable = if (self.header()) |header_view| header_view.hasFocusable() else false;
+        return self.headerActive() or (!focusable and self.contentAtTop());
     }
 
     pub fn focusHeader(self: *View, root_focus: *Focus) bool {
-        return self.header().focusHeader(root_focus);
+        const header_view = self.header() orelse return false;
+        return header_view.focusHeader(root_focus);
     }
 };
 
