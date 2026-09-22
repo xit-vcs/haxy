@@ -365,6 +365,9 @@ pub const Conn = struct {
     }
 };
 
+// how long a peer probe waits for a packet that may already be on its way
+const probe_timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(1), .clock = .awake } };
+
 /// session bridge handed to the consumer's handleSession callback. exposes a
 /// pumped event API plus a byte-write API; the byte stream goes out as
 /// CHANNEL_DATA packets respecting the channel's flow-control window.
@@ -399,6 +402,17 @@ pub const SessionCtx = struct {
 
     pub fn deinit(self: *SessionCtx) void {
         self.incoming_buffer.deinit(self.conn.allocator);
+    }
+
+    /// whether the client is gone. a push spends its transaction writing
+    /// rather than reading, so a peer that hung up has to be pumped for. one
+    /// pending packet is processed, which is where a close is seen.
+    pub fn peerGone(self: *SessionCtx) bool {
+        if (self.closed or self.remote_closed) return true;
+        self.conn.read_timeout = probe_timeout.toDeadline(self.conn.io);
+        defer self.conn.read_timeout = .none;
+        self.processOneBackgroundPacket() catch |err| return err != error.Timeout;
+        return self.remote_closed;
     }
 
     /// the std.Io adapters can only report ReadFailed or WriteFailed. recover

@@ -11,68 +11,7 @@ const find = @import("find.zig");
 const srch_cmmt = @import("search_commit.zig");
 const fork = @import("fork.zig");
 const serve_common = @import("serve_common.zig");
-
-pub const PushProgress = struct {
-    response: *xit.net_server_receive_pack.Response,
-    writer: *std.Io.Writer,
-    label: []const u8 = "Processing commits",
-    count: usize = 0,
-    total: usize = 0,
-    // the last reported step, so a line is sent only when it changes
-    step: usize = 0,
-
-    // how many items a phase with no total advances between reports
-    const report_every = 1000;
-
-    // the phases a push reports: the objects unpacked from the pack it
-    // received, then everything counted after it
-    fn reported(kind: rp.ProgressKind) bool {
-        return kind == .writing_object_from_pack or kind == .writing_patch;
-    }
-
-    pub fn run(self: *PushProgress, _: std.Io, event: rp.ProgressEvent) !void {
-        switch (event) {
-            .start => |start| {
-                if (!reported(start.kind)) return;
-                // the unpack phase sends no label of its own
-                if (start.kind == .writing_object_from_pack) self.label = "Unpacking objects";
-                self.total = start.estimated_total_items;
-                self.count = 0;
-                self.step = 0;
-            },
-            .complete_one => |kind| {
-                if (!reported(kind)) return;
-                self.count += 1;
-            },
-            .end => |kind| {
-                if (!reported(kind)) return;
-            },
-            // each phase names itself before reporting its count
-            .text => |text| {
-                self.label = text;
-                return;
-            },
-            else => return,
-        }
-        // a phase that knows no total counts instead, and stays quiet until it
-        // has something to count
-        if (self.total == 0 and self.count == 0) return;
-
-        // every report flushes, so one is sent per percent, or per block of
-        // items when there is no total to turn into one
-        const step: usize = if (self.total > 0) @intCast(@as(u128, self.count) * 100 / self.total) else self.count / report_every;
-        if (event == .complete_one and step == self.step) return;
-        self.step = step;
-
-        var buffer: [128]u8 = undefined;
-        const suffix = if (event == .end) "\n" else "\r";
-        const text = if (self.total > 0)
-            try std.fmt.bufPrint(&buffer, "{s}: {d}% ({d}/{d}){s}", .{ self.label, step, self.count, self.total, suffix })
-        else
-            try std.fmt.bufPrint(&buffer, "{s}: {d}{s}", .{ self.label, self.count, suffix });
-        try self.response.progress(self.writer, text);
-    }
-};
+const ssh = @import("serve_ssh_protocol.zig");
 
 // prepare all reachable commits, including history received before patch
 // generation was enabled. this shares the receive-pack transaction.
@@ -97,7 +36,7 @@ pub fn writeReceivedPatches(
             try iter.include(&oid);
         }
     }
-    var progress = PushProgress{ .response = response, .writer = writer };
+    var progress = serve_common.PushProgress{ .response = response, .writer = writer };
     try xit.patch.writePatches(repo_opts, state, io, allocator, &iter, &progress);
 }
 
@@ -182,6 +121,7 @@ pub fn receivePackAndConsume(
     author: ?evt.CommitAuthor,
     repo_root_path: []const u8,
     error_writer: *std.Io.Writer,
+    sess: ?*ssh.SessionCtx,
 ) !void {
     const DB = rp.Repo(.xit, repo_opts).DB;
     const State = rp.Repo(.xit, repo_opts).State;
@@ -192,7 +132,7 @@ pub fn receivePackAndConsume(
     var updates = xit.net_server_receive_pack.AppliedRefUpdates.init(allocator);
     defer updates.deinit();
 
-    var progress = PushProgress{ .response = &response, .writer = writer };
+    var progress = serve_common.PushProgress{ .response = &response, .writer = writer, .sess = sess };
     const Ctx = struct {
         updates: *xit.net_server_receive_pack.AppliedRefUpdates,
         core: *rp.Repo(.xit, repo_opts).Core,
@@ -205,7 +145,7 @@ pub fn receivePackAndConsume(
         response: *xit.net_server_receive_pack.Response,
         repo_root_path: []const u8,
         error_writer: *std.Io.Writer,
-        progress: *PushProgress,
+        progress: *serve_common.PushProgress,
 
         pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
             var moment = try DB.HashMap(.read_write).init(cursor.*);
@@ -216,6 +156,7 @@ pub fn receivePackAndConsume(
             receive_options.deferred_response = ctx.response;
             try xit.net_server_receive_pack.run(.xit, repo_opts, state, ctx.io, ctx.allocator, ctx.reader, ctx.writer, receive_options, ctx.progress);
             try writeReceivedPatches(repo_opts, state, ctx.io, ctx.allocator, ctx.response, ctx.writer);
+            if (ctx.progress.gone) return error.ClientGone;
 
             // a repo without an events branch has no events to consume. a
             // no-op consume must not cancel here, since the push shares the
@@ -227,6 +168,8 @@ pub fn receivePackAndConsume(
                 // the revisions the pushed branches cause belong to the push
                 _ = try pch.refreshBranchesInTransaction(.server, repo_opts, state, &moment, ctx.io, ctx.allocator, ctx.updates.items.items, null, ctx.progress);
             }
+
+            if (ctx.progress.gone) return error.ClientGone;
 
             // the indexes the pushed refs invalidate belong to the push too
             _ = try find.refreshInTransaction(repo_opts, state, &moment, ctx.io, ctx.allocator, ctx.progress);
@@ -284,6 +227,7 @@ pub fn receiveFork(
     reader: *std.Io.Reader,
     writer: *std.Io.Writer,
     error_writer: *std.Io.Writer,
+    sess: ?*ssh.SessionCtx,
 ) !void {
     const patch_id = try evt.parseEventId(id);
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -316,7 +260,7 @@ pub fn receiveFork(
     var revision_id_maybe: ?[evt.event_id_size]u8 = null;
     var response = xit.net_server_receive_pack.Response.init(allocator);
     defer response.deinit();
-    var progress = PushProgress{ .response = &response, .writer = writer };
+    var progress = serve_common.PushProgress{ .response = &response, .writer = writer, .sess = sess };
 
     // execute a transaction that receives the push and materializes its revision
     const result = blk: {
@@ -339,7 +283,7 @@ pub fn receiveFork(
             timestamp: u64,
             newest: ?evt.PatchRev.WithId,
             revision_id_maybe: *?[evt.event_id_size]u8,
-            progress: *PushProgress,
+            progress: *serve_common.PushProgress,
 
             pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
                 // receive the branch update
@@ -347,6 +291,7 @@ pub fn receiveFork(
                 const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
                 try xit.net_server_receive_pack.run(.xit, repo_opts, state, ctx.io, ctx.allocator, ctx.reader, ctx.writer, .{ .allowed_ref = "refs/heads/" ++ fork.ref.name, .deferred_response = ctx.response }, ctx.progress);
                 try writeReceivedPatches(repo_opts, state, ctx.io, ctx.allocator, ctx.response, ctx.writer);
+                if (ctx.progress.gone) return error.ClientGone;
 
                 // copy the target history needed to preserve the merge base
                 const source_oid = (try rf.readRecur(.xit, repo_opts, state.readOnly(), ctx.io, .{ .ref = fork.ref })) orelse return error.CancelTransaction;

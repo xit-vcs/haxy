@@ -259,11 +259,13 @@ pub fn refreshInTransaction(
             serve_common.reportProgress(repo_opts, io, progress_ctx_maybe, .{ .text = "Indexing commits" });
             serve_common.reportProgress(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .writing_patch, .estimated_total_items = diff.removed.len + diff.added.len } });
             for (diff.removed) |commit| {
+                if (serve_common.progressCancelled(repo_opts, progress_ctx_maybe)) return error.ClientGone;
                 defer serve_common.reportProgress(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .writing_patch });
                 const key = try readPosting(repo_opts, state.readOnly(), io, allocator, &message, commit);
                 try srch.remove(DB, version, allocator, &key, message.items);
             }
             for (diff.added) |commit| {
+                if (serve_common.progressCancelled(repo_opts, progress_ctx_maybe)) return error.ClientGone;
                 defer serve_common.reportProgress(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .writing_patch });
                 const key = try readPosting(repo_opts, state.readOnly(), io, allocator, &message, commit);
                 try srch.add(DB, version, allocator, &key, message.items);

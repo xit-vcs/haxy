@@ -23,7 +23,7 @@ const escape_timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromMillisecond
 
 var active_connections: std.atomic.Value(u32) = .init(0);
 
-const any_repo_opts: rp.AnyRepoOpts(.xit) = .{ .ProgressCtx = *push.PushProgress };
+const any_repo_opts: rp.AnyRepoOpts(.xit) = .{ .ProgressCtx = *serve_common.PushProgress };
 
 pub const SessionHandler = struct {
     admin_repo_path: []const u8,
@@ -395,14 +395,14 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, exec: ss
     };
     defer allocator.free(repo_path);
 
-    if (try serveIfExists(repo_path, handler.repo_root_path, &reader.interface, &writer.interface, io, allocator, parsed.service, protocol_version, author, handler.err)) return;
+    if (try serveIfExists(repo_path, handler.repo_root_path, &reader.interface, &writer.interface, io, allocator, parsed.service, protocol_version, author, handler.err, sess)) return;
 
     if (!create_if_missing) return writeError(sess, "repo not found");
 
     // create the on-disk repo for the just-minted event and serve the push
     var repo = try createRepo(any_repo_opts.toRepoOpts(), io, allocator, repo_path);
     defer repo.deinit(io, allocator);
-    try servePack(repo.self_repo_opts, &repo, handler.repo_root_path, &reader.interface, &writer.interface, io, allocator, parsed.service, protocol_version, author, handler.err);
+    try servePack(repo.self_repo_opts, &repo, handler.repo_root_path, &reader.interface, &writer.interface, io, allocator, parsed.service, protocol_version, author, handler.err, sess);
 }
 
 // serve a patch draft: anyone may fetch it, only its author may push to it
@@ -459,7 +459,7 @@ fn runForkSession(
                 var target_repo = rp.Repo(.xit, repo.self_repo_opts).open(io, allocator, .{ .path = target_path }) catch
                     return writeError(sess, "repo not found or has the wrong hash");
                 defer target_repo.deinit(io, allocator);
-                try push.receiveFork(repo.self_repo_opts, io, allocator, repo, &target_repo, &route.id, author, timestamp, reader, writer, handler.err);
+                try push.receiveFork(repo.self_repo_opts, io, allocator, repo, &target_repo, &route.id, author, timestamp, reader, writer, handler.err, sess);
             },
         }
     }
@@ -477,6 +477,7 @@ fn serveIfExists(
     protocol_version: xit.net_server_common.ProtocolVersion,
     author: ?evt.CommitAuthor,
     error_writer: *std.Io.Writer,
+    sess: ?*ssh.SessionCtx,
 ) !bool {
     // a bare open() creates the directory while probing for the repo, so only
     // attempt it when the path already exists
@@ -489,7 +490,7 @@ fn serveIfExists(
     defer any_repo.deinit(io, allocator);
 
     switch (any_repo) {
-        inline else => |*repo| try servePack(repo.self_repo_opts, repo, repo_root_path, reader, writer, io, allocator, service, protocol_version, author, error_writer),
+        inline else => |*repo| try servePack(repo.self_repo_opts, repo, repo_root_path, reader, writer, io, allocator, service, protocol_version, author, error_writer, sess),
     }
     return true;
 }
@@ -519,10 +520,11 @@ fn servePack(
     protocol_version: xit.net_server_common.ProtocolVersion,
     author: ?evt.CommitAuthor,
     error_writer: *std.Io.Writer,
+    sess: ?*ssh.SessionCtx,
 ) !void {
     switch (service) {
         .upload_pack => try repo.uploadPack(io, allocator, reader, writer, .{ .protocol_version = protocol_version }),
-        .receive_pack => try push.receivePackAndConsume(repo_opts, io, allocator, repo, reader, writer, .{ .protocol_version = protocol_version }, author, repo_root_path, error_writer),
+        .receive_pack => try push.receivePackAndConsume(repo_opts, io, allocator, repo, reader, writer, .{ .protocol_version = protocol_version }, author, repo_root_path, error_writer, sess),
     }
 }
 

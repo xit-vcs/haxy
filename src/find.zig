@@ -241,6 +241,7 @@ pub fn refreshInTransaction(
         defer key.deinit(allocator);
 
         for (work.items) |item| {
+            if (serve_common.progressCancelled(repo_opts, progress_ctx_maybe)) return error.ClientGone;
             const index = try DB.HashMap(.read_write).init(try moment.putCursor(index_hash));
             const tree = item.tree orelse {
                 _ = try index.remove(item.branch_hash);
@@ -315,6 +316,7 @@ fn indexTree(
         else => return,
     };
     for (tree.entries.keys(), tree.entries.values()) |name, *tree_entry| {
+        if (serve_common.progressCancelled(repo_opts, progress_ctx_maybe)) return error.ClientGone;
         const path = try fs.joinPath(paths, &.{ prefix, name });
         if (tree_entry.isTree()) {
             try indexTree(repo_opts, state, io, allocator, paths, files, key, path, &std.fmt.bytesToHex(tree_entry.oid, .lower), progress_ctx_maybe);
