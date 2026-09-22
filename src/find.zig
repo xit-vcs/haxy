@@ -8,6 +8,7 @@ const tr = xit.tree;
 const obj = xit.object;
 const fs = xit.fs;
 const serve_common = @import("serve_common.zig");
+const progress = @import("./progress.zig");
 
 // the repo moment key holding one file map per branch tip. it sits outside the
 // haxy moment because pushes change it and events never do. each entry is
@@ -235,13 +236,13 @@ pub fn refreshInTransaction(
     {
         const index_hash = hash.hashInt(repo_opts.hash, index_key);
         var new_branch_base = base;
-        serve_common.reportProgress(repo_opts, io, progress_ctx_maybe, .{ .text = "Indexing files" });
+        progress.report(repo_opts, io, progress_ctx_maybe, .{ .text = "Indexing files" });
 
         var key: std.ArrayList(u8) = .empty;
         defer key.deinit(allocator);
 
         for (work.items) |item| {
-            if (serve_common.progressCancelled(repo_opts, progress_ctx_maybe)) return error.ClientGone;
+            if (progress.cancelled(repo_opts, progress_ctx_maybe)) return error.ClientGone;
             const index = try DB.HashMap(.read_write).init(try moment.putCursor(index_hash));
             const tree = item.tree orelse {
                 _ = try index.remove(item.branch_hash);
@@ -264,9 +265,9 @@ pub fn refreshInTransaction(
                 var tree_diff = tr.TreeDiff(.xit, repo_opts).init(allocator);
                 defer tree_diff.deinit();
                 try tree_diff.compare(state.readOnly(), io, &entry.tree, &tree, null);
-                serve_common.reportProgress(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .writing_patch, .estimated_total_items = tree_diff.changes.count() } });
+                progress.report(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .writing_patch, .estimated_total_items = tree_diff.changes.count() } });
                 for (tree_diff.changes.keys(), tree_diff.changes.values()) |path, change| {
-                    defer serve_common.reportProgress(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .writing_patch });
+                    defer progress.report(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .writing_patch });
                     try fileKey(allocator, &key, path);
                     const oid = if (change.new) |*tree_entry| indexedOid(repo_opts.hash, tree_entry) else null;
                     if (oid) |bytes| {
@@ -278,12 +279,12 @@ pub fn refreshInTransaction(
             } else {
                 // a whole tree has no count until it is walked, so it reports
                 // the files it has indexed so far
-                serve_common.reportProgress(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .writing_patch, .estimated_total_items = 0 } });
+                progress.report(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .writing_patch, .estimated_total_items = 0 } });
                 var paths = std.heap.ArenaAllocator.init(allocator);
                 defer paths.deinit();
                 try indexTree(repo_opts, state.readOnly(), io, allocator, paths.allocator(), files, &key, "", &tree, progress_ctx_maybe);
             }
-            serve_common.reportProgress(repo_opts, io, progress_ctx_maybe, .{ .end = .writing_patch });
+            progress.report(repo_opts, io, progress_ctx_maybe, .{ .end = .writing_patch });
 
             // the first entry ever written becomes the base for the next
             // new branch, so only one branch walks a whole tree.
@@ -316,14 +317,14 @@ fn indexTree(
         else => return,
     };
     for (tree.entries.keys(), tree.entries.values()) |name, *tree_entry| {
-        if (serve_common.progressCancelled(repo_opts, progress_ctx_maybe)) return error.ClientGone;
+        if (progress.cancelled(repo_opts, progress_ctx_maybe)) return error.ClientGone;
         const path = try fs.joinPath(paths, &.{ prefix, name });
         if (tree_entry.isTree()) {
             try indexTree(repo_opts, state, io, allocator, paths, files, key, path, &std.fmt.bytesToHex(tree_entry.oid, .lower), progress_ctx_maybe);
         } else if (indexedOid(repo_opts.hash, tree_entry)) |bytes| {
             try fileKey(allocator, key, path);
             try files.put(key.items, .{ .bytes = bytes });
-            serve_common.reportProgress(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .writing_patch });
+            progress.report(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .writing_patch });
         }
     }
 }

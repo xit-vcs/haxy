@@ -10,6 +10,7 @@ const find = @import("find.zig");
 const srch_cmmt = @import("search_commit.zig");
 const fork = @import("fork.zig");
 const serve_common = @import("serve_common.zig");
+const progress = @import("./progress.zig");
 
 // the action a patch merge records
 pub const merge_undo_action = "haxy/merge";
@@ -266,13 +267,13 @@ pub fn refreshBranchesInTransaction(
 
     const total = patches.count();
     if (total > 0) {
-        serve_common.reportProgress(repo_opts, io, progress_ctx_maybe, .{ .text = "Updating patches" });
-        serve_common.reportProgress(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .writing_patch, .estimated_total_items = total } });
+        progress.report(repo_opts, io, progress_ctx_maybe, .{ .text = "Updating patches" });
+        progress.report(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .writing_patch, .estimated_total_items = total } });
     }
 
     var refreshed = false;
     for (patches.keys(), patches.values()) |id, record| {
-        defer serve_common.reportProgress(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .writing_patch });
+        defer progress.report(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .writing_patch });
 
         // a branch patch opens no fork, so its checks need no lock of their own
         var checks: MergeCheckInputs(repo_opts) = .{};
@@ -286,7 +287,7 @@ pub fn refreshBranchesInTransaction(
         };
         refreshed = true;
     }
-    if (total > 0) serve_common.reportProgress(repo_opts, io, progress_ctx_maybe, .{ .end = .writing_patch });
+    if (total > 0) progress.report(repo_opts, io, progress_ctx_maybe, .{ .end = .writing_patch });
     return refreshed;
 }
 
@@ -544,17 +545,17 @@ fn refreshOpenMergeChecks(
     }
 
     // start progress reporting after the patch count is known
-    serve_common.reportProgress(repo_opts, io, progress_ctx_maybe, .{ .text = "Checking mergeability" });
-    serve_common.reportProgress(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .writing_patch, .estimated_total_items = ids.items.len } });
+    progress.report(repo_opts, io, progress_ctx_maybe, .{ .text = "Checking mergeability" });
+    progress.report(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .writing_patch, .estimated_total_items = ids.items.len } });
 
     // refresh each collected patch independently
     for (ids.items) |id| {
         refreshMergeability(repo_opts, io, allocator, target_repo, id);
-        serve_common.reportProgress(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .writing_patch });
+        progress.report(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .writing_patch });
     }
 
     // finish progress reporting after all patches have been visited
-    serve_common.reportProgress(repo_opts, io, progress_ctx_maybe, .{ .end = .writing_patch });
+    progress.report(repo_opts, io, progress_ctx_maybe, .{ .end = .writing_patch });
 }
 
 fn refreshMergeCheck(

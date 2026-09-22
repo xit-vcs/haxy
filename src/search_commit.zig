@@ -8,6 +8,7 @@ const rf = xit.ref;
 const obj = xit.object;
 const mrg = xit.merge;
 const serve_common = @import("serve_common.zig");
+const progress = @import("./progress.zig");
 
 // the repo moment key holding one commit-message index per ref tip. it sits
 // outside the haxy moment because pushes change it and events never do. each
@@ -256,21 +257,21 @@ pub fn refreshInTransaction(
             const diff = try commitDiff(repo_opts, state.readOnly(), io, allocator, diff_arena.allocator(), if (base) |*base_oid| base_oid else null, &item.oid, progress_ctx_maybe);
 
             // the walk is done, so the messages left to read are the total
-            serve_common.reportProgress(repo_opts, io, progress_ctx_maybe, .{ .text = "Indexing commits" });
-            serve_common.reportProgress(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .writing_patch, .estimated_total_items = diff.removed.len + diff.added.len } });
+            progress.report(repo_opts, io, progress_ctx_maybe, .{ .text = "Indexing commits" });
+            progress.report(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .writing_patch, .estimated_total_items = diff.removed.len + diff.added.len } });
             for (diff.removed) |commit| {
-                if (serve_common.progressCancelled(repo_opts, progress_ctx_maybe)) return error.ClientGone;
-                defer serve_common.reportProgress(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .writing_patch });
+                if (progress.cancelled(repo_opts, progress_ctx_maybe)) return error.ClientGone;
+                defer progress.report(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .writing_patch });
                 const key = try readPosting(repo_opts, state.readOnly(), io, allocator, &message, commit);
                 try srch.remove(DB, version, allocator, &key, message.items);
             }
             for (diff.added) |commit| {
-                if (serve_common.progressCancelled(repo_opts, progress_ctx_maybe)) return error.ClientGone;
-                defer serve_common.reportProgress(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .writing_patch });
+                if (progress.cancelled(repo_opts, progress_ctx_maybe)) return error.ClientGone;
+                defer progress.report(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .writing_patch });
                 const key = try readPosting(repo_opts, state.readOnly(), io, allocator, &message, commit);
                 try srch.add(DB, version, allocator, &key, message.items);
             }
-            serve_common.reportProgress(repo_opts, io, progress_ctx_maybe, .{ .end = .writing_patch });
+            progress.report(repo_opts, io, progress_ctx_maybe, .{ .end = .writing_patch });
 
             try versions.append(aa, .{ .oid = item.oid, .timestamp = item.timestamp });
             // the next version copies this one's slot, so everything
@@ -398,17 +399,17 @@ fn commitDiff(
     } else {
         // a whole history has no count until it is walked, so the walk reports
         // the commits it has reached so far
-        serve_common.reportProgress(repo_opts, io, progress_ctx_maybe, .{ .text = "Walking commits" });
-        serve_common.reportProgress(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .writing_patch, .estimated_total_items = 0 } });
+        progress.report(repo_opts, io, progress_ctx_maybe, .{ .text = "Walking commits" });
+        progress.report(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .writing_patch, .estimated_total_items = 0 } });
         var iter = try obj.ObjectIterator(.xit, repo_opts).init(state, io, allocator, .{ .kind = .commit });
         defer iter.deinit();
         try iter.include(tip);
         while (try iter.next(allocator)) |object| {
             defer object.deinit();
             try added.append(aa, .{ .oid = object.oid, .timestamp = object.content.commit.metadata.timestamp });
-            serve_common.reportProgress(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .writing_patch });
+            progress.report(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .writing_patch });
         }
-        serve_common.reportProgress(repo_opts, io, progress_ctx_maybe, .{ .end = .writing_patch });
+        progress.report(repo_opts, io, progress_ctx_maybe, .{ .end = .writing_patch });
     }
 
     return .{ .removed = removed.items, .added = added.items };

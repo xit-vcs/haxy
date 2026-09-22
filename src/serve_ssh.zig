@@ -10,6 +10,7 @@ const ssh = @import("./serve_ssh_protocol.zig");
 const evt = @import("./event.zig");
 const serve_common = @import("./serve_common.zig");
 const fork = @import("./fork.zig");
+const progress = @import("./progress.zig");
 
 // listener resource limits. the watchdog gives peers a hard deadline to start
 // a session, times out non-interactive sessions that stall while we're blocked
@@ -23,7 +24,7 @@ const escape_timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromMillisecond
 
 var active_connections: std.atomic.Value(u32) = .init(0);
 
-const any_repo_opts: rp.AnyRepoOpts(.xit) = .{ .ProgressCtx = *serve_common.SidebandProgress };
+const any_repo_opts: rp.AnyRepoOpts(.xit) = .{ .ProgressCtx = *progress.Sideband };
 
 pub const SessionHandler = struct {
     admin_repo_path: []const u8,
@@ -442,9 +443,9 @@ fn runForkSession(
         return writeError(sess, "patch draft not found");
     defer draft.deinit(io, allocator);
     if (service == .upload_pack) {
-        var progress = serve_common.SidebandProgress{ .writer = writer, .sess = sess };
+        var sideband = progress.Sideband{ .writer = writer, .sess = sess };
         switch (draft) {
-            inline else => |*repo| try repo.uploadPack(io, allocator, reader, writer, .{ .protocol_version = protocol_version }, &progress),
+            inline else => |*repo| try repo.uploadPack(io, allocator, reader, writer, .{ .protocol_version = protocol_version }, &sideband),
         }
     } else {
         const target = (try evt.Repo.readByOwnerAndName(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &admin_arena, owner_repo.owner, owner_repo.name)) orelse
@@ -525,8 +526,8 @@ fn servePack(
 ) !void {
     switch (service) {
         .upload_pack => {
-            var progress = serve_common.SidebandProgress{ .writer = writer, .sess = sess };
-            try repo.uploadPack(io, allocator, reader, writer, .{ .protocol_version = protocol_version }, &progress);
+            var sideband = progress.Sideband{ .writer = writer, .sess = sess };
+            try repo.uploadPack(io, allocator, reader, writer, .{ .protocol_version = protocol_version }, &sideband);
         },
         .receive_pack => try push.receivePackAndConsume(repo_opts, io, allocator, repo, reader, writer, .{ .protocol_version = protocol_version }, author, repo_root_path, error_writer, sess),
     }

@@ -10,6 +10,7 @@ const pch = @import("../../patch.zig");
 const push = @import("../../push.zig");
 const serve_common = @import("../../serve_common.zig");
 const ui = @import("../../ui.zig");
+const progress = @import("../../progress.zig");
 
 const repo_opts: rp.RepoOpts(.xit) = .{ .is_test = true };
 const Repo = rp.Repo(.xit, repo_opts);
@@ -155,7 +156,7 @@ test "branch patches merge without a fork" {
 fn testBranchMerge(selection: evt.Patch.MergeRevision) !void {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    const opts: rp.RepoOpts(.xit) = .{ .is_test = true, .ProgressCtx = *serve_common.SidebandProgress };
+    const opts: rp.RepoOpts(.xit) = .{ .is_test = true, .ProgressCtx = *progress.Sideband };
     var temp = std.testing.tmpDir(.{});
     defer temp.cleanup();
     const path = try temp.dir.realPathFileAlloc(io, ".", allocator);
@@ -200,9 +201,9 @@ fn testBranchMerge(selection: evt.Patch.MergeRevision) !void {
     response.sideband = true;
     var output = std.Io.Writer.Allocating.init(allocator);
     defer output.deinit();
-    var progress = serve_common.SidebandProgress{ .response = &response, .writer = &output.writer };
+    var sideband = progress.Sideband{ .response = &response, .writer = &output.writer };
     const before_refresh = try repo.core.db.rootCursor().count();
-    try pch.refreshBranches(.server, .xit, opts, io, allocator, &repo, null, &progress);
+    try pch.refreshBranches(.server, .xit, opts, io, allocator, &repo, null, &sideband);
     try std.testing.expectEqual(before_refresh + 1, try repo.core.db.rootCursor().count());
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "Checking mergeability: 100% (1/1)\n") != null);
 
@@ -211,7 +212,7 @@ fn testBranchMerge(selection: evt.Patch.MergeRevision) !void {
     const next = try repo.commitAtRef(io, allocator, .{ .message = "revise while closed" }, null, .{ .kind = .head, .name = "feature" });
     const closed_tip = (try repo.readRef(io, evt.events_ref)) orelse return error.NotFound;
     const closed_progress_len = output.written().len;
-    try pch.refreshBranches(.server, .xit, opts, io, allocator, &repo, null, &progress);
+    try pch.refreshBranches(.server, .xit, opts, io, allocator, &repo, null, &sideband);
     try std.testing.expectEqualStrings(&closed_tip, &(try repo.readRef(io, evt.events_ref) orelse return error.NotFound));
     try std.testing.expectEqual(closed_progress_len, output.written().len);
 
@@ -270,7 +271,7 @@ fn testBranchMerge(selection: evt.Patch.MergeRevision) !void {
     _ = try repo.commitAtRef(io, allocator, .{ .message = "later" }, null, .{ .kind = .head, .name = "feature" });
     const tip = (try repo.readRef(io, evt.events_ref)) orelse return error.NotFound;
     const progress_len = output.written().len;
-    try pch.refreshBranches(.server, .xit, opts, io, allocator, &repo, null, &progress);
+    try pch.refreshBranches(.server, .xit, opts, io, allocator, &repo, null, &sideband);
     try std.testing.expectEqual(progress_len, output.written().len);
     try std.testing.expectEqualStrings(&tip, &(try repo.readRef(io, evt.events_ref) orelse return error.NotFound));
 

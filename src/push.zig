@@ -12,6 +12,7 @@ const srch_cmmt = @import("search_commit.zig");
 const fork = @import("fork.zig");
 const serve_common = @import("serve_common.zig");
 const ssh = @import("serve_ssh_protocol.zig");
+const progress = @import("./progress.zig");
 
 // prepare all reachable commits, including history received before patch
 // generation was enabled. this shares the receive-pack transaction.
@@ -36,8 +37,8 @@ pub fn writeReceivedPatches(
             try iter.include(&oid);
         }
     }
-    var progress = serve_common.SidebandProgress{ .response = response, .writer = writer };
-    try xit.patch.writePatches(repo_opts, state, io, allocator, &iter, &progress);
+    var sideband = progress.Sideband{ .response = response, .writer = writer };
+    try xit.patch.writePatches(repo_opts, state, io, allocator, &iter, &sideband);
 }
 
 // the action a received push records
@@ -132,7 +133,7 @@ pub fn receivePackAndConsume(
     var updates = xit.net_server_receive_pack.AppliedRefUpdates.init(allocator);
     defer updates.deinit();
 
-    var progress = serve_common.SidebandProgress{ .response = &response, .writer = writer, .sess = sess };
+    var sideband = progress.Sideband{ .response = &response, .writer = writer, .sess = sess };
     const Ctx = struct {
         updates: *xit.net_server_receive_pack.AppliedRefUpdates,
         core: *rp.Repo(.xit, repo_opts).Core,
@@ -145,7 +146,7 @@ pub fn receivePackAndConsume(
         response: *xit.net_server_receive_pack.Response,
         repo_root_path: []const u8,
         error_writer: *std.Io.Writer,
-        progress: *serve_common.SidebandProgress,
+        sideband: *progress.Sideband,
 
         pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
             var moment = try DB.HashMap(.read_write).init(cursor.*);
@@ -154,9 +155,9 @@ pub fn receivePackAndConsume(
             var receive_options = ctx.options;
             receive_options.applied_ref_updates = ctx.updates;
             receive_options.deferred_response = ctx.response;
-            try xit.net_server_receive_pack.run(.xit, repo_opts, state, ctx.io, ctx.allocator, ctx.reader, ctx.writer, receive_options, ctx.progress);
+            try xit.net_server_receive_pack.run(.xit, repo_opts, state, ctx.io, ctx.allocator, ctx.reader, ctx.writer, receive_options, ctx.sideband);
             try writeReceivedPatches(repo_opts, state, ctx.io, ctx.allocator, ctx.response, ctx.writer);
-            if (ctx.progress.gone) return error.ClientGone;
+            if (ctx.sideband.gone) return error.ClientGone;
 
             // a repo without an events branch has no events to consume. a
             // no-op consume must not cancel here, since the push shares the
@@ -166,14 +167,14 @@ pub fn receivePackAndConsume(
                 try pch.detectMerged(repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, ctx.repo_root_path, ctx.updates.items.items, ctx.error_writer);
 
                 // the revisions the pushed branches cause belong to the push
-                _ = try pch.refreshBranchesInTransaction(.server, repo_opts, state, &moment, ctx.io, ctx.allocator, ctx.updates.items.items, null, ctx.progress);
+                _ = try pch.refreshBranchesInTransaction(.server, repo_opts, state, &moment, ctx.io, ctx.allocator, ctx.updates.items.items, null, ctx.sideband);
             }
 
-            if (ctx.progress.gone) return error.ClientGone;
+            if (ctx.sideband.gone) return error.ClientGone;
 
             // the indexes the pushed refs invalidate belong to the push too
-            _ = try find.refreshInTransaction(repo_opts, state, &moment, ctx.io, ctx.allocator, ctx.progress);
-            _ = try srch_cmmt.refreshInTransaction(repo_opts, state, &moment, ctx.io, ctx.allocator, ctx.updates.items.items, ctx.progress);
+            _ = try find.refreshInTransaction(repo_opts, state, &moment, ctx.io, ctx.allocator, ctx.sideband);
+            _ = try srch_cmmt.refreshInTransaction(repo_opts, state, &moment, ctx.io, ctx.allocator, ctx.updates.items.items, ctx.sideband);
 
             try writeUndo(repo_opts, state, ctx.io, ctx.allocator, ctx.author, ctx.updates.items.items);
         }
@@ -198,7 +199,7 @@ pub fn receivePackAndConsume(
                 .response = &response,
                 .repo_root_path = repo_root_path,
                 .error_writer = error_writer,
-                .progress = &progress,
+                .sideband = &sideband,
             },
         );
     };
@@ -208,9 +209,9 @@ pub fn receivePackAndConsume(
         return err;
     };
 
-    pch.refreshBranches(.server, .xit, repo_opts, io, allocator, repo, updates.items.items, &progress) catch |err| {
+    pch.refreshBranches(.server, .xit, repo_opts, io, allocator, repo, updates.items.items, &sideband) catch |err| {
         serve_common.logError(io, error_writer, "failed to refresh branch patches: {s}\n", .{@errorName(err)});
-        pch.refreshOpenMergeability(repo_opts, io, allocator, repo, null, &progress);
+        pch.refreshOpenMergeability(repo_opts, io, allocator, repo, null, &sideband);
     };
     try response.finish(writer, null);
 }
@@ -260,7 +261,7 @@ pub fn receiveFork(
     var revision_id_maybe: ?[evt.event_id_size]u8 = null;
     var response = xit.net_server_receive_pack.Response.init(allocator);
     defer response.deinit();
-    var progress = serve_common.SidebandProgress{ .response = &response, .writer = writer, .sess = sess };
+    var sideband = progress.Sideband{ .response = &response, .writer = writer, .sess = sess };
 
     // execute a transaction that receives the push and materializes its revision
     const result = blk: {
@@ -283,15 +284,15 @@ pub fn receiveFork(
             timestamp: u64,
             newest: ?evt.PatchRev.WithId,
             revision_id_maybe: *?[evt.event_id_size]u8,
-            progress: *serve_common.SidebandProgress,
+            sideband: *progress.Sideband,
 
             pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
                 // receive the branch update
                 var moment = try DB.HashMap(.read_write).init(cursor.*);
                 const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
-                try xit.net_server_receive_pack.run(.xit, repo_opts, state, ctx.io, ctx.allocator, ctx.reader, ctx.writer, .{ .allowed_ref = "refs/heads/" ++ fork.ref.name, .deferred_response = ctx.response }, ctx.progress);
+                try xit.net_server_receive_pack.run(.xit, repo_opts, state, ctx.io, ctx.allocator, ctx.reader, ctx.writer, .{ .allowed_ref = "refs/heads/" ++ fork.ref.name, .deferred_response = ctx.response }, ctx.sideband);
                 try writeReceivedPatches(repo_opts, state, ctx.io, ctx.allocator, ctx.response, ctx.writer);
-                if (ctx.progress.gone) return error.ClientGone;
+                if (ctx.sideband.gone) return error.ClientGone;
 
                 // copy the target history needed to preserve the merge base
                 const source_oid = (try rf.readRecur(.xit, repo_opts, state.readOnly(), ctx.io, .{ .ref = fork.ref })) orelse return error.CancelTransaction;
@@ -377,7 +378,7 @@ pub fn receiveFork(
             .timestamp = timestamp,
             .newest = newest,
             .revision_id_maybe = &revision_id_maybe,
-            .progress = &progress,
+            .sideband = &sideband,
         });
     };
     result catch |err| {
@@ -391,8 +392,8 @@ pub fn receiveFork(
     };
     if (!published) return response.finish(writer, null);
 
-    progress.run(io, .{ .text = "Updating patches" }) catch {};
-    progress.run(io, .{ .start = .{ .kind = .writing_patch, .estimated_total_items = 1 } }) catch {};
+    sideband.run(io, .{ .text = "Updating patches" }) catch {};
+    sideband.run(io, .{ .start = .{ .kind = .writing_patch, .estimated_total_items = 1 } }) catch {};
 
     // best-effort update the published patch so it has the new revision
     var refreshed = false;
@@ -426,8 +427,8 @@ pub fn receiveFork(
     }
 
     if (!refreshed) pch.refreshMergeability(repo_opts, io, allocator, target_repo, patch_id);
-    progress.run(io, .{ .complete_one = .writing_patch }) catch {};
-    progress.run(io, .{ .end = .writing_patch }) catch {};
+    sideband.run(io, .{ .complete_one = .writing_patch }) catch {};
+    sideband.run(io, .{ .end = .writing_patch }) catch {};
 
     // the client may read either repo as soon as it gets the final response.
     try response.finish(writer, null);
