@@ -7,6 +7,7 @@ const hash = xit.hash;
 const rf = xit.ref;
 const obj = xit.object;
 const mrg = xit.merge;
+const serve_common = @import("serve_common.zig");
 
 // the repo moment key holding one commit-message index per ref tip. it sits
 // outside the haxy moment because pushes change it and events never do. each
@@ -85,7 +86,7 @@ pub fn refresh(
         pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
             var moment = try DB.HashMap(.read_write).init(cursor.*);
             const state = Repo.State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
-            if (!try refreshInTransaction(repo_opts, state, &moment, ctx.io, ctx.allocator, ctx.updates)) return error.CancelTransaction;
+            if (!try refreshInTransaction(repo_opts, state, &moment, ctx.io, ctx.allocator, ctx.updates, null)) return error.CancelTransaction;
 
             // record the user action for undo
             try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action_kind = undo_action } });
@@ -115,6 +116,7 @@ pub fn refreshInTransaction(
     io: std.Io,
     allocator: std.mem.Allocator,
     updates: ?[]const xit.net_server_receive_pack.AppliedRefUpdate,
+    progress_ctx_maybe: ?repo_opts.ProgressCtx,
 ) !bool {
     const Repo = rp.Repo(.xit, repo_opts);
     const DB = Repo.DB;
@@ -251,15 +253,22 @@ pub fn refreshInTransaction(
 
             var diff_arena = std.heap.ArenaAllocator.init(allocator);
             defer diff_arena.deinit();
-            const diff = try commitDiff(repo_opts, state.readOnly(), io, allocator, diff_arena.allocator(), if (base) |*base_oid| base_oid else null, &item.oid);
+            const diff = try commitDiff(repo_opts, state.readOnly(), io, allocator, diff_arena.allocator(), if (base) |*base_oid| base_oid else null, &item.oid, progress_ctx_maybe);
+
+            // the walk is done, so the messages left to read are the total
+            serve_common.reportProgress(repo_opts, io, progress_ctx_maybe, .{ .text = "Indexing commits" });
+            serve_common.reportProgress(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .writing_patch, .estimated_total_items = diff.removed.len + diff.added.len } });
             for (diff.removed) |commit| {
+                defer serve_common.reportProgress(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .writing_patch });
                 const key = try readPosting(repo_opts, state.readOnly(), io, allocator, &message, commit);
                 try srch.remove(DB, version, allocator, &key, message.items);
             }
             for (diff.added) |commit| {
+                defer serve_common.reportProgress(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .writing_patch });
                 const key = try readPosting(repo_opts, state.readOnly(), io, allocator, &message, commit);
                 try srch.add(DB, version, allocator, &key, message.items);
             }
+            serve_common.reportProgress(repo_opts, io, progress_ctx_maybe, .{ .end = .writing_patch });
 
             try versions.append(aa, .{ .oid = item.oid, .timestamp = item.timestamp });
             // the next version copies this one's slot, so everything
@@ -346,6 +355,7 @@ fn commitDiff(
     aa: std.mem.Allocator,
     base_tip: ?*const [hash.hexLen(repo_opts.hash)]u8,
     tip: *const [hash.hexLen(repo_opts.hash)]u8,
+    progress_ctx_maybe: ?repo_opts.ProgressCtx,
 ) !struct { removed: []const Commit(repo_opts.hash), added: []const Commit(repo_opts.hash) } {
     var removed: std.ArrayList(Commit(repo_opts.hash)) = .empty;
     var added: std.ArrayList(Commit(repo_opts.hash)) = .empty;
@@ -384,13 +394,19 @@ fn commitDiff(
             }
         }
     } else {
+        // a whole history has no count until it is walked, so the walk reports
+        // the commits it has reached so far
+        serve_common.reportProgress(repo_opts, io, progress_ctx_maybe, .{ .text = "Walking commits" });
+        serve_common.reportProgress(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .writing_patch, .estimated_total_items = 0 } });
         var iter = try obj.ObjectIterator(.xit, repo_opts).init(state, io, allocator, .{ .kind = .commit });
         defer iter.deinit();
         try iter.include(tip);
         while (try iter.next(allocator)) |object| {
             defer object.deinit();
             try added.append(aa, .{ .oid = object.oid, .timestamp = object.content.commit.metadata.timestamp });
+            serve_common.reportProgress(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .writing_patch });
         }
+        serve_common.reportProgress(repo_opts, io, progress_ctx_maybe, .{ .end = .writing_patch });
     }
 
     return .{ .removed = removed.items, .added = added.items };

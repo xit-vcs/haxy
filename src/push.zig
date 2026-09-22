@@ -18,20 +18,34 @@ pub const PushProgress = struct {
     label: []const u8 = "Processing commits",
     count: usize = 0,
     total: usize = 0,
+    // the last reported step, so a line is sent only when it changes
+    step: usize = 0,
+
+    // how many items a phase with no total advances between reports
+    const report_every = 1000;
+
+    // the phases a push reports: the objects unpacked from the pack it
+    // received, then everything counted after it
+    fn reported(kind: rp.ProgressKind) bool {
+        return kind == .writing_object_from_pack or kind == .writing_patch;
+    }
 
     pub fn run(self: *PushProgress, _: std.Io, event: rp.ProgressEvent) !void {
         switch (event) {
             .start => |start| {
-                if (start.kind != .writing_patch) return;
+                if (!reported(start.kind)) return;
+                // the unpack phase sends no label of its own
+                if (start.kind == .writing_object_from_pack) self.label = "Unpacking objects";
                 self.total = start.estimated_total_items;
                 self.count = 0;
+                self.step = 0;
             },
             .complete_one => |kind| {
-                if (kind != .writing_patch) return;
+                if (!reported(kind)) return;
                 self.count += 1;
             },
             .end => |kind| {
-                if (kind != .writing_patch) return;
+                if (!reported(kind)) return;
             },
             // each phase names itself before reporting its count
             .text => |text| {
@@ -40,10 +54,22 @@ pub const PushProgress = struct {
             },
             else => return,
         }
-        if (self.total == 0) return;
+        // a phase that knows no total counts instead, and stays quiet until it
+        // has something to count
+        if (self.total == 0 and self.count == 0) return;
+
+        // every report flushes, so one is sent per percent, or per block of
+        // items when there is no total to turn into one
+        const step: usize = if (self.total > 0) @intCast(@as(u128, self.count) * 100 / self.total) else self.count / report_every;
+        if (event == .complete_one and step == self.step) return;
+        self.step = step;
+
         var buffer: [128]u8 = undefined;
-        const percent = @as(u128, self.count) * 100 / self.total;
-        const text = try std.fmt.bufPrint(&buffer, "{s}: {d}% ({d}/{d}){s}", .{ self.label, percent, self.count, self.total, if (event == .end) "\n" else "\r" });
+        const suffix = if (event == .end) "\n" else "\r";
+        const text = if (self.total > 0)
+            try std.fmt.bufPrint(&buffer, "{s}: {d}% ({d}/{d}){s}", .{ self.label, step, self.count, self.total, suffix })
+        else
+            try std.fmt.bufPrint(&buffer, "{s}: {d}{s}", .{ self.label, self.count, suffix });
         try self.response.progress(self.writer, text);
     }
 };
@@ -188,7 +214,7 @@ pub fn receivePackAndConsume(
             var receive_options = ctx.options;
             receive_options.applied_ref_updates = ctx.updates;
             receive_options.deferred_response = ctx.response;
-            try xit.net_server_receive_pack.run(.xit, repo_opts, state, ctx.io, ctx.allocator, ctx.reader, ctx.writer, receive_options);
+            try xit.net_server_receive_pack.run(.xit, repo_opts, state, ctx.io, ctx.allocator, ctx.reader, ctx.writer, receive_options, ctx.progress);
             try writeReceivedPatches(repo_opts, state, ctx.io, ctx.allocator, ctx.response, ctx.writer);
 
             // a repo without an events branch has no events to consume. a
@@ -203,8 +229,8 @@ pub fn receivePackAndConsume(
             }
 
             // the indexes the pushed refs invalidate belong to the push too
-            _ = try find.refreshInTransaction(repo_opts, state, &moment, ctx.io, ctx.allocator);
-            _ = try srch_cmmt.refreshInTransaction(repo_opts, state, &moment, ctx.io, ctx.allocator, ctx.updates.items.items);
+            _ = try find.refreshInTransaction(repo_opts, state, &moment, ctx.io, ctx.allocator, ctx.progress);
+            _ = try srch_cmmt.refreshInTransaction(repo_opts, state, &moment, ctx.io, ctx.allocator, ctx.updates.items.items, ctx.progress);
 
             try writeUndo(repo_opts, state, ctx.io, ctx.allocator, ctx.author, ctx.updates.items.items);
         }

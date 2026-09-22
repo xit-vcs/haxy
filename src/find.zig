@@ -7,6 +7,7 @@ const rf = xit.ref;
 const tr = xit.tree;
 const obj = xit.object;
 const fs = xit.fs;
+const serve_common = @import("serve_common.zig");
 
 // the repo moment key holding one file map per branch tip. it sits outside the
 // haxy moment because pushes change it and events never do. each entry is
@@ -127,7 +128,7 @@ pub fn refresh(
         pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
             var moment = try DB.HashMap(.read_write).init(cursor.*);
             const state = Repo.State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
-            if (!try refreshInTransaction(repo_opts, state, &moment, ctx.io, ctx.allocator)) return error.CancelTransaction;
+            if (!try refreshInTransaction(repo_opts, state, &moment, ctx.io, ctx.allocator, null)) return error.CancelTransaction;
 
             // record the user action for undo
             try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action_kind = undo_action } });
@@ -156,6 +157,7 @@ pub fn refreshInTransaction(
     moment: *rp.Repo(.xit, repo_opts).DB.HashMap(.read_write),
     io: std.Io,
     allocator: std.mem.Allocator,
+    progress_ctx_maybe: ?repo_opts.ProgressCtx,
 ) !bool {
     const Repo = rp.Repo(.xit, repo_opts);
     const DB = Repo.DB;
@@ -233,6 +235,7 @@ pub fn refreshInTransaction(
     {
         const index_hash = hash.hashInt(repo_opts.hash, index_key);
         var new_branch_base = base;
+        serve_common.reportProgress(repo_opts, io, progress_ctx_maybe, .{ .text = "Indexing files" });
 
         var key: std.ArrayList(u8) = .empty;
         defer key.deinit(allocator);
@@ -260,7 +263,9 @@ pub fn refreshInTransaction(
                 var tree_diff = tr.TreeDiff(.xit, repo_opts).init(allocator);
                 defer tree_diff.deinit();
                 try tree_diff.compare(state.readOnly(), io, &entry.tree, &tree, null);
+                serve_common.reportProgress(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .writing_patch, .estimated_total_items = tree_diff.changes.count() } });
                 for (tree_diff.changes.keys(), tree_diff.changes.values()) |path, change| {
+                    defer serve_common.reportProgress(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .writing_patch });
                     try fileKey(allocator, &key, path);
                     const oid = if (change.new) |*tree_entry| indexedOid(repo_opts.hash, tree_entry) else null;
                     if (oid) |bytes| {
@@ -270,10 +275,14 @@ pub fn refreshInTransaction(
                     }
                 }
             } else {
+                // a whole tree has no count until it is walked, so it reports
+                // the files it has indexed so far
+                serve_common.reportProgress(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .writing_patch, .estimated_total_items = 0 } });
                 var paths = std.heap.ArenaAllocator.init(allocator);
                 defer paths.deinit();
-                try indexTree(repo_opts, state.readOnly(), io, allocator, paths.allocator(), files, &key, "", &tree);
+                try indexTree(repo_opts, state.readOnly(), io, allocator, paths.allocator(), files, &key, "", &tree, progress_ctx_maybe);
             }
+            serve_common.reportProgress(repo_opts, io, progress_ctx_maybe, .{ .end = .writing_patch });
 
             // the first entry ever written becomes the base for the next
             // new branch, so only one branch walks a whole tree.
@@ -297,6 +306,7 @@ fn indexTree(
     key: *std.ArrayList(u8),
     prefix: []const u8,
     oid: *const [hash.hexLen(repo_opts.hash)]u8,
+    progress_ctx_maybe: ?repo_opts.ProgressCtx,
 ) !void {
     var object = try obj.Object(.xit, repo_opts).init(state, io, allocator, oid);
     defer object.deinit();
@@ -307,10 +317,11 @@ fn indexTree(
     for (tree.entries.keys(), tree.entries.values()) |name, *tree_entry| {
         const path = try fs.joinPath(paths, &.{ prefix, name });
         if (tree_entry.isTree()) {
-            try indexTree(repo_opts, state, io, allocator, paths, files, key, path, &std.fmt.bytesToHex(tree_entry.oid, .lower));
+            try indexTree(repo_opts, state, io, allocator, paths, files, key, path, &std.fmt.bytesToHex(tree_entry.oid, .lower), progress_ctx_maybe);
         } else if (indexedOid(repo_opts.hash, tree_entry)) |bytes| {
             try fileKey(allocator, key, path);
             try files.put(key.items, .{ .bytes = bytes });
+            serve_common.reportProgress(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .writing_patch });
         }
     }
 }

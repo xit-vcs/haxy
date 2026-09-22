@@ -1,5 +1,13 @@
 const std = @import("std");
 const evt = @import("./event.zig");
+const rp = @import("xit").repo;
+
+// progress is optional and best effort: a failed report must not fail the work
+pub fn reportProgress(comptime repo_opts: rp.RepoOpts(.xit), io: std.Io, progress_ctx_maybe: ?repo_opts.ProgressCtx, event: rp.ProgressEvent) void {
+    if (repo_opts.ProgressCtx != void) {
+        if (progress_ctx_maybe) |progress_ctx| progress_ctx.run(io, event) catch {};
+    }
+}
 
 // the outcome of resolving a requested repo path to its on-disk directory.
 // the http and ssh paths each map the cases to their own error responses.
