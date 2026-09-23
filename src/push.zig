@@ -28,17 +28,16 @@ pub fn writeReceivedPatches(
     defer config.deinit();
     try config.add(state, io, .{ .name = "merge.algorithm", .value = "patch" });
 
-    var iter = try obj.ObjectIterator(.xit, repo_opts).init(state.readOnly(), io, allocator, .{ .kind = .commit });
-    defer iter.deinit();
+    // every ref is a tip
+    var tips: std.ArrayList([hash.hexLen(repo_opts.hash)]u8) = .empty;
+    defer tips.deinit(allocator);
     var refs = try rf.AllRefIterator(.xit, repo_opts).init(state.readOnly(), allocator);
     defer refs.deinit();
     while (try refs.next()) |ref| {
-        if (try rf.readRecur(.xit, repo_opts, state.readOnly(), io, .{ .ref = ref })) |oid| {
-            try iter.include(&oid);
-        }
+        if (try rf.readRecur(.xit, repo_opts, state.readOnly(), io, .{ .ref = ref })) |oid| try tips.append(allocator, oid);
     }
     var sideband = progress.Sideband{ .response = response, .writer = writer };
-    try xit.patch.writePatches(repo_opts, state, io, allocator, &iter, &sideband);
+    try xit.patch.writePatches(repo_opts, state, io, allocator, tips.items, &sideband);
 }
 
 // the action a received push records
