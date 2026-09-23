@@ -333,9 +333,9 @@ pub fn main(init: std.process.Init) !void {
             try template_repo.add(io, allocator, &.{ "README.md", "docs/dev/contribute.md" });
             _ = try template_repo.commit(io, allocator, .{ .message = "let there be light" });
 
-            // tag every commit in creation order as v1, v2, and so on
+            // tag every commit in creation order, three versions at a time
             var tag_num: usize = 1;
-            try addNextTag(&template_repo, io, allocator, &tag_num);
+            try addNextTags(&template_repo, io, allocator, &tag_num);
 
             // a batch of commits so the commits tab has more than one page to
             // paginate through. each rewrites a few files with scattered line
@@ -387,7 +387,7 @@ pub fn main(init: std.process.Init) !void {
                 }
                 const message = try arena.allocator().dupe(u8, msg_writer.written());
                 _ = try template_repo.commit(io, allocator, .{ .message = message, .timestamp = base_ts + c * std.time.s_per_day });
-                try addNextTag(&template_repo, io, allocator, &tag_num);
+                try addNextTags(&template_repo, io, allocator, &tag_num);
             }
 
             // two more branches forked off master, each adding a single commit
@@ -418,7 +418,7 @@ pub fn main(init: std.process.Init) !void {
                 }
                 try template_repo.add(io, allocator, &.{b.file});
                 _ = try template_repo.commit(io, allocator, .{ .message = b.message, .timestamp = base_ts + b.rev * std.time.s_per_day });
-                try addNextTag(&template_repo, io, allocator, &tag_num);
+                try addNextTags(&template_repo, io, allocator, &tag_num);
 
                 {
                     var to_master = try template_repo.switchDir(io, allocator, .{ .target = .{ .ref = .{ .kind = .head, .name = "master" } } });
@@ -997,12 +997,15 @@ fn scatterContent(allocator: std.mem.Allocator, fi: usize, c: usize, replacement
     return writer.toOwnedSlice();
 }
 
-// tag the current HEAD as the next sequential version: v1, v2, and so on
-fn addNextTag(repo: *rp.Repo(.xit, .{}), io: std.Io, allocator: std.mem.Allocator, n: *usize) !void {
-    var buf: [16]u8 = undefined;
-    const name = try std.fmt.bufPrint(&buf, "v{d}", .{n.*});
-    _ = try repo.addTag(io, allocator, .{ .name = name });
-    n.* += 1;
+// tag the current HEAD with the next three sequential versions, so the refs
+// tab has enough tags to page through
+fn addNextTags(repo: *rp.Repo(.xit, .{}), io: std.Io, allocator: std.mem.Allocator, n: *usize) !void {
+    for (0..3) |_| {
+        var buf: [16]u8 = undefined;
+        const name = try std.fmt.bufPrint(&buf, "v{d}", .{n.*});
+        _ = try repo.addTag(io, allocator, .{ .name = name });
+        n.* += 1;
+    }
 }
 
 fn commitTree(

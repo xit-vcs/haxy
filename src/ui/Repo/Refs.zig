@@ -12,7 +12,7 @@ const Focus = xitui.focus.Focus;
 const inp = @import("../input.zig");
 
 // how many refs one window of a column shows.
-pub const page_size = 20;
+pub const page_size = 50;
 
 // "owner/name", needed to build the columns' window-navigation links.
 identity: []const u8,
@@ -123,13 +123,12 @@ fn prevRoot(aa: std.mem.Allocator, iter: anytype, from: []const u8) !?[]const u8
 }
 
 pub const View = struct {
-    // a horizontal box of two vertical columns. each column is a fixed,
-    // centered, non-focusable label above a Scroll of focusable rows, so the
-    // label stays visible while the rows scroll. focus tracks a single selected
-    // row across both columns: the box's focus path points at the active column,
-    // that column's at its scroll, and the scroll's (its rows') at the row.
+    // a horizontal box of two columns, each a fixed label above a Scroll of a
+    // TagFlow, so the names wrap across the column and scroll beneath the
+    // label. focus points at the active column and, in its flow, the selected
+    // name.
     box: wgt.Box(ui.Widget),
-    data: *const Self,
+    session: *ui.Session,
 
     const left_col = 0;
     const right_col = 1;
@@ -141,15 +140,14 @@ pub const View = struct {
         try addColumn(allocator, &box, session, data.identity, .branch, &data.branches);
         try addColumn(allocator, &box, session, data.identity, .tag, &data.tags);
 
-        var self = View{ .box = box, .data = data };
-        // select the first row of the first column that has one.
-        for (self.box.children.keys(), self.box.children.values()) |id, *child| {
+        // select the first name of the first column that has one
+        for (box.children.keys(), box.children.values()) |id, *child| {
             if (child.widget.box.getFocus().child_id != null) {
-                self.box.getFocus().child_id = id;
+                box.getFocus().child_id = id;
                 break;
             }
         }
-        return self;
+        return .{ .box = box, .session = session };
     }
 
     fn addColumn(
@@ -164,9 +162,8 @@ pub const View = struct {
         errdefer column.deinit(allocator);
 
         // a fixed, non-focusable header in the SubTitle font, nudged off the
-        // left edge by a one-column space. it stays visible while the rows
-        // scroll below, and declares its height (2 rows) as a min so the (fill)
-        // scroll reserves room for it rather than consuming the whole column.
+        // left edge by a one-column space. it declares its height (2 rows plus
+        // a blank one beneath) as a min so the (fill) scroll reserves room for it.
         {
             var header_box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
             errdefer header_box.deinit(allocator);
@@ -180,52 +177,33 @@ pub const View = struct {
                 errdefer header.deinit(allocator);
                 try header_box.children.put(allocator, header.getFocus().id, .{ .widget = .{ .sub_title = header }, .rect = null, .min_size = null });
             }
-            try column.children.put(allocator, header_box.getFocus().id, .{ .widget = .{ .box = header_box }, .rect = null, .min_size = .{ .width = null, .height = 2 } });
+            try column.children.put(allocator, header_box.getFocus().id, .{ .widget = .{ .box = header_box }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
         }
 
-        // a long ref list overflows the page height; the rows scroll on their
-        // own (the label above stays put) so they lay out under a fixed height.
+        // each name links to the files tab at that ref's root. window
+        // navigation brackets them: "← previous" off the first window, "next →"
+        // when more remain, each a full reload.
         {
+            var items: std.ArrayList(ui.widget.TagFlow.Item) = .empty;
+            defer items.deinit(allocator);
+            if (data.prev) |p| try items.append(allocator, .{ .text = "← previous", .link = try windowLink(session.page_arena, identity, kind, p) });
+            for (data.names) |name| try items.append(allocator, .{ .text = name, .link = try refLink(session.page_arena, identity, kind, name) });
+            if (data.next) |n| try items.append(allocator, .{ .text = "next →", .link = try windowLink(session.page_arena, identity, kind, n) });
+
             var scroll = blk: {
-                var rows = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert });
-                errdefer rows.deinit(allocator);
-
-                // window-navigation rows bracket the names: "← previous" off the
-                // first window, "next →" when more remain. each is a full reload.
-                if (data.prev) |p| try addRow(allocator, &rows, "← previous", try windowLink(session.page_arena, identity, kind, p));
-                // each ref name links to the files tab at that ref's root.
-                for (data.names) |name| try addRow(allocator, &rows, name, try refLink(session.page_arena, identity, kind, name));
-                if (data.next) |n| try addRow(allocator, &rows, "next →", try windowLink(session.page_arena, identity, kind, n));
-
-                if (rows.children.count() > 0) rows.getFocus().child_id = rows.children.keys()[0];
-
-                // fill the column (rows top-aligned, scroll bar pinned to the
-                // edge) rather than shrinking to the widest row.
-                break :blk try wgt.Scroll(ui.Widget).init(allocator, .{ .box = rows }, .{ .direction = .vert, .web_native = !session.is_terminal, .fill = true });
+                var flow = try ui.widget.TagFlow.init(allocator);
+                errdefer flow.deinit(allocator);
+                try flow.setItems(allocator, items.items);
+                break :blk try wgt.Scroll(ui.Widget).init(allocator, .{ .tag_flow = flow }, .{ .direction = .vert, .web_native = !session.is_terminal, .fill = true });
             };
             errdefer scroll.deinit(allocator);
 
-            // the column's focus path skips the label and points at the scroll.
+            // the column's focus path skips the label and points at the flow
             if (scroll.getFocus().child_id != null) column.getFocus().child_id = scroll.getFocus().id;
             try column.children.put(allocator, scroll.getFocus().id, .{ .widget = .{ .scroll = scroll }, .rect = null, .min_size = null });
         }
 
         try box.children.put(allocator, column.getFocus().id, .{ .widget = .{ .box = column }, .rect = null, .min_size = null });
-    }
-
-    // [0] = the fixed label, [1] = the scrollable rows.
-    fn columnScroll(column: *wgt.Box(ui.Widget)) *wgt.Scroll(ui.Widget) {
-        return &column.children.values()[1].widget.scroll;
-    }
-
-    // a focusable row in a column. `link`, when present, is the row's `a:`
-    // navigation kind (the window-navigation rows); ref names pass null.
-    fn addRow(allocator: std.mem.Allocator, col: *wgt.Box(ui.Widget), label: []const u8, link: ?[]const u8) !void {
-        var row = try wgt.TextBox.init(allocator, label, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .none });
-        errdefer row.deinit(allocator);
-        row.getFocus().mode = .all;
-        if (link) |l| row.getFocus().kind = .{ .custom = l };
-        try col.children.put(allocator, row.getFocus().id, .{ .widget = .{ .text_box = row }, .rect = null, .min_size = null });
     }
 
     pub fn deinit(self: *View, allocator: std.mem.Allocator) void {
@@ -235,25 +213,8 @@ pub const View = struct {
     pub fn build(self: *View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
         self.clearGrid();
 
-        // the selected row (in the active column) shows a single border; the
-        // focused TextBox upgrades it to a double border itself.
-        const active_col_id = self.box.getFocus().child_id;
-        for (self.box.children.values()) |*child| {
-            const column = &child.widget.box;
-            const col = &columnScroll(column).child.box;
-            const active = column.getFocus().id == active_col_id;
-            for (col.children.keys(), col.children.values()) |id, *row| {
-                switch (row.widget) {
-                    .text_box => |*tb| tb.options.border_style = if (active and col.getFocus().child_id == id) .single else .hidden,
-                    else => {},
-                }
-            }
-        }
-
         // split the available width evenly between the two columns when it's
-        // known; otherwise let them size to their content. each column's Scroll
-        // has `fill = true`, so it stretches across the column (rows/scroll bar)
-        // rather than hugging the widest row.
+        // known; otherwise let them size to their content.
         if (constraint.max_size.width) |w| {
             const half = w / 2;
             for (self.box.children.values()) |*child| {
@@ -277,52 +238,80 @@ pub const View = struct {
 
     pub fn input(self: *View, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
         _ = allocator;
-        // up/down (and the scroll wheel) move within the active column a row;
-        // page up/down and home/end jump; left/right switch columns, keeping the
-        // same row offset. the parent (Repo) intercepts up at the top row to move
-        // focus to the header.
-        if (inp.rowDelta(key, self.columnRowCount())) |delta| {
-            const scroll = self.activeScroll() orelse return;
-            ui.widget.moveRowFocus(&scroll.child.box, scroll, root_focus, delta);
-            return;
+        // arrows and the scroll wheel move the selection within the active
+        // flow. left from a row's first name and right from its last cross to
+        // the other column's same row. the parent (Repo) takes up from the first
+        // row to the header.
+        const index = self.activeIndex() orelse return;
+        const flow = self.flowAt(index);
+        const cur = flow.indexOfFocusId(flow.focus.child_id orelse return) orelse return;
+        // a flow last laid out at zero width has names without positions
+        if (cur >= flow.rects.items.len) return;
+        const count = flow.text_boxes.items.len;
+        const cur_y = flow.rects.items[cur].y;
+        switch (inp.vertDirection(key)) {
+            .up => if (flow.rowStep(cur, false)) |i| return self.focusName(index, i, root_focus),
+            .down => if (flow.rowStep(cur, true)) |i| return self.focusName(index, i, root_focus),
+            .none => {},
         }
         switch (key) {
-            .arrow_left => try self.switchColumn(root_focus, left_col),
-            .arrow_right => try self.switchColumn(root_focus, right_col),
+            .arrow_left => if (index == right_col and rowStart(flow, cur)) {
+                self.crossTo(left_col, cur_y, root_focus);
+            } else if (cur > 0) self.focusName(index, cur - 1, root_focus),
+            .arrow_right => if (index == left_col and rowEnd(flow, cur)) {
+                self.crossTo(right_col, cur_y, root_focus);
+            } else if (cur + 1 < count) self.focusName(index, cur + 1, root_focus),
+            .home => self.focusName(index, 0, root_focus),
+            .end => self.focusName(index, count - 1, root_focus),
             else => {},
         }
     }
 
-    // the active column's row count, used as a clamp-to-end delta for home/end.
-    fn columnRowCount(self: *View) isize {
-        const col = self.activeColumn() orelse return 0;
-        return @intCast(col.children.count());
-    }
-
-    fn activeScroll(self: *View) ?*wgt.Scroll(ui.Widget) {
+    fn activeIndex(self: *View) ?usize {
         const id = self.box.getFocus().child_id orelse return null;
-        const index = self.box.children.getIndex(id) orelse return null;
-        return columnScroll(&self.box.children.values()[index].widget.box);
+        return self.box.children.getIndex(id);
     }
 
-    fn activeColumn(self: *View) ?*wgt.Box(ui.Widget) {
-        return &(self.activeScroll() orelse return null).child.box;
+    // [0] = the fixed label, [1] = the scrolling flow
+    fn scrollAt(self: *View, index: usize) *wgt.Scroll(ui.Widget) {
+        return &self.box.children.values()[index].widget.box.children.values()[1].widget.scroll;
     }
 
-    fn switchColumn(self: *View, root_focus: *Focus, target: usize) !void {
-        if (target >= self.box.children.count()) return;
-        const cur_col = self.activeColumn() orelse return;
-        const target_scroll = columnScroll(&self.box.children.values()[target].widget.box);
-        const target_col = &target_scroll.child.box;
-        // an empty column has nothing to select; ignore.
-        if (target_col.children.count() == 0) return;
-        // keep the same row offset, clamped to the target column's last row.
-        const cur_id = cur_col.getFocus().child_id orelse return;
-        const cur = cur_col.children.getIndex(cur_id) orelse return;
-        const last = target_col.children.count() - 1;
-        const next = @min(cur, last);
-        root_focus.setFocus(target_col.children.keys()[next]);
-        if (target_col.children.values()[next].rect) |rect| target_scroll.scrollToRect(rect);
+    fn flowAt(self: *View, index: usize) *ui.widget.TagFlow {
+        return &self.scrollAt(index).child.tag_flow;
+    }
+
+    fn rowStart(flow: *ui.widget.TagFlow, item: usize) bool {
+        const rects = flow.rects.items;
+        return item == 0 or rects[item - 1].y != rects[item].y;
+    }
+
+    fn rowEnd(flow: *ui.widget.TagFlow, item: usize) bool {
+        const rects = flow.rects.items;
+        return item + 1 == rects.len or rects[item + 1].y != rects[item].y;
+    }
+
+    // land on the other column's row at or above the current one: its first
+    // name when moving right, its last when moving left. names are laid out in
+    // order, so that row ends at the last name no lower than the current one.
+    fn crossTo(self: *View, target: usize, from_y: isize, root_focus: *Focus) void {
+        // the other column may have no names at all
+        const rects = self.flowAt(target).rects.items;
+        if (rects.len == 0) return;
+        var last: usize = 0;
+        for (rects, 0..) |rect, i| {
+            if (rect.y <= from_y) last = i;
+        }
+        var first = last;
+        while (first > 0 and rects[first - 1].y == rects[last].y) first -= 1;
+        self.focusName(target, if (target == right_col) first else last, root_focus);
+    }
+
+    fn focusName(self: *View, index: usize, item: usize, root_focus: *Focus) void {
+        const flow = self.flowAt(index);
+        root_focus.setFocus(flow.text_boxes.items[item].getFocus().id);
+        // the browser scrolls natively; the terminal brings the name into view
+        if (self.session.is_terminal and item < flow.rects.items.len) self.scrollAt(index).scrollToRect(flow.rects.items[item]);
     }
 
     pub fn clearGrid(self: *View) void {
@@ -337,10 +326,12 @@ pub const View = struct {
         return self.box.getFocus();
     }
 
+    // on the active flow's first row, where up leaves the tab
     pub fn atTop(self: *View) bool {
-        const col = self.activeColumn() orelse return false;
-        const cur_id = col.getFocus().child_id orelse return false;
-        return col.children.getIndex(cur_id) == 0;
+        const index = self.activeIndex() orelse return false;
+        const flow = self.flowAt(index);
+        const cur = flow.indexOfFocusId(flow.focus.child_id orelse return false) orelse return false;
+        return flow.rowStep(cur, false) == null;
     }
 };
 
