@@ -814,9 +814,7 @@ pub fn main(init: std.process.Init) !void {
             try evt.consume(.local, .repo, .xit, .{}, io, allocator, &template_repo, evt.events_ref, &discussion_comment_events);
             try template_repo.patchAll(io, allocator, null);
             try template_repo.addConfig(io, allocator, .{ .name = "core.bare", .value = "true" });
-            // fixtures commit directly, so index the ref tips by hand
-            try find.refresh(.{}, io, allocator, &template_repo);
-            try srch_cmmt.refresh(.{}, io, allocator, &template_repo);
+            try transaction(io, &template_repo, Reindex{ .io = io, .allocator = allocator, .core = &template_repo.core, .commits = true });
             // clear history only after indexing has written its transactions.
             {
                 const moment = try evt.currentMoment(.{}, &template_repo);
@@ -1071,8 +1069,7 @@ fn seedPatchRevision(
     }
     try fork_repo.patchAll(io, allocator, null);
     try fork_repo.addConfig(io, allocator, .{ .name = "core.bare", .value = "true" });
-    // the commits above skipped the push path, so index the patch branch by hand
-    try find.refresh(.{}, io, allocator, &fork_repo);
+    try transaction(io, &fork_repo, Reindex{ .io = io, .allocator = allocator, .core = &fork_repo.core, .commits = false });
     _ = try fork_repo.garbageCollect(io, allocator, .{});
     try fork_dir.deleteFile(io, path);
     const revision_id = evt.EventWithId.randomId(random);
@@ -1460,6 +1457,22 @@ fn commitEventsAtRef(
 
 // append `ctx` to the repo's history as one transaction. the fixtures write a
 // few states the normal paths have no way to produce
+// fixtures commit directly, so the ref tips are indexed by hand. a fork gets
+// no commit index, as in production.
+const Reindex = struct {
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    core: *rp.Repo(.xit, .{}).Core,
+    commits: bool,
+
+    pub fn run(ctx: @This(), cursor: *rp.Repo(.xit, .{}).DB.Cursor(.read_write)) !void {
+        var moment = try rp.Repo(.xit, .{}).DB.HashMap(.read_write).init(cursor.*);
+        const state = rp.Repo(.xit, .{}).State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
+        _ = try find.refreshInTransaction(.{}, state, &moment, ctx.io, ctx.allocator, null);
+        if (ctx.commits) _ = try srch_cmmt.refreshInTransaction(.{}, state, &moment, ctx.io, ctx.allocator, &.{}, null);
+    }
+};
+
 fn transaction(io: std.Io, repo: *rp.Repo(.xit, .{}), ctx: anytype) !void {
     const DB = rp.Repo(.xit, .{}).DB;
     try repo.core.db_file.lock(io, .exclusive);

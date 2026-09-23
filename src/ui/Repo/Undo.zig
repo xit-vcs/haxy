@@ -5,8 +5,6 @@ const evt = @import("../../event.zig");
 const pch = @import("../../patch.zig");
 const push = @import("../../push.zig");
 const fork = @import("../../fork.zig");
-const find = @import("../../find.zig");
-const srch_cmmt = @import("../../search_commit.zig");
 const inp = @import("../input.zig");
 const xit = @import("xit");
 const rp = xit.repo;
@@ -140,8 +138,6 @@ fn eventDetail(
     if (std.mem.eql(u8, record.action_kind, pch.merge_undo_action)) return .{ .action = "merge patch", .description = "merged a patch into its target branch" };
     if (std.mem.eql(u8, record.action_kind, fork.undo_action)) return .{ .action = "fork", .description = "created a fork to draft a patch in" };
     if (std.mem.eql(u8, record.action_kind, pch.mergeability_undo_action)) return .{ .action = "mergeability", .description = "rechecked whether the open patches still merge cleanly" };
-    if (std.mem.eql(u8, record.action_kind, find.undo_action)) return .{ .action = "file index", .description = "reindexed the files on a branch" };
-    if (std.mem.eql(u8, record.action_kind, srch_cmmt.undo_action)) return .{ .action = "commit index", .description = "reindexed the commits on a branch" };
     if (std.mem.eql(u8, record.action_kind, push.undo_action)) {
         // a push consumes the events it carried in its own transaction
         var buttons: std.ArrayList(DetailButton) = .empty;

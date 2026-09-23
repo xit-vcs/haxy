@@ -9,14 +9,6 @@ const hash = xit.hash;
 // thread's creation order key, which never changes. issues and patches list in
 // that order too, so their list sets filter a query by intersection.
 
-// one indexed thread: its doc key and the fields the index covers
-pub const Doc = struct {
-    key: []const u8,
-    title: []const u8,
-    tags: []const u8,
-    description: []const u8,
-};
-
 pub fn indexKey(comptime kind: evt.EventKind) []const u8 {
     return switch (kind) {
         .issue => "word->issue-id-set",
@@ -26,51 +18,27 @@ pub fn indexKey(comptime kind: evt.EventKind) []const u8 {
     };
 }
 
-// `record`'s indexed side under `key`, or null when it is removed and so has
-// no postings
-pub fn doc(key: []const u8, record: anytype) ?Doc {
-    if (record.removed) return null;
-    return .{
-        .key = key,
-        .title = record.event.title,
-        .tags = record.event.tags,
-        .description = record.event.description,
-    };
-}
-
-// move `old`'s postings to `new`'s. an unchanged doc costs nothing: a status
-// change or an edit that leaves the indexed fields alone returns here. both
-// sides share a doc key, since a thread keeps the one it was created with.
+// reindex the thread `key` names after `old_maybe` became `new`. an unchanged
+// doc costs nothing: a status change or an edit that leaves the indexed fields
+// alone returns here.
 pub fn update(
     comptime DB: type,
     comptime hash_kind: hash.HashKind,
     comptime kind: evt.EventKind,
     haxy_moment: DB.HashMap(.read_write),
     allocator: std.mem.Allocator,
-    old: ?Doc,
-    new: ?Doc,
+    key: []const u8,
+    old_maybe: anytype,
+    new: anytype,
 ) !void {
-    if (old == null and new == null) return;
-    if (old) |before| if (new) |after| {
-        if (std.mem.eql(u8, before.key, after.key) and
-            std.mem.eql(u8, before.title, after.title) and
-            std.mem.eql(u8, before.tags, after.tags) and
-            std.mem.eql(u8, before.description, after.description)) return;
-    };
-
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const aa = arena.allocator();
+    const old_text = if (old_maybe) |old| try text(aa, old) else "";
+    const new_text = try text(aa, new);
+    if (std.mem.eql(u8, old_text, new_text)) return;
     const index = try DB.SortedMap(.read_write).init(try haxy_moment.putCursor(hash.hashInt(hash_kind, indexKey(kind))));
-    if (old) |before| {
-        if (new) |after| {
-            try srch.replace(DB, index, allocator, after.key, try text(aa, before), try text(aa, after));
-        } else {
-            try srch.remove(DB, index, allocator, before.key, try text(aa, before));
-        }
-    } else if (new) |after| {
-        try srch.add(DB, index, allocator, after.key, try text(aa, after));
-    }
+    try srch.replace(DB, index, allocator, key, old_text, new_text);
 }
 
 // the doc keys matching `query_text`, in key order, narrowed to `filter` when
@@ -84,15 +52,17 @@ pub fn query(
     query_text: []const u8,
     filter: ?DB.SortedSet(.read_only),
 ) !srch.Query(DB) {
-    const cursor = try haxy_moment.getCursor(hash.hashInt(hash_kind, indexKey(kind))) orelse return .{ .terms = &.{} };
+    const cursor = try haxy_moment.getCursor(hash.hashInt(hash_kind, indexKey(kind))) orelse return .{ .terms = .empty };
     const index = try DB.SortedMap(.read_only).init(cursor);
     var results = try srch.Query(DB).init(index, aa, query_text);
     if (filter) |set| try results.require(aa, set);
     return results;
 }
 
-// the text a thread is indexed under: the title and tags first, so the
-// tokenizer's caps can only drop the tail of a long description.
-fn text(aa: std.mem.Allocator, value: Doc) ![]const u8 {
-    return std.mem.concat(aa, u8, &.{ value.title, " ", value.tags, " ", value.description });
+// the text a thread is indexed under, none once it is removed: the title and
+// tags first, so the tokenizer's caps can only drop the tail of a long
+// description.
+fn text(aa: std.mem.Allocator, record: anytype) ![]const u8 {
+    if (record.removed) return "";
+    return std.mem.concat(aa, u8, &.{ record.event.title, " ", record.event.tags, " ", record.event.description });
 }

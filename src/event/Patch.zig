@@ -254,7 +254,7 @@ pub fn consume(
     }
 
     // the search index is keyed by the same order key as the sets above
-    try srch_thrd.update(DB, hash_kind, .patch, haxy_moment, arena.child_allocator, if (existing_maybe) |existing| srch_thrd.doc(&order_key, existing) else null, srch_thrd.doc(&order_key, record));
+    try srch_thrd.update(DB, hash_kind, .patch, haxy_moment, arena.child_allocator, &order_key, existing_maybe, record);
 
     if (!record.removed) {
         const status = try statusSet(DB, statuses, status_kind);

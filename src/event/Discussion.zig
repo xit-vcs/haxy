@@ -94,7 +94,7 @@ pub fn consume(
     // the search index is keyed by creation, not activity: ordering is the
     // list's business, so a comment moving the discussion up leaves it alone
     const search_key = evt.orderKeyDesc(record_to_write.created_order, event_id);
-    try srch_thrd.update(DB, hash_kind, .discuss, haxy_moment, arena.child_allocator, if (existing_record_maybe) |existing| srch_thrd.doc(&search_key, existing) else null, srch_thrd.doc(&search_key, record_to_write));
+    try srch_thrd.update(DB, hash_kind, .discuss, haxy_moment, arena.child_allocator, &search_key, existing_record_maybe, record_to_write);
 
     if (!record_to_write.removed) {
         try active.put(&order_key);

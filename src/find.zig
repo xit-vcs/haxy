@@ -108,45 +108,6 @@ fn rootTreeOid(
     }
 }
 
-// the action a file index refresh records when it runs on its own
-pub const undo_action = "haxy/find-index";
-
-// reconcile every branch tip's index, in a transaction of its own
-pub fn refresh(
-    comptime repo_opts: rp.RepoOpts(.xit),
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    repo: *rp.Repo(.xit, repo_opts),
-) !void {
-    const Repo = rp.Repo(.xit, repo_opts);
-    const DB = Repo.DB;
-    const Save = struct {
-        core: *Repo.Core,
-        io: std.Io,
-        allocator: std.mem.Allocator,
-
-        pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
-            var moment = try DB.HashMap(.read_write).init(cursor.*);
-            const state = Repo.State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
-            if (!try refreshInTransaction(repo_opts, state, &moment, ctx.io, ctx.allocator, null)) return error.CancelTransaction;
-
-            // record the user action for undo
-            try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action_kind = undo_action } });
-        }
-    };
-
-    // held across the reads and the writes, so a concurrent refresh can't
-    // change the entries these decisions were made from.
-    try repo.core.db_file.lock(io, .exclusive);
-    defer repo.core.db_file.unlock(io);
-
-    const history = try DB.ArrayList(.read_write).init(repo.core.db.rootCursor());
-    history.appendContext(.{ .slot = try history.getSlot(-1) }, Save{ .core = &repo.core, .io = io, .allocator = allocator }) catch |err| switch (err) {
-        error.CancelTransaction => {},
-        else => return err,
-    };
-}
-
 // reconcile them inside the caller's transaction, so the index lands with the
 // change that invalidated it. every branch is reconciled, since an up-to-date
 // one costs a ref read and an oid compare. reports whether anything was

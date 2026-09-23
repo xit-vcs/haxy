@@ -62,46 +62,6 @@ fn docKeyLen(comptime hash_kind: hash.HashKind) usize {
     return @sizeOf(u64) + hash.byteLen(hash_kind);
 }
 
-// the action a commit index refresh records when it runs on its own
-pub const undo_action = "haxy/commit-index";
-
-// reconcile the index versions with the repo's ref tips, in a transaction of
-// its own
-pub fn refresh(
-    comptime repo_opts: rp.RepoOpts(.xit),
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    repo: *rp.Repo(.xit, repo_opts),
-) !void {
-    const Repo = rp.Repo(.xit, repo_opts);
-    const DB = Repo.DB;
-    const Save = struct {
-        core: *Repo.Core,
-        io: std.Io,
-        allocator: std.mem.Allocator,
-
-        pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
-            var moment = try DB.HashMap(.read_write).init(cursor.*);
-            const state = Repo.State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
-            if (!try refreshInTransaction(repo_opts, state, &moment, ctx.io, ctx.allocator, &.{}, null)) return error.CancelTransaction;
-
-            // record the user action for undo
-            try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action_kind = undo_action } });
-        }
-    };
-
-    // held across the reads and the writes, so a concurrent refresh can't
-    // change the entries these decisions were made from.
-    try repo.core.db_file.lock(io, .exclusive);
-    defer repo.core.db_file.unlock(io);
-
-    const history = try DB.ArrayList(.read_write).init(repo.core.db.rootCursor());
-    history.appendContext(.{ .slot = try history.getSlot(-1) }, Save{ .core = &repo.core, .io = io, .allocator = allocator }) catch |err| switch (err) {
-        error.CancelTransaction => {},
-        else => return err,
-    };
-}
-
 // reconcile them inside the caller's transaction, so the index lands with the
 // change that invalidated it. `moves` are the refs that change moved, whose
 // old oids are the cheapest bases to derive the new tips from. reports whether
@@ -363,17 +323,17 @@ fn derive(
         var object = try obj.Object(.xit, repo_opts).init(state, io, allocator, entry.key_ptr);
         defer object.deinit();
         const key = try readPosting(repo_opts, allocator, &message, &object);
-        if (flags == Ancestry.one) {
-            try srch.remove(DB, version, allocator, &key, message.items);
-        } else {
-            try srch.add(DB, version, allocator, &key, message.items);
-        }
+        const removed = flags == Ancestry.one;
+        try srch.replace(DB, version, allocator, &key, if (removed) message.items else "", if (removed) "" else message.items);
     }
     progress.report(repo_opts, io, progress_ctx_maybe, .{ .end = .writing_patch });
 }
 
 // index every commit `tip` reaches into an empty `version`, as the walk
-// reaches it
+// reaches it.
+// TODO: the walk holds every visited oid in memory. if that proves too costly
+// for large repositories, consider indexing first-parent history only, which
+// needs no visited set and matches the commits list.
 fn indexHistory(
     comptime repo_opts: rp.RepoOpts(.xit),
     state: rp.Repo(.xit, repo_opts).State(.read_only),
@@ -399,7 +359,7 @@ fn indexHistory(
         defer object.deinit();
         if (progress.cancelled(repo_opts, progress_ctx_maybe)) return error.ClientGone;
         const key = try readPosting(repo_opts, allocator, &message, object);
-        try srch.add(DB, version, allocator, &key, message.items);
+        try srch.replace(DB, version, allocator, &key, "", message.items);
         progress.report(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .writing_patch });
     }
     progress.report(repo_opts, io, progress_ctx_maybe, .{ .end = .writing_patch });

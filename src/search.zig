@@ -19,40 +19,9 @@ const max_expansions = 50;
 // the largest doc key, so results are read into a buffer rather than allocated.
 pub const max_doc_key_len = 64;
 
-// index `text` under `doc_key`.
-pub fn add(
-    comptime DB: type,
-    index: DB.SortedMap(.read_write),
-    allocator: std.mem.Allocator,
-    doc_key: []const u8,
-    text: []const u8,
-) !void {
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    for (try tokenize(arena.allocator(), text)) |word| {
-        try addWord(DB, index, doc_key, word);
-    }
-}
-
-// drop `doc_key`'s postings. the caller supplies the text again, so no forward
-// index is stored.
-pub fn remove(
-    comptime DB: type,
-    index: DB.SortedMap(.read_write),
-    allocator: std.mem.Allocator,
-    doc_key: []const u8,
-    text: []const u8,
-) !void {
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    for (try tokenize(arena.allocator(), text)) |word| {
-        try removeWord(DB, index, doc_key, word);
-    }
-}
-
 // move `doc_key` from `old_text`'s words to `new_text`'s. the words they share
 // are left alone, so editing a long description costs what the edit changed
-// rather than the whole text.
+// rather than the whole text. an empty side adds or drops the document.
 pub fn replace(
     comptime DB: type,
     index: DB.SortedMap(.read_write),
@@ -101,7 +70,7 @@ fn removeWord(comptime DB: type, index: DB.SortedMap(.read_write), doc_key: []co
 pub fn Query(comptime DB: type) type {
     return struct {
         // one per typed word; empty when nothing can match
-        terms: []Term,
+        terms: std.ArrayList(Term),
         // the key the next result starts from, plus room for the one byte that
         // steps past a returned key
         pos: [max_doc_key_len + 1]u8 = undefined,
@@ -179,23 +148,20 @@ pub fn Query(comptime DB: type) type {
                     try postings.append(aa, .{ .set = try DB.SortedSet(.read_only).init(pair.value_cursor) });
                 }
                 // a word nothing starts with rules out every document
-                if (postings.items.len == 0) return .{ .terms = &.{} };
+                if (postings.items.len == 0) return .{ .terms = .empty };
                 try terms.append(aa, .{ .postings = postings.items });
             }
-            return .{ .terms = terms.items };
+            return .{ .terms = terms };
         }
 
         // narrow the results to the doc keys in `set`. it is one more term,
         // with that set as its only posting. a query nothing can match stays
         // empty, since requiring a set would turn it into every doc key in it.
         pub fn require(self: *Self, aa: std.mem.Allocator, set: DB.SortedSet(.read_only)) !void {
-            if (self.terms.len == 0) return;
-            var terms: std.ArrayList(Term) = .empty;
-            try terms.appendSlice(aa, self.terms);
+            if (self.terms.items.len == 0) return;
             const postings = try aa.alloc(Posting, 1);
             postings[0] = .{ .set = set };
-            try terms.append(aa, .{ .postings = postings });
-            self.terms = terms.items;
+            try self.terms.append(aa, .{ .postings = postings });
         }
 
         // start the next result at `key` rather than the first one.
@@ -206,7 +172,7 @@ pub fn Query(comptime DB: type) type {
         }
 
         pub fn next(self: *Self) !?[]const u8 {
-            if (self.terms.len == 0) return null;
+            if (self.terms.items.len == 0) return null;
             if (self.returned) {
                 // doc keys are at most max_doc_key_len, so appending a byte
                 // lands strictly after the one just returned
@@ -217,8 +183,8 @@ pub fn Query(comptime DB: type) type {
             // intersect by seeking: a term that lands past the candidate makes
             // its key the new candidate and the others seek up to it.
             var i: usize = 0;
-            while (i < self.terms.len) {
-                const key = (try self.terms[i].seek(self.pos[0..self.pos_len])) orelse return null;
+            while (i < self.terms.items.len) {
+                const key = (try self.terms.items[i].seek(self.pos[0..self.pos_len])) orelse return null;
                 if (std.mem.order(u8, key, self.pos[0..self.pos_len]) == .gt) {
                     @memcpy(self.pos[0..key.len], key);
                     self.pos_len = key.len;

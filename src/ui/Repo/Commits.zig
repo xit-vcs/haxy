@@ -172,10 +172,8 @@ pub fn init(
                 next_start = try aa.dupe(u8, &oid);
                 break;
             }
-            // a result whose object is gone is skipped rather than shown
-            var commit_object = obj.Object(.xit, repo_opts).init(state, io, gpa, &oid) catch continue;
+            var commit_object = try obj.Object(.xit, repo_opts).initCommit(state, io, gpa, &oid);
             defer commit_object.deinit();
-            if (commit_object.content != .commit) continue;
             @memcpy(&oids[count], &oid);
             buf[count] = try commitEntry(repo_kind, repo_opts, arena, repo, io, gpa, admin_moment, &commit_object, root_message and count == 0);
             count += 1;
