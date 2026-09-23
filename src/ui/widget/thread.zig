@@ -1258,11 +1258,7 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                 .box => |*box| box,
                 else => return false,
             };
-            const selected = row.getFocus().child_id orelse return false;
-            const selected_index = row.children.getIndex(selected) orelse return false;
-            const target = if (right) selected_index + 1 else selected_index -| 1;
-            if (target == selected_index or target >= row.children.count()) return false;
-            root_focus.setFocus(row.children.keys()[target]);
+            if (!widget.moveInRow(row, root_focus, right)) return false;
             if (child.rect) |rect| self.scroll.scrollToRect(rect);
             return true;
         }
@@ -2518,15 +2514,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 .arrow_up, .back_tab => if (formStep(form, cur, false)) |i| self.focusResolveChild(form, i, root_focus) else self.focusHeader(root_focus),
                 .arrow_down, .tab => if (formStep(form, cur, true)) |i| self.focusResolveChild(form, i, root_focus),
                 .arrow_left, .arrow_right => switch (child.widget) {
-                    .box => |*row| {
-                        const row_cid = row.getFocus().child_id orelse return;
-                        const row_index = row.children.getIndex(row_cid) orelse return;
-                        if (key == .arrow_left) {
-                            if (row_index > 0) root_focus.setFocus(row.children.keys()[row_index - 1]);
-                        } else if (row_index + 1 < row.children.count()) {
-                            root_focus.setFocus(row.children.keys()[row_index + 1]);
-                        }
-                    },
+                    .box => |*row| _ = widget.moveInRow(row, root_focus, key == .arrow_right),
                     else => try child.widget.input(allocator, key, root_focus),
                 },
                 .enter => if (on_submit) try self.submitResolution(allocator),

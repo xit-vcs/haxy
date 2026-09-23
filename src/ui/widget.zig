@@ -167,6 +167,16 @@ pub fn moveRowFocus(box: *wgt.Box(Widget), scroll: *wgt.Scroll(Widget), root_foc
     if (box.children.values()[next].rect) |rect| scroll.scrollToRect(rect);
 }
 
+// focus the box beside the selected one in `row`, false when there is none that way.
+pub fn moveInRow(row: *wgt.Box(Widget), root_focus: *Focus, right: bool) bool {
+    const selected = row.getFocus().child_id orelse return false;
+    const index = row.children.getIndex(selected) orelse return false;
+    const target = if (right) index + 1 else index -| 1;
+    if (target == index or target >= row.children.count()) return false;
+    root_focus.setFocus(row.children.keys()[target]);
+    return true;
+}
+
 pub const FlowBox = struct {
     focus: *Focus,
     grid: ?Grid,

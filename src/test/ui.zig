@@ -200,7 +200,7 @@ test "commits list next row is a cross-page link" {
         .ref_or_oid_value = oid0,
         .base_oid = base_oid,
         .commits = &.{
-            .{ .oid = oid0, .date = "2024-01-01", .message = "first", .window = .{} },
+            .{ .oid = oid0, .date = "2024-01-01", .message = "first", .timestamp = "Jan 1, 2024, 00:00:00 UTC", .window = .{} },
         },
         .next_start = next_oid,
     };

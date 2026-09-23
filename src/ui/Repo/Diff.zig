@@ -271,13 +271,11 @@ pub const View = struct {
         const sc = &self.scroll;
         switch (key) {
             // scroll horizontally within the diff
-            .arrow_left => {
-                if (sc.x > 0) {
-                    sc.x -= 1;
-                    self.scroll.clampToContent();
-                }
+            .arrow_left => if (!self.moveInRow(root_focus, false) and sc.x > 0) {
+                sc.x -= 1;
+                self.scroll.clampToContent();
             },
-            .arrow_right => {
+            .arrow_right => if (!self.moveInRow(root_focus, true)) {
                 sc.x += 1;
                 self.scroll.clampToContent();
             },
@@ -297,6 +295,16 @@ pub const View = struct {
         }
     }
 
+    // step across the selected row's boxes, false when the row has none that way.
+    pub fn moveInRow(self: *View, root_focus: *Focus, right: bool) bool {
+        const box = self.inner();
+        const selected = box.getFocus().child_id orelse return false;
+        return switch ((box.children.getPtr(selected) orelse return false).widget) {
+            .box => |*row| ui.widget.moveInRow(row, root_focus, right),
+            else => false,
+        };
+    }
+
     // move one step in `delta` (+ down, - up). in the terminal, `delta` is a
     // line count unless there is a new hunk visible (in which case it is a
     // hunk count). on the web `delta` is always a hunk count.
@@ -304,7 +312,7 @@ pub const View = struct {
         const box = self.inner();
         const keys = box.children.keys();
         if (keys.len == 0) return;
-        const cur: usize = if (root_focus.grandchild_id) |g| (box.children.getIndex(g) orelse 0) else 0;
+        const cur: usize = if (box.getFocus().child_id) |c| (box.children.getIndex(c) orelse 0) else 0;
         const target = @as(isize, @intCast(cur)) + delta;
         const in_range = target >= 0 and target < @as(isize, @intCast(keys.len));
 
@@ -340,7 +348,7 @@ pub const View = struct {
             const box = self.inner();
             const keys = box.children.keys();
             if (keys.len == 0) return;
-            const cur: isize = if (root_focus.grandchild_id) |g| @intCast(box.children.getIndex(g) orelse 0) else 0;
+            const cur: isize = if (box.getFocus().child_id) |c| @intCast(box.children.getIndex(c) orelse 0) else 0;
             const target: usize = @intCast(std.math.clamp(cur + delta, 0, @as(isize, @intCast(keys.len - 1))));
             root_focus.setFocus(keys[target]);
         }

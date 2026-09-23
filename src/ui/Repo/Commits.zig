@@ -5,6 +5,7 @@ const ui = @import("../../ui.zig");
 const xit = @import("xit");
 const rp = xit.repo;
 const Diff = @import("Diff.zig");
+const Undo = @import("Undo.zig");
 const obj = xit.object;
 const srch_cmmt = @import("../../search_commit.zig");
 const srch = @import("../../search.zig");
@@ -31,6 +32,10 @@ pub const Commit = struct {
     // whether `message` is a shortened preview.
     message_truncated: bool = false,
     author: ui.Author = .unknown,
+    // .unknown when the committer is the author.
+    committer: ui.Author = .unknown,
+    // the committer timestamp, human-readable.
+    timestamp: []const u8,
     stats: ?xit.patch.CommitStats = null,
     window: Diff.Window = .{},
 };
@@ -252,8 +257,19 @@ fn commitEntry(
         .message = text,
         .message_truncated = truncated,
         .author = try ui.Author.init(admin_moment, arena, md.author orelse ""),
+        .committer = if (md.committer) |committer|
+            (if (std.mem.eql(u8, identityOf(committer), identityOf(md.author orelse ""))) .unknown else try ui.Author.init(admin_moment, arena, committer))
+        else
+            .unknown,
+        .timestamp = try Undo.formatTimestamp(aa, std.math.cast(i64, md.timestamp) orelse -1),
         .stats = if (repo_kind == .xit) try repo.commitStats(io, gpa, .{ .oid = &commit_object.oid }) else null,
     };
+}
+
+// an author or committer line without its timestamp.
+fn identityOf(line: []const u8) []const u8 {
+    const close_bracket = std.mem.indexOfScalar(u8, line, '>') orelse return line;
+    return line[0 .. close_bracket + 1];
 }
 
 // an empty listing pinned to a ref, for the wasm / no-repo / unresolved paths.
@@ -656,9 +672,27 @@ pub const View = struct {
             .diff => |d| {
                 if (d.path.len == 0) {
                     try self.addMessageBox(allocator, inner, commit, .preview);
-                    if (commit.author != .unknown) {
-                        var tb = try ui.authorBox(allocator, self.session.page_arena, commit.author);
+                    if (commit.author != .unknown or commit.committer != .unknown) {
+                        var row = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
+                        errdefer row.deinit(allocator);
+                        if (commit.author != .unknown) {
+                            var tb = try ui.authorBox(allocator, self.session.page_arena, commit.author);
+                            errdefer tb.deinit(allocator);
+                            try row.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
+                        }
+                        if (commit.committer != .unknown) {
+                            var tb = try ui.authorBox(allocator, self.session.page_arena, commit.committer);
+                            errdefer tb.deinit(allocator);
+                            tb.options.label = " committer ";
+                            try row.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
+                        }
+                        row.getFocus().child_id = row.children.keys()[0];
+                        try inner.children.put(allocator, row.getFocus().id, .{ .widget = .{ .box = row }, .rect = null, .min_size = null });
+                    }
+                    {
+                        var tb = try wgt.TextBox.init(allocator, commit.timestamp, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none, .label = " timestamp " });
                         errdefer tb.deinit(allocator);
+                        tb.getFocus().mode = .all;
                         try inner.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
                     }
                     if (commit.stats) |stats| {
@@ -718,10 +752,11 @@ pub const View = struct {
         }
         if (direction == .up and self.contentAtTop() and self.focusHeader(root_focus)) return;
         if (self.diffActive()) {
+            const diff_view = &self.diffOuter().children.values()[0].widget.diff_view;
             if (key == .arrow_left and self.diffScroll().x == 0) {
-                self.focusList(root_focus);
+                if (!diff_view.moveInRow(root_focus, false)) self.focusList(root_focus);
             } else {
-                try self.diffOuter().children.values()[0].widget.diff_view.input(allocator, key, root_focus);
+                try diff_view.input(allocator, key, root_focus);
             }
         } else {
             try self.listInput(key, root_focus);

@@ -386,7 +386,10 @@ pub fn main(init: std.process.Init) !void {
                     }
                 }
                 const message = try arena.allocator().dupe(u8, msg_writer.written());
-                _ = try template_repo.commit(io, allocator, .{ .message = message, .timestamp = base_ts + c * std.time.s_per_day });
+                // the newest commit was committed by someone other than its
+                // author, so the detail pane shows a committer box.
+                const committer: ?[]const u8 = if (c == commit_count - 1) "alice <alice@example.test>" else null;
+                _ = try template_repo.commit(io, allocator, .{ .message = message, .committer = committer, .timestamp = base_ts + c * std.time.s_per_day });
                 try addNextTags(&template_repo, io, allocator, &tag_num);
             }
 
