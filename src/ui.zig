@@ -127,6 +127,8 @@ pub const RoutablePage = union(enum) {
         // the url-encoded ref name `kind`'s column windows from ("" = the
         // first window; the other column always shows its first window).
         from: Array(ref_route_max_len) = .{},
+        // the url-encoded prefix both columns are narrowed to ("" = none)
+        search: Array(search_route_max_len) = .{},
     },
     repo_issues: struct {
         name: Array(repo_route_max_len),
@@ -609,6 +611,7 @@ pub const RoutablePage = union(enum) {
         const search = Array(search_route_max_len).from(value) orelse return null;
         switch (route) {
             .repo_commits => |*c| c.search = search,
+            .repo_refs => |*r| r.search = search,
             .repo_issues => |*i| i.search = search,
             .repo_patches => |*p| p.search = search,
             .repo_discussions => |*d| d.search = search,
@@ -1049,11 +1052,11 @@ pub const RoutablePage = union(enum) {
                 break :blk out.written();
             },
             .repo_refs => |r| blk: {
-                const prefix = try repoUrlPrefix(arena, r.name.slice());
-                break :blk if (r.from.len == 0)
-                    try std.fmt.allocPrint(arena.allocator(), "{s}/refs", .{prefix})
-                else
-                    try std.fmt.allocPrint(arena.allocator(), "{s}/refs/{s}:{s}", .{ prefix, @tagName(r.kind), r.from.slice() });
+                var out: std.Io.Writer.Allocating = .init(arena.allocator());
+                try out.writer.print("{s}/refs", .{try repoUrlPrefix(arena, r.name.slice())});
+                if (r.from.len != 0) try out.writer.print("/{s}:{s}", .{ @tagName(r.kind), r.from.slice() });
+                if (r.search.len != 0) try out.writer.print("/" ++ search_seg ++ "{s}", .{r.search.slice()});
+                break :blk out.written();
             },
             .repo_issues => |i| blk: {
                 const prefix = try repoUrlPrefix(arena, i.name.slice());
@@ -1413,10 +1416,11 @@ pub const RoutablePage = union(enum) {
         if (std.mem.eql(u8, tab, "auth")) return if (segments.next() == null) .{ .repo_auth = Array(repo_route_max_len).from(pair) orelse return null } else null;
         if (std.mem.eql(u8, tab, "refs")) {
             const word = params.scanTail(&segments) catch return null;
-            if (word != null or !params.only(&.{ .branch, .tag })) return null;
-            const ref = (params.ref() catch return null) orelse return repoRefsRoute(pair, .branch, "");
-            const kind = std.meta.stringToEnum(RefKind, @tagName(ref.kind)) orelse return null;
-            return repoRefsRoute(pair, kind, ref.value);
+            if (word != null or !params.only(&.{ .branch, .tag, .search })) return null;
+            const ref = params.ref() catch return null;
+            const kind: RefKind = if (ref) |r| std.meta.stringToEnum(RefKind, @tagName(r.kind)) orelse return null else .branch;
+            const from = if (ref) |r| r.value else "";
+            return withEncodedSearch(repoRefsRoute(pair, kind, from), params.values.get(.search) orelse "");
         }
         if (std.mem.startsWith(u8, tab, issue_seg)) {
             const issue_id = tab[issue_seg.len..];
@@ -1689,7 +1693,7 @@ pub const RoutablePage = union(enum) {
                 std.mem.eql(u8, a_d.base_oid.slice(), b.repo_diff.base_oid.slice()) and
                 std.mem.eql(u8, a_d.patchrev_id.slice(), b.repo_diff.patchrev_id.slice()) and
                 a_d.start == b.repo_diff.start and std.mem.eql(u8, a_d.path.slice(), b.repo_diff.path.slice()),
-            .repo_refs => |a_r| std.mem.eql(u8, a_r.name.slice(), b.repo_refs.name.slice()) and a_r.kind == b.repo_refs.kind and std.mem.eql(u8, a_r.from.slice(), b.repo_refs.from.slice()),
+            .repo_refs => |a_r| std.mem.eql(u8, a_r.name.slice(), b.repo_refs.name.slice()) and a_r.kind == b.repo_refs.kind and std.mem.eql(u8, a_r.from.slice(), b.repo_refs.from.slice()) and std.mem.eql(u8, a_r.search.slice(), b.repo_refs.search.slice()),
             .repo_issues => |a_i| std.mem.eql(u8, a_i.name.slice(), b.repo_issues.name.slice()) and
                 std.mem.eql(u8, a_i.tag.slice(), b.repo_issues.tag.slice()) and
                 std.mem.eql(u8, a_i.search.slice(), b.repo_issues.search.slice()) and

@@ -119,6 +119,10 @@ pub fn init(
         .repo_refs => |*r| r.from.slice(),
         else => "",
     };
+    const refs_search: []const u8 = switch (route) {
+        .repo_refs => |*r| r.search.slice(),
+        else => "",
+    };
     // the issues tab's tag filter, the issue its window is rooted at, and the
     // view it shows.
     const issues_tag: []const u8 = switch (route) {
@@ -305,7 +309,7 @@ pub fn init(
                             break :blk .{
                                 files_data,
                                 changes_data,
-                                try Refs.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, repo_identity.identity, refs_kind, refs_from),
+                                try Refs.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, repo_identity.identity, refs_kind, refs_from, refs_search),
                                 try Issues.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, issues_tag, issues_search, issues_selected, issues_comment, issues_comments_start, issues_theirs, issues_view),
                                 try Patches.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, session, repo_id_maybe, repo_identity.identity, target_branch, patches_tag, patches_search, patches_selected, patches_comment, patches_comments_start, patches_theirs, patches_view),
                                 try Discussions.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, discussions_tag, discussions_search, discussions_selected, discussions_comment, discussions_comments_start, discussions_view),
@@ -320,7 +324,7 @@ pub fn init(
         break :blk .{
             try Files.emptyResult(aa, location, requested_ref_or_oid orelse .branch, requested_ref_value, files_dir),
             Changes{ .commits = try Commits.emptyResult(aa, location, requested_ref_or_oid orelse .branch, requested_ref_value, commits_content, commits_base_oid) },
-            try Refs.emptyResult(arena, repo_identity.identity, refs_kind, refs_from),
+            try Refs.emptyResult(arena, repo_identity.identity, refs_kind, refs_from, refs_search),
             try Issues.emptyResult(aa, repo_identity.identity, issues_tag, issues_search, issues_selected, issues_comment, issues_comments_start, issues_theirs, issues_view),
             try Patches.emptyResult(aa, repo_identity.identity, patches_tag, patches_search, patches_selected, patches_comment, patches_comments_start, patches_theirs, patches_view),
             try Discussions.emptyResult(aa, repo_identity.identity, discussions_tag, discussions_search, discussions_selected, discussions_comment, discussions_comments_start, discussions_view),
@@ -519,6 +523,7 @@ pub const View = struct {
                                 if (stack.getSelected()) |selected_widget| switch (selected_widget.*) {
                                     .repo_files => |*v| if (v.focusHeader(root_focus)) return,
                                     .repo_commits => |*v| if (v.focusHeader(root_focus)) return,
+                                    .repo_refs => |*v| if (v.focusHeader(root_focus)) return,
                                     .repo_events => |*v| if (v.focusHeader(root_focus)) return,
                                     .repo_undo => |*v| if (v.focusHeader(root_focus)) return,
                                     else => {},

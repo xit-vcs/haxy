@@ -20,6 +20,8 @@ identity: []const u8,
 // first window) roots `kind`'s column; the other always shows its first window.
 kind: ui.RoutablePage.RefKind,
 from: []const u8,
+// the prefix both columns are narrowed to (decoded; null = no search)
+search: ?[]const u8,
 branches: Column,
 tags: Column,
 
@@ -36,11 +38,13 @@ pub const Column = struct {
 };
 
 // empty columns, for the wasm / no-repo paths.
-pub fn emptyResult(arena: *std.heap.ArenaAllocator, identity: []const u8, kind: ui.RoutablePage.RefKind, from: []const u8) !Self {
+pub fn emptyResult(arena: *std.heap.ArenaAllocator, identity: []const u8, kind: ui.RoutablePage.RefKind, from: []const u8, search: []const u8) !Self {
+    const aa = arena.allocator();
     return .{
-        .identity = try arena.allocator().dupe(u8, identity),
+        .identity = try aa.dupe(u8, identity),
         .kind = kind,
-        .from = try arena.allocator().dupe(u8, from),
+        .from = try aa.dupe(u8, from),
+        .search = if (search.len == 0) null else std.Uri.percentDecodeInPlace(try aa.dupe(u8, search)),
         .branches = .{ .label = try ui.SubTitle.init(arena, "branches") },
         .tags = .{ .label = try ui.SubTitle.init(arena, "tags") },
     };
@@ -58,9 +62,11 @@ pub fn init(
     identity: []const u8,
     kind: ui.RoutablePage.RefKind,
     from: []const u8,
+    search: []const u8,
 ) !Self {
     const aa = arena.allocator();
-    var result = try emptyResult(arena, identity, kind, from);
+    var result = try emptyResult(arena, identity, kind, from, search);
+    const prefix = result.search orelse "";
     // the window root only applies to its own column; a ref name arrives
     // url-encoded, and the iterator seeks to the first name at or after it.
     const decoded = std.Uri.percentDecodeInPlace(try aa.dupe(u8, from));
@@ -69,20 +75,24 @@ pub fn init(
         [_]*Column{ &result.branches, &result.tags },
     ) |col_kind, column| {
         const col_from: []const u8 = if (kind == col_kind) decoded else "";
-        // an unreadable listing leaves the column empty
-        var iter = listRefs(repo_kind, repo_opts, repo, io, gpa, col_kind, iterStart(col_from)) catch continue;
+        // an unreadable listing leaves the column empty. the names are sorted,
+        // so those with the prefix are contiguous from the prefix itself.
+        var iter = listRefs(repo_kind, repo_opts, repo, io, gpa, col_kind, iterStart(laterKey(prefix, col_from))) catch continue;
         defer iter.deinit();
         var names = try std.ArrayListUnmanaged([]const u8).initCapacity(aa, page_size);
-        while (names.items.len < page_size) {
-            const ref = try iter.next() orelse break;
+        while (try iter.next()) |ref| {
+            if (!std.mem.startsWith(u8, ref.name, prefix)) break;
+            if (names.items.len == page_size) {
+                column.next = try aa.dupe(u8, ref.name);
+                break;
+            }
             names.appendAssumeCapacity(try aa.dupe(u8, ref.name));
         }
         column.names = names.items;
-        column.next = if (try iter.next()) |ref| try aa.dupe(u8, ref.name) else null;
         if (col_from.len != 0) {
-            var prev_iter = listRefs(repo_kind, repo_opts, repo, io, gpa, col_kind, .beginning) catch continue;
+            var prev_iter = listRefs(repo_kind, repo_opts, repo, io, gpa, col_kind, iterStart(prefix)) catch continue;
             defer prev_iter.deinit();
-            column.prev = try prevRoot(aa, &prev_iter, col_from);
+            column.prev = try prevRoot(aa, &prev_iter, prefix, col_from);
         }
     }
     return result;
@@ -107,13 +117,19 @@ fn iterStart(from: []const u8) xit.ref.RefIteratorStart {
     return if (from.len == 0) .beginning else .{ .key = from };
 }
 
-// the root of the window before the one starting at `from` (decoded): the ref
-// a page before it ("" = the first window), or null when nothing precedes it.
-fn prevRoot(aa: std.mem.Allocator, iter: anytype, from: []const u8) !?[]const u8 {
+// the later of two ref names, so a window never starts before the prefix
+fn laterKey(a: []const u8, b: []const u8) []const u8 {
+    return if (std.mem.lessThan(u8, a, b)) b else a;
+}
+
+// the root of the window before the one starting at `from` (decoded) among the
+// names with `prefix`: the ref a page before it ("" = the first window), or null
+// when nothing precedes it. `iter` starts at the prefix.
+fn prevRoot(aa: std.mem.Allocator, iter: anytype, prefix: []const u8, from: []const u8) !?[]const u8 {
     var ring: [page_size][]const u8 = undefined;
     var count: usize = 0;
     while (try iter.next()) |ref| {
-        if (!std.mem.lessThan(u8, ref.name, from)) break;
+        if (!std.mem.startsWith(u8, ref.name, prefix) or !std.mem.lessThan(u8, ref.name, from)) break;
         ring[count % page_size] = try aa.dupe(u8, ref.name);
         count += 1;
     }
@@ -123,31 +139,65 @@ fn prevRoot(aa: std.mem.Allocator, iter: anytype, from: []const u8) !?[]const u8
 }
 
 pub const View = struct {
-    // a horizontal box of two columns, each a fixed label above a Scroll of a
-    // TagFlow, so the names wrap across the column and scroll beneath the
-    // label. focus points at the active column and, in its flow, the selected
-    // name.
+    // a vertical box: the search sub-header above a horizontal box of two
+    // columns. each column is a fixed label above a
+    // Scroll of a TagFlow, so the names wrap across the column and scroll
+    // beneath the label. focus points at the header or the active column and,
+    // in its flow, the selected name.
     box: wgt.Box(ui.Widget),
+    data: *const Self,
     session: *ui.Session,
 
+    const header_index = 0;
+    const columns_index = 1;
     const left_col = 0;
     const right_col = 1;
 
     pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !View {
-        var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
-        errdefer box.deinit(allocator);
+        var outer = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .vert });
+        errdefer outer.deinit(allocator);
 
-        try addColumn(allocator, &box, session, data.identity, .branch, &data.branches);
-        try addColumn(allocator, &box, session, data.identity, .tag, &data.tags);
-
-        // select the first name of the first column that has one
-        for (box.children.keys(), box.children.values()) |id, *child| {
-            if (child.widget.box.getFocus().child_id != null) {
-                box.getFocus().child_id = id;
-                break;
+        // both backends list refs in sorted order, so a prefix is just a seek
+        {
+            var header = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
+            errdefer header.deinit(allocator);
+            {
+                var search_box = try ui.widget.SearchBox.init(allocator, session, " search ", "search", data.search);
+                errdefer search_box.deinit(allocator);
+                header.getFocus().child_id = search_box.getFocus().id;
+                try header.children.put(allocator, search_box.getFocus().id, .{ .widget = .{ .search_box = search_box }, .rect = null, .min_size = ui.widget.SearchBox.min_size });
             }
+            // the spacer keeps the box at its own width
+            {
+                var spacer = try ui.widget.Spacer.init(allocator);
+                errdefer spacer.deinit(allocator);
+                try header.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null });
+            }
+            // a row taller than the box, leaving a blank line above the columns
+            try outer.children.put(allocator, header.getFocus().id, .{ .widget = .{ .box = header }, .rect = null, .min_size = .{ .width = null, .height = 4 } });
         }
-        return .{ .box = box, .session = session };
+
+        {
+            var split = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
+            errdefer split.deinit(allocator);
+
+            const search = data.search orelse "";
+            try addColumn(allocator, &split, session, data.identity, search, .branch, &data.branches);
+            try addColumn(allocator, &split, session, data.identity, search, .tag, &data.tags);
+
+            // select the first name of the first column that has one
+            for (split.children.keys(), split.children.values()) |id, *child| {
+                if (child.widget.box.getFocus().child_id != null) {
+                    split.getFocus().child_id = id;
+                    break;
+                }
+            }
+            try outer.children.put(allocator, split.getFocus().id, .{ .widget = .{ .box = split }, .rect = null, .min_size = null });
+        }
+
+        // search results start in the box so the term can be refined right away
+        outer.getFocus().child_id = outer.children.keys()[if (data.search != null) header_index else columns_index];
+        return .{ .box = outer, .data = data, .session = session };
     }
 
     fn addColumn(
@@ -155,6 +205,7 @@ pub const View = struct {
         box: *wgt.Box(ui.Widget),
         session: *ui.Session,
         identity: []const u8,
+        search: []const u8,
         kind: ui.RoutablePage.RefKind,
         data: *const Column,
     ) !void {
@@ -186,9 +237,9 @@ pub const View = struct {
         {
             var items: std.ArrayList(ui.widget.TagFlow.Item) = .empty;
             defer items.deinit(allocator);
-            if (data.prev) |p| try items.append(allocator, .{ .text = "← previous", .link = try windowLink(session.page_arena, identity, kind, p) });
+            if (data.prev) |p| try items.append(allocator, .{ .text = "← previous", .link = try windowLink(session.page_arena, identity, kind, p, search) });
             for (data.names) |name| try items.append(allocator, .{ .text = name, .link = try refLink(session.page_arena, identity, kind, name) });
-            if (data.next) |n| try items.append(allocator, .{ .text = "next →", .link = try windowLink(session.page_arena, identity, kind, n) });
+            if (data.next) |n| try items.append(allocator, .{ .text = "next →", .link = try windowLink(session.page_arena, identity, kind, n, search) });
 
             var scroll = blk: {
                 var flow = try ui.widget.TagFlow.init(allocator);
@@ -217,12 +268,12 @@ pub const View = struct {
         // known; otherwise let them size to their content.
         if (constraint.max_size.width) |w| {
             const half = w / 2;
-            for (self.box.children.values()) |*child| {
+            for (self.columns().children.values()) |*child| {
                 child.min_size = .{ .width = half, .height = null };
                 child.max_size = .{ .width = half, .height = null };
             }
         } else {
-            for (self.box.children.values()) |*child| {
+            for (self.columns().children.values()) |*child| {
                 child.min_size = null;
                 child.max_size = null;
             }
@@ -237,11 +288,20 @@ pub const View = struct {
     }
 
     pub fn input(self: *View, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
-        _ = allocator;
+        if (self.headerActive()) {
+            const search_box = self.searchBox();
+            if (inp.vertDirection(key) == .down) return root_focus.setFocus(self.columns().getFocus().id);
+            if (key == .enter) {
+                const text = try search_box.text(allocator);
+                defer allocator.free(text);
+                return self.submit(text);
+            }
+            return search_box.input(allocator, key, root_focus);
+        }
         // arrows and the scroll wheel move the selection within the active
         // flow. left from a row's first name and right from its last cross to
-        // the other column's same row. the parent (Repo) takes up from the first
-        // row to the header.
+        // the other column's same row. up from a first row reaches the search
+        // box.
         const index = self.activeIndex() orelse return;
         const flow = self.flowAt(index);
         const cur = flow.indexOfFocusId(flow.focus.child_id orelse return) orelse return;
@@ -250,8 +310,14 @@ pub const View = struct {
         const count = flow.text_boxes.items.len;
         const cur_y = flow.rects.items[cur].y;
         switch (inp.vertDirection(key)) {
-            .up => if (flow.rowStep(cur, false)) |i| return self.focusName(index, i, root_focus),
-            .down => if (flow.rowStep(cur, true)) |i| return self.focusName(index, i, root_focus),
+            .up => {
+                if (flow.rowStep(cur, false)) |i| self.focusName(index, i, root_focus) else _ = self.focusHeader(root_focus);
+                return;
+            },
+            .down => {
+                if (flow.rowStep(cur, true)) |i| self.focusName(index, i, root_focus);
+                return;
+            },
             .none => {},
         }
         switch (key) {
@@ -267,14 +333,35 @@ pub const View = struct {
         }
     }
 
+    // both lists narrowed to `text`, each from its first window. an empty box
+    // on an unsearched page has nothing to clear.
+    fn submit(self: *View, text: []const u8) !void {
+        if (text.len == 0 and self.data.search == null) return;
+        const route = ui.RoutablePage.repoRefsRoute(self.data.identity, .branch, "") orelse return;
+        try self.session.navigate(route.withSearch(text) orelse return);
+    }
+
+    fn searchBox(self: *View) *ui.widget.SearchBox {
+        return &self.box.children.values()[header_index].widget.box.children.values()[0].widget.search_box;
+    }
+
+    fn headerActive(self: *View) bool {
+        return self.box.getFocus().child_id == self.box.children.keys()[header_index];
+    }
+
+    fn columns(self: *View) *wgt.Box(ui.Widget) {
+        return &self.box.children.values()[columns_index].widget.box;
+    }
+
     fn activeIndex(self: *View) ?usize {
-        const id = self.box.getFocus().child_id orelse return null;
-        return self.box.children.getIndex(id);
+        const cols = self.columns();
+        const id = cols.getFocus().child_id orelse return null;
+        return cols.children.getIndex(id);
     }
 
     // [0] = the fixed label, [1] = the scrolling flow
     fn scrollAt(self: *View, index: usize) *wgt.Scroll(ui.Widget) {
-        return &self.box.children.values()[index].widget.box.children.values()[1].widget.scroll;
+        return &self.columns().children.values()[index].widget.box.children.values()[1].widget.scroll;
     }
 
     fn flowAt(self: *View, index: usize) *ui.widget.TagFlow {
@@ -326,21 +413,24 @@ pub const View = struct {
         return self.box.getFocus();
     }
 
-    // on the active flow's first row, where up leaves the tab
+    // up leaves the tab from the search box
     pub fn atTop(self: *View) bool {
-        const index = self.activeIndex() orelse return false;
-        const flow = self.flowAt(index);
-        const cur = flow.indexOfFocusId(flow.focus.child_id orelse return false) orelse return false;
-        return flow.rowStep(cur, false) == null;
+        return self.headerActive();
+    }
+
+    pub fn focusHeader(self: *View, root_focus: *Focus) bool {
+        root_focus.setFocus(self.searchBox().getFocus().id);
+        return true;
     }
 };
 
 // the "a:" link to `kind`'s column windowed from ref `name` (raw; "" = the
 // first window) within `identity` ("owner/name"). the other column resets to
 // its first window.
-fn windowLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, kind: ui.RoutablePage.RefKind, name: []const u8) ![]const u8 {
+fn windowLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, kind: ui.RoutablePage.RefKind, name: []const u8, search: []const u8) ![]const u8 {
     const encoded = try ui.urlEncodeRef(page_arena.allocator(), name);
-    const route = ui.RoutablePage.repoRefsRoute(identity, kind, encoded) orelse return error.RouteTooLong;
+    const window = ui.RoutablePage.repoRefsRoute(identity, kind, encoded) orelse return error.RouteTooLong;
+    const route = window.withSearch(search) orelse return error.RouteTooLong;
     const url = try route.toUrl(page_arena);
     return std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{url});
 }
