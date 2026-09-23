@@ -401,7 +401,7 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, exec: ss
     if (!create_if_missing) return writeError(sess, "repo not found");
 
     // create the on-disk repo for the just-minted event and serve the push
-    var repo = try createRepo(any_repo_opts.toRepoOpts(), io, allocator, repo_path);
+    var repo = try rp.Repo(.xit, any_repo_opts.toRepoOpts()).init(io, allocator, .{ .path = repo_path, .bare = true });
     defer repo.deinit(io, allocator);
     try servePack(repo.self_repo_opts, &repo, handler.repo_root_path, &reader.interface, &writer.interface, io, allocator, parsed.service, protocol_version, author, handler.err, sess);
 }
@@ -495,19 +495,6 @@ fn serveIfExists(
         inline else => |*repo| try servePack(repo.self_repo_opts, repo, repo_root_path, reader, writer, io, allocator, service, protocol_version, author, error_writer, sess),
     }
     return true;
-}
-
-fn createRepo(
-    comptime repo_opts: rp.RepoOpts(.xit),
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    repo_path: []const u8,
-) !rp.Repo(.xit, repo_opts) {
-    var repo = try rp.Repo(.xit, repo_opts).init(io, allocator, .{ .path = repo_path, .bare = true });
-    errdefer repo.deinit(io, allocator);
-    try repo.setMergeAlgorithm(io, allocator, .patch);
-    try repo.addConfig(io, allocator, .{ .name = "http.receivepack", .value = "true" });
-    return repo;
 }
 
 fn servePack(

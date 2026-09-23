@@ -122,6 +122,7 @@ pub fn create(
         const Ctx = struct {
             core: *rp.Repo(.xit, repo_opts).Core,
             io: std.Io,
+            allocator: std.mem.Allocator,
 
             pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
                 var moment = try DB.HashMap(.read_write).init(cursor.*);
@@ -152,6 +153,11 @@ pub fn create(
                     try bch.add(.xit, repo_opts, state, ctx.io, .{ .name = ref.name, .target = .none });
                 }
                 try rf.replaceHead(.xit, repo_opts, state, ctx.io, .{ .ref = ref });
+
+                var config = try xit.config.Config(.xit, repo_opts).init(state.readOnly(), ctx.io, ctx.allocator);
+                defer config.deinit();
+                try config.add(state, ctx.io, .{ .name = "receive.denydeletes", .value = "true" });
+
                 try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action_kind = undo_action } });
             }
         };
@@ -162,12 +168,9 @@ pub fn create(
         const history = try DB.ArrayList(.read_write).init(fork_repo.core.db.rootCursor());
         try history.appendContext(
             .{ .slot = try history.getSlot(-1) },
-            Ctx{ .core = &fork_repo.core, .io = io },
+            Ctx{ .core = &fork_repo.core, .io = io, .allocator = allocator },
         );
     }
-
-    try fork_repo.addConfig(io, allocator, .{ .name = "core.bare", .value = "true" });
-    try fork_repo.addConfig(io, allocator, .{ .name = "receive.denydeletes", .value = "true" });
 
     // the copied db carries the target's file index, so the patch branch's
     // entry starts from one of those rather than walking the tree
