@@ -144,8 +144,7 @@ pub fn init(
     if (comptime repo_kind == .xit) index: {
         if (resolved.ref_or_oid != .branch) break :index;
         const branch = std.Uri.percentDecodeInPlace(try aa.dupe(u8, resolved.value));
-        const tree_oid = try fnd.rootTreeOid(repo_opts, state, io, gpa, &resolved.oid);
-        const files = (try fnd.lookup(repo_opts, moment, branch, &tree_oid)) orelse break :index;
+        const files = (try fnd.lookup(repo_opts, moment, branch, &resolved.oid)) orelse break :index;
         find_available = true;
         const value = term orelse break :index;
         // a result's name is its full path, so the listing has no directory and

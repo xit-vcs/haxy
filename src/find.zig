@@ -7,13 +7,12 @@ const rf = xit.ref;
 const tr = xit.tree;
 const obj = xit.object;
 const fs = xit.fs;
-const serve_common = @import("serve_common.zig");
 const progress = @import("./progress.zig");
 
 // the repo moment key holding one file map per branch tip. it sits outside the
 // haxy moment because pushes change it and events never do. each entry is
 // keyed by its branch name's hash: its value is the branch's file map, and its
-// key slot holds the root tree oid that map covers rather than the name.
+// key slot holds the raw tip commit oid that map covers rather than the name.
 const index_key = "haxy/branch->file-name+path->oid";
 
 // what a search returns: the matching files and whether the cap cut the list
@@ -31,19 +30,19 @@ pub fn Results(comptime hash_kind: hash.HashKind) type {
 }
 
 // `branch`'s file index, or null when it has none or its entry is stale: one
-// that doesn't cover `tree_oid`, the branch tip's root tree.
+// that doesn't cover `oid`, the branch's tip.
 pub fn lookup(
     comptime repo_opts: rp.RepoOpts(.xit),
     moment: rp.Repo(.xit, repo_opts).DB.HashMap(.read_only),
     branch: []const u8,
-    tree_oid: *const [hash.hexLen(repo_opts.hash)]u8,
+    oid: *const [hash.hexLen(repo_opts.hash)]u8,
 ) !?rp.Repo(.xit, repo_opts).DB.SortedMap(.read_only) {
     const DB = rp.Repo(.xit, repo_opts).DB;
     const index_cursor = try moment.getCursor(hash.hashInt(repo_opts.hash, index_key)) orelse return null;
     const index = try DB.HashMap(.read_only).init(index_cursor);
     const pair = try index.getKeyValuePair(hash.hashInt(repo_opts.hash, branch)) orelse return null;
-    const entry_tree = try readTree(repo_opts, pair.key_cursor);
-    if (!std.mem.eql(u8, &entry_tree, tree_oid)) return null;
+    const entry_oid = try readOid(repo_opts, pair.key_cursor);
+    if (!std.mem.eql(u8, &entry_oid, oid)) return null;
     return try DB.SortedMap(.read_only).init(pair.value_cursor);
 }
 
@@ -89,7 +88,7 @@ pub fn get(
 }
 
 // peel an oid to the root tree it names, following commits and tags.
-pub fn rootTreeOid(
+fn rootTreeOid(
     comptime repo_opts: rp.RepoOpts(.xit),
     state: rp.Repo(.xit, repo_opts).State(.read_only),
     io: std.Io,
@@ -149,7 +148,7 @@ pub fn refresh(
 }
 
 // reconcile them inside the caller's transaction, so the index lands with the
-// push that invalidated it. every branch is reconciled, since an up-to-date
+// change that invalidated it. every branch is reconciled, since an up-to-date
 // one costs a ref read and an oid compare. reports whether anything was
 // written, so a caller that owns an otherwise empty transaction can cancel it
 pub fn refreshInTransaction(
@@ -163,22 +162,22 @@ pub fn refreshInTransaction(
     const Repo = rp.Repo(.xit, repo_opts);
     const DB = Repo.DB;
     const HashInt = hash.HashInt(repo_opts.hash);
-    const Tree = [hash.hexLen(repo_opts.hash)]u8;
+    const Oid = [hash.hexLen(repo_opts.hash)]u8;
 
-    // an entry in the index: the root tree it covers and its file map
+    // an entry in the index: the tip it covers and its file map
     const Entry = struct {
-        tree: Tree,
+        oid: Oid,
         files: xit.xitdb.Slot,
 
         fn init(pair: DB.KeyValuePairCursor(.read_only)) !@This() {
-            return .{ .tree = try readTree(repo_opts, pair.key_cursor), .files = pair.value_cursor.slot() };
+            return .{ .oid = try readOid(repo_opts, pair.key_cursor), .files = pair.value_cursor.slot() };
         }
     };
     // what one branch needs written
     const Work = struct {
         branch_hash: HashInt,
-        // the tip's root tree (null = the branch is gone, so its entry goes)
-        tree: ?Tree,
+        // the tip (null = the branch is gone, so its entry goes)
+        oid: ?Oid,
         // the entry the branch has now
         own: ?Entry,
     };
@@ -222,13 +221,12 @@ pub fn refreshInTransaction(
             const branch_hash = hash.hashInt(repo_opts.hash, ref.name);
             const own = if (existing.fetchSwapRemove(branch_hash)) |kv| kv.value else null;
             const oid = (try rf.readRecur(.xit, repo_opts, read_state, io, .{ .ref = .{ .kind = .head, .name = ref.name } })) orelse continue;
-            const tree = try rootTreeOid(repo_opts, read_state, io, allocator, &oid);
-            if (own) |entry| if (std.mem.eql(u8, &entry.tree, &tree)) continue;
-            try work.append(aa, .{ .branch_hash = branch_hash, .tree = tree, .own = own });
+            if (own) |entry| if (std.mem.eql(u8, &entry.oid, &oid)) continue;
+            try work.append(aa, .{ .branch_hash = branch_hash, .oid = oid, .own = own });
         }
 
         // whatever is left belongs to a branch that no longer exists
-        for (existing.keys()) |branch_hash| try work.append(aa, .{ .branch_hash = branch_hash, .tree = null, .own = null });
+        for (existing.keys()) |branch_hash| try work.append(aa, .{ .branch_hash = branch_hash, .oid = null, .own = null });
     }
 
     if (work.items.len == 0) return false;
@@ -244,27 +242,29 @@ pub fn refreshInTransaction(
         for (work.items) |item| {
             if (progress.cancelled(repo_opts, progress_ctx_maybe)) return error.ClientGone;
             const index = try DB.HashMap(.read_write).init(try moment.putCursor(index_hash));
-            const tree = item.tree orelse {
+            const tip = item.oid orelse {
                 _ = try index.remove(item.branch_hash);
                 continue;
             };
             // the entry this one starts from (null = index the whole tree)
             const from = item.own orelse new_branch_base;
 
-            var tree_bytes: [hash.byteLen(repo_opts.hash)]u8 = undefined;
-            _ = try std.fmt.hexToBytes(&tree_bytes, &tree);
+            var tip_bytes: [hash.byteLen(repo_opts.hash)]u8 = undefined;
+            _ = try std.fmt.hexToBytes(&tip_bytes, &tip);
             // putKey only fills an empty key slot, and this one changes
             // whenever the branch moves
-            var tree_cursor = try index.putKeyCursor(item.branch_hash);
-            try tree_cursor.write(.{ .bytes = &tree_bytes });
+            var tip_cursor = try index.putKeyCursor(item.branch_hash);
+            try tip_cursor.write(.{ .bytes = &tip_bytes });
             var files_cursor = try index.putCursor(item.branch_hash);
             if (from) |entry| try files_cursor.write(.{ .slot = entry.files });
             const files = try DB.SortedMap(.read_write).init(files_cursor);
 
+            const tree = try rootTreeOid(repo_opts, state.readOnly(), io, allocator, &tip);
             if (from) |entry| {
+                const from_tree = try rootTreeOid(repo_opts, state.readOnly(), io, allocator, &entry.oid);
                 var tree_diff = tr.TreeDiff(.xit, repo_opts).init(allocator);
                 defer tree_diff.deinit();
-                try tree_diff.compare(state.readOnly(), io, &entry.tree, &tree, null);
+                try tree_diff.compare(state.readOnly(), io, &from_tree, &tree, null);
                 progress.report(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .writing_patch, .estimated_total_items = tree_diff.changes.count() } });
                 for (tree_diff.changes.keys(), tree_diff.changes.values()) |path, change| {
                     defer progress.report(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .writing_patch });
@@ -288,7 +288,7 @@ pub fn refreshInTransaction(
 
             // the first entry ever written becomes the base for the next
             // new branch, so only one branch walks a whole tree.
-            if (new_branch_base == null) new_branch_base = .{ .tree = tree, .files = (try index.getSlot(item.branch_hash)) orelse unreachable };
+            if (new_branch_base == null) new_branch_base = .{ .oid = tip, .files = (try index.getSlot(item.branch_hash)) orelse unreachable };
             // a later entry copies an earlier one's slot, so everything
             // written so far has to be shared rather than mutated
             try state.core.db.freeze();
@@ -329,14 +329,14 @@ fn indexTree(
     }
 }
 
-// the root tree an index entry covers, read from its key slot as hex.
-fn readTree(
+// the tip an index entry covers, read from its key slot as hex.
+fn readOid(
     comptime repo_opts: rp.RepoOpts(.xit),
     key_cursor: rp.Repo(.xit, repo_opts).DB.Cursor(.read_only),
 ) ![hash.hexLen(repo_opts.hash)]u8 {
-    var tree: [hash.byteLen(repo_opts.hash)]u8 = undefined;
-    if ((try key_cursor.readBytes(&tree)).len != tree.len) return error.InvalidFileIndex;
-    return std.fmt.bytesToHex(tree, .lower);
+    var oid: [hash.byteLen(repo_opts.hash)]u8 = undefined;
+    if ((try key_cursor.readBytes(&oid)).len != oid.len) return error.InvalidFileIndex;
+    return std.fmt.bytesToHex(oid, .lower);
 }
 
 // build a file's key: its lowercased basename, a separator, then its full path.

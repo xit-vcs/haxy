@@ -173,7 +173,10 @@ pub fn receivePackAndConsume(
 
             // the indexes the pushed refs invalidate belong to the push too
             _ = try find.refreshInTransaction(repo_opts, state, &moment, ctx.io, ctx.allocator, ctx.sideband);
-            _ = try srch_cmmt.refreshInTransaction(repo_opts, state, &moment, ctx.io, ctx.allocator, ctx.updates.items.items, ctx.sideband);
+            var moves: std.ArrayList(srch_cmmt.Move) = .empty;
+            defer moves.deinit(ctx.allocator);
+            for (ctx.updates.items.items) |update| try moves.append(ctx.allocator, .{ .old_oid = update.old_oid, .new_oid = update.new_oid });
+            _ = try srch_cmmt.refreshInTransaction(repo_opts, state, &moment, ctx.io, ctx.allocator, moves.items, ctx.sideband);
 
             try writeUndo(repo_opts, state, ctx.io, ctx.allocator, ctx.author, ctx.updates.items.items);
         }
@@ -351,6 +354,9 @@ pub fn receiveFork(
                     try evt.commitEvents(.xit, repo_opts, state, ctx.io, ctx.allocator, evt.events_ref, events[0..event_count], null);
                     if (!try evt.consumeInTransaction(.fork, .xit, repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, evt.events_ref)) return error.CancelTransaction;
                 }
+                // the patch branch's file index lands with the push
+                _ = try find.refreshInTransaction(repo_opts, state, &moment, ctx.io, ctx.allocator, ctx.sideband);
+
                 // a fork push tracks no ref updates, so it records no ranges
                 try writeUndo(repo_opts, state, ctx.io, ctx.allocator, ctx.author, &.{});
             }
@@ -386,9 +392,6 @@ pub fn receiveFork(
         return err;
     };
 
-    find.refresh(repo_opts, io, allocator, fork_repo) catch |err| {
-        serve_common.logError(io, error_writer, "failed to refresh file index: {s}\n", .{@errorName(err)});
-    };
     if (!published) return response.finish(writer, null);
 
     sideband.run(io, .{ .text = "Updating patches" }) catch {};

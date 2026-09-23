@@ -1125,6 +1125,11 @@ pub fn merge(
                 // retain the submitted revision and snapshot the merge result
                 if (!try importMergedRevision(repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, ctx.fork_repo, &ctx.patch_id, .{ .revision = ctx.revision, .before_oid = &before_oid, .after_oid = &after_oid }, ctx.expected_patch, ctx.author, ctx.timestamp)) return error.PatchOutOfDate;
 
+                // the merge moved the target branch, so its indexes follow,
+                // the commit index deriving from the old tip's version
+                _ = try find.refreshInTransaction(repo_opts, state, &moment, ctx.io, ctx.allocator, null);
+                _ = try srch_cmmt.refreshInTransaction(repo_opts, state, &moment, ctx.io, ctx.allocator, &.{.{ .old_oid = &before_oid, .new_oid = &after_oid }}, null);
+
                 // record the merge as one undoable action.
                 try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action_kind = merge_undo_action } });
             }
@@ -1155,14 +1160,6 @@ pub fn merge(
 
     // refresh other patches affected by the updated target branch.
     refreshOpenMergeability(repo_opts, io, allocator, target_repo, null, null);
-
-    // the merge moved the target branch, so its indexes follow
-    find.refresh(repo_opts, io, allocator, target_repo) catch |err| {
-        std.log.warn("failed to refresh file index: {s}", .{@errorName(err)});
-    };
-    srch_cmmt.refresh(repo_opts, io, allocator, target_repo, null) catch |err| {
-        std.log.warn("failed to refresh commit index: {s}", .{@errorName(err)});
-    };
 }
 
 // merge a published patch and remove its fork

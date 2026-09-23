@@ -816,7 +816,7 @@ pub fn main(init: std.process.Init) !void {
             try template_repo.addConfig(io, allocator, .{ .name = "core.bare", .value = "true" });
             // fixtures commit directly, so index the ref tips by hand
             try find.refresh(.{}, io, allocator, &template_repo);
-            try srch_cmmt.refresh(.{}, io, allocator, &template_repo, null);
+            try srch_cmmt.refresh(.{}, io, allocator, &template_repo);
             // clear history only after indexing has written its transactions.
             {
                 const moment = try evt.currentMoment(.{}, &template_repo);

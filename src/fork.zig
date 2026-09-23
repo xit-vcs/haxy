@@ -158,6 +158,11 @@ pub fn create(
                 defer config.deinit();
                 try config.add(state, ctx.io, .{ .name = "receive.denydeletes", .value = "true" });
 
+                // the copied db carries the target's file index, so the patch
+                // branch's entry starts from one of those rather than walking
+                // the tree
+                _ = try find.refreshInTransaction(repo_opts, state, &moment, ctx.io, ctx.allocator, null);
+
                 try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action_kind = undo_action } });
             }
         };
@@ -171,12 +176,6 @@ pub fn create(
             Ctx{ .core = &fork_repo.core, .io = io, .allocator = allocator },
         );
     }
-
-    // the copied db carries the target's file index, so the patch branch's
-    // entry starts from one of those rather than walking the tree
-    find.refresh(repo_opts, io, allocator, &fork_repo) catch |err| {
-        std.log.warn("failed to refresh file index: {s}", .{@errorName(err)});
-    };
 
     // create the patch event
     try evt.consume(.server, .fork, .xit, repo_opts, io, allocator, &fork_repo, evt.events_ref, &.{.{

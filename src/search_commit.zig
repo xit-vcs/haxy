@@ -7,22 +7,20 @@ const hash = xit.hash;
 const rf = xit.ref;
 const obj = xit.object;
 const mrg = xit.merge;
-const serve_common = @import("serve_common.zig");
 const progress = @import("./progress.zig");
 
 // the repo moment key holding one commit-message index per ref tip. it sits
 // outside the haxy moment because pushes change it and events never do. each
 // entry is keyed by its commit oid's hash: its value is the index as of that
-// commit, and its key slot holds the raw commit oid.
+// commit, and its key slot holds the raw commit oid followed by its timestamp.
 pub const index_key = "haxy/commit-oid->word->time+oid";
 
-// a commit a version covers.
-pub fn Commit(comptime hash_kind: hash.HashKind) type {
-    return struct {
-        oid: [hash.hexLen(hash_kind)]u8,
-        timestamp: u64,
-    };
-}
+// a ref move: the old tip's version, when it has one, is the base the new
+// tip's derives from
+pub const Move = struct {
+    old_oid: []const u8,
+    new_oid: []const u8,
+};
 
 // `commit_oid`'s index, or null when it has none. a version is correct for its
 // commit by construction, so there is nothing to check for staleness.
@@ -74,7 +72,6 @@ pub fn refresh(
     io: std.Io,
     allocator: std.mem.Allocator,
     repo: *rp.Repo(.xit, repo_opts),
-    updates: ?[]const xit.net_server_receive_pack.AppliedRefUpdate,
 ) !void {
     const Repo = rp.Repo(.xit, repo_opts);
     const DB = Repo.DB;
@@ -82,12 +79,11 @@ pub fn refresh(
         core: *Repo.Core,
         io: std.Io,
         allocator: std.mem.Allocator,
-        updates: ?[]const xit.net_server_receive_pack.AppliedRefUpdate,
 
         pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
             var moment = try DB.HashMap(.read_write).init(cursor.*);
             const state = Repo.State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
-            if (!try refreshInTransaction(repo_opts, state, &moment, ctx.io, ctx.allocator, ctx.updates, null)) return error.CancelTransaction;
+            if (!try refreshInTransaction(repo_opts, state, &moment, ctx.io, ctx.allocator, &.{}, null)) return error.CancelTransaction;
 
             // record the user action for undo
             try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action_kind = undo_action } });
@@ -100,29 +96,32 @@ pub fn refresh(
     defer repo.core.db_file.unlock(io);
 
     const history = try DB.ArrayList(.read_write).init(repo.core.db.rootCursor());
-    history.appendContext(.{ .slot = try history.getSlot(-1) }, Save{ .core = &repo.core, .io = io, .allocator = allocator, .updates = updates }) catch |err| switch (err) {
+    history.appendContext(.{ .slot = try history.getSlot(-1) }, Save{ .core = &repo.core, .io = io, .allocator = allocator }) catch |err| switch (err) {
         error.CancelTransaction => {},
         else => return err,
     };
 }
 
 // reconcile them inside the caller's transaction, so the index lands with the
-// push that invalidated it. `updates` is that push, whose old oids are the
-// cheapest bases to derive the new tips from. reports whether anything was
-// written, so a caller that owns an otherwise empty transaction can cancel it
+// change that invalidated it. `moves` are the refs that change moved, whose
+// old oids are the cheapest bases to derive the new tips from. reports whether
+// anything was written, so a caller that owns an otherwise empty transaction
+// can cancel it
 pub fn refreshInTransaction(
     comptime repo_opts: rp.RepoOpts(.xit),
     state: rp.Repo(.xit, repo_opts).State(.read_write),
     moment: *rp.Repo(.xit, repo_opts).DB.HashMap(.read_write),
     io: std.Io,
     allocator: std.mem.Allocator,
-    updates: ?[]const xit.net_server_receive_pack.AppliedRefUpdate,
+    moves: []const Move,
     progress_ctx_maybe: ?repo_opts.ProgressCtx,
 ) !bool {
     const Repo = rp.Repo(.xit, repo_opts);
     const DB = Repo.DB;
     const Oid = [hash.hexLen(repo_opts.hash)]u8;
-    const Tip = Commit(repo_opts.hash);
+    const oid_len = comptime hash.byteLen(repo_opts.hash);
+    // an entry's key slot: the raw commit oid followed by its timestamp
+    const Entry = [oid_len + @sizeOf(u64)]u8;
 
     // one version to build: the commit it covers, and the commit whose version
     // it derives from (null = walk the whole history).
@@ -139,22 +138,22 @@ pub fn refreshInTransaction(
     var work: std.ArrayList(Work) = .empty;
     var gone: std.ArrayList(Oid) = .empty;
     var default_tip: ?Oid = null;
-    // the versions a new tip can derive from
-    var versions: std.ArrayList(Tip) = .empty;
+    // the versions in the index, each with its commit's timestamp. the ones
+    // built here join them, so a later tip can derive from an earlier one.
+    var versions: std.AutoArrayHashMapUnmanaged(Oid, u64) = .empty;
 
     {
         const read_state = state.readOnly();
 
-        // the commits that already have a version
-        var existing: std.AutoArrayHashMapUnmanaged(Oid, void) = .empty;
         if (try moment.getCursor(hash.hashInt(repo_opts.hash, index_key))) |index_cursor| {
             const index = try DB.HashMap(.read_only).init(index_cursor);
             var iter = try index.iterator();
             while (try iter.next()) |cursor| {
                 const pair = try cursor.readKeyValuePair();
-                var oid_bytes: [hash.byteLen(repo_opts.hash)]u8 = undefined;
-                if ((try pair.key_cursor.readBytes(&oid_bytes)).len != oid_bytes.len) return error.InvalidCommitIndex;
-                try existing.put(aa, std.fmt.bytesToHex(oid_bytes, .lower), {});
+                var entry: Entry = undefined;
+                if ((try pair.key_cursor.readBytes(&entry)).len != entry.len) return error.InvalidCommitIndex;
+                const oid = std.fmt.bytesToHex(entry[0..oid_len].*, .lower);
+                try versions.put(aa, oid, std.mem.readInt(u64, entry[oid_len..], .big));
             }
         }
 
@@ -182,38 +181,27 @@ pub fn refreshInTransaction(
         var missing: std.AutoArrayHashMapUnmanaged(Oid, Work) = .empty;
         for (tips.items) |tip| {
             // a tip that already has a version needs no reading
-            if (existing.contains(tip)) {
+            if (versions.contains(tip)) {
                 try wanted.put(aa, tip, {});
                 continue;
             }
             var commit = obj.Object(.xit, repo_opts).initCommit(read_state, io, allocator, &tip) catch continue;
             defer commit.deinit();
             try wanted.put(aa, commit.oid, {});
-            if (existing.contains(commit.oid)) continue;
+            if (versions.contains(commit.oid)) continue;
             const entry = try missing.getOrPut(aa, commit.oid);
             if (!entry.found_existing) entry.value_ptr.* = .{
                 .oid = commit.oid,
                 .timestamp = commit.content.commit.metadata.timestamp,
                 .base = null,
             };
-            if (entry.value_ptr.base == null) entry.value_ptr.base = pushedFrom(repo_opts, updates, &tip, existing);
+            if (entry.value_ptr.base == null) entry.value_ptr.base = movedFrom(repo_opts, moves, &tip, versions);
         }
 
         var head_buffer: [rf.MAX_REF_CONTENT_SIZE]u8 = undefined;
         if (rf.readHead(.xit, repo_opts, read_state, io, &head_buffer) catch null) |head| switch (head) {
             .ref => |ref| default_tip = try rf.readRecur(.xit, repo_opts, read_state, io, .{ .ref = .{ .kind = .head, .name = ref.name } }),
             .oid => {},
-        };
-
-        // an entry whose commit is gone can't be walked from, so it isn't a
-        // candidate.
-        const unbased = for (missing.values()) |item| {
-            if (item.base == null) break true;
-        } else false;
-        if (unbased) for (existing.keys()) |oid| {
-            var commit = obj.Object(.xit, repo_opts).initCommit(read_state, io, allocator, &oid) catch continue;
-            defer commit.deinit();
-            try versions.append(aa, .{ .oid = oid, .timestamp = commit.content.commit.metadata.timestamp });
         };
 
         try work.appendSlice(aa, missing.values());
@@ -224,7 +212,7 @@ pub fn refreshInTransaction(
             }
         }.lessThan);
 
-        for (existing.keys()) |oid| {
+        for (versions.keys()) |oid| {
             if (!wanted.contains(oid)) try gone.append(aa, oid);
         }
     }
@@ -234,17 +222,15 @@ pub fn refreshInTransaction(
     {
         const index_hash = hash.hashInt(repo_opts.hash, index_key);
 
-        var message: std.ArrayList(u8) = .empty;
-        defer message.deinit(allocator);
-
         for (work.items) |item| {
             const index = try DB.HashMap(.read_write).init(try moment.putCursor(index_hash));
-            const base = item.base orelse nearestVersion(repo_opts.hash, versions.items, default_tip, item.timestamp);
+            const base = item.base orelse nearestVersion(repo_opts.hash, versions, default_tip, item.timestamp);
 
-            var oid_bytes: [hash.byteLen(repo_opts.hash)]u8 = undefined;
-            _ = try std.fmt.hexToBytes(&oid_bytes, &item.oid);
-            const oid_int = hash.bytesToInt(repo_opts.hash, &oid_bytes);
-            try index.putKey(oid_int, .{ .bytes = &oid_bytes });
+            var entry: Entry = undefined;
+            _ = try std.fmt.hexToBytes(entry[0..oid_len], &item.oid);
+            std.mem.writeInt(u64, entry[oid_len..], item.timestamp, .big);
+            const oid_int = hash.bytesToInt(repo_opts.hash, entry[0..oid_len]);
+            try index.putKey(oid_int, .{ .bytes = &entry });
             var version_cursor = try index.putCursor(oid_int);
             if (base) |base_oid| {
                 const base_cursor = (try index.getCursor(try hash.hexToInt(repo_opts.hash, &base_oid))) orelse return error.InvalidCommitIndex;
@@ -252,28 +238,13 @@ pub fn refreshInTransaction(
             }
             const version = try DB.SortedMap(.read_write).init(version_cursor);
 
-            var diff_arena = std.heap.ArenaAllocator.init(allocator);
-            defer diff_arena.deinit();
-            const diff = try commitDiff(repo_opts, state.readOnly(), io, allocator, diff_arena.allocator(), if (base) |*base_oid| base_oid else null, &item.oid, progress_ctx_maybe);
-
-            // the walk is done, so the messages left to read are the total
-            progress.report(repo_opts, io, progress_ctx_maybe, .{ .text = "Indexing commits" });
-            progress.report(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .writing_patch, .estimated_total_items = diff.removed.len + diff.added.len } });
-            for (diff.removed) |commit| {
-                if (progress.cancelled(repo_opts, progress_ctx_maybe)) return error.ClientGone;
-                defer progress.report(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .writing_patch });
-                const key = try readPosting(repo_opts, state.readOnly(), io, allocator, &message, commit);
-                try srch.remove(DB, version, allocator, &key, message.items);
+            if (base) |*base_oid| {
+                try derive(repo_opts, state.readOnly(), io, allocator, version, base_oid, &item.oid, progress_ctx_maybe);
+            } else {
+                try indexHistory(repo_opts, state.readOnly(), io, allocator, version, &item.oid, progress_ctx_maybe);
             }
-            for (diff.added) |commit| {
-                if (progress.cancelled(repo_opts, progress_ctx_maybe)) return error.ClientGone;
-                defer progress.report(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .writing_patch });
-                const key = try readPosting(repo_opts, state.readOnly(), io, allocator, &message, commit);
-                try srch.add(DB, version, allocator, &key, message.items);
-            }
-            progress.report(repo_opts, io, progress_ctx_maybe, .{ .end = .writing_patch });
 
-            try versions.append(aa, .{ .oid = item.oid, .timestamp = item.timestamp });
+            try versions.put(aa, item.oid, item.timestamp);
             // the next version copies this one's slot, so everything
             // written so far has to be shared rather than mutated
             try state.core.db.freeze();
@@ -286,126 +257,167 @@ pub fn refreshInTransaction(
     return true;
 }
 
-// the version a tip committed at `timestamp` derives from when no push names
+// the version a tip committed at `timestamp` derives from when no move names
 // one: the default branch's unless it is newer than the tip, else the nearest
 // older one, else the oldest. a guess by dates that only the cost rides on.
 fn nearestVersion(
     comptime hash_kind: hash.HashKind,
-    versions: []const Commit(hash_kind),
+    versions: std.AutoArrayHashMapUnmanaged([hash.hexLen(hash_kind)]u8, u64),
     default_tip: ?[hash.hexLen(hash_kind)]u8,
     timestamp: u64,
 ) ?[hash.hexLen(hash_kind)]u8 {
-    var older: ?Commit(hash_kind) = null;
-    var oldest: ?Commit(hash_kind) = null;
-    for (versions) |version| {
-        if (version.timestamp <= timestamp) {
-            if (default_tip) |oid| if (std.mem.eql(u8, &oid, &version.oid)) return oid;
-            const nearer = if (older) |found| version.timestamp > found.timestamp else true;
-            if (nearer) older = version;
+    var older: ?[hash.hexLen(hash_kind)]u8 = null;
+    var older_timestamp: u64 = 0;
+    var oldest: ?[hash.hexLen(hash_kind)]u8 = null;
+    var oldest_timestamp: u64 = std.math.maxInt(u64);
+    for (versions.keys(), versions.values()) |oid, version_timestamp| {
+        if (version_timestamp <= timestamp) {
+            if (default_tip) |tip| if (std.mem.eql(u8, &tip, &oid)) return tip;
+            if (older == null or version_timestamp > older_timestamp) {
+                older = oid;
+                older_timestamp = version_timestamp;
+            }
         }
-        const earlier = if (oldest) |found| version.timestamp < found.timestamp else true;
-        if (earlier) oldest = version;
+        if (version_timestamp < oldest_timestamp) {
+            oldest = oid;
+            oldest_timestamp = version_timestamp;
+        }
     }
-    return if (older orelse oldest) |version| version.oid else null;
+    return older orelse oldest;
 }
 
-// the commit this push moved a ref to `tip` from, when it has a version to
-// derive from.
-fn pushedFrom(
+// the commit a move took a ref to `tip` from, when it has a version to derive
+// from.
+fn movedFrom(
     comptime repo_opts: rp.RepoOpts(.xit),
-    updates: ?[]const xit.net_server_receive_pack.AppliedRefUpdate,
+    moves: []const Move,
     tip: *const [hash.hexLen(repo_opts.hash)]u8,
-    existing: std.AutoArrayHashMapUnmanaged([hash.hexLen(repo_opts.hash)]u8, void),
+    versions: std.AutoArrayHashMapUnmanaged([hash.hexLen(repo_opts.hash)]u8, u64),
 ) ?[hash.hexLen(repo_opts.hash)]u8 {
-    for (updates orelse &.{}) |update| {
-        if (!std.mem.eql(u8, update.new_oid, tip)) continue;
-        if (update.old_oid.len != hash.hexLen(repo_opts.hash)) continue;
+    for (moves) |move| {
+        if (!std.mem.eql(u8, move.new_oid, tip)) continue;
+        if (move.old_oid.len != hash.hexLen(repo_opts.hash)) continue;
         var oid: [hash.hexLen(repo_opts.hash)]u8 = undefined;
-        @memcpy(&oid, update.old_oid);
-        if (existing.contains(oid)) return oid;
+        @memcpy(&oid, move.old_oid);
+        if (versions.contains(oid)) return oid;
     }
     return null;
 }
 
-// read `commit`'s message into `message` and return the doc key it indexes
-// under.
-fn readPosting(
+// turn a copy of `base_tip`'s version into `tip`'s by moving the postings of
+// the commits the two don't share
+fn derive(
     comptime repo_opts: rp.RepoOpts(.xit),
     state: rp.Repo(.xit, repo_opts).State(.read_only),
     io: std.Io,
     allocator: std.mem.Allocator,
+    version: rp.Repo(.xit, repo_opts).DB.SortedMap(.read_write),
+    base_tip: *const [hash.hexLen(repo_opts.hash)]u8,
+    tip: *const [hash.hexLen(repo_opts.hash)]u8,
+    progress_ctx_maybe: ?repo_opts.ProgressCtx,
+) !void {
+    const DB = rp.Repo(.xit, repo_opts).DB;
+    const Ancestry = mrg.Ancestry(.xit, repo_opts);
+    var ancestry = try Ancestry.init(state, io, allocator, base_tip, tip);
+    defer ancestry.deinit();
+
+    progress.report(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .walking_commit, .estimated_total_items = 0 } });
+    try ancestry.finish(progress_ctx_maybe);
+    progress.report(repo_opts, io, progress_ctx_maybe, .{ .end = .walking_commit });
+
+    // the walk stops at the shared history, so it trusts timestamps: a
+    // commit dated later than a descendant can be passed from the base
+    // side before the tip turns out to reach it too, and its postings are
+    // then dropped. settling that would mean walking the whole history.
+    // a wrong addition only re-puts postings, so a fast-forward removes
+    // nothing, which the base tip picking up the tip's flag proves.
+    const base_node = ancestry.nodes.get(ancestry.tips[0]) orelse unreachable;
+    const fast_forward = base_node.flags & Ancestry.two != 0;
+
+    // a commit one tip alone reaches has postings to move. tag objects are
+    // peeled through, not walked.
+    var total: usize = 0;
+    var counted = ancestry.nodes.valueIterator();
+    while (counted.next()) |node| {
+        if (node.tag_target != null) continue;
+        switch (node.flags & Ancestry.both) {
+            Ancestry.one => total += @intFromBool(!fast_forward),
+            Ancestry.two => total += 1,
+            else => {},
+        }
+    }
+
+    var message: std.ArrayList(u8) = .empty;
+    defer message.deinit(allocator);
+
+    progress.report(repo_opts, io, progress_ctx_maybe, .{ .text = "Indexing commits" });
+    progress.report(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .writing_patch, .estimated_total_items = total } });
+    var iter = ancestry.nodes.iterator();
+    while (iter.next()) |entry| {
+        if (entry.value_ptr.tag_target != null) continue;
+        const flags = entry.value_ptr.flags & Ancestry.both;
+        if (flags == Ancestry.both or flags == 0 or (flags == Ancestry.one and fast_forward)) continue;
+        if (progress.cancelled(repo_opts, progress_ctx_maybe)) return error.ClientGone;
+        defer progress.report(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .writing_patch });
+
+        var object = try obj.Object(.xit, repo_opts).init(state, io, allocator, entry.key_ptr);
+        defer object.deinit();
+        const key = try readPosting(repo_opts, allocator, &message, &object);
+        if (flags == Ancestry.one) {
+            try srch.remove(DB, version, allocator, &key, message.items);
+        } else {
+            try srch.add(DB, version, allocator, &key, message.items);
+        }
+    }
+    progress.report(repo_opts, io, progress_ctx_maybe, .{ .end = .writing_patch });
+}
+
+// index every commit `tip` reaches into an empty `version`, as the walk
+// reaches it
+fn indexHistory(
+    comptime repo_opts: rp.RepoOpts(.xit),
+    state: rp.Repo(.xit, repo_opts).State(.read_only),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    version: rp.Repo(.xit, repo_opts).DB.SortedMap(.read_write),
+    tip: *const [hash.hexLen(repo_opts.hash)]u8,
+    progress_ctx_maybe: ?repo_opts.ProgressCtx,
+) !void {
+    const DB = rp.Repo(.xit, repo_opts).DB;
+
+    var message: std.ArrayList(u8) = .empty;
+    defer message.deinit(allocator);
+
+    // a whole history has no count until it is walked, so it reports the
+    // commits indexed so far
+    progress.report(repo_opts, io, progress_ctx_maybe, .{ .text = "Indexing commits" });
+    progress.report(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .writing_patch, .estimated_total_items = 0 } });
+    var iter = try obj.ObjectIterator(.xit, repo_opts).init(state, io, allocator, .{ .kind = .commit });
+    defer iter.deinit();
+    try iter.include(tip);
+    while (try iter.next(allocator)) |object| {
+        defer object.deinit();
+        if (progress.cancelled(repo_opts, progress_ctx_maybe)) return error.ClientGone;
+        const key = try readPosting(repo_opts, allocator, &message, object);
+        try srch.add(DB, version, allocator, &key, message.items);
+        progress.report(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .writing_patch });
+    }
+    progress.report(repo_opts, io, progress_ctx_maybe, .{ .end = .writing_patch });
+}
+
+// replace `message` with the indexed prefix of `object`'s message and return
+// the doc key it indexes under
+fn readPosting(
+    comptime repo_opts: rp.RepoOpts(.xit),
+    allocator: std.mem.Allocator,
     message: *std.ArrayList(u8),
-    commit: Commit(repo_opts.hash),
+    object: *obj.Object(.xit, repo_opts),
 ) ![docKeyLen(repo_opts.hash)]u8 {
     message.clearRetainingCapacity();
-    var object = try obj.Object(.xit, repo_opts).init(state, io, allocator, &commit.oid);
-    defer object.deinit();
     object.readMessage(allocator, message, .limited(srch.max_indexed_bytes)) catch |err| switch (err) {
         // only the indexed prefix matters
         error.StreamTooLong => {},
         else => |e| return e,
     };
-    return docKey(repo_opts.hash, commit.timestamp, &commit.oid);
-}
-
-// what `tip` reaches that `base_tip` doesn't, and the other way round, built
-// into `aa`. with no base the whole history is added.
-fn commitDiff(
-    comptime repo_opts: rp.RepoOpts(.xit),
-    state: rp.Repo(.xit, repo_opts).State(.read_only),
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    aa: std.mem.Allocator,
-    base_tip: ?*const [hash.hexLen(repo_opts.hash)]u8,
-    tip: *const [hash.hexLen(repo_opts.hash)]u8,
-    progress_ctx_maybe: ?repo_opts.ProgressCtx,
-) !struct { removed: []const Commit(repo_opts.hash), added: []const Commit(repo_opts.hash) } {
-    var removed: std.ArrayList(Commit(repo_opts.hash)) = .empty;
-    var added: std.ArrayList(Commit(repo_opts.hash)) = .empty;
-
-    if (base_tip) |base| {
-        const Ancestry = mrg.Ancestry(.xit, repo_opts);
-        var ancestry = try Ancestry.init(state, io, allocator, base, tip);
-        defer ancestry.deinit();
-
-        progress.report(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .walking_commit, .estimated_total_items = 0 } });
-        try ancestry.finish(progress_ctx_maybe);
-        progress.report(repo_opts, io, progress_ctx_maybe, .{ .end = .walking_commit });
-
-        // the walk stops at the shared history, so it trusts timestamps: a
-        // commit dated later than a descendant can be passed from the base
-        // side before the tip turns out to reach it too, and its postings are
-        // then dropped. settling that would mean walking the whole history.
-        // a wrong addition only re-puts postings, so a fast-forward removes
-        // nothing, which the base tip picking up the tip's flag proves.
-        const base_node = ancestry.nodes.get(ancestry.tips[0]) orelse unreachable;
-        const fast_forward = base_node.flags & Ancestry.two != 0;
-
-        var iter = ancestry.nodes.iterator();
-        while (iter.next()) |entry| {
-            // tag objects are peeled through, not walked
-            if (entry.value_ptr.tag_target != null) continue;
-            const commit = Commit(repo_opts.hash){ .oid = entry.key_ptr.*, .timestamp = entry.value_ptr.timestamp };
-            switch (entry.value_ptr.flags & Ancestry.both) {
-                Ancestry.one => if (!fast_forward) try removed.append(aa, commit),
-                Ancestry.two => try added.append(aa, commit),
-                else => {},
-            }
-        }
-    } else {
-        // a whole history has no count until it is walked, so the walk reports
-        // the commits it has reached so far
-        progress.report(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .walking_commit, .estimated_total_items = 0 } });
-        var iter = try obj.ObjectIterator(.xit, repo_opts).init(state, io, allocator, .{ .kind = .commit });
-        defer iter.deinit();
-        try iter.include(tip);
-        while (try iter.next(allocator)) |object| {
-            defer object.deinit();
-            try added.append(aa, .{ .oid = object.oid, .timestamp = object.content.commit.metadata.timestamp });
-            progress.report(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .walking_commit });
-        }
-        progress.report(repo_opts, io, progress_ctx_maybe, .{ .end = .walking_commit });
-    }
-
-    return .{ .removed = removed.items, .added = added.items };
+    return docKey(repo_opts.hash, object.content.commit.metadata.timestamp, &object.oid);
 }
