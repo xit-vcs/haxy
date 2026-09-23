@@ -15,7 +15,7 @@ const max_words_per_doc = 256;
 // how much of a document is tokenized.
 pub const max_indexed_bytes = 16 * 1024;
 // how many indexed words one typed word expands to.
-const max_expansions = 50;
+const max_expansions = 200;
 // the largest doc key, so results are read into a buffer rather than allocated.
 pub const max_doc_key_len = 64;
 
