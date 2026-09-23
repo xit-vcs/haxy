@@ -3,8 +3,8 @@
 //! handles, per connection: version exchange, KEXINIT, curve25519 key
 //! exchange, NEWKEYS, key derivation, chacha20-poly1305 packet codec,
 //! strict kex (Terrapin mitigation), client-initiated rekeying,
-//! ssh-userauth service request, publickey authentication (ed25519 only;
-//! captures the SHA256 fingerprint of the verified key), channel-layer
+//! ssh-userauth service request, publickey authentication (ed25519 and
+//! rsa-sha2; captures the SHA256 fingerprint of the verified key), channel-layer
 //! requests (pty-req, env, window-change, shell, exec), CHANNEL_DATA
 //! flow with sender/receiver windows, and clean teardown
 //! (exit-status / EOF / CLOSE).
@@ -26,13 +26,15 @@
 //!   cipher:    chacha20-poly1305@openssh.com (RFC 4253 + openssh extension)
 //!   MAC:       none (implicit in AEAD)
 //!   compress:  none
-//!   user auth: publickey + ssh-ed25519 only (RSA/ECDSA deferred)
+//!   user auth: publickey + ssh-ed25519, rsa-sha2-512, rsa-sha2-256
 
 const std = @import("std");
 const builtin = @import("builtin");
 const Ed25519 = std.crypto.sign.Ed25519;
 const X25519 = std.crypto.dh.X25519;
 const Sha256 = std.crypto.hash.sha2.Sha256;
+const Sha512 = std.crypto.hash.sha2.Sha512;
+const rsa = std.crypto.Certificate.rsa;
 const ChaCha20 = std.crypto.stream.chacha.ChaCha20With64BitNonce;
 const Poly1305 = std.crypto.onetimeauth.Poly1305;
 
@@ -56,6 +58,7 @@ pub const SSH_MSG_UNIMPLEMENTED: u8 = 3;
 pub const SSH_MSG_DEBUG: u8 = 4;
 pub const SSH_MSG_SERVICE_REQUEST: u8 = 5;
 pub const SSH_MSG_SERVICE_ACCEPT: u8 = 6;
+pub const SSH_MSG_EXT_INFO: u8 = 7;
 pub const SSH_MSG_KEXINIT: u8 = 20;
 pub const SSH_MSG_NEWKEYS: u8 = 21;
 pub const SSH_MSG_KEX_ECDH_INIT: u8 = 30;
@@ -1011,11 +1014,14 @@ pub const our_kex_algos = [_][]const u8{ "mlkem768x25519-sha256", "curve25519-sh
 // algorithm because the matcher only picks from our_kex_algos.
 pub const kex_strict_server = "kex-strict-s-v00@openssh.com";
 pub const kex_strict_client = "kex-strict-c-v00@openssh.com";
+// the client asks for EXT_INFO after the initial NEWKEYS (RFC 8308)
+pub const ext_info_client = "ext-info-c";
 
 const MLKem768 = std.crypto.kem.ml_kem.MLKem768;
 const hybrid_client_blob_len = MLKem768.PublicKey.encoded_length + X25519.public_length; // 1216
 const hybrid_server_blob_len = MLKem768.ciphertext_length + X25519.public_length; // 1120
 pub const our_host_key_algos = [_][]const u8{"ssh-ed25519"};
+pub const our_userauth_algos = [_][]const u8{ "ssh-ed25519", "rsa-sha2-512", "rsa-sha2-256" };
 pub const our_ciphers = [_][]const u8{"chacha20-poly1305@openssh.com"};
 const our_macs = [_][]const u8{}; // none — implicit in the AEAD cipher
 const our_compression = [_][]const u8{"none"};
@@ -1122,6 +1128,7 @@ fn runKex(
     // seqnos reset to 0 after every NEWKEYS.
     const strict = firstCommonName(parsed.kex_algos, &.{kex_strict_client}) != null;
     if (strict and seqs.read != 1) return error.StrictKexViolation;
+    const ext_info = firstCommonName(parsed.kex_algos, &.{ext_info_client}) != null;
 
     var keys: SessionKeys = undefined;
     defer std.crypto.secureZero(u8, std.mem.asBytes(&keys));
@@ -1144,7 +1151,7 @@ fn runKex(
     // post-KEX everything is encrypted with chacha20-poly1305@openssh.com.
     // each cipher continues its own direction's count; the read side
     // includes any skipped IGNORE/DEBUG packets.
-    return .{
+    var conn: Conn = .{
         .io = io,
         .allocator = allocator,
         .reader = reader,
@@ -1159,6 +1166,19 @@ fn runKex(
         },
         .idle = idle,
     };
+    if (ext_info) try sendExtInfo(&conn);
+    return conn;
+}
+
+// advertise server-sig-algs so clients will offer rsa-sha2 keys (RFC 8308 §3.1)
+fn sendExtInfo(conn: *Conn) !void {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(conn.allocator);
+    try buf.append(conn.allocator, SSH_MSG_EXT_INFO);
+    try writeU32(&buf, conn.allocator, 1); // one extension
+    try writeStringField(&buf, conn.allocator, "server-sig-algs");
+    try writeNameList(&buf, conn.allocator, &our_userauth_algos);
+    try conn.writePacket(&.{buf.items});
 }
 
 /// everything needed to service a client-initiated rekey mid-session.
@@ -1662,7 +1682,7 @@ fn runAuth(conn: *Conn) ![fingerprint_len]u8 {
         try conn.writePacket(&.{accept.items});
     }
 
-    // step 2: USERAUTH loop until SUCCESS. accept any ed25519 key whose
+    // step 2: USERAUTH loop until SUCCESS. accept any supported key whose
     // signature verifies against the offered pubkey.
     var auth_attempts: u32 = 0;
     while (true) {
@@ -1695,7 +1715,7 @@ fn runAuth(conn: *Conn) ![fingerprint_len]u8 {
         const algo = try takeString(&req_reader, 64);
         const pubkey_blob = try takeString(&req_reader, 4096);
 
-        if (!std.mem.eql(u8, algo, "ssh-ed25519")) {
+        if (firstCommonName(algo, &our_userauth_algos) == null) {
             try sendUserauthFailure(conn);
             continue;
         }
@@ -1784,6 +1804,13 @@ fn verifyUserauthSignature(
     defer signed.deinit(allocator);
     try appendPublickeySignedData(&signed, allocator, session_id, user_name, service_name, algo, pubkey_blob);
 
+    if (std.mem.eql(u8, algo, "ssh-ed25519")) return verifyEd25519(pubkey_blob, signature_blob, signed.items);
+    if (std.mem.eql(u8, algo, "rsa-sha2-512")) return verifyRsa(Sha512, algo, pubkey_blob, signature_blob, signed.items);
+    if (std.mem.eql(u8, algo, "rsa-sha2-256")) return verifyRsa(Sha256, algo, pubkey_blob, signature_blob, signed.items);
+    return false;
+}
+
+fn verifyEd25519(pubkey_blob: []const u8, signature_blob: []const u8, signed: []const u8) !bool {
     // parse pubkey_blob: string "ssh-ed25519" || string raw_pubkey
     var pubkey_reader = std.Io.Reader.fixed(pubkey_blob);
     const pk_algo = try takeString(&pubkey_reader, 64);
@@ -1805,8 +1832,31 @@ fn verifyUserauthSignature(
 
     const pk = Ed25519.PublicKey.fromBytes(pubkey_bytes) catch return false;
     const sig = Ed25519.Signature.fromBytes(sig_bytes);
-    sig.verify(signed.items, pk) catch return false;
+    sig.verify(signed, pk) catch return false;
     return true;
+}
+
+fn verifyRsa(comptime Hash: type, algo: []const u8, pubkey_blob: []const u8, signature_blob: []const u8, signed: []const u8) !bool {
+    // parse pubkey_blob: string "ssh-rsa" || mpint e || mpint n
+    var pubkey_reader = std.Io.Reader.fixed(pubkey_blob);
+    if (!std.mem.eql(u8, try takeString(&pubkey_reader, 64), "ssh-rsa")) return false;
+    const e = std.mem.trimStart(u8, try takeString(&pubkey_reader, 1024), &.{0});
+    const n = std.mem.trimStart(u8, try takeString(&pubkey_reader, 1024), &.{0});
+
+    // parse signature_blob: string algo || string sig
+    var sig_reader = std.Io.Reader.fixed(signature_blob);
+    if (!std.mem.eql(u8, try takeString(&sig_reader, 64), algo)) return false;
+    const sig = try takeString(&sig_reader, 1024);
+    if (sig.len != n.len) return false;
+
+    const pk = rsa.PublicKey.fromBytes(e, n) catch return false;
+    switch (n.len) {
+        inline 256, 384, 512 => |len| {
+            rsa.PKCS1v1_5Signature.verify(len, sig[0..len].*, signed, pk, Hash) catch return false;
+            return true;
+        },
+        else => return false,
+    }
 }
 
 // ---------------------------------------------------------------------------
