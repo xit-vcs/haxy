@@ -2332,7 +2332,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     if (formWidget(form, .patch_source)) |source| {
                         source.field().options.label = if (failure == .invalid_source_branch) " source branch (not found) " else if (failure == .same_branch) " source branch (same as target) " else if (failure == .unrelated_branches) " source branch (unrelated) " else " source branch ";
                         const submit = formWidget(form, .submit_button) orelse return error.MissingFormField;
-                        try submit.setLabel(allocator, switch (source.selected) {
+                        try submit.setLabel(allocator, switch (source.selectedKind()) {
                             .fork => "submit draft",
                             .branch => "submit patch",
                         });
@@ -2731,7 +2731,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
 
             if (comptime supports_drafts) {
                 const source = formWidget(form, .patch_source) orelse return error.MissingFormField;
-                const source_branch = switch (source.selected) {
+                const source_branch = switch (source.selectedKind()) {
                     .fork => null,
                     .branch => try source.field().text(allocator),
                 };
@@ -2876,7 +2876,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     .description = try aa.dupe(u8, description),
                     .target_branch = try aa.dupe(u8, target_branch),
                     .source_branch = if (source) |value| try value.field().text(aa) else "",
-                    .source_kind = if (source) |value| value.selected else .fork,
+                    .source_kind = if (source) |value| value.selectedKind() else .fork,
                 } else .{
                     .title = try aa.dupe(u8, title),
                     .tags = try aa.dupe(u8, tags),

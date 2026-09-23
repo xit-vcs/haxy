@@ -2,7 +2,6 @@ const std = @import("std");
 const builtin = @import("builtin");
 const evt = @import("../../event.zig");
 const ui = @import("../../ui.zig");
-const inp = @import("../input.zig");
 const xit = @import("xit");
 const rp = xit.repo;
 const hash = xit.hash;
@@ -20,7 +19,6 @@ const wasm = builtin.target.cpu.arch == .wasm32;
 pub const Source = struct {
     box: wgt.Box(ui.Widget),
     session: *ui.Session,
-    selected: Kind,
     selectors: std.enums.EnumMap(Kind, usize),
 
     pub const Kind = enum { fork, branch };
@@ -49,7 +47,7 @@ pub const Source = struct {
         try input_box.setContent(allocator, initial);
         try box.children.put(allocator, input_box.getFocus().id, .{ .widget = .{ .text_input = input_box }, .rect = null, .min_size = .{ .width = 15, .height = 3 } });
         box.getFocus().child_id = selectors.get(selected) orelse input_box.getFocus().id;
-        return .{ .box = box, .session = session, .selected = selected, .selectors = selectors };
+        return .{ .box = box, .session = session, .selectors = selectors };
     }
 
     pub fn field(self: *Source) *wgt.TextInput {
@@ -58,6 +56,19 @@ pub const Source = struct {
             else => {},
         };
         unreachable;
+    }
+
+    // the selection is whichever selector focus last landed on, like every
+    // other selection in the ui, so a click (which only moves focus on the
+    // web) selects. the branch text input is only reachable while branch is
+    // selected, so focus on it means branch too.
+    pub fn selectedKind(self: *Source) Kind {
+        const current = self.box.getFocus().child_id orelse return .branch;
+        var iter = self.selectors.iterator();
+        while (iter.next()) |selector| {
+            if (selector.value.* == current) return selector.key;
+        }
+        return .branch;
     }
 
     pub fn deinit(self: *Source, allocator: std.mem.Allocator) void {
@@ -78,15 +89,13 @@ pub const Source = struct {
 
     pub fn build(self: *Source, allocator: std.mem.Allocator, constraint: xitui.layout.Constraint, root_focus: *xitui.focus.Focus) !void {
         self.clearGrid();
+        const selected = self.selectedKind();
         for (self.box.children.keys(), self.box.children.values()) |id, *child| switch (child.widget) {
-            .text_input => child.hidden = switch (self.selected) {
-                .fork => true,
-                .branch => false,
-            },
+            .text_input => child.hidden = selected == .fork,
             .text_box => |*selector| {
-                const selected = id == self.selectors.get(self.selected);
-                selector.options.border_style = if (selected) .single else .hidden;
-                selector.options.inverted = selected;
+                const is_selected = id == self.selectors.get(selected);
+                selector.options.border_style = if (is_selected) .single else .hidden;
+                selector.options.inverted = is_selected;
             },
             else => {},
         };
@@ -97,20 +106,11 @@ pub const Source = struct {
     }
 
     pub fn input(self: *Source, allocator: std.mem.Allocator, key: xitui.input.Key, root_focus: *xitui.focus.Focus) !void {
-        if (key == .mouse) {
-            var iter = self.selectors.iterator();
-            while (iter.next()) |selector| {
-                if (inp.leftClickOn(root_focus, selector.value.*, key.mouse)) {
-                    self.selected = selector.key;
-                    return;
-                }
-            }
-        }
         const current = self.box.getFocus().child_id orelse return;
         const text_input = self.field();
         if (current == text_input.getFocus().id) {
             if (key == .arrow_left) {
-                if (self.selectors.get(self.selected)) |id| {
+                if (self.selectors.get(.branch)) |id| {
                     root_focus.setFocus(id);
                     return;
                 }
@@ -121,22 +121,14 @@ pub const Source = struct {
         var iter = self.selectors.iterator();
         var previous: ?Kind = null;
         while (iter.next()) |selector| {
-            if (selector.value.* == current) {
-                self.selected = selector.key;
-                break;
-            }
+            if (selector.value.* == current) break;
             previous = selector.key;
         } else return;
         switch (key) {
-            .arrow_left => if (previous) |kind| {
-                self.selected = kind;
-                root_focus.setFocus(self.selectors.get(kind) orelse return);
-            },
-            .arrow_right => if (iter.next()) |next| {
-                self.selected = next.key;
-                root_focus.setFocus(next.value.*);
-            } else if (self.selected == .branch) root_focus.setFocus(text_input.getFocus().id),
-            .enter => if (self.selected == .branch) root_focus.setFocus(text_input.getFocus().id),
+            .arrow_left => if (previous) |kind| root_focus.setFocus(self.selectors.get(kind) orelse return),
+            // past the last selector (branch) lies its text input
+            .arrow_right => if (iter.next()) |next| root_focus.setFocus(next.value.*) else root_focus.setFocus(text_input.getFocus().id),
+            .enter => if (self.selectedKind() == .branch) root_focus.setFocus(text_input.getFocus().id),
             else => {},
         }
     }
