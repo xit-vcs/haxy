@@ -5,8 +5,10 @@
         <title>HAXY</title>
         <style>
           html {
-            background-color: rgba(0, 50, 70, 1.0);
-            color: rgba(200, 200, 200, 1.0);
+            --bg: rgba(0, 50, 70, 1.0);
+            --fg: rgba(200, 200, 200, 1.0);
+            background-color: var(--bg);
+            color: var(--fg);
           }
 
           /* no body margin because it could push content past the viewport and

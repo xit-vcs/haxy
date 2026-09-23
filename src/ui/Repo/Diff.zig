@@ -207,13 +207,43 @@ pub fn appendWindow(data: @This(), allocator: std.mem.Allocator, session: *ui.Se
     if (data.window.start > 0) try addLink(allocator, box, "← previous", try data.route.link(session.page_arena, data.window.start -| page_size, data.path));
     for (data.window.hunks) |hunk| {
         if (data.path.len == 0) if (hunk.path) |path| try addLink(allocator, box, path, try data.route.link(session.page_arena, 0, path));
-        if (hunk.text.len != 0) try addLink(allocator, box, hunk.text, "");
+        if (hunk.text.len != 0) try addHunk(allocator, box, hunk.text);
     }
     if (data.window.has_more) try addLink(allocator, box, "next →", try data.route.link(session.page_arena, data.window.start + page_size, data.path));
 }
 
 fn addLink(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), text: []const u8, link: []const u8) !void {
-    var tb = try wgt.TextBox.init(allocator, text, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+    try addSpans(allocator, box, &.{.{ .text = text }}, link);
+}
+
+// a hunk rendered by renderHunk: each line is a right-aligned line number, a
+// space, then the edit's +/-/space prefix. inserted lines are green and
+// deleted lines red. the text box copies the text, so the spans only live
+// until init.
+fn addHunk(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), text: []const u8) !void {
+    var spans: std.ArrayList(wgt.Span) = .empty;
+    defer spans.deinit(allocator);
+    var start: usize = 0;
+    while (start < text.len) {
+        // each span keeps its trailing newline so the text box still breaks there
+        const end = if (std.mem.indexOfScalarPos(u8, text, start, '\n')) |nl| nl + 1 else text.len;
+        const line = text[start..end];
+        const num = std.mem.trimStart(u8, line, " ");
+        const digits = std.mem.indexOfNone(u8, num, "0123456789") orelse num.len;
+        const prefix: u8 = if (digits + 1 < num.len) num[digits + 1] else ' ';
+        const style: wgt.Style = switch (prefix) {
+            '+' => .{ .fg = .{ .ansi = .green } },
+            '-' => .{ .fg = .{ .ansi = .red } },
+            else => .{},
+        };
+        try spans.append(allocator, .{ .text = line, .style = style });
+        start = end;
+    }
+    try addSpans(allocator, box, spans.items, "");
+}
+
+fn addSpans(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), spans: []const wgt.Span, link: []const u8) !void {
+    var tb = try wgt.TextBox.initSpans(allocator, spans, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
     errdefer tb.deinit(allocator);
     tb.getFocus().mode = .all;
     if (link.len != 0) tb.getFocus().kind = .{ .custom = link };

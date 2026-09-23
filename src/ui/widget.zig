@@ -1290,11 +1290,11 @@ pub const AnsiArt = struct {
                 38, 48 => {
                     // truecolor form: 38;2;r;g;b — anything else is ignored
                     if (i + 4 < n and nums[i + 1] == 2) {
-                        const c = Grid.Color{
+                        const c = Grid.Color{ .rgb = .{
                             .r = @truncate(nums[i + 2]),
                             .g = @truncate(nums[i + 3]),
                             .b = @truncate(nums[i + 4]),
-                        };
+                        } };
                         if (nums[i] == 38) style.fg = c else style.bg = c;
                         i += 4;
                     }
@@ -1389,12 +1389,16 @@ pub const AnsiBackground = struct {
     // stays legible over it
     const art_brightness = 35; // percent
 
+    // only truecolor can be dimmed; palette colors pass through
     fn dimColor(color: ?Grid.Color) ?Grid.Color {
         const c = color orelse return null;
-        return .{
-            .r = @intCast(@as(u16, c.r) * art_brightness / 100),
-            .g = @intCast(@as(u16, c.g) * art_brightness / 100),
-            .b = @intCast(@as(u16, c.b) * art_brightness / 100),
+        return switch (c) {
+            .rgb => |v| .{ .rgb = .{
+                .r = @intCast(@as(u16, v.r) * art_brightness / 100),
+                .g = @intCast(@as(u16, v.g) * art_brightness / 100),
+                .b = @intCast(@as(u16, v.b) * art_brightness / 100),
+            } },
+            else => c,
         };
     }
 
@@ -1424,7 +1428,10 @@ pub const AnsiBackground = struct {
                 return if (v >= 1 and v <= 9) 10 else v;
             }
         }.f;
-        return .{ .r = snap(c.r), .g = snap(c.g), .b = snap(c.b) };
+        return switch (c) {
+            .rgb => |v| .{ .rgb = .{ .r = snap(v.r), .g = snap(v.g), .b = snap(v.b) } },
+            else => c,
+        };
     }
 
     fn applyArtBackground(dst: *Grid.Cell, src: Grid.Cell) void {
@@ -1432,16 +1439,21 @@ pub const AnsiBackground = struct {
         dst.style.bg = background_maybe;
         // change unstyled text to contrast with the art behind it
         if (dst.style.fg == null) {
-            if (background_maybe) |background| {
+            // the art is parsed as truecolor, so a palette bg never occurs
+            const background: ?Grid.Color.Rgb = if (background_maybe) |b| switch (b) {
+                .rgb => |v| v,
+                else => null,
+            } else null;
+            if (background) |v| {
                 // use near-black and near-white, which is easier on the eyes
                 // while retaining high contrast
-                const luminance = (@as(u32, background.r) * 299 +
-                    @as(u32, background.g) * 587 +
-                    @as(u32, background.b) * 114) / 1000;
+                const luminance = (@as(u32, v.r) * 299 +
+                    @as(u32, v.g) * 587 +
+                    @as(u32, v.b) * 114) / 1000;
                 dst.style.fg = if (luminance >= 128)
-                    .{ .r = 16, .g = 16, .b = 16 }
+                    .{ .rgb = .{ .r = 16, .g = 16, .b = 16 } }
                 else
-                    .{ .r = 240, .g = 240, .b = 240 };
+                    .{ .rgb = .{ .r = 240, .g = 240, .b = 240 } };
             }
         }
     }
@@ -1596,6 +1608,7 @@ pub const CopyableText = struct {
                     (if (focused) .double else .single)
                 else
                     .hidden;
+                self.selector(i).options.inverted = i == self.selected;
             }
         }
         self.textInput().options.border_style = .single;

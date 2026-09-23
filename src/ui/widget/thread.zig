@@ -478,7 +478,11 @@ pub const Header = struct {
         const selected_id = if (self.selectedTab()) |tab| self.tab_ids.keys()[tab] else null;
         for (self.box.children.keys(), self.box.children.values()) |id, *child| {
             switch (child.widget) {
-                .text_box => |*tb| tb.options.border_style = if (selected_id == id) .single else .hidden,
+                .text_box => |*tb| {
+                    const selected = selected_id == id;
+                    tb.options.border_style = if (selected) .single else .hidden;
+                    tb.options.inverted = selected;
+                },
                 else => {},
             }
         }
@@ -2292,7 +2296,11 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 const lb = self.listBox(i);
                 for (lb.children.keys(), lb.children.values()) |id, *child| {
                     switch (child.widget) {
-                        .text_box => |*tb| tb.options.border_style = if (lb.getFocus().child_id == id) .single else .hidden,
+                        .text_box => |*tb| {
+                            const selected = lb.getFocus().child_id == id;
+                            tb.options.border_style = if (selected) .single else .hidden;
+                            tb.options.inverted = selected;
+                        },
                         else => {},
                     }
                 }

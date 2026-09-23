@@ -83,7 +83,11 @@ pub const Source = struct {
                 .fork => true,
                 .branch => false,
             },
-            .text_box => |*selector| selector.options.border_style = if (id == self.selectors.get(self.selected)) .single else .hidden,
+            .text_box => |*selector| {
+                const selected = id == self.selectors.get(self.selected);
+                selector.options.border_style = if (selected) .single else .hidden;
+                selector.options.inverted = selected;
+            },
             else => {},
         };
         try self.box.build(allocator, constraint, root_focus);

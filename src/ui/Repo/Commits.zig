@@ -622,7 +622,11 @@ pub const View = struct {
         const lb = self.listBox();
         for (lb.children.keys(), lb.children.values()) |id, *child| {
             switch (child.widget) {
-                .text_box => |*tb| tb.options.border_style = if (lb.getFocus().child_id == id) .single else .hidden,
+                .text_box => |*tb| {
+                    const selected = lb.getFocus().child_id == id;
+                    tb.options.border_style = if (selected) .single else .hidden;
+                    tb.options.inverted = selected;
+                },
                 else => {},
             }
         }

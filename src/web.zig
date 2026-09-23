@@ -2042,6 +2042,7 @@ fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: 
         var cur_id: ?usize = null;
         var cur_fg: ?Grid.Color = null;
         var cur_bg: ?Grid.Color = null;
+        var cur_inverted = false;
         var open_tag: ?CellTag = null;
         var first = true;
         for (0..grid.size.width) |x| {
@@ -2061,8 +2062,9 @@ fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: 
             const cell_id = if (covered_by_scroll) null else owners[y * grid.size.width + x];
             const fg = if (covered_by_scroll) null else cell.style.fg;
             const bg = cell.style.bg;
+            const inverted = !covered_by_scroll and cell.style.inverted;
 
-            if (first or cell_id != cur_id or !colorEql(fg, cur_fg) or !colorEql(bg, cur_bg)) {
+            if (first or cell_id != cur_id or !colorEql(fg, cur_fg) or !colorEql(bg, cur_bg) or inverted != cur_inverted) {
                 if (open_tag) |t| try output.appendSlice(allocator, t.closeTag());
 
                 var new_tag: ?CellTag = null;
@@ -2074,17 +2076,18 @@ fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: 
                         };
                     }
                 }
-                if (new_tag == null and (fg != null or bg != null)) new_tag = .plain;
+                if (new_tag == null and (fg != null or bg != null or inverted)) new_tag = .plain;
 
                 if (new_tag) |t| {
                     var style_buf: [64]u8 = undefined;
-                    try t.writeOpenTag(allocator, output, cell_id orelse 0, styleAttr(&style_buf, fg, bg));
+                    try t.writeOpenTag(allocator, output, cell_id orelse 0, styleAttr(&style_buf, fg, bg, inverted));
                 }
 
                 open_tag = new_tag;
                 cur_id = cell_id;
                 cur_fg = fg;
                 cur_bg = bg;
+                cur_inverted = inverted;
                 first = false;
             }
 
@@ -2291,20 +2294,58 @@ fn colorEql(a: ?Grid.Color, b: ?Grid.Color) bool {
     return b == null;
 }
 
-// builds an HTML ` style="color:#rrggbb;background-color:#rrggbb"` attribute
-// from a cell's fg/bg into `buf`, omitting whichever color is unset. returns an
-// empty slice when neither is set.
-fn styleAttr(buf: []u8, fg: ?Grid.Color, bg: ?Grid.Color) []const u8 {
-    if (fg == null and bg == null) return buf[0..0];
+// the 16 ansi colors as the browser shows them (xterm's defaults)
+const ansi_palette = [16]Grid.Color.Rgb{
+    .{ .r = 0x00, .g = 0x00, .b = 0x00 }, .{ .r = 0xcd, .g = 0x00, .b = 0x00 }, .{ .r = 0x00, .g = 0xcd, .b = 0x00 }, .{ .r = 0xcd, .g = 0xcd, .b = 0x00 },
+    .{ .r = 0x00, .g = 0x00, .b = 0xee }, .{ .r = 0xcd, .g = 0x00, .b = 0xcd }, .{ .r = 0x00, .g = 0xcd, .b = 0xcd }, .{ .r = 0xe5, .g = 0xe5, .b = 0xe5 },
+    .{ .r = 0x7f, .g = 0x7f, .b = 0x7f }, .{ .r = 0xff, .g = 0x00, .b = 0x00 }, .{ .r = 0x00, .g = 0xff, .b = 0x00 }, .{ .r = 0xff, .g = 0xff, .b = 0x00 },
+    .{ .r = 0x5c, .g = 0x5c, .b = 0xff }, .{ .r = 0xff, .g = 0x00, .b = 0xff }, .{ .r = 0x00, .g = 0xff, .b = 0xff }, .{ .r = 0xff, .g = 0xff, .b = 0xff },
+};
+
+// resolve any color to rgb: palette colors through the ansi table and the
+// xterm 256-color layout (16 ansi, a 6x6x6 cube, then 24 grays)
+fn colorRgb(color: Grid.Color) Grid.Color.Rgb {
+    return switch (color) {
+        .rgb => |c| c,
+        .ansi => |a| ansi_palette[@intFromEnum(a)],
+        .indexed => |n| if (n < 16)
+            ansi_palette[n]
+        else if (n < 232) blk: {
+            const levels = [6]u8{ 0, 0x5f, 0x87, 0xaf, 0xd7, 0xff };
+            const i = n - 16;
+            break :blk .{ .r = levels[i / 36], .g = levels[(i / 6) % 6], .b = levels[i % 6] };
+        } else blk: {
+            const v: u8 = 8 + (n - 232) * 10;
+            break :blk .{ .r = v, .g = v, .b = v };
+        },
+    };
+}
+
+// builds an HTML ` style="color:…;background-color:…"` attribute from a
+// cell's fg/bg into `buf`, omitting whichever color is unset. an inverted
+// cell swaps the two, falling back to the page's --fg/--bg variables for
+// whichever side is unset. returns an empty slice when nothing is set.
+fn styleAttr(buf: []u8, fg: ?Grid.Color, bg: ?Grid.Color, inverted: bool) []const u8 {
+    if (fg == null and bg == null and !inverted) return buf[0..0];
     const prefix = " style=\"";
     @memcpy(buf[0..prefix.len], prefix);
     var i: usize = prefix.len;
-    if (fg) |c| {
-        const s = std.fmt.bufPrint(buf[i..], "color:#{x:0>2}{x:0>2}{x:0>2};", .{ c.r, c.g, c.b }) catch return buf[0..0];
+    const text = if (inverted) bg else fg;
+    const back = if (inverted) fg else bg;
+    if (text) |c| {
+        const v = colorRgb(c);
+        const s = std.fmt.bufPrint(buf[i..], "color:#{x:0>2}{x:0>2}{x:0>2};", .{ v.r, v.g, v.b }) catch return buf[0..0];
+        i += s.len;
+    } else if (inverted) {
+        const s = std.fmt.bufPrint(buf[i..], "color:var(--bg);", .{}) catch return buf[0..0];
         i += s.len;
     }
-    if (bg) |c| {
-        const s = std.fmt.bufPrint(buf[i..], "background-color:#{x:0>2}{x:0>2}{x:0>2};", .{ c.r, c.g, c.b }) catch return buf[0..0];
+    if (back) |c| {
+        const v = colorRgb(c);
+        const s = std.fmt.bufPrint(buf[i..], "background-color:#{x:0>2}{x:0>2}{x:0>2};", .{ v.r, v.g, v.b }) catch return buf[0..0];
+        i += s.len;
+    } else if (inverted) {
+        const s = std.fmt.bufPrint(buf[i..], "background-color:var(--fg);", .{}) catch return buf[0..0];
         i += s.len;
     }
     buf[i] = '"';

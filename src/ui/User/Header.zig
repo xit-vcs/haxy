@@ -220,7 +220,9 @@ pub const View = struct {
                 else => null,
             };
             if (tb) |t| {
-                t.options.border_style = if (self.getFocus().child_id == id) .single else .hidden;
+                const selected = self.getFocus().child_id == id;
+                t.options.border_style = if (selected) .single else .hidden;
+                t.options.inverted = selected;
             }
         }
         var scroll_constraint = constraint;
