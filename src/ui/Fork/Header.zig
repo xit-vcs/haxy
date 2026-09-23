@@ -204,10 +204,7 @@ pub const View = struct {
                 },
                 else => null,
             };
-            if (text_box) |tab| {
-                tab.options.border_style = if (selected_tab == id) .single else .hidden;
-                tab.options.inverted = selected_tab == id;
-            }
+            if (text_box) |tab| ui.widget.markSelected(tab, selected_tab == id);
             tabs_width += if (child.min_size) |min_size| min_size.width orelse 0 else 0;
         }
 

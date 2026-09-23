@@ -405,10 +405,7 @@ pub const View = struct {
                 },
                 else => null,
             };
-            if (tb) |t| {
-                t.options.border_style = if (selected_tab == id) .single else .hidden;
-                t.options.inverted = selected_tab == id;
-            }
+            if (tb) |t| ui.widget.markSelected(t, selected_tab == id);
             tabs_width += if (child.min_size) |min_size| min_size.width orelse 0 else 0;
         }
 

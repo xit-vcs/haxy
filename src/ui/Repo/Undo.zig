@@ -586,11 +586,7 @@ pub const View = struct {
                 self.shown_failure = failure;
             }
         }
-        for (rows.children.keys(), rows.children.values()) |id, *child| {
-            const is_selected = rows.getFocus().child_id == id;
-            child.widget.text_box.options.border_style = if (is_selected) .single else .hidden;
-            child.widget.text_box.options.inverted = is_selected;
-        }
+        for (rows.children.keys(), rows.children.values()) |id, *child| ui.widget.markSelected(&child.widget.text_box, rows.getFocus().child_id == id);
         const both_fit = if (constraint.max_size.width) |width| width >= list_max_width + detail_min_width else true;
         self.contentBox().children.values()[0].max_size = if (both_fit) .{ .width = list_max_width, .height = null } else null;
         const width = if (constraint.max_size.width) |value| if (both_fit) value - list_max_width else value else detail_min_width;

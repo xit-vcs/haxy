@@ -2064,7 +2064,7 @@ fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: 
             const bg = cell.style.bg;
             const inverted = !covered_by_scroll and cell.style.inverted;
 
-            if (first or cell_id != cur_id or !colorEql(fg, cur_fg) or !colorEql(bg, cur_bg) or inverted != cur_inverted) {
+            if (first or cell_id != cur_id or !std.meta.eql(fg, cur_fg) or !std.meta.eql(bg, cur_bg) or inverted != cur_inverted) {
                 if (open_tag) |t| try output.appendSlice(allocator, t.closeTag());
 
                 var new_tag: ?CellTag = null;
@@ -2289,11 +2289,6 @@ fn renderForms(allocator: std.mem.Allocator, output: *std.ArrayList(u8), root_fo
     }
 }
 
-fn colorEql(a: ?Grid.Color, b: ?Grid.Color) bool {
-    if (a) |av| return if (b) |bv| av.eql(bv) else false;
-    return b == null;
-}
-
 // the 16 ansi colors as the browser shows them (xterm's defaults)
 const ansi_palette = [16]Grid.Color.Rgb{
     .{ .r = 0x00, .g = 0x00, .b = 0x00 }, .{ .r = 0xcd, .g = 0x00, .b = 0x00 }, .{ .r = 0x00, .g = 0xcd, .b = 0x00 }, .{ .r = 0xcd, .g = 0xcd, .b = 0x00 },
@@ -2330,27 +2325,24 @@ fn styleAttr(buf: []u8, fg: ?Grid.Color, bg: ?Grid.Color, inverted: bool) []cons
     const prefix = " style=\"";
     @memcpy(buf[0..prefix.len], prefix);
     var i: usize = prefix.len;
-    const text = if (inverted) bg else fg;
-    const back = if (inverted) fg else bg;
-    if (text) |c| {
-        const v = colorRgb(c);
-        const s = std.fmt.bufPrint(buf[i..], "color:#{x:0>2}{x:0>2}{x:0>2};", .{ v.r, v.g, v.b }) catch return buf[0..0];
-        i += s.len;
-    } else if (inverted) {
-        const s = std.fmt.bufPrint(buf[i..], "color:var(--bg);", .{}) catch return buf[0..0];
-        i += s.len;
-    }
-    if (back) |c| {
-        const v = colorRgb(c);
-        const s = std.fmt.bufPrint(buf[i..], "background-color:#{x:0>2}{x:0>2}{x:0>2};", .{ v.r, v.g, v.b }) catch return buf[0..0];
-        i += s.len;
-    } else if (inverted) {
-        const s = std.fmt.bufPrint(buf[i..], "background-color:var(--fg);", .{}) catch return buf[0..0];
-        i += s.len;
-    }
+    i = cssColor(buf, i, "color", if (inverted) bg else fg, if (inverted) "var(--bg)" else null) orelse return buf[0..0];
+    i = cssColor(buf, i, "background-color", if (inverted) fg else bg, if (inverted) "var(--fg)" else null) orelse return buf[0..0];
     buf[i] = '"';
-    i += 1;
-    return buf[0..i];
+    return buf[0 .. i + 1];
+}
+
+// append `prop:value;` at buf[i..] for the color, or for the fallback when
+// the color is unset (nothing when both are). returns the new end, or null
+// when it doesn't fit.
+fn cssColor(buf: []u8, i: usize, prop: []const u8, color: ?Grid.Color, fallback: ?[]const u8) ?usize {
+    const s = if (color) |c| blk: {
+        const v = colorRgb(c);
+        break :blk std.fmt.bufPrint(buf[i..], "{s}:#{x:0>2}{x:0>2}{x:0>2};", .{ prop, v.r, v.g, v.b }) catch return null;
+    } else if (fallback) |f|
+        std.fmt.bufPrint(buf[i..], "{s}:{s};", .{ prop, f }) catch return null
+    else
+        return i;
+    return i + s.len;
 }
 
 fn appendEscapedHtml(allocator: std.mem.Allocator, out: *std.ArrayList(u8), input: []const u8) !void {

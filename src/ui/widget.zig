@@ -118,6 +118,13 @@ pub const back_button_width = 3;
 const back_button_height = 3;
 const back_kind = "back";
 
+// draw a text box as the selected one of its group: bordered and inverted,
+// while the rest stay borderless
+pub fn markSelected(text_box: *wgt.TextBox, selected: bool) void {
+    text_box.options.border_style = if (selected) .single else .hidden;
+    text_box.options.inverted = selected;
+}
+
 pub fn addBackButton(allocator: std.mem.Allocator, box: *wgt.Box(Widget), session: *ui.Session) !void {
     if (!session.is_terminal) return;
     var back = try wgt.TextBox.init(allocator, "←", .{ .border_style = .hidden, .wrap_kind = .none });
@@ -1389,17 +1396,22 @@ pub const AnsiBackground = struct {
     // stays legible over it
     const art_brightness = 35; // percent
 
-    // only truecolor can be dimmed; palette colors pass through
-    fn dimColor(color: ?Grid.Color) ?Grid.Color {
+    // the art parser only emits truecolor, so a palette color never occurs
+    fn artRgb(color: ?Grid.Color) ?Grid.Color.Rgb {
         const c = color orelse return null;
         return switch (c) {
-            .rgb => |v| .{ .rgb = .{
-                .r = @intCast(@as(u16, v.r) * art_brightness / 100),
-                .g = @intCast(@as(u16, v.g) * art_brightness / 100),
-                .b = @intCast(@as(u16, v.b) * art_brightness / 100),
-            } },
-            else => c,
+            .rgb => |v| v,
+            else => null,
         };
+    }
+
+    fn dimColor(color: ?Grid.Color) ?Grid.Color {
+        const v = artRgb(color) orelse return color;
+        return .{ .rgb = .{
+            .r = @intCast(@as(u16, v.r) * art_brightness / 100),
+            .g = @intCast(@as(u16, v.g) * art_brightness / 100),
+            .b = @intCast(@as(u16, v.b) * art_brightness / 100),
+        } };
     }
 
     fn buildArt(self: *AnsiBackground, allocator: std.mem.Allocator, size: layout.Size, root_focus: *Focus) !void {
@@ -1422,16 +1434,13 @@ pub const AnsiBackground = struct {
     // hide text there; the ≤9/255 shift is imperceptible on terminals that
     // actually render truecolor.
     fn sgrSafe(color: ?Grid.Color) ?Grid.Color {
-        const c = color orelse return null;
+        const v = artRgb(color) orelse return color;
         const snap = struct {
-            fn f(v: u8) u8 {
-                return if (v >= 1 and v <= 9) 10 else v;
+            fn f(c: u8) u8 {
+                return if (c >= 1 and c <= 9) 10 else c;
             }
         }.f;
-        return switch (c) {
-            .rgb => |v| .{ .rgb = .{ .r = snap(v.r), .g = snap(v.g), .b = snap(v.b) } },
-            else => c,
-        };
+        return .{ .rgb = .{ .r = snap(v.r), .g = snap(v.g), .b = snap(v.b) } };
     }
 
     fn applyArtBackground(dst: *Grid.Cell, src: Grid.Cell) void {
@@ -1439,12 +1448,7 @@ pub const AnsiBackground = struct {
         dst.style.bg = background_maybe;
         // change unstyled text to contrast with the art behind it
         if (dst.style.fg == null) {
-            // the art is parsed as truecolor, so a palette bg never occurs
-            const background: ?Grid.Color.Rgb = if (background_maybe) |b| switch (b) {
-                .rgb => |v| v,
-                else => null,
-            } else null;
-            if (background) |v| {
+            if (artRgb(background_maybe)) |v| {
                 // use near-black and near-white, which is easier on the eyes
                 // while retaining high contrast
                 const luminance = (@as(u32, v.r) * 299 +

@@ -510,11 +510,7 @@ pub const View = struct {
 
         const list = self.listBox();
         for (list.children.keys(), list.children.values()) |id, *child| switch (child.widget) {
-            .text_box => |*text_box| {
-                const selected = list.getFocus().child_id == id;
-                text_box.options.border_style = if (selected) .single else .hidden;
-                text_box.options.inverted = selected;
-            },
+            .text_box => |*text_box| ui.widget.markSelected(text_box, list.getFocus().child_id == id),
             else => {},
         };
 
@@ -720,9 +716,7 @@ pub const Header = struct {
                     .text_box => |*text_box| text_box,
                     else => continue,
                 };
-                const selected = self.box.getFocus().child_id == id;
-                tab.options.border_style = if (selected) .single else .hidden;
-                tab.options.inverted = selected;
+                ui.widget.markSelected(tab, self.box.getFocus().child_id == id);
             }
             try self.box.build(allocator, constraint, root_focus);
         }

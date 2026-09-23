@@ -14,6 +14,8 @@ pub const page_size = 10;
 pub const Hunk = struct {
     path: ?[]const u8 = null,
     text: []const u8,
+    // one byte per line of text: the edit's +/-/space prefix
+    prefixes: []const u8,
 };
 pub const Window = struct {
     hunks: []const Hunk = &.{},
@@ -143,9 +145,11 @@ pub fn render(
                 has_more = true;
                 break :file_loop;
             }
+            const rendered = try renderHunk(repo_kind, repo_opts, arena, &hunk_iter, &hunk);
             try hunks.append(arena, .{
                 .path = if (path_attached) null else try arena.dupe(u8, pair.path),
-                .text = try renderHunk(repo_kind, repo_opts, arena, &hunk_iter, &hunk),
+                .text = rendered.text,
+                .prefixes = rendered.prefixes,
             });
             path_attached = true;
         }
@@ -154,16 +158,17 @@ pub fn render(
     return .{ .hunks = try hunks.toOwnedSlice(arena), .start = start, .has_more = has_more };
 }
 
-// render edits with right-aligned line numbers
+// render edits with right-aligned line numbers, alongside each line's prefix
 fn renderHunk(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     arena: std.mem.Allocator,
     hunk_iter: *df.HunkIterator(repo_kind, repo_opts),
     hunk: *df.Hunk(repo_kind, repo_opts),
-) ![]const u8 {
+) !struct { text: []const u8, prefixes: []const u8 } {
     var out: std.Io.Writer.Allocating = .init(arena);
     defer out.deinit();
+    var prefixes: std.ArrayList(u8) = .empty;
     var max_num: usize = 1;
     for (hunk.edits.items) |edit| {
         const n = editLineNum(edit) + 1;
@@ -185,8 +190,9 @@ fn renderHunk(
         const num = editLineNum(edit) + 1;
         try out.writer.splatByteAll(' ', width - std.fmt.count("{d}", .{num}));
         try out.writer.print("{d} {c}{s}", .{ num, prefix, text });
+        try prefixes.append(arena, prefix);
     }
-    return out.toOwnedSlice();
+    return .{ .text = try out.toOwnedSlice(), .prefixes = try prefixes.toOwnedSlice(arena) };
 }
 
 // the line number to show for an edit: the new-side number for kept and inserted
@@ -207,7 +213,7 @@ pub fn appendWindow(data: @This(), allocator: std.mem.Allocator, session: *ui.Se
     if (data.window.start > 0) try addLink(allocator, box, "← previous", try data.route.link(session.page_arena, data.window.start -| page_size, data.path));
     for (data.window.hunks) |hunk| {
         if (data.path.len == 0) if (hunk.path) |path| try addLink(allocator, box, path, try data.route.link(session.page_arena, 0, path));
-        if (hunk.text.len != 0) try addHunk(allocator, box, hunk.text);
+        if (hunk.text.len != 0) try addHunk(allocator, box, hunk);
     }
     if (data.window.has_more) try addLink(allocator, box, "next →", try data.route.link(session.page_arena, data.window.start + page_size, data.path));
 }
@@ -216,27 +222,21 @@ fn addLink(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), text: []const
     try addSpans(allocator, box, &.{.{ .text = text }}, link);
 }
 
-// a hunk rendered by renderHunk: each line is a right-aligned line number, a
-// space, then the edit's +/-/space prefix. inserted lines are green and
-// deleted lines red. the text box copies the text, so the spans only live
-// until init.
-fn addHunk(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), text: []const u8) !void {
+// one span per line, inserted lines green and deleted lines red. the text
+// box copies the text, so the spans only live until init.
+fn addHunk(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), hunk: Hunk) !void {
     var spans: std.ArrayList(wgt.Span) = .empty;
     defer spans.deinit(allocator);
     var start: usize = 0;
-    while (start < text.len) {
+    for (hunk.prefixes) |prefix| {
         // each span keeps its trailing newline so the text box still breaks there
-        const end = if (std.mem.indexOfScalarPos(u8, text, start, '\n')) |nl| nl + 1 else text.len;
-        const line = text[start..end];
-        const num = std.mem.trimStart(u8, line, " ");
-        const digits = std.mem.indexOfNone(u8, num, "0123456789") orelse num.len;
-        const prefix: u8 = if (digits + 1 < num.len) num[digits + 1] else ' ';
+        const end = if (std.mem.indexOfScalarPos(u8, hunk.text, start, '\n')) |nl| nl + 1 else hunk.text.len;
         const style: wgt.Style = switch (prefix) {
             '+' => .{ .fg = .{ .ansi = .green } },
             '-' => .{ .fg = .{ .ansi = .red } },
             else => .{},
         };
-        try spans.append(allocator, .{ .text = line, .style = style });
+        try spans.append(allocator, .{ .text = hunk.text[start..end], .style = style });
         start = end;
     }
     try addSpans(allocator, box, spans.items, "");

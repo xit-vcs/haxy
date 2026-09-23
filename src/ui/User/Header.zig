@@ -219,11 +219,7 @@ pub const View = struct {
                 },
                 else => null,
             };
-            if (tb) |t| {
-                const selected = self.getFocus().child_id == id;
-                t.options.border_style = if (selected) .single else .hidden;
-                t.options.inverted = selected;
-            }
+            if (tb) |t| ui.widget.markSelected(t, self.getFocus().child_id == id);
         }
         var scroll_constraint = constraint;
         scroll_constraint.min_size.width = constraint.max_size.width orelse constraint.min_size.width;

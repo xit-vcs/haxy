@@ -92,11 +92,7 @@ pub const Source = struct {
         const selected = self.selectedKind();
         for (self.box.children.keys(), self.box.children.values()) |id, *child| switch (child.widget) {
             .text_input => child.hidden = selected == .fork,
-            .text_box => |*selector| {
-                const is_selected = id == self.selectors.get(selected);
-                selector.options.border_style = if (is_selected) .single else .hidden;
-                selector.options.inverted = is_selected;
-            },
+            .text_box => |*selector| ui.widget.markSelected(selector, id == self.selectors.get(selected)),
             else => {},
         };
         try self.box.build(allocator, constraint, root_focus);
