@@ -368,28 +368,18 @@ fn commitDiff(
         var ancestry = try Ancestry.init(state, io, allocator, base, tip);
         defer ancestry.deinit();
 
-        // the walk is bracketed here because it may run twice
         progress.report(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .walking_commit, .estimated_total_items = 0 } });
-        defer progress.report(repo_opts, io, progress_ctx_maybe, .{ .end = .walking_commit });
         try ancestry.finish(progress_ctx_maybe);
+        progress.report(repo_opts, io, progress_ctx_maybe, .{ .end = .walking_commit });
 
-        // timestamps only choose the walk's order, so a commit the base reached
-        // can be passed before the tip turns out to reach it too. that can only
-        // make a removal wrong, never an addition. a fast-forward removes
-        // nothing, which the base tip picking up the tip's flag proves. anything
-        // else is settled by walking until nothing is left to carry down.
+        // the walk stops at the shared history, so it trusts timestamps: a
+        // commit dated later than a descendant can be passed from the base
+        // side before the tip turns out to reach it too, and its postings are
+        // then dropped. settling that would mean walking the whole history.
+        // a wrong addition only re-puts postings, so a fast-forward removes
+        // nothing, which the base tip picking up the tip's flag proves.
         const base_node = ancestry.nodes.get(ancestry.tips[0]) orelse unreachable;
         const fast_forward = base_node.flags & Ancestry.two != 0;
-        if (!fast_forward) {
-            var candidates = false;
-            var flagged = ancestry.nodes.valueIterator();
-            while (flagged.next()) |node| {
-                if (node.flags & Ancestry.both == Ancestry.one) candidates = true;
-            }
-            if (candidates) while (try ancestry.step()) {
-                progress.report(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .walking_commit });
-            };
-        }
 
         var iter = ancestry.nodes.iterator();
         while (iter.next()) |entry| {
