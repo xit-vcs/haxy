@@ -200,7 +200,7 @@ pub const RoutablePage = union(enum) {
 
     // the "key:value" segments of a url tail, collected in any order
     const Params = struct {
-        const ParamKey = enum { start, line, branch, tag, object, base, patchrev, theirs, find, search, from, moment };
+        const ParamKey = enum { start, line, branch, tag, object, base, patchrev, theirs, find, search, from, moment, merge };
 
         // a branch:/tag:/object: param; the value stays url-encoded
         const RefParam = struct { kind: RefOrOid, value: []const u8 };
@@ -288,6 +288,7 @@ pub const RoutablePage = union(enum) {
     const search_seg = @tagName(Params.ParamKey.search) ++ ":";
     const from_seg = @tagName(Params.ParamKey.from) ++ ":";
     const base_seg = @tagName(Params.ParamKey.base) ++ ":";
+    const merge_seg = @tagName(Params.ParamKey.merge) ++ ":";
     const theirs_seg = @tagName(Params.ParamKey.theirs) ++ ":";
     const issue_seg = "issue:";
     const patch_seg = "patch:";
@@ -387,6 +388,9 @@ pub const RoutablePage = union(enum) {
         search: Array(search_route_max_len) = .{},
         // the commit the list starts at ("" = the ref's own commit).
         from: Array(ref_route_max_len) = .{},
+        // a merge commit whose brought-in commits the page lists, resolved to an
+        // object and base on load. set alone.
+        merge: Array(ref_route_max_len) = .{},
         // what the pane shows for the commit the log walks from.
         content: Content = .{ .diff = .{} },
 
@@ -487,6 +491,14 @@ pub const RoutablePage = union(enum) {
                     forkCommitsRoute(f.identity, f.id, value, start, path)
                 else
                     null,
+            };
+        }
+
+        // fork commits routes carry no base, so only a repo can list a merge's commits
+        pub fn commitsMergeRoute(self: RepoLocation, oid: []const u8) ?RoutablePage {
+            return switch (self) {
+                .repo => |repo_identity| repoCommitsMergeRoute(repo_identity, oid),
+                .fork => null,
             };
         }
 
@@ -663,6 +675,13 @@ pub const RoutablePage = union(enum) {
                 .start = start,
                 .path = Array(repo_route_max_len).from(path) orelse return null,
             } },
+        } };
+    }
+
+    pub fn repoCommitsMergeRoute(identity: []const u8, oid: []const u8) ?RoutablePage {
+        return .{ .repo_commits = .{
+            .name = Array(repo_identity_max_len).from(identity) orelse return null,
+            .merge = Array(ref_route_max_len).from(oid) orelse return null,
         } };
     }
 
@@ -1031,6 +1050,7 @@ pub const RoutablePage = union(enum) {
                 if (c.base_oid.len != 0) try out.writer.print("/" ++ base_seg ++ "{s}", .{c.base_oid.slice()});
                 if (c.search.len != 0) try out.writer.print("/" ++ search_seg ++ "{s}", .{c.search.slice()});
                 if (c.from.len != 0) try out.writer.print("/" ++ from_seg ++ "{s}", .{c.from.slice()});
+                if (c.merge.len != 0) try out.writer.print("/" ++ merge_seg ++ "{s}", .{c.merge.slice()});
                 switch (c.content) {
                     .diff => |d| {
                         if (d.start != 0) try out.writer.print("/" ++ start_seg ++ "{d}", .{d.start});
@@ -1620,6 +1640,10 @@ pub const RoutablePage = union(enum) {
         }
         if (std.mem.eql(u8, tab, commits_seg)) {
             params.scanPairs(&segments) catch return null;
+            if (params.values.get(.merge)) |oid| {
+                if (!params.only(&.{.merge}) or segments.next() != null) return null;
+                return repoCommitsMergeRoute(pair, oid);
+            }
             if (!params.only(&.{ .start, .branch, .tag, .object, .base, .search, .from })) return null;
             const base_oid = params.values.get(.base) orelse "";
             const search = params.values.get(.search) orelse "";
@@ -1680,6 +1704,7 @@ pub const RoutablePage = union(enum) {
                 std.mem.eql(u8, a_c.base_oid.slice(), b.repo_commits.base_oid.slice()) and
                 std.mem.eql(u8, a_c.search.slice(), b.repo_commits.search.slice()) and
                 std.mem.eql(u8, a_c.from.slice(), b.repo_commits.from.slice()) and
+                std.mem.eql(u8, a_c.merge.slice(), b.repo_commits.merge.slice()) and
                 switch (a_c.content) {
                     .diff => |a_d| switch (b.repo_commits.content) {
                         .diff => |b_d| a_d.start == b_d.start and std.mem.eql(u8, a_d.path.slice(), b_d.path.slice()),

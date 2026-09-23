@@ -1126,6 +1126,8 @@ fn seedPatches(
         tags: []const u8,
         status: ?evt.Patch.StatusKind,
         alpha_edit: ?ScatterEdit = null,
+        // based behind master, so merging it makes a merge commit
+        behind_master: bool = false,
     }{
         .{
             .title = "Draft a faster dependency scanner",
@@ -1138,6 +1140,7 @@ fn seedPatches(
             .description = "Delete the compatibility loader now that the replacement format has shipped and the migration warning has been available for a full release.",
             .tags = "cleanup config",
             .status = .merged,
+            .behind_master = true,
         },
         .{
             .title = "Cache parsed manifests between commands",
@@ -1194,8 +1197,7 @@ fn seedPatches(
             defer arena.deinit();
             const aa = arena.allocator();
             var base_oid = (try target_repo.readRef(io, .{ .kind = .head, .name = "master" })) orelse return error.NotFound;
-            var contents: [3][]const u8 = undefined;
-            const file_path: []const u8, const count: usize = if (patch.alpha_edit) |edit| blk: {
+            if (patch.alpha_edit != null or patch.behind_master) {
                 // v30 precedes the last scatter commit, even after the sample merge
                 const tag_oid = (try target_repo.readRef(io, .{ .kind = .tag, .name = "v30" })) orelse return error.NotFound;
                 var moment = try target_repo.core.latestMoment();
@@ -1206,6 +1208,9 @@ fn seedPatches(
                     .tag => |value| value.target,
                     else => return error.InvalidObject,
                 };
+            }
+            var contents: [3][]const u8 = undefined;
+            const file_path: []const u8, const count: usize = if (patch.alpha_edit) |edit| blk: {
                 // rev 29 first changes line 4; edit that line or the one above it
                 contents[0] = try scatterContent(aa, 0, 28, edit);
                 break :blk .{ "src/alpha.txt", 1 };

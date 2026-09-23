@@ -7,6 +7,7 @@ const rp = xit.repo;
 const Diff = @import("Diff.zig");
 const Undo = @import("Undo.zig");
 const obj = xit.object;
+const mrg = xit.merge;
 const srch_cmmt = @import("../../search_commit.zig");
 const srch = @import("../../search.zig");
 const xitui = xit.xitui;
@@ -36,6 +37,8 @@ pub const Commit = struct {
     committer: ui.Author = .unknown,
     // the committer timestamp, human-readable.
     timestamp: []const u8,
+    // whether it has a second parent.
+    merge: bool = false,
     stats: ?xit.patch.CommitStats = null,
     window: Diff.Window = .{},
 };
@@ -262,8 +265,37 @@ fn commitEntry(
         else
             .unknown,
         .timestamp = try Undo.formatTimestamp(aa, std.math.cast(i64, md.timestamp) orelse -1),
+        .merge = if (md.parent_oids) |parent_oids| parent_oids.len > 1 else false,
         .stats = if (repo_kind == .xit) try repo.commitStats(io, gpa, .{ .oid = &commit_object.oid }) else null,
     };
+}
+
+// what merge `merge_oid` brought in: its second parent's log back to the
+// parents' common ancestor, or the whole log when they share none.
+pub fn resolveMerge(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    arena: *std.heap.ArenaAllocator,
+    repo: *rp.Repo(repo_kind, repo_opts),
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    merge_oid: []const u8,
+) !struct { oid: []const u8, base_oid: []const u8 } {
+    const aa = arena.allocator();
+    evt.PatchRev.validateOid(repo_opts.hash, merge_oid) catch return error.NotFound;
+    var moment = try repo.core.latestMoment();
+    const state = rp.Repo(repo_kind, repo_opts).State(.read_only){ .core = &repo.core, .extra = .{ .moment = &moment } };
+    var merge = obj.Object(repo_kind, repo_opts).initCommit(state, io, gpa, merge_oid[0..comptime xit.hash.hexLen(repo_opts.hash)]) catch return error.NotFound;
+    defer merge.deinit();
+    const parent_oids = merge.content.commit.metadata.parent_oids orelse &.{};
+    if (parent_oids.len < 2) return error.NotFound;
+    const oid = try aa.dupe(u8, &parent_oids[1]);
+    const base_oid = mrg.commonAncestor(repo_kind, repo_opts, state, io, gpa, &parent_oids[0], &parent_oids[1]) catch |err| switch (err) {
+        error.NoCommonAncestor => return .{ .oid = oid, .base_oid = "" },
+        error.MultipleMergeBases => return error.NotFound,
+        else => return err,
+    };
+    return .{ .oid = oid, .base_oid = try aa.dupe(u8, &base_oid) };
 }
 
 // an author or committer line without its timestamp.
@@ -435,10 +467,10 @@ pub const View = struct {
                     // js off (the browser follows it, rooting the list there);
                     // with wasm the click just selects it and swaps the diff pane.
                     const content = if (index == 0) data.content else Content{ .diff = .{} };
-                    try addRow(allocator, &list_box, firstLine(commit.message), try commitRowLink(session.page_arena, data, commit, content));
+                    try addRow(allocator, &list_box, firstLine(commit.message), try commitRowLink(session.page_arena, data, commit, content), if (commit.merge) "(merge)" else "");
                 }
                 if (data.next_start) |next| {
-                    try addRow(allocator, &list_box, "next →", try nextPageLink(session.page_arena, data, next));
+                    try addRow(allocator, &list_box, "next →", try nextPageLink(session.page_arena, data, next), "");
                 }
                 if (list_box.children.count() > 0) list_box.getFocus().child_id = list_box.children.keys()[0];
                 break :blk try wgt.Scroll(ui.Widget).init(allocator, .{ .box = list_box }, .{ .direction = .vert, .web_native = !session.is_terminal, .fill = true });
@@ -482,31 +514,17 @@ pub const View = struct {
         };
     }
 
-    fn addRow(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8, link: []const u8) !void {
-        var row = try wgt.TextBox.init(allocator, label, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .word });
+    fn addRow(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8, link: []const u8, bottom_label: []const u8) !void {
+        var row = try wgt.TextBox.init(allocator, label, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .word, .bottom_label = bottom_label });
         errdefer row.deinit(allocator);
         row.getFocus().mode = .all;
         if (link.len != 0) row.getFocus().kind = .{ .custom = link };
         try box.children.put(allocator, row.getFocus().id, .{ .widget = .{ .text_box = row }, .rect = null, .min_size = null, .max_size = .{ .width = null, .height = 5 } });
     }
 
-    // a focusable window-navigation row ("previous"/"next"). it's a link to this
-    // commit's route at `target_start`, so activating it (the host follows the
-    // "a:" link) reloads the page on the adjacent window — same on TUI and web.
-    fn addNavLink(self: *View, allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8, oid: []const u8, target_start: usize, path: []const u8) !void {
-        const link = try commitsLink(self.session.page_arena, self.data, oid, target_start, path);
+    // a focusable row following the "a:" `link`.
+    fn addLink(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8, link: []const u8) !void {
         var tb = try wgt.TextBox.init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
-        errdefer tb.deinit(allocator);
-        tb.getFocus().mode = .all;
-        tb.getFocus().kind = .{ .custom = link };
-        try box.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
-    }
-
-    // a focusable row for the top of the diff pane linking to the files tab at
-    // this commit's tree, so its files are always viewable as of this object.
-    fn addViewFilesLink(self: *View, allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), oid: []const u8) !void {
-        const link = try filesObjectLink(self.session.page_arena, self.data.location, oid);
-        var tb = try wgt.TextBox.init(allocator, "view files at this commit", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
         errdefer tb.deinit(allocator);
         tb.getFocus().mode = .all;
         tb.getFocus().kind = .{ .custom = link };
@@ -666,7 +684,7 @@ pub const View = struct {
 
         switch (self.paneContent(sel)) {
             .message => {
-                try self.addNavLink(allocator, inner, "← back to diff", commit.oid, 0, "");
+                try addLink(allocator, inner, "← back to diff", try commitsLink(self.session.page_arena, self.data, commit.oid, 0, ""));
                 try self.addMessageBox(allocator, inner, commit, .whole);
             },
             .diff => |d| {
@@ -695,6 +713,9 @@ pub const View = struct {
                         tb.getFocus().mode = .all;
                         try inner.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
                     }
+                    if (commit.merge) if (self.data.location.commitsMergeRoute(commit.oid)) |route| {
+                        try addLink(allocator, inner, "view commits from this merge", try std.fmt.allocPrint(self.session.page_arena.allocator(), "a:{s}", .{try route.toUrl(self.session.page_arena)}));
+                    };
                     if (commit.stats) |stats| {
                         var text: std.Io.Writer.Allocating = .init(allocator);
                         defer text.deinit();
@@ -711,7 +732,7 @@ pub const View = struct {
                         tb.getFocus().mode = .all;
                         try inner.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
                     }
-                    try self.addViewFilesLink(allocator, inner, commit.oid);
+                    try addLink(allocator, inner, "view files at this commit", try filesObjectLink(self.session.page_arena, self.data.location, commit.oid));
                 }
 
                 try (Diff{

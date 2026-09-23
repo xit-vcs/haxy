@@ -109,6 +109,10 @@ pub fn init(
         .repo_commits => |*c| c.from.slice(),
         else => "",
     };
+    const commits_merge: []const u8 = switch (route) {
+        .repo_commits => |*c| c.merge.slice(),
+        else => "",
+    };
     // the refs tab windows one column at a time: `refs_from` (a url-encoded
     // ref name) roots `refs_kind`'s column, the other stays at its first window.
     const refs_kind: ui.RoutablePage.RefKind = switch (route) {
@@ -295,16 +299,23 @@ pub fn init(
                                     else => .{ .identity = repo_identity.identity, .failure = @errorName(err) },
                                 };
                             }
+                            // a merge: route stands for the log of what the merge brought in
+                            const ref_or_oid: ?ui.RoutablePage.RefOrOid, const ref_value, const base_oid = if (commits_merge.len == 0)
+                                .{ requested_ref_or_oid, requested_ref_value, commits_base_oid }
+                            else merged: {
+                                const merged = try Commits.resolveMerge(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, commits_merge);
+                                break :merged .{ .object, merged.oid, merged.base_oid };
+                            };
                             const files_data = if (patchrev_id.len != 0)
                                 try Files.initPatchRev(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, location, patchrev_id, files_dir, files_line)
                             else
-                                try Files.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, location, requested_ref_or_oid, requested_ref_value, files_dir, files_line, files_find);
+                                try Files.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, location, ref_or_oid, ref_value, files_dir, files_line, files_find);
                             const changes_data: Changes = if (route == .repo_diff)
                                 .{ .diff = try Diff.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, route.repo_diff) }
                             else if (patchrev_id.len != 0) diff: {
                                 const diff_route = ui.RoutablePage.repoPatchRevDiffRoute(repo_identity.identity, patchrev_id, 0, "") orelse return error.RouteTooLong;
                                 break :diff .{ .diff = try Diff.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, diff_route.repo_diff) };
-                            } else .{ .commits = try Commits.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, session.haxy_moment, location, requested_ref_or_oid, requested_ref_value, commits_content, commits_base_oid, commits_search, commits_from) };
+                            } else .{ .commits = try Commits.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, session.haxy_moment, location, ref_or_oid, ref_value, commits_content, base_oid, commits_search, commits_from) };
                             const target_branch = if (files_data.ref_or_oid == .branch) files_data.ref_or_oid_value else "";
                             break :blk .{
                                 files_data,
