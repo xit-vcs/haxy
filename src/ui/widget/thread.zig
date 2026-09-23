@@ -311,6 +311,7 @@ fn loadSearchWindow(
     if (comptime kind == .discuss) {
         // discussions list by activity but are indexed by creation, so the
         // matching ids are gathered and the listed set is walked in its order
+        // until every one has been found
         var matches: std.AutoHashMapUnmanaged([evt.event_id_size]u8, void) = .empty;
         var results = try srch_thrd.query(DB, hash_kind, kind, haxy_moment, aa, query_text, null);
         while (try results.next()) |key| try matches.put(aa, (try resultKey(key))[@sizeOf(u64)..].*, {});
@@ -320,7 +321,7 @@ fn loadSearchWindow(
             const pair = try ((try iter.next()) orelse break).readKeyValuePair();
             var order_key: OrderKey = undefined;
             _ = try pair.key_cursor.readBytes(&order_key);
-            if (!matches.contains(order_key[@sizeOf(u64)..].*)) continue;
+            if (!matches.remove(order_key[@sizeOf(u64)..].*)) continue;
             try keys.append(aa, order_key);
             if (windowKnown(Data, keys.items, root)) break;
         }
