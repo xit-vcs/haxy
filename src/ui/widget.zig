@@ -1612,7 +1612,6 @@ pub const CopyableText = struct {
                     (if (focused) .double else .single)
                 else
                     .hidden;
-                self.selector(i).options.inverted = i == self.selected;
             }
         }
         self.textInput().options.border_style = .single;
