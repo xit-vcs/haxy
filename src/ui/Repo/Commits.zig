@@ -61,6 +61,9 @@ search: ?[]const u8 = null,
 // whether the viewed ref has a commit index, so the search box shows and a
 // search: route resolves. travels in the page json for the wasm view.
 search_available: bool = false,
+// an object view or a base-bounded list searches the default branch: that
+// branch's url-encoded name, when it is indexed
+default_branch: []const u8 = "",
 
 const Self = @This();
 
@@ -148,13 +151,27 @@ pub fn init(
     var count: usize = 0;
     var next_start: ?[]const u8 = null;
     var search_available = false;
+    var default_branch: []const u8 = "";
     var searched = false;
 
-    // the index covers a repository's branch and tag tips, so a fork or an
-    // object view gets no search box and refuses a search: url. nor does a list
-    // bounded by a base, whose version also covers the commits before it.
+    // the index covers a repository's branch and tag tips, so a fork gets no
+    // search box and refuses a search: url. an object view or a list bounded by
+    // a base, whose version would also cover the commits before it, searches
+    // the default branch instead.
     if (comptime repo_kind == .xit) index: {
-        if (location != .repo or resolved.ref_or_oid == .object or base_oid.len != 0) break :index;
+        if (location != .repo) break :index;
+        if (resolved.ref_or_oid == .object or base_oid.len != 0) {
+            var head_buffer: [xit.ref.MAX_REF_CONTENT_SIZE]u8 = undefined;
+            const branch = switch (repo.head(io, &head_buffer) catch break :index) {
+                .ref => |ref| ref.name,
+                .oid => break :index,
+            };
+            const tip = (try repo.readRef(io, .{ .kind = .head, .name = branch })) orelse break :index;
+            if (try srch_cmmt.lookup(repo_opts, moment, &tip) == null) break :index;
+            search_available = true;
+            default_branch = try ui.urlEncodeRef(aa, branch);
+            break :index;
+        }
         const index = (try srch_cmmt.lookup(repo_opts, moment, &resolved.oid)) orelse break :index;
         search_available = true;
         const text = query orelse break :index;
@@ -233,6 +250,7 @@ pub fn init(
         .content = try pageContent(aa, content),
         .search = query,
         .search_available = search_available,
+        .default_branch = default_branch,
     };
 }
 
@@ -787,8 +805,12 @@ pub const View = struct {
     // empty query leaves the results for the plain log.
     fn submit(self: *View, text: []const u8) !void {
         if (text.len == 0 and self.data.search == null) return;
-        const route = self.data.location.commitsRoute(self.data.ref_or_oid, self.data.ref_or_oid_value, 0, "", self.data.base_oid) orelse return;
-        try self.session.navigate(route.withSearch(text) orelse return);
+        // an object view or a base-bounded list searches the default branch, so the url says so
+        const route = if (self.data.default_branch.len != 0)
+            self.data.location.commitsRoute(.branch, self.data.default_branch, 0, "", "")
+        else
+            self.data.location.commitsRoute(self.data.ref_or_oid, self.data.ref_or_oid_value, 0, "", self.data.base_oid);
+        try self.session.navigate((route orelse return).withSearch(text) orelse return);
     }
 
     fn listInput(self: *View, key: Key, root_focus: *Focus) !void {
