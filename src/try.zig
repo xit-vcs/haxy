@@ -446,136 +446,136 @@ pub fn main(init: std.process.Init) !void {
             const issue_data = [_]struct {
                 title: []const u8,
                 description: []const u8,
-                tags: []const u8,
+                labels: []const u8,
                 status: evt.Issue.Status = .open,
             }{
                 .{
                     .title = "Crash on startup when config file is missing",
                     .description = "Running the program without a config file present dereferences a null pointer and segfaults. Fall back to the built-in defaults and log a warning instead.",
-                    .tags = "bug priority-high crash",
+                    .labels = "bug priority-high crash",
                 },
                 .{
                     .title = "Support dark mode in the settings panel",
                     .description = "The settings panel is always rendered with the light palette even when the rest of the app is in dark mode. Read the active theme and pick colors accordingly.",
-                    .tags = "enhancement ui theme",
+                    .labels = "enhancement ui theme",
                 },
                 .{
                     .title = "Memory leak when reconnecting after network failure",
                     .description = "Each reconnect allocates a new connection state without freeing the previous one. After a flaky network session, memory usage grows by several megabytes per hour.",
-                    .tags = "bug memory networking",
+                    .labels = "bug memory networking",
                     .status = .closed,
                 },
                 .{
                     .title = "Document the plugin API",
                     .description = "The plugin interface has no documentation beyond the header comments. Add a guide covering the lifecycle hooks, the event callbacks, and a minimal working plugin.",
-                    .tags = "documentation plugins",
+                    .labels = "documentation plugins",
                 },
                 .{
                     .title = "Slow file indexing on large directories",
                     .description = "Indexing a directory with more than 100k files takes several minutes because every entry is stat'd twice. Cache the first stat result and batch the reads.",
-                    .tags = "performance indexing",
+                    .labels = "performance indexing",
                 },
                 .{
                     .title = "Add keyboard shortcut for quick search",
                     .description = "Opening the search box currently requires clicking the toolbar icon. Bind a shortcut and show it in the tooltip so keyboard users can search without the mouse.",
-                    .tags = "enhancement ux keyboard",
+                    .labels = "enhancement ux keyboard",
                 },
                 .{
                     .title = "Unicode filenames are garbled in the export dialog",
                     .description = "Filenames containing non-ASCII characters display as replacement characters in the export dialog. The dialog decodes the path as Latin-1 instead of UTF-8.",
-                    .tags = "bug unicode i18n",
+                    .labels = "bug unicode i18n",
                 },
                 .{
                     .title = "Flaky test: integration suite times out on CI",
                     .description = "The integration suite intermittently exceeds the CI time limit because the server fixture waits for a fixed 30 seconds. Poll for readiness instead of sleeping.",
-                    .tags = "bug testing ci",
+                    .labels = "bug testing ci",
                 },
                 .{
                     .title = "Upgrade bundled zlib to the latest release",
                     .description = "The vendored zlib is two major releases behind and misses several upstream fixes. Update the bundled copy and re-run the compression benchmarks.",
-                    .tags = "dependencies maintenance",
+                    .labels = "dependencies maintenance",
                 },
                 .{
                     .title = "Progress bar overshoots 100% during resumed downloads",
                     .description = "Resuming a partial download counts the already-downloaded bytes twice, so the progress bar reads up to 150%. Subtract the resume offset from the total.",
-                    .tags = "bug ui downloads",
+                    .labels = "bug ui downloads",
                     .status = .closed,
                 },
                 .{
                     .title = "Config parser rejects trailing commas",
                     .description = "A trailing comma after the last entry in a config block is reported as a syntax error. Most editors add one automatically, so accept it.",
-                    .tags = "bug config parser",
+                    .labels = "bug config parser",
                 },
                 .{
                     .title = "Add a --json flag to the status command",
                     .description = "Scripts currently scrape the human-readable status output, which breaks whenever the format changes. Emit a stable machine-readable JSON form behind a flag.",
-                    .tags = "enhancement cli",
+                    .labels = "enhancement cli",
                 },
                 .{
                     .title = "Race condition between autosave and manual save",
                     .description = "Saving manually while an autosave is in flight can interleave the two writes and corrupt the file. Serialize saves through a single queue.",
-                    .tags = "bug priority-high data-loss",
+                    .labels = "bug priority-high data-loss",
                 },
                 .{
                     .title = "Reduce binary size of release builds",
                     .description = "The release binary has grown past 40 MB, mostly from debug info and an unused bundled font. Strip symbols and drop the font from the default build.",
-                    .tags = "performance build",
+                    .labels = "performance build",
                 },
                 .{
                     .title = "Tooltips flicker when the cursor moves between adjacent buttons",
                     .description = "Moving the cursor across a toolbar hides and re-shows the tooltip for every button. Keep the tooltip open with a short grace period between neighbors.",
-                    .tags = "bug ui polish",
+                    .labels = "bug ui polish",
                 },
                 .{
                     .title = "Support environment variable expansion in config paths",
                     .description = "Paths in the config file are taken literally, so shared configs can't refer to the home directory portably. Expand environment variables when loading.",
-                    .tags = "enhancement config",
+                    .labels = "enhancement config",
                 },
                 .{
                     .title = "Log rotation deletes the newest file instead of the oldest",
                     .description = "When the log directory hits its size cap, the rotation logic sorts by name rather than mtime and removes the most recent log. Sort by modification time.",
-                    .tags = "bug logging",
+                    .labels = "bug logging",
                     .status = .closed,
                 },
                 .{
                     .title = "Add man pages for all subcommands",
                     .description = "Only the top-level command has a man page. Generate one per subcommand from the existing help text as part of the release build.",
-                    .tags = "documentation cli",
+                    .labels = "documentation cli",
                 },
                 .{
                     .title = "High CPU usage while idle in the background",
                     .description = "The main loop polls for file changes every 10 ms even when no window is visible. Switch to native file watching and idle at zero CPU.",
-                    .tags = "performance priority-high",
+                    .labels = "performance priority-high",
                 },
                 .{
                     .title = "Paste from clipboard drops the final newline",
                     .description = "Pasting text that ends with a newline silently trims it, which breaks pasted shell snippets. Preserve the clipboard content exactly.",
-                    .tags = "bug editor clipboard",
+                    .labels = "bug editor clipboard",
                 },
                 .{
                     .title = "Improve error message for expired credentials",
                     .description = "An expired token currently surfaces as a bare 401 with no guidance. Detect the expiry case and tell the user how to re-authenticate.",
-                    .tags = "enhancement ux auth",
+                    .labels = "enhancement ux auth",
                 },
                 .{
                     .title = "Crash when window is resized during startup animation",
                     .description = "Resizing the window while the splash animation is running dereferences a freed layout node. Cancel the animation before rebuilding the layout.",
-                    .tags = "bug crash ui",
+                    .labels = "bug crash ui",
                 },
                 .{
                     .title = "Add integration tests for the sync engine",
                     .description = sync_p1 ++ "\n\n" ++ sync_p2 ++ "\n\n" ++ sync_p3,
-                    .tags = "testing sync",
+                    .labels = "testing sync",
                 },
                 .{
                     .title = "Timestamps display in UTC instead of local time",
                     .description = tz_p1 ++ "\n\n" ++ tz_p2 ++ "\n\n" ++ tz_p3 ++ "\n\n" ++ tz_p4,
-                    .tags = "bug i18n time",
+                    .labels = "bug i18n time",
                 },
                 .{
                     .title = "Deprecate the legacy plugin format",
                     .description = "Both plugin formats are currently loaded, doubling the maintenance surface. Warn on legacy plugins this release and drop support in the next.",
-                    .tags = "maintenance plugins",
+                    .labels = "maintenance plugins",
                 },
             };
 
@@ -597,7 +597,7 @@ pub fn main(init: std.process.Init) !void {
                         .issue = .{
                             .title = issue.title,
                             .description = description,
-                            .tags = issue.tags,
+                            .labels = issue.labels,
                             .status = issue.status,
                         },
                     },
@@ -609,7 +609,7 @@ pub fn main(init: std.process.Init) !void {
 
             // two divergent edits per conflicted issue: ours on the events
             // branch, theirs on a temp branch rooted at the seed tip, then a
-            // merge. the 4th-newest issue conflicts on title and tags; the
+            // merge. the 4th-newest issue conflicts on title and labels; the
             // 3rd-newest on its description with every hunk auto-resolving
             // (each side reworks a different paragraph); the 2nd-newest on
             // its description with a removal conflict (ours removes a
@@ -628,7 +628,7 @@ pub fn main(init: std.process.Init) !void {
                     .event = .{ .issue = .{
                         .title = "Crash when resizing the window during the splash animation",
                         .description = title_issue.description,
-                        .tags = "bug crash ui priority-high",
+                        .labels = "bug crash ui priority-high",
                     } },
                 }, .{
                     .id = issue_events[issue_data.len - 3].id,
@@ -638,7 +638,7 @@ pub fn main(init: std.process.Init) !void {
                         .title = sync_issue.title,
                         .description = "The sync engine's coverage is unit tests only, with every transport mocked out." ++ "\n\n" ++
                             sync_p2 ++ "\n\n" ++ sync_p3,
-                        .tags = sync_issue.tags,
+                        .labels = sync_issue.labels,
                     } },
                 }, .{
                     .id = issue_events[issue_data.len - 2].id,
@@ -648,7 +648,7 @@ pub fn main(init: std.process.Init) !void {
                         .title = desc_issue.title,
                         .description = tz_p1 ++ "\n\n" ++ tz_p2 ++ "\n\n" ++ tz_p4 ++ "\n\n" ++
                             "The confusion is worst for teams spread across timezones, who each read a different wall-clock time from the same feed.",
-                        .tags = desc_issue.tags,
+                        .labels = desc_issue.labels,
                     } },
                 } };
                 const theirs = [_]evt.EventWithId{ .{
@@ -658,7 +658,7 @@ pub fn main(init: std.process.Init) !void {
                     .event = .{ .issue = .{
                         .title = "Segfault on early window resize",
                         .description = title_issue.description,
-                        .tags = "bug crash rendering",
+                        .labels = "bug crash rendering",
                     } },
                 }, .{
                     .id = issue_events[issue_data.len - 3].id,
@@ -668,7 +668,7 @@ pub fn main(init: std.process.Init) !void {
                         .title = sync_issue.title,
                         .description = sync_p1 ++ "\n\n" ++ sync_p2 ++ "\n\n" ++
                             "Add end-to-end tests that drive two live instances against a local server on every CI run.",
-                        .tags = sync_issue.tags,
+                        .labels = sync_issue.labels,
                     } },
                 }, .{
                     .id = issue_events[issue_data.len - 2].id,
@@ -679,7 +679,7 @@ pub fn main(init: std.process.Init) !void {
                         .description = tz_p1 ++ "\n\n" ++ tz_p2 ++ "\n\n" ++
                             "Most other clients already render local time by default, which makes our UTC output stand out as a bug." ++ "\n\n" ++ tz_p4 ++ "\n\n" ++
                             "Log exports inherit the same UTC rendering, so downstream tooling has to guess the source timezone.",
-                        .tags = desc_issue.tags,
+                        .labels = desc_issue.labels,
                     } },
                 } };
 
@@ -740,32 +740,32 @@ pub fn main(init: std.process.Init) !void {
             const discussion_data = [_]struct {
                 title: []const u8,
                 description: []const u8,
-                tags: []const u8,
+                labels: []const u8,
             }{
                 .{
                     .title = "How should plugins declare capabilities?",
                     .description = "I'd like the manifest to make privileged capabilities explicit without making simple plugins verbose.",
-                    .tags = "plugins design",
+                    .labels = "plugins design",
                 },
                 .{
                     .title = "Ideas for making large repositories faster",
                     .description = "This is a place to collect profiling results and discuss which indexing work is worth pursuing first.",
-                    .tags = "performance indexing",
+                    .labels = "performance indexing",
                 },
                 .{
                     .title = "What should the next release focus on?",
                     .description = "Let's compare the most important reliability fixes with the larger features already in progress.",
-                    .tags = "release planning",
+                    .labels = "release planning",
                 },
                 .{
                     .title = "Improving keyboard navigation",
                     .description = "Share workflows that still require a mouse and suggestions for making their focus behavior predictable.",
-                    .tags = "ui keyboard accessibility",
+                    .labels = "ui keyboard accessibility",
                 },
                 .{
                     .title = "Configuration format discussion",
                     .description = "Should the next configuration format favor strict validation or accept common conveniences such as trailing commas?",
-                    .tags = "config design",
+                    .labels = "config design",
                 },
             };
 
@@ -778,7 +778,7 @@ pub fn main(init: std.process.Init) !void {
                     .event = .{ .discuss = .{
                         .title = discussion.title,
                         .description = discussion.description,
-                        .tags = discussion.tags,
+                        .labels = discussion.labels,
                     } },
                 };
             }
@@ -1120,7 +1120,7 @@ fn seedPatches(
     const patch_data = [_]struct {
         title: []const u8,
         description: []const u8,
-        tags: []const u8,
+        labels: []const u8,
         status: ?evt.Patch.StatusKind,
         alpha_edit: ?ScatterEdit = null,
         // based behind master, so merging it makes a merge commit
@@ -1129,39 +1129,39 @@ fn seedPatches(
         .{
             .title = "Draft a faster dependency scanner",
             .description = "Rework dependency discovery so a large workspace can be scanned without repeatedly opening the same manifests.",
-            .tags = "performance build",
+            .labels = "performance build",
             .status = null,
         },
         .{
             .title = "Remove the legacy configuration loader",
             .description = "Delete the compatibility loader now that the replacement format has shipped and the migration warning has been available for a full release.",
-            .tags = "cleanup config",
+            .labels = "cleanup config",
             .status = .merged,
             .behind_master = true,
         },
         .{
             .title = "Cache parsed manifests between commands",
             .description = "Keep parsed manifests in the command context so consecutive operations do not repeat identical filesystem and parsing work.",
-            .tags = "performance cache",
+            .labels = "performance cache",
             .status = .closed,
         },
         .{
             .title = "Add structured output to the inspect command",
             .description = "Add a stable JSON representation of inspect results for scripts and editor integrations.",
-            .tags = "enhancement cli",
+            .labels = "enhancement cli",
             .status = .open,
         },
         .{
             .title = "Edit an adjacent line in alpha.txt",
             .description = "This patch can be cleanly merged by haxy, while git throws a merge conflict!",
-            .tags = "merge",
+            .labels = "merge",
             .status = .open,
             .alpha_edit = .{ .line = 2, .text = "adjust alpha beside the latest scatter edit" },
         },
         .{
             .title = "Edit a conflicting line in alpha.txt",
             .description = "Both source and squash merges conflict with a different edit to the same line on master.",
-            .tags = "merge",
+            .labels = "merge",
             .status = .open,
             .alpha_edit = .{ .line = 3, .text = "replace alpha with a conflicting edit" },
         },
@@ -1181,7 +1181,7 @@ fn seedPatches(
             .repo_id = repo_id.*,
             .title = patch.title,
             .description = patch.description,
-            .tags = patch.tags,
+            .labels = patch.labels,
             .target_branch = "master",
             .author = patch_author,
             .timestamp = timestamp,
@@ -1286,7 +1286,7 @@ fn seedPatches(
     }
     var ours_values = values;
     ours_values[0].title = "Drop the legacy configuration loader";
-    ours_values[0].tags = "cleanup config breaking";
+    ours_values[0].labels = "cleanup config breaking";
     const closed_description = try longDescription(
         patch_arena.allocator(),
         "Cache parsed manifests for the lifetime of a command invocation and invalidate entries when their files change.",
@@ -1295,7 +1295,7 @@ fn seedPatches(
     ours_values[2].description = "Add JSON output to inspect with versioned field names and deterministic object ordering.";
     var theirs_values = values;
     theirs_values[0].title = "Delete compatibility configuration support";
-    theirs_values[0].tags = "config maintenance";
+    theirs_values[0].labels = "config maintenance";
     theirs_values[1].description = "Keep a process-wide manifest cache shared by every command and refresh it after writes.";
     theirs_values[2].description = "Expose inspect results as newline-delimited JSON so callers can stream large repositories.";
 
@@ -1345,7 +1345,7 @@ fn seedPatches(
     try pch.writeBranchPatch(.server, .xit, .{}, io, allocator, target_repo, std.fmt.bytesToHex(evt.EventWithId.randomId(random), .lower), .{
         .title = "Merge the existing feature branch",
         .description = "This patch tracks the feature branch in this repo without creating a fork.",
-        .tags = "feature",
+        .labels = "feature",
         .source_branch = "feature",
         .target_branch = "master",
     }, null, patch_author);

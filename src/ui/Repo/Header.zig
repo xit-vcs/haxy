@@ -31,24 +31,24 @@ title: ui.Title,
 // the ref/oid this page is viewing; the value is url-encoded
 ref_or_oid: RefOrOid,
 ref_or_oid_value: []const u8,
-// the issues tab's tag filter, url-encoded ("" = unfiltered), so the tab links
+// the issues tab's label filter, url-encoded ("" = unfiltered), so the tab links
 // back to the filtered list.
-issues_tag: []const u8,
-patches_tag: []const u8,
-discussions_tag: []const u8,
+issues_label: []const u8,
+patches_label: []const u8,
+discussions_label: []const u8,
 
 const Self = @This();
 
-pub fn init(arena: *std.heap.ArenaAllocator, name: []const u8, owner_name: []const u8, ref_or_oid: RefOrOid, ref_or_oid_value: []const u8, issues_tag: []const u8, patches_tag: []const u8, discussions_tag: []const u8) !Self {
+pub fn init(arena: *std.heap.ArenaAllocator, name: []const u8, owner_name: []const u8, ref_or_oid: RefOrOid, ref_or_oid_value: []const u8, issues_label: []const u8, patches_label: []const u8, discussions_label: []const u8) !Self {
     return .{
         .name = name,
         .owner_name = owner_name,
         .title = try ui.Title.init(arena, name),
         .ref_or_oid = ref_or_oid,
         .ref_or_oid_value = ref_or_oid_value,
-        .issues_tag = issues_tag,
-        .patches_tag = patches_tag,
-        .discussions_tag = discussions_tag,
+        .issues_label = issues_label,
+        .patches_label = patches_label,
+        .discussions_label = discussions_label,
     };
 }
 
@@ -157,11 +157,11 @@ pub const View = struct {
         const changes_link = try ui.inPageTabLink(session, changes_route, current_tag == changes_tag);
         const refs_route = ui.RoutablePage.repoRefsRoute(identity, .branch, "") orelse return error.RouteTooLong;
         const refs_link = try ui.inPageTabLink(session, refs_route, current_tag == .repo_refs);
-        const issues_route = ui.RoutablePage.repoIssuesRoute(identity, .open, data.issues_tag, "") orelse return error.RouteTooLong;
+        const issues_route = ui.RoutablePage.repoIssuesRoute(identity, .open, data.issues_label, "") orelse return error.RouteTooLong;
         const issues_link = try ui.inPageTabLink(session, issues_route, current_tag == .repo_issues);
-        const patches_route = ui.RoutablePage.repoPatchesRoute(identity, .open, data.patches_tag, "") orelse return error.RouteTooLong;
+        const patches_route = ui.RoutablePage.repoPatchesRoute(identity, .open, data.patches_label, "") orelse return error.RouteTooLong;
         const patches_link = try ui.inPageTabLink(session, patches_route, current_tag == .repo_patches);
-        const discussions_route = ui.RoutablePage.repoDiscussionsRoute(identity, data.discussions_tag, "") orelse return error.RouteTooLong;
+        const discussions_route = ui.RoutablePage.repoDiscussionsRoute(identity, data.discussions_label, "") orelse return error.RouteTooLong;
         const discussions_link = try ui.inPageTabLink(session, discussions_route, current_tag == .repo_discussions);
         const events_route = ui.RoutablePage.repoEventsRoute(identity, .active, null, "", null) orelse return error.RouteTooLong;
         const events_link = try ui.inPageTabLink(session, events_route, current_tag == .repo_events);

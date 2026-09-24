@@ -60,9 +60,9 @@ pub fn query(
 }
 
 // the text a thread is indexed under, none once it is removed: the title and
-// tags first, so the tokenizer's caps can only drop the tail of a long
+// labels first, so the tokenizer's caps can only drop the tail of a long
 // description.
 fn text(aa: std.mem.Allocator, record: anytype) ![]const u8 {
     if (record.removed) return "";
-    return std.mem.concat(aa, u8, &.{ record.event.title, " ", record.event.tags, " ", record.event.description });
+    return std.mem.concat(aa, u8, &.{ record.event.title, " ", record.event.labels, " ", record.event.description });
 }

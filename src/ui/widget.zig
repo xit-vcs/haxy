@@ -20,7 +20,7 @@ pub const Widget = union(enum) {
     stack: wgt.Stack(Widget),
     flow_box: FlowBox,
     flow_box_scroll: FlowBox.Scroll,
-    tag_flow: TagFlow,
+    word_flow: WordFlow,
     spacer: Spacer,
     center: Center,
     section_label: SectionLabel,
@@ -457,7 +457,7 @@ pub const FlowBox = struct {
 // available width, like words in a paragraph. unlike FlowBox there is no cell
 // grid: each item is as wide as its text. selection movement is driven by the
 // owning view via indexOfFocusId/verticalNeighbor.
-pub const TagFlow = struct {
+pub const WordFlow = struct {
     focus: *Focus,
     grid: ?Grid,
     text_boxes: std.ArrayList(wgt.TextBox),
@@ -469,7 +469,7 @@ pub const TagFlow = struct {
 
     pub const Item = struct { text: []const u8, link: []const u8 = "" };
 
-    pub fn init(allocator: std.mem.Allocator) !TagFlow {
+    pub fn init(allocator: std.mem.Allocator) !WordFlow {
         return .{
             .focus = try Focus.create(allocator, .container),
             .grid = null,
@@ -479,7 +479,7 @@ pub const TagFlow = struct {
         };
     }
 
-    pub fn deinit(self: *TagFlow, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *WordFlow, allocator: std.mem.Allocator) void {
         self.focus.destroy(allocator);
         if (self.grid) |*grid| {
             grid.deinit();
@@ -493,7 +493,7 @@ pub const TagFlow = struct {
 
     // the text box copies the item text; links are copied into the arena, so the
     // caller's slices needn't outlive this call.
-    pub fn setItems(self: *TagFlow, allocator: std.mem.Allocator, items: []const Item) !void {
+    pub fn setItems(self: *WordFlow, allocator: std.mem.Allocator, items: []const Item) !void {
         for (self.text_boxes.items) |*tb| tb.deinit(allocator);
         self.text_boxes.clearAndFree(allocator);
 
@@ -520,7 +520,7 @@ pub const TagFlow = struct {
         }
     }
 
-    pub fn build(self: *TagFlow, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
+    pub fn build(self: *WordFlow, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
         self.clearGrid();
         self.focus.clear();
 
@@ -569,14 +569,14 @@ pub const TagFlow = struct {
         self.grid = grid;
     }
 
-    pub fn input(self: *TagFlow, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
+    pub fn input(self: *WordFlow, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
         _ = self;
         _ = allocator;
         _ = key;
         _ = root_focus;
     }
 
-    pub fn clearGrid(self: *TagFlow) void {
+    pub fn clearGrid(self: *WordFlow) void {
         if (self.grid) |*grid| {
             grid.deinit();
             self.grid = null;
@@ -584,15 +584,15 @@ pub const TagFlow = struct {
         for (self.text_boxes.items) |*tb| tb.clearGrid();
     }
 
-    pub fn getGrid(self: TagFlow) ?Grid {
+    pub fn getGrid(self: WordFlow) ?Grid {
         return self.grid;
     }
 
-    pub fn getFocus(self: *TagFlow) *Focus {
+    pub fn getFocus(self: *WordFlow) *Focus {
         return self.focus;
     }
 
-    pub fn indexOfFocusId(self: TagFlow, focus_id: usize) ?usize {
+    pub fn indexOfFocusId(self: WordFlow, focus_id: usize) ?usize {
         for (self.text_boxes.items, 0..) |tb, i| {
             if (tb.focus.id == focus_id) return i;
         }
@@ -601,7 +601,7 @@ pub const TagFlow = struct {
 
     // the first item of the row below (when `downward`) or above, or null at
     // the flow's edge. items are laid out in order, so y is nondecreasing.
-    pub fn rowStep(self: TagFlow, index: usize, downward: bool) ?usize {
+    pub fn rowStep(self: WordFlow, index: usize, downward: bool) ?usize {
         const rects = self.rects.items;
         if (index >= rects.len) return null;
         const cur_y = rects[index].y;

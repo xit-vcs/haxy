@@ -378,7 +378,7 @@ test "fork query and removal lifecycle" {
         .repo_id = repo_id,
         .title = "add a feature",
         .description = "a draft patch",
-        .tags = "enhancement",
+        .labels = "enhancement",
         .author = author,
         .timestamp = 2,
     });

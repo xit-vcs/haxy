@@ -164,7 +164,7 @@ fn branchEvents(
 ) ![2]evt.EventWithId {
     // validate the patch fields and branch names
     const branch = patch.source_branch orelse return error.InvalidSourceBranch;
-    if (!evt.Patch.fieldsValid(patch.title, patch.tags)) return error.InvalidFields;
+    if (!evt.Patch.fieldsValid(patch.title, patch.labels)) return error.InvalidFields;
     if (!evt.Patch.branchValid(branch)) return error.InvalidSourceBranch;
     if (!evt.Patch.branchValid(patch.target_branch)) return error.InvalidTargetBranch;
 
@@ -395,7 +395,7 @@ pub const EditDraftInput = struct {
     user_id: [evt.event_id_size]u8,
     repo_id: [evt.event_id_size]u8,
     title: []const u8,
-    tags: []const u8,
+    labels: []const u8,
     description: []const u8,
     target_branch: []const u8,
     author: evt.CommitAuthor,
@@ -959,7 +959,7 @@ pub fn editDraft(
     input: EditDraftInput,
 ) !bool {
     // validate the submitted fields before opening repositories
-    if (!evt.Patch.fieldsValid(input.title, input.tags)) return error.InvalidFields;
+    if (!evt.Patch.fieldsValid(input.title, input.labels)) return error.InvalidFields;
     if (!evt.Patch.branchValid(input.target_branch)) return error.InvalidTargetBranch;
     const patch_id = try evt.parseEventId(&input.id);
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -989,7 +989,7 @@ pub fn editDraft(
     // apply the edits and invalidate a revision targeting another branch
     var patch = record.event;
     patch.title = input.title;
-    patch.tags = input.tags;
+    patch.labels = input.labels;
     patch.description = input.description;
     if (!std.mem.eql(u8, patch.target_branch, input.target_branch)) patch.revision = null;
     patch.target_branch = input.target_branch;

@@ -46,7 +46,7 @@ fn testBranchPatch(comptime kind: rp.RepoKind, comptime hash_kind: hash.HashKind
     const base = try repo.commit(io, allocator, .{ .message = "base" });
     try repo.addBranch(io, .{ .name = "feature" });
     const id = [_]u8{7} ** evt.event_id_size;
-    const patch = evt.Patch{ .title = "branch patch", .tags = "feature", .description = "existing branch", .source_branch = "feature", .target_branch = "master" };
+    const patch = evt.Patch{ .title = "branch patch", .labels = "feature", .description = "existing branch", .source_branch = "feature", .target_branch = "master" };
 
     // the same branch cannot be both source and target
     {
@@ -71,7 +71,7 @@ fn testBranchPatch(comptime kind: rp.RepoKind, comptime hash_kind: hash.HashKind
     // retargeting to the source leaves the patch and revision unchanged
     try std.testing.expectError(error.SameBranch, evt.Patch.update(.local, kind, opts, io, allocator, &repo, &id, .{ .fields = .{
         .title = patch.title,
-        .tags = patch.tags,
+        .labels = patch.labels,
         .description = patch.description,
         .target_branch = "feature",
     } }, author));
@@ -90,7 +90,7 @@ fn testBranchPatch(comptime kind: rp.RepoKind, comptime hash_kind: hash.HashKind
     try repo.addBranch(io, .{ .name = "other-target" });
     try evt.Patch.update(.local, kind, opts, io, allocator, &repo, &id, .{ .fields = .{
         .title = patch.title,
-        .tags = patch.tags,
+        .labels = patch.labels,
         .description = patch.description,
         .target_branch = "other-target",
     } }, author);
@@ -111,7 +111,7 @@ fn testBranchPatch(comptime kind: rp.RepoKind, comptime hash_kind: hash.HashKind
     const before_edit = (try repo.readRef(io, evt.events_ref)) orelse return error.NotFound;
     try std.testing.expectError(error.UnrelatedBranches, evt.Patch.update(.local, kind, opts, io, allocator, &repo, &id, .{ .fields = .{
         .title = "edited title",
-        .tags = patch.tags,
+        .labels = patch.labels,
         .description = patch.description,
         .target_branch = "unrelated",
     } }, author));
@@ -128,7 +128,7 @@ fn testBranchPatch(comptime kind: rp.RepoKind, comptime hash_kind: hash.HashKind
     // editing metadata without changing the target must also record a patch edit.
     try evt.Patch.update(.local, kind, opts, io, allocator, &repo, &id, .{ .fields = .{
         .title = "renamed patch",
-        .tags = patch.tags,
+        .labels = patch.labels,
         .description = patch.description,
         .target_branch = "other-target",
     } }, author);
@@ -188,7 +188,7 @@ fn testBranchMerge(selection: evt.Patch.MergeRevision) !void {
     try pch.writeBranchPatch(.server, .xit, opts, io, allocator, &repo, id_hex, .{
         .title = "merge branch",
         .description = "",
-        .tags = "",
+        .labels = "",
         .source_branch = "feature",
         .target_branch = "master",
     }, null, author);
@@ -438,7 +438,7 @@ test "patch event conflicts, stacking, and gc" {
     const patch = evt.Patch{
         .title = "add the answer",
         .description = "adds a reusable answer constant",
-        .tags = "enhancement",
+        .labels = "enhancement",
         .target_branch = "master",
     };
     const tree_entries = [_]evt.EventTreeEntry{
@@ -680,7 +680,7 @@ test "patch event conflicts, stacking, and gc" {
         }, &child_entries, 12, child_id, .{
             .title = "stack another answer change",
             .description = "depends on the first patch",
-            .tags = "enhancement",
+            .labels = "enhancement",
             .target_branch = "master",
             .target_patch_id = std.fmt.bytesToHex(patch_id, .lower),
         }, 13);
@@ -753,7 +753,7 @@ test "patch event conflicts, stacking, and gc" {
     try std.testing.expectEqual(0, try patchStatusCount(status_moment, .open));
     try std.testing.expectEqual(1, try patchStatusCount(status_moment, .closed));
     try std.testing.expectEqual(1, try patchStatusCount(status_moment, .merged));
-    try std.testing.expectEqual(1, try patchTagStatusCount(status_moment, "enhancement", .merged));
+    try std.testing.expectEqual(1, try patchLabelStatusCount(status_moment, "enhancement", .merged));
     const status_conflicts_cursor = try status_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Patch.conflicts_key)) orelse return error.NotFound;
     const status_conflicts = try Repo.DB.SortedMap(.read_only).init(status_conflicts_cursor);
     const child_conflict = try status_conflicts.getCursor(&evt.orderKeyDesc(merged_child_record.created_order, &child_id));
@@ -776,7 +776,7 @@ test "patch event conflicts, stacking, and gc" {
         .event = .{ .patch = .{
             .title = "invalid merged patch",
             .description = "has no revision",
-            .tags = "enhancement",
+            .labels = "enhancement",
             .target_branch = "master",
             .status = .{ .merged = .{ .revision = .source, .patchrev_id = std.fmt.bytesToHex(invalid_merged_id, .lower) } },
         } },
@@ -882,7 +882,7 @@ fn patchLifecycle(merge_revision: evt.Patch.MergeRevision) !void {
         .user_id = user_id,
         .repo_id = repo_id,
         .title = "add the answer",
-        .tags = "enhancement",
+        .labels = "enhancement",
         .description = "adds a reusable answer constant",
         .author = author,
         .timestamp = 2,
@@ -936,7 +936,7 @@ fn patchLifecycle(merge_revision: evt.Patch.MergeRevision) !void {
             .message = "add the answer",
         }, &first_entries, 3, patch_id, .{
             .title = "add the answer",
-            .tags = "enhancement",
+            .labels = "enhancement",
             .description = "adds a reusable answer constant",
             .target_branch = "master",
         }, 3);
@@ -966,7 +966,7 @@ fn patchLifecycle(merge_revision: evt.Patch.MergeRevision) !void {
         .user_id = user_id,
         .repo_id = repo_id,
         .title = "explain the answer",
-        .tags = "documentation",
+        .labels = "documentation",
         .description = "describes the existing answer",
         .target_branch = "master",
         .author = author,
@@ -1003,7 +1003,7 @@ fn patchLifecycle(merge_revision: evt.Patch.MergeRevision) !void {
         .user_id = user_id,
         .repo_id = repo_id,
         .title = "explain the answer",
-        .tags = "enhancement documentation",
+        .labels = "enhancement documentation",
         .description = "adds and explains a reusable answer constant",
         .target_branch = "master",
         .author = author,
@@ -1142,11 +1142,11 @@ fn patchStatusCount(moment: Repo.DB.HashMap(.read_only), status: evt.Patch.Statu
     return try ids.count();
 }
 
-fn patchTagStatusCount(moment: Repo.DB.HashMap(.read_only), tag: []const u8, status: evt.Patch.StatusKind) !u64 {
-    const tags_cursor = try moment.getCursor(hash.hashInt(repo_opts.hash, evt.Patch.tag_status_to_id_set_key)) orelse return 0;
-    const tags = try Repo.DB.SortedMap(.read_only).init(tags_cursor);
-    var key_buffer: evt.Patch.TagStatusKey = undefined;
-    const ids_cursor = try tags.getCursor(try evt.Patch.tagStatusKey(&key_buffer, tag, status)) orelse return 0;
+fn patchLabelStatusCount(moment: Repo.DB.HashMap(.read_only), label: []const u8, status: evt.Patch.StatusKind) !u64 {
+    const labels_cursor = try moment.getCursor(hash.hashInt(repo_opts.hash, evt.Patch.label_status_to_id_set_key)) orelse return 0;
+    const labels = try Repo.DB.SortedMap(.read_only).init(labels_cursor);
+    var key_buffer: evt.Patch.LabelStatusKey = undefined;
+    const ids_cursor = try labels.getCursor(try evt.Patch.labelStatusKey(&key_buffer, label, status)) orelse return 0;
     const ids = try Repo.DB.SortedSet(.read_only).init(ids_cursor);
     return try ids.count();
 }
@@ -1216,7 +1216,7 @@ fn testMergeability(
     // local edits and server comments leave checks alone
     var edit = evt.Patch.Update{ .fields = .{
         .title = "edit the answer",
-        .tags = patch.tags,
+        .labels = patch.labels,
         .description = patch.description,
         .target_branch = patch.target_branch,
     } };

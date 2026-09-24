@@ -7,7 +7,7 @@ const hash = xit.hash;
 
 title: []const u8,
 description: []const u8,
-tags: []const u8, // space-separated
+labels: []const u8, // space-separated
 
 pub const Record = struct {
     event: Self,
@@ -19,24 +19,24 @@ pub const Record = struct {
 
 const Self = @This();
 
-pub const tag_max_len = 64;
+pub const label_max_len = 64;
 
 pub const merge_policy: evt.MergePolicy = .target_wins;
 pub const record_map_key = "event-id->discussion";
 pub const all_id_set_key = "discussion-id-set";
 pub const active_id_set_key = "active-discussion-id-set";
-pub const tag_to_id_set_key = "tag->discussion-id-set";
+pub const label_to_id_set_key = "label->discussion-id-set";
 const activity_order_key = "discussion-id->activity-order";
 
-pub fn tagIterator(tags: []const u8) std.mem.SplitIterator(u8, .scalar) {
-    return std.mem.splitScalar(u8, tags, ' ');
+pub fn labelIterator(labels: []const u8) std.mem.SplitIterator(u8, .scalar) {
+    return std.mem.splitScalar(u8, labels, ' ');
 }
 
-pub fn fieldsValid(title: []const u8, tags: []const u8) bool {
+pub fn fieldsValid(title: []const u8, labels: []const u8) bool {
     if (!evt.titleValid(title)) return false;
-    var tag_iter = tagIterator(tags);
-    while (tag_iter.next()) |tag| {
-        if (tag.len > tag_max_len) return false;
+    var label_iter = labelIterator(labels);
+    while (label_iter.next()) |label| {
+        if (label.len > label_max_len) return false;
     }
     return true;
 }
@@ -53,7 +53,7 @@ pub fn consume(
     const discussion_key = hash.hashInt(hash_kind, event_id);
     const records = try DB.HashMap(.read_write).init(try haxy_moment.putCursor(hash.hashInt(hash_kind, record_map_key)));
     const active = try DB.SortedSet(.read_write).init(try haxy_moment.putCursor(hash.hashInt(hash_kind, active_id_set_key)));
-    const tags = try DB.SortedMap(.read_write).init(try haxy_moment.putCursor(hash.hashInt(hash_kind, tag_to_id_set_key)));
+    const labels = try DB.SortedMap(.read_write).init(try haxy_moment.putCursor(hash.hashInt(hash_kind, label_to_id_set_key)));
     var existing_record_maybe: ?Record = null;
     const existing_cursor_maybe = try records.getCursor(discussion_key);
     if (existing_cursor_maybe) |existing_cursor| {
@@ -75,7 +75,7 @@ pub fn consume(
         if (!existing.removed) {
             const old_key = evt.orderKeyDesc(activity_order, event_id);
             _ = try active.remove(&old_key);
-            try removeFromTagSets(DB, tags, existing.event.tags, &old_key);
+            try removeFromLabelSets(DB, labels, existing.event.labels, &old_key);
         }
     }
 
@@ -98,7 +98,7 @@ pub fn consume(
 
     if (!record_to_write.removed) {
         try active.put(&order_key);
-        try addToTagSets(DB, tags, record_to_write.event.tags, &order_key);
+        try addToLabelSets(DB, labels, record_to_write.event.labels, &order_key);
     }
 }
 
@@ -119,11 +119,11 @@ pub fn touch(
     if (order <= current) return;
 
     const active = try DB.SortedSet(.read_write).init(try haxy_moment.putCursor(hash.hashInt(hash_kind, active_id_set_key)));
-    const tags = try DB.SortedMap(.read_write).init(try haxy_moment.putCursor(hash.hashInt(hash_kind, tag_to_id_set_key)));
+    const labels = try DB.SortedMap(.read_write).init(try haxy_moment.putCursor(hash.hashInt(hash_kind, label_to_id_set_key)));
     if (!record.removed) {
         const old_key = evt.orderKeyDesc(current, event_id);
         _ = try active.remove(&old_key);
-        try removeFromTagSets(DB, tags, record.event.tags, &old_key);
+        try removeFromLabelSets(DB, labels, record.event.labels, &old_key);
     }
 
     const activity = try DB.HashMap(.read_write).init(try haxy_moment.putCursor(hash.hashInt(hash_kind, activity_order_key)));
@@ -131,7 +131,7 @@ pub fn touch(
     if (!record.removed) {
         const new_key = evt.orderKeyDesc(order, event_id);
         try active.put(&new_key);
-        try addToTagSets(DB, tags, record.event.tags, &new_key);
+        try addToLabelSets(DB, labels, record.event.labels, &new_key);
     }
 }
 
@@ -156,11 +156,11 @@ pub fn update(
     repo: *rp.Repo(repo_kind, repo_opts),
     id: *const [evt.event_id_size]u8,
     title: []const u8,
-    tags: []const u8,
+    labels: []const u8,
     description: []const u8,
     author: evt.CommitAuthor,
 ) !void {
-    if (!fieldsValid(title, tags)) return error.InvalidFields;
+    if (!fieldsValid(title, labels)) return error.InvalidFields;
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -173,28 +173,28 @@ pub fn update(
         .author = author,
         .event = .{ .discuss = .{
             .title = title,
-            .tags = tags,
+            .labels = labels,
             .description = description,
         } },
     }});
 }
 
-fn removeFromTagSets(comptime DB: type, tags: DB.SortedMap(.read_write), names: []const u8, order_key: []const u8) !void {
-    var tag_iter = tagIterator(names);
-    while (tag_iter.next()) |tag| {
-        if (tag.len == 0 or tag.len > tag_max_len) continue;
-        const cursor = try tags.putCursor(tag);
+fn removeFromLabelSets(comptime DB: type, labels: DB.SortedMap(.read_write), names: []const u8, order_key: []const u8) !void {
+    var label_iter = labelIterator(names);
+    while (label_iter.next()) |label| {
+        if (label.len == 0 or label.len > label_max_len) continue;
+        const cursor = try labels.putCursor(label);
         const set = try DB.SortedSet(.read_write).init(cursor);
         _ = try set.remove(order_key);
-        if (0 == try set.count()) _ = try tags.remove(tag);
+        if (0 == try set.count()) _ = try labels.remove(label);
     }
 }
 
-fn addToTagSets(comptime DB: type, tags: DB.SortedMap(.read_write), names: []const u8, order_key: []const u8) !void {
-    var tag_iter = tagIterator(names);
-    while (tag_iter.next()) |tag| {
-        if (tag.len == 0 or tag.len > tag_max_len) continue;
-        const set = try DB.SortedSet(.read_write).init(try tags.putCursor(tag));
+fn addToLabelSets(comptime DB: type, labels: DB.SortedMap(.read_write), names: []const u8, order_key: []const u8) !void {
+    var label_iter = labelIterator(names);
+    while (label_iter.next()) |label| {
+        if (label.len == 0 or label.len > label_max_len) continue;
+        const set = try DB.SortedSet(.read_write).init(try labels.putCursor(label));
         try set.put(order_key);
     }
 }

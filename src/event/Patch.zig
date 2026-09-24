@@ -9,7 +9,7 @@ const rf = xit.ref;
 
 title: []const u8,
 description: []const u8,
-tags: []const u8, // space-separated
+labels: []const u8, // space-separated
 source_branch: ?[]const u8 = null,
 target_branch: []const u8,
 target_patch_id: ?[evt.event_id_size * 2]u8 = null,
@@ -79,18 +79,18 @@ pub const Status = union(StatusKind) {
 
 pub const Resolve = struct {
     title: ?[]const u8 = null,
-    tags: ?[]const u8 = null,
+    labels: ?[]const u8 = null,
     hunks: []const []const u8 = &.{},
     theirs: []const u8 = "",
 };
 
 pub const Update = union(enum) {
     status: StatusKind,
-    fields: struct { title: []const u8, tags: []const u8, description: []const u8, target_branch: []const u8 },
+    fields: struct { title: []const u8, labels: []const u8, description: []const u8, target_branch: []const u8 },
     resolve: Resolve,
 };
 
-pub const tag_max_len = 64;
+pub const label_max_len = 64;
 pub const merge_policy: evt.MergePolicy = .field_conflicts;
 pub const record_map_key = "event-id->patch";
 pub const all_id_set_key = "patch-id-set";
@@ -98,26 +98,26 @@ pub const conflicts_key = "conflicted-patch-id->conflict";
 pub const id_to_field_to_oid_key = "patch-id->field->oid";
 pub const target_patch_id_to_patch_id_set_key = "target-patch-id->patch-id-set";
 pub const status_to_id_set_key = "status->patch-id-set";
-pub const tag_status_to_id_set_key = "tag+status->patch-id-set";
+pub const label_status_to_id_set_key = "label+status->patch-id-set";
 pub const revision_to_id_set_key = "target-branch+oid->patch-id-set";
 pub const source_to_id_set_key = "source-branch->patch-id-set";
 pub const patch_id_to_mergeability_key = "patch-id->mergeability";
 
-pub const TagStatusKey = [tag_max_len + 1 + StatusKind.longest_len]u8;
+pub const LabelStatusKey = [label_max_len + 1 + StatusKind.longest_len]u8;
 
-pub fn tagStatusKey(buffer: *TagStatusKey, tag: []const u8, status: StatusKind) ![]const u8 {
-    return std.fmt.bufPrint(buffer, "{s} {s}", .{ tag, @tagName(status) });
+pub fn labelStatusKey(buffer: *LabelStatusKey, label: []const u8, status: StatusKind) ![]const u8 {
+    return std.fmt.bufPrint(buffer, "{s} {s}", .{ label, @tagName(status) });
 }
 
-pub fn tagIterator(tags: []const u8) std.mem.SplitIterator(u8, .scalar) {
-    return std.mem.splitScalar(u8, tags, ' ');
+pub fn labelIterator(labels: []const u8) std.mem.SplitIterator(u8, .scalar) {
+    return std.mem.splitScalar(u8, labels, ' ');
 }
 
-pub fn fieldsValid(title: []const u8, tags: []const u8) bool {
+pub fn fieldsValid(title: []const u8, labels: []const u8) bool {
     if (!evt.titleValid(title)) return false;
-    var tag_iter = tagIterator(tags);
-    while (tag_iter.next()) |tag| {
-        if (tag.len > tag_max_len) return false;
+    var label_iter = labelIterator(labels);
+    while (label_iter.next()) |label| {
+        if (label.len > label_max_len) return false;
     }
     return true;
 }
@@ -138,7 +138,7 @@ pub fn consume(
     const record_key = hash.hashInt(hash_kind, event_id);
     const records = try DB.HashMap(.read_write).init(try haxy_moment.putCursor(hash.hashInt(hash_kind, record_map_key)));
     const statuses = try DB.SortedMap(.read_write).init(try haxy_moment.putCursor(hash.hashInt(hash_kind, status_to_id_set_key)));
-    const tag_statuses = try DB.SortedMap(.read_write).init(try haxy_moment.putCursor(hash.hashInt(hash_kind, tag_status_to_id_set_key)));
+    const label_statuses = try DB.SortedMap(.read_write).init(try haxy_moment.putCursor(hash.hashInt(hash_kind, label_status_to_id_set_key)));
     const conflicts = try DB.SortedMap(.read_write).init(try haxy_moment.putCursor(hash.hashInt(hash_kind, conflicts_key)));
     const field_oid_map = try DB.HashMap(.read_write).init(try haxy_moment.putCursor(hash.hashInt(hash_kind, id_to_field_to_oid_key)));
 
@@ -150,7 +150,7 @@ pub fn consume(
 
     var record = record_maybe orelse try evt.removedRecord(Record, DB, hash_kind, haxy_moment.readOnly(), existing_maybe);
 
-    if (!fieldsValid(record.event.title, record.event.tags)) return error.InvalidPatch;
+    if (!fieldsValid(record.event.title, record.event.labels)) return error.InvalidPatch;
     if (!branchValid(record.event.target_branch)) return error.InvalidTargetBranch;
     if (record.event.source_branch) |branch| {
         if (!branchValid(branch)) return error.InvalidSourceBranch;
@@ -209,7 +209,7 @@ pub fn consume(
             const existing_status_kind = existing.event.status.kind();
             const old_status = try statusSet(DB, statuses, existing_status_kind);
             _ = try old_status.remove(&order_key);
-            try removeFromTagSets(DB, tag_statuses, existing.event.tags, existing_status_kind, &order_key);
+            try removeFromLabelSets(DB, label_statuses, existing.event.labels, existing_status_kind, &order_key);
             if (existing_status_kind != .merged) {
                 if (existing.event.revision) |revision| {
                     const revisions = try DB.HashMap(.read_write).init(try haxy_moment.putCursor(hash.hashInt(hash_kind, revision_to_id_set_key)));
@@ -260,11 +260,11 @@ pub fn consume(
         const status = try statusSet(DB, statuses, status_kind);
         try status.put(&order_key);
 
-        var tag_iter = tagIterator(record.event.tags);
-        while (tag_iter.next()) |tag| {
-            if (tag.len == 0 or tag.len > tag_max_len) continue;
-            var key_buffer: TagStatusKey = undefined;
-            const set = try DB.SortedSet(.read_write).init(try tag_statuses.putCursor(try tagStatusKey(&key_buffer, tag, status_kind)));
+        var label_iter = labelIterator(record.event.labels);
+        while (label_iter.next()) |label| {
+            if (label.len == 0 or label.len > label_max_len) continue;
+            var key_buffer: LabelStatusKey = undefined;
+            const set = try DB.SortedSet(.read_write).init(try label_statuses.putCursor(try labelStatusKey(&key_buffer, label, status_kind)));
             try set.put(&order_key);
         }
 
@@ -333,7 +333,7 @@ pub fn update(
             if (!branchValid(fields.target_branch)) return error.InvalidTargetBranch;
             if ((try repo.readRef(io, .{ .kind = .head, .name = fields.target_branch })) == null) return error.InvalidTargetBranch;
             updated.title = fields.title;
-            updated.tags = fields.tags;
+            updated.labels = fields.labels;
             updated.description = fields.description;
             if (!std.mem.eql(u8, updated.target_branch, fields.target_branch)) updated.revision = null;
             updated.target_branch = fields.target_branch;
@@ -342,7 +342,7 @@ pub fn update(
             updated = try resolveFields(repo_kind, repo_opts, io, allocator, &arena, repo, id, record, resolve);
         },
     }
-    if (!fieldsValid(updated.title, updated.tags)) return error.InvalidFields;
+    if (!fieldsValid(updated.title, updated.labels)) return error.InvalidFields;
 
     if (updated.source_branch != null and updated.revision == null) return @import("../patch.zig").writeBranchPatch(host_kind, repo_kind, repo_opts, io, allocator, repo, std.fmt.bytesToHex(id.*, .lower), updated, record.event, author);
     try evt.consume(host_kind, .repo, repo_kind, repo_opts, io, allocator, repo, evt.events_ref, &.{.{
@@ -367,7 +367,7 @@ fn resolveFields(
     const DB = evt.EventDB(repo_opts.hash);
     var updated = live.event;
     if (resolve.title) |title| updated.title = title;
-    if (resolve.tags) |tags| updated.tags = tags;
+    if (resolve.labels) |labels| updated.labels = labels;
 
     var event_db_maybe: ?evt.LocalEventDB(repo_opts.hash) = if (repo_kind == .git) try evt.LocalEventDB(repo_opts.hash).openReadOnly(io, allocator, repo.core.repo_dir) else null;
     defer if (event_db_maybe) |*event_db| event_db.deinit(io, allocator);
@@ -433,21 +433,21 @@ fn statusSet(
     return DB.SortedSet(.read_write).init(try statuses.putCursor(@tagName(status)));
 }
 
-fn removeFromTagSets(
+fn removeFromLabelSets(
     comptime DB: type,
-    tag_statuses: DB.SortedMap(.read_write),
-    tags: []const u8,
+    label_statuses: DB.SortedMap(.read_write),
+    labels: []const u8,
     status: StatusKind,
     order_key: []const u8,
 ) !void {
-    var tag_iter = tagIterator(tags);
-    while (tag_iter.next()) |tag| {
-        if (tag.len == 0 or tag.len > tag_max_len) continue;
-        var key_buffer: TagStatusKey = undefined;
-        const key = try tagStatusKey(&key_buffer, tag, status);
-        const set = try DB.SortedSet(.read_write).init(try tag_statuses.putCursor(key));
+    var label_iter = labelIterator(labels);
+    while (label_iter.next()) |label| {
+        if (label.len == 0 or label.len > label_max_len) continue;
+        var key_buffer: LabelStatusKey = undefined;
+        const key = try labelStatusKey(&key_buffer, label, status);
+        const set = try DB.SortedSet(.read_write).init(try label_statuses.putCursor(key));
         _ = try set.remove(order_key);
-        if (0 == try set.count()) _ = try tag_statuses.remove(key);
+        if (0 == try set.count()) _ = try label_statuses.remove(key);
     }
 }
 

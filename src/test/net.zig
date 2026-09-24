@@ -552,7 +552,7 @@ fn testPushFork(
             .repo_id = repo_id,
             .title = "add a feature",
             .description = "a draft patch",
-            .tags = "enhancement",
+            .labels = "enhancement",
             .target_branch = "master",
             .author = .{ .name = "admin", .email = "admin@example.test" },
             .timestamp = 1,
@@ -635,7 +635,7 @@ fn testPushFork(
         try evt.Patch.update(.server, .xit, repo_opts, io, allocator, &target, &fork_id, .{ .fields = .{
             .title = "edited feature",
             .description = patch.event.description,
-            .tags = patch.event.tags,
+            .labels = patch.event.labels,
             .target_branch = "feature",
         } }, .{ .name = "admin", .email = "admin@example.test" });
     }
@@ -982,7 +982,7 @@ fn testPushEvents(
                 .issue = .{
                     .title = "Login form clears password on validation error",
                     .description = "Submitting an invalid email address resets the password field. Preserve the field value and show an inline validation message.",
-                    .tags = "bug priority-high ui",
+                    .labels = "bug priority-high ui",
                 },
             },
         },
@@ -1010,7 +1010,7 @@ fn testPushEvents(
         const issue = try evt.read(evt.Issue.Record, ServerRepo.DB, repo_opts.hash, &arena, try ServerRepo.DB.HashMap(.read_only).init(issue_cursor));
 
         try std.testing.expectEqualStrings(events_to_push[0].event.issue.?.description, issue.event.description);
-        try std.testing.expectEqualStrings(events_to_push[0].event.issue.?.tags, issue.event.tags);
+        try std.testing.expectEqualStrings(events_to_push[0].event.issue.?.labels, issue.event.labels);
     }
 
     //
@@ -1026,7 +1026,7 @@ fn testPushEvents(
                 .issue = .{
                     .title = "Login form clears password on validation error",
                     .description = "Submitting an invalid email address resets the password field and removes typed input. Preserve the field value and show an inline validation message.",
-                    .tags = "bug priority-low ui",
+                    .labels = "bug priority-low ui",
                 },
             },
         },
@@ -1053,9 +1053,9 @@ fn testPushEvents(
         const issue_cursor = try records.getCursor(hash.hashInt(repo_opts.hash, &issue_event_id)) orelse return error.NotFound;
         const issue = try evt.read(evt.Issue.Record, ServerRepo.DB, repo_opts.hash, &arena, try ServerRepo.DB.HashMap(.read_only).init(issue_cursor));
 
-        // the description and tags were correctly edited
+        // the description and labels were correctly edited
         try std.testing.expectEqualStrings(events_to_push2[0].event.issue.?.description, issue.event.description);
-        try std.testing.expectEqualStrings(events_to_push2[0].event.issue.?.tags, issue.event.tags);
+        try std.testing.expectEqualStrings(events_to_push2[0].event.issue.?.labels, issue.event.labels);
     }
 }
 

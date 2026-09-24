@@ -20,7 +20,7 @@ const Comment = @import("../Repo/Comment.zig");
 const Attachment = @import("../Repo/Attachment.zig");
 
 const Widget = widget.Widget;
-const TagFlow = widget.TagFlow;
+const WordFlow = widget.WordFlow;
 const Center = widget.Center;
 const SubmitButton = widget.SubmitButton;
 const Spacer = widget.Spacer;
@@ -86,10 +86,10 @@ pub fn readConflict(
                 .ours = .{ .text = ours.event.title, .author = our_author },
                 .theirs = .{ .text = theirs.event.title, .author = their_author },
             };
-        } else if (std.mem.eql(u8, field, "tags")) {
-            conflict.tags = .{
-                .ours = .{ .text = ours.event.tags, .author = our_author },
-                .theirs = .{ .text = theirs.event.tags, .author = their_author },
+        } else if (std.mem.eql(u8, field, "labels")) {
+            conflict.labels = .{
+                .ours = .{ .text = ours.event.labels, .author = our_author },
+                .theirs = .{ .text = theirs.event.labels, .author = their_author },
             };
         } else if (std.mem.eql(u8, field, "description")) {
             conflict.description = .{
@@ -165,20 +165,20 @@ pub fn statusSet(
     return try DB.SortedSet(.read_only).init(cursor);
 }
 
-pub fn tagStatusSet(
+pub fn labelStatusSet(
     comptime Data: type,
     comptime DB: type,
-    tag_statuses: DB.SortedMap(.read_only),
-    tag: []const u8,
+    label_statuses: DB.SortedMap(.read_only),
+    label: []const u8,
     status: Data.Status,
 ) !?DB.SortedSet(.read_only) {
-    var key_buffer: Data.Event.TagStatusKey = undefined;
-    const key = Data.Event.tagStatusKey(&key_buffer, tag, status) catch return null;
-    const cursor = (try tag_statuses.getCursor(key)) orelse return null;
+    var key_buffer: Data.Event.LabelStatusKey = undefined;
+    const key = Data.Event.labelStatusKey(&key_buffer, label, status) catch return null;
+    const cursor = (try label_statuses.getCursor(key)) orelse return null;
     return try DB.SortedSet(.read_only).init(cursor);
 }
 
-pub fn loadTags(
+pub fn loadLabels(
     comptime Data: type,
     comptime hash_kind: hash.HashKind,
     arena: *std.heap.ArenaAllocator,
@@ -186,23 +186,23 @@ pub fn loadTags(
 ) ![]const []const u8 {
     const aa = arena.allocator();
     const DB = evt.EventDB(hash_kind);
-    const cursor = try haxy_moment.getCursor(hash.hashInt(hash_kind, Data.Event.tag_status_to_id_set_key)) orelse return &.{};
-    const tag_statuses = try DB.SortedMap(.read_only).init(cursor);
-    var tags: std.ArrayList([]const u8) = .empty;
-    var iter = try tag_statuses.iterator();
+    const cursor = try haxy_moment.getCursor(hash.hashInt(hash_kind, Data.Event.label_status_to_id_set_key)) orelse return &.{};
+    const label_statuses = try DB.SortedMap(.read_only).init(cursor);
+    var labels: std.ArrayList([]const u8) = .empty;
+    var iter = try label_statuses.iterator();
     while (try iter.next()) |pair_cursor| {
-        if (tags.items.len == Data.max_tags) break;
+        if (labels.items.len == Data.max_labels) break;
         var entry_cursor = pair_cursor;
         const pair = try entry_cursor.readKeyValuePair();
         const key = try pair.key_cursor.readBytesAlloc(aa, null);
         const space = std.mem.indexOfScalar(u8, key, ' ') orelse continue;
-        const tag = key[0..space];
-        if (tags.getLastOrNull()) |last| {
-            if (std.mem.eql(u8, last, tag)) continue;
+        const label = key[0..space];
+        if (labels.getLastOrNull()) |last| {
+            if (std.mem.eql(u8, last, label)) continue;
         }
-        try tags.append(aa, tag);
+        try labels.append(aa, label);
     }
-    return tags.items;
+    return labels.items;
 }
 
 // the key a list set (and the search index) stores a thread under
@@ -661,8 +661,8 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
             return null;
         }
 
-        fn listRoute(identity: []const u8, status: Status, tag: []const u8, selected: []const u8) ?ui.RoutablePage {
-            return Data.listRoute(identity, status, tag, selected);
+        fn listRoute(identity: []const u8, status: Status, label: []const u8, selected: []const u8) ?ui.RoutablePage {
+            return Data.listRoute(identity, status, label, selected);
         }
 
         fn draftsRoute(identity: []const u8) ?ui.RoutablePage {
@@ -681,16 +681,16 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
             return if (supports_conflicts) Data.resolveRoute(identity, selected, picks) else null;
         }
 
-        // a list link keeps the filters the page carries: the tag, and the
+        // a list link keeps the filters the page carries: the label, and the
         // search query when one is set
-        fn listLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, status: Status, tag: []const u8, id: []const u8, search: []const u8) ![]const u8 {
-            var route = listRoute(identity, status, tag, id) orelse return error.RouteTooLong;
+        fn listLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, status: Status, label: []const u8, id: []const u8, search: []const u8) ![]const u8 {
+            var route = listRoute(identity, status, label, id) orelse return error.RouteTooLong;
             if (search.len != 0) route = route.withSearch(search) orelse return error.RouteTooLong;
             return std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{try route.toUrl(page_arena)});
         }
 
-        fn tagLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, status: Status, tag: []const u8, search: []const u8) ![]const u8 {
-            const encoded = try ui.urlEncodeRef(page_arena.allocator(), tag);
+        fn labelLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, status: Status, label: []const u8, search: []const u8) ![]const u8 {
+            const encoded = try ui.urlEncodeRef(page_arena.allocator(), label);
             return listLink(page_arena, identity, status, encoded, "", search);
         }
 
@@ -829,18 +829,18 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                 try inner_box.children.put(allocator, author.getFocus().id, .{ .widget = .{ .text_box = author }, .rect = null, .min_size = null });
                 self.author_id = author.getFocus().id;
 
-                var items: std.ArrayList(TagFlow.Item) = .empty;
+                var items: std.ArrayList(WordFlow.Item) = .empty;
                 defer items.deinit(allocator);
-                var tag_iter = Event.tagIterator(entry.record.event.tags);
-                while (tag_iter.next()) |tag| {
-                    if (tag.len == 0) continue;
-                    try items.append(allocator, .{ .text = tag, .link = try tagLink(self.session.page_arena, self.data.identity, entryStatus(entry), tag, self.data.search orelse "") });
+                var label_iter = Event.labelIterator(entry.record.event.labels);
+                while (label_iter.next()) |label| {
+                    if (label.len == 0) continue;
+                    try items.append(allocator, .{ .text = label, .link = try labelLink(self.session.page_arena, self.data.identity, entryStatus(entry), label, self.data.search orelse "") });
                 }
                 if (items.items.len > 0) {
-                    var tags = try TagFlow.init(allocator);
-                    errdefer tags.deinit(allocator);
-                    try tags.setItems(allocator, items.items);
-                    try inner_box.children.put(allocator, tags.getFocus().id, .{ .widget = .{ .tag_flow = tags }, .rect = null, .min_size = null });
+                    var labels = try WordFlow.init(allocator);
+                    errdefer labels.deinit(allocator);
+                    try labels.setItems(allocator, items.items);
+                    try inner_box.children.put(allocator, labels.getFocus().id, .{ .widget = .{ .word_flow = labels }, .rect = null, .min_size = null });
                 }
             }
 
@@ -958,7 +958,7 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
             }
 
             switch (child.*) {
-                .tag_flow => |*tags| self.tagsInput(child_index, tags, key, root_focus),
+                .word_flow => |*labels| self.labelsInput(child_index, labels, key, root_focus),
                 .copyable_text => |*copyable| switch (key) {
                     .arrow_up => if (!self.moveVertical(root_focus, false)) {
                         self.exit = .header;
@@ -1264,36 +1264,36 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
             return true;
         }
 
-        fn tagsInput(self: *This, child_index: usize, tags: *TagFlow, key: Key, root_focus: *Focus) void {
-            const child_id = tags.focus.child_id orelse return;
-            const cur = tags.indexOfFocusId(child_id) orelse return;
-            const count = tags.text_boxes.items.len;
+        fn labelsInput(self: *This, child_index: usize, labels: *WordFlow, key: Key, root_focus: *Focus) void {
+            const child_id = labels.focus.child_id orelse return;
+            const cur = labels.indexOfFocusId(child_id) orelse return;
+            const count = labels.text_boxes.items.len;
             switch (key) {
-                .arrow_left => if (cur > 0) self.focusTag(child_index, tags, root_focus, cur - 1) else {
+                .arrow_left => if (cur > 0) self.focusLabel(child_index, labels, root_focus, cur - 1) else {
                     self.exit = .list;
                 },
-                .arrow_right => if (cur + 1 < count) self.focusTag(child_index, tags, root_focus, cur + 1),
-                .arrow_up => if (tags.rowStep(cur, false)) |index| {
-                    self.focusTag(child_index, tags, root_focus, index);
+                .arrow_right => if (cur + 1 < count) self.focusLabel(child_index, labels, root_focus, cur + 1),
+                .arrow_up => if (labels.rowStep(cur, false)) |index| {
+                    self.focusLabel(child_index, labels, root_focus, index);
                 } else {
                     _ = self.moveVertical(root_focus, false);
                 },
-                .arrow_down => if (tags.rowStep(cur, true)) |index| {
-                    self.focusTag(child_index, tags, root_focus, index);
+                .arrow_down => if (labels.rowStep(cur, true)) |index| {
+                    self.focusLabel(child_index, labels, root_focus, index);
                 } else {
                     _ = self.moveVertical(root_focus, true);
                 },
-                .home => self.focusTag(child_index, tags, root_focus, 0),
-                .end => self.focusTag(child_index, tags, root_focus, count - 1),
+                .home => self.focusLabel(child_index, labels, root_focus, 0),
+                .end => self.focusLabel(child_index, labels, root_focus, count - 1),
                 else => {},
             }
         }
 
-        fn focusTag(self: *This, child_index: usize, tags: *TagFlow, root_focus: *Focus, item: usize) void {
-            root_focus.setFocus(tags.text_boxes.items[item].getFocus().id);
-            if (self.session.is_terminal and item < tags.rects.items.len) {
+        fn focusLabel(self: *This, child_index: usize, labels: *WordFlow, root_focus: *Focus, item: usize) void {
+            root_focus.setFocus(labels.text_boxes.items[item].getFocus().id);
+            if (self.session.is_terminal and item < labels.rects.items.len) {
                 if (self.inner().children.values()[child_index].rect) |flow_rect| {
-                    var rect = tags.rects.items[item];
+                    var rect = labels.rects.items[item];
                     rect.x += flow_rect.x;
                     rect.y += flow_rect.y;
                     self.scroll.scrollToRect(rect);
@@ -1424,7 +1424,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         const This = @This();
         // a vertical box: the header tabs on top, then a stack holding a
         // master-detail split (thread list + description pane) per status list,
-        // plus the tags view.
+        // plus the labels view.
         box: wgt.Box(Widget), // vert: [header_index] = tabs, [stack_index] = stack
         data: *const Self,
         session: *ui.Session,
@@ -1433,10 +1433,10 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         const stack_index: usize = 1;
         // indices within the stack, 1:1 with the header tabs.
         const status_count = @typeInfo(Status).@"enum".fields.len;
-        const tags_view_index: usize = status_count;
+        const labels_view_index: usize = status_count;
         // the new-thread form, or the edit, comment, or resolve form when the page was
         // loaded at one of their urls.
-        const form_view_index: usize = tags_view_index + 1;
+        const form_view_index: usize = labels_view_index + 1;
         // the conflicts split; the tab and stack child exist only when the repo
         // has conflicted threads.
         const drafts_view_index: usize = form_view_index + 1;
@@ -1450,7 +1450,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
 
         pub fn viewIndex(view: ViewKind) usize {
             const name = @tagName(view);
-            if (std.mem.eql(u8, name, "tags")) return tags_view_index;
+            if (std.mem.eql(u8, name, "labels")) return labels_view_index;
             if (std.mem.eql(u8, name, "new") or std.mem.eql(u8, name, "edit") or std.mem.eql(u8, name, "publish") or std.mem.eql(u8, name, "merge") or std.mem.eql(u8, name, "new_comment") or std.mem.eql(u8, name, "edit_comment") or std.mem.eql(u8, name, "remove") or std.mem.eql(u8, name, "resolve")) return form_view_index;
             if (std.mem.eql(u8, name, "conflicts")) return conflict_view_index;
             if (std.mem.eql(u8, name, "drafts")) return drafts_view_index;
@@ -1489,8 +1489,8 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             return if (supports_drafts) entry.draft else false;
         }
 
-        fn listRoute(identity: []const u8, status: Status, tag: []const u8, selected: []const u8) ?ui.RoutablePage {
-            return Data.listRoute(identity, status, tag, selected);
+        fn listRoute(identity: []const u8, status: Status, label: []const u8, selected: []const u8) ?ui.RoutablePage {
+            return Data.listRoute(identity, status, label, selected);
         }
 
         fn draftsRoute(identity: []const u8) ?ui.RoutablePage {
@@ -1513,10 +1513,10 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             return if (supports_conflicts) Data.resolveRoute(identity, selected, picks) else null;
         }
 
-        // a list link keeps the filters the page carries: the tag, and the
+        // a list link keeps the filters the page carries: the label, and the
         // search query when one is set
-        fn listLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, status: Status, tag: []const u8, id: []const u8, search: []const u8) ![]const u8 {
-            var route = listRoute(identity, status, tag, id) orelse return error.RouteTooLong;
+        fn listLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, status: Status, label: []const u8, id: []const u8, search: []const u8) ![]const u8 {
+            var route = listRoute(identity, status, label, id) orelse return error.RouteTooLong;
             if (search.len != 0) route = route.withSearch(search) orelse return error.RouteTooLong;
             return std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{try route.toUrl(page_arena)});
         }
@@ -1544,11 +1544,11 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 const route = draftsRoute(data.identity) orelse return error.RouteTooLong;
                 return std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{try route.toUrl(page_arena)});
             }
-            return listLink(page_arena, data.identity, status_maybe orelse @enumFromInt(0), data.tag, id, data.search orelse "");
+            return listLink(page_arena, data.identity, status_maybe orelse @enumFromInt(0), data.label, id, data.search orelse "");
         }
 
-        fn tagLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, status: Status, tag: []const u8, search: []const u8) ![]const u8 {
-            const encoded = try ui.urlEncodeRef(page_arena.allocator(), tag);
+        fn labelLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, status: Status, label: []const u8, search: []const u8) ![]const u8 {
+            const encoded = try ui.urlEncodeRef(page_arena.allocator(), label);
             return listLink(page_arena, identity, status, encoded, "", search);
         }
 
@@ -1578,19 +1578,19 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 try stack.children.put(allocator, split.getFocus().id, .{ .box = split });
             }
 
-            // the tags view
+            // the labels view
             {
-                var tf = try TagFlow.init(allocator);
+                var tf = try WordFlow.init(allocator);
                 errdefer tf.deinit(allocator);
-                var items: std.ArrayList(TagFlow.Item) = .empty;
+                var items: std.ArrayList(WordFlow.Item) = .empty;
                 defer items.deinit(allocator);
                 // when filtered, the first item clears the filter
-                if (data.tag.len != 0)
+                if (data.label.len != 0)
                     try items.append(allocator, .{ .text = "✕", .link = try listLink(session.page_arena, data.identity, @enumFromInt(0), "", "", data.search orelse "") });
-                for (data.tags) |tag|
-                    try items.append(allocator, .{ .text = tag, .link = try tagLink(session.page_arena, data.identity, @enumFromInt(0), tag, data.search orelse "") });
+                for (data.labels) |label|
+                    try items.append(allocator, .{ .text = label, .link = try labelLink(session.page_arena, data.identity, @enumFromInt(0), label, data.search orelse "") });
                 try tf.setItems(allocator, items.items);
-                try stack.children.put(allocator, tf.getFocus().id, .{ .tag_flow = tf });
+                try stack.children.put(allocator, tf.getFocus().id, .{ .word_flow = tf });
             }
 
             // the new-thread form, or — on an edit, comment, or resolve url — that form in
@@ -1812,14 +1812,14 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             }
 
             {
-                var tags = try wgt.TextInput.init(allocator, .{ .label = " tags (separate with spaces) ", .name = "tags", .visible_width = null, .rounded_corners = true, .render_content = session.is_terminal });
-                errdefer tags.deinit(allocator);
-                tags.getFocus().mode = .all;
+                var labels = try wgt.TextInput.init(allocator, .{ .label = " labels (separate with spaces) ", .name = "labels", .visible_width = null, .rounded_corners = true, .render_content = session.is_terminal });
+                errdefer labels.deinit(allocator);
+                labels.getFocus().mode = .all;
                 if (saved_fields) |saved|
-                    try tags.setContent(allocator, saved.tags)
+                    try labels.setContent(allocator, saved.labels)
                 else if (record) |r|
-                    try tags.setContent(allocator, r.event.tags);
-                try box.children.put(allocator, tags.getFocus().id, .{ .widget = .{ .text_input = tags }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
+                    try labels.setContent(allocator, r.event.labels);
+                try box.children.put(allocator, labels.getFocus().id, .{ .widget = .{ .text_input = labels }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
             }
 
             {
@@ -1949,9 +1949,9 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 try addLabel(allocator, &box, "title conflict:");
                 try addFieldConflict(allocator, &box, session, data, "title", fc);
             }
-            if (conflict.tags) |*fc| {
-                try addLabel(allocator, &box, "tags conflict:");
-                try addFieldConflict(allocator, &box, session, data, "tags", fc);
+            if (conflict.labels) |*fc| {
+                try addLabel(allocator, &box, "labels conflict:");
+                try addFieldConflict(allocator, &box, session, data, "labels", fc);
             }
             if (comptime @hasField(Data.Conflict, "status")) {
                 if (conflict.status) |*fc| {
@@ -2147,9 +2147,9 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             return &self.viewStack().children.values()[index].box;
         }
 
-        // the tags view's flow inside the stack.
-        fn tagsView(self: *This) *TagFlow {
-            return &self.viewStack().children.values()[tags_view_index].tag_flow;
+        // the labels view's flow inside the stack.
+        fn labelsView(self: *This) *WordFlow {
+            return &self.viewStack().children.values()[labels_view_index].word_flow;
         }
 
         // the non-confirmation form inside the stack
@@ -2228,7 +2228,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             return stack.children.getIndex(cid);
         }
 
-        // the stack's selected master-detail split (null when the tags view or the
+        // the stack's selected master-detail split (null when the labels view or the
         // new-thread form shows).
         fn selectedSplitIndex(self: *This) ?usize {
             const idx = self.stackSelectedIndex() orelse return null;
@@ -2246,9 +2246,9 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             return self.box.children.getIndex(cid) == header_index;
         }
 
-        fn tagsViewActive(self: *This) bool {
+        fn labelsViewActive(self: *This) bool {
             if (self.headerActive()) return false;
-            return self.stackSelectedIndex() == tags_view_index;
+            return self.stackSelectedIndex() == labels_view_index;
         }
 
         fn formViewActive(self: *This) bool {
@@ -2357,7 +2357,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 // the query; other keys move within the sub-header.
                 if (inp.vertDirection(key) == .down) {
                     const enterable = if (self.viewStack().getSelected()) |selected| switch (selected.*) {
-                        .tag_flow => |*tf| tf.text_boxes.items.len > 0,
+                        .word_flow => |*tf| tf.text_boxes.items.len > 0,
                         // nothing focusable in the unauthorized view
                         .unauthorized => false,
                         else => true,
@@ -2373,8 +2373,8 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 }
                 return;
             }
-            if (self.tagsViewActive()) {
-                self.tagsViewInput(key, root_focus);
+            if (self.labelsViewActive()) {
+                self.labelsViewInput(key, root_focus);
                 return;
             }
             if (self.formViewActive()) {
@@ -2399,21 +2399,21 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             }
         }
 
-        // navigate to the typed query's results, keeping the tag filter and the
+        // navigate to the typed query's results, keeping the label filter and the
         // status list the page shows. an empty box clears a filtered page and
         // does nothing on any other one.
         fn submitSearch(self: *This, text: []const u8) !void {
             if (text.len == 0 and self.data.search == null) return;
             const selected = self.header().getSelectedIndex() orelse 0;
             const status: Status = if (selected < status_count) splitStatus(selected) else @enumFromInt(0);
-            const route = listRoute(self.data.identity, status, self.data.tag, "") orelse return;
+            const route = listRoute(self.data.identity, status, self.data.label, "") orelse return;
             try self.session.navigate(route.withSearch(text) orelse return);
         }
 
-        // arrow keys move the tag selection; up from the top row crosses to the
+        // arrow keys move the label selection; up from the top row crosses to the
         // header tabs.
-        fn tagsViewInput(self: *This, key: Key, root_focus: *Focus) void {
-            const tf = self.tagsView();
+        fn labelsViewInput(self: *This, key: Key, root_focus: *Focus) void {
+            const tf = self.labelsView();
             const cid = tf.focus.child_id orelse return;
             const cur = tf.indexOfFocusId(cid) orelse return;
             const count = tf.text_boxes.items.len;
@@ -2584,11 +2584,11 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
 
             // gather the inputs by name; the d<n> hunk inputs appear in chunk order
             var title: ?[]u8 = null;
-            var tags: ?[]u8 = null;
+            var labels: ?[]u8 = null;
             var hunks: std.ArrayList([]const u8) = .empty;
             defer {
                 if (title) |t| allocator.free(t);
-                if (tags) |t| allocator.free(t);
+                if (labels) |t| allocator.free(t);
                 for (hunks.items) |h| allocator.free(h);
                 hunks.deinit(allocator);
             }
@@ -2598,8 +2598,8 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     errdefer allocator.free(text);
                     if (std.mem.eql(u8, ti.options.name, "title")) {
                         title = text;
-                    } else if (std.mem.eql(u8, ti.options.name, "tags")) {
-                        tags = text;
+                    } else if (std.mem.eql(u8, ti.options.name, "labels")) {
+                        labels = text;
                     } else {
                         try hunks.append(allocator, text);
                     }
@@ -2617,7 +2617,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                         inline else => |*repo| {
                             var resolution: Event.Resolve = .{
                                 .title = title,
-                                .tags = tags,
+                                .labels = labels,
                                 .hunks = hunks.items,
                             };
                             if (comptime @hasField(Event.Resolve, "theirs")) resolution.theirs = self.data.theirs_picks;
@@ -2704,20 +2704,20 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
 
             const form = self.threadForm() orelse return;
             const title_input = try formField(form, "title");
-            const tags_input = try formField(form, "tags");
+            const labels_input = try formField(form, "labels");
             const description_input = try formField(form, "description");
 
             const title = try title_input.text(allocator);
             defer allocator.free(title);
-            const tags = try tags_input.text(allocator);
-            defer allocator.free(tags);
+            const labels = try labels_input.text(allocator);
+            defer allocator.free(labels);
             const description = try description_input.text(allocator);
             defer allocator.free(description);
             const target_branch = if (comptime supports_drafts) try (try formField(form, "target_branch")).text(allocator) else "";
             defer if (comptime supports_drafts) allocator.free(target_branch);
 
-            if (!Event.fieldsValid(title, tags)) {
-                if (!evt.titleValid(title)) try self.rememberThreadFeedback(.required_title, title, tags, description, target_branch);
+            if (!Event.fieldsValid(title, labels)) {
+                if (!evt.titleValid(title)) try self.rememberThreadFeedback(.required_title, title, labels, description, target_branch);
                 return;
             }
 
@@ -2728,13 +2728,13 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     .branch => try source.field().text(allocator),
                 };
                 defer if (source_branch) |branch| allocator.free(branch);
-                const event_id_hex = Data.create(self.data, self.session, allocator, author, title, tags, description, target_branch, source_branch) catch |err| {
+                const event_id_hex = Data.create(self.data, self.session, allocator, author, title, labels, description, target_branch, source_branch) catch |err| {
                     const failure = FeedbackFailure.fromError(err) orelse return err;
-                    try self.rememberThreadFeedback(failure, title, tags, description, target_branch);
+                    try self.rememberThreadFeedback(failure, title, labels, description, target_branch);
                     return;
                 };
                 title_input.clear(allocator);
-                tags_input.clear(allocator);
+                labels_input.clear(allocator);
                 description_input.clear(allocator);
                 (try formField(form, "target_branch")).clear(allocator);
                 const route = ui.RoutablePage.repoThreadCommentsRoute(kind, self.data.identity, &event_id_hex, 0) orelse return;
@@ -2753,7 +2753,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 .event = @unionInit(evt.Event, @tagName(kind), Event{
                     .title = title,
                     .description = description,
-                    .tags = tags,
+                    .labels = labels,
                 }),
             };
 
@@ -2769,7 +2769,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
 
             // wipe the form so a return visit starts fresh
             title_input.clear(allocator);
-            tags_input.clear(allocator);
+            labels_input.clear(allocator);
             description_input.clear(allocator);
 
             const route = listRoute(self.data.identity, @enumFromInt(0), "", &event_id_hex) orelse return;
@@ -2788,29 +2788,29 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
 
             const form = self.threadForm() orelse return;
             const title_input = try formField(form, "title");
-            const tags_input = try formField(form, "tags");
+            const labels_input = try formField(form, "labels");
             const description_input = try formField(form, "description");
 
             const title = try title_input.text(allocator);
             defer allocator.free(title);
-            const tags = try tags_input.text(allocator);
-            defer allocator.free(tags);
+            const labels = try labels_input.text(allocator);
+            defer allocator.free(labels);
             const description = try description_input.text(allocator);
             defer allocator.free(description);
             const target_branch = if (comptime supports_drafts) try (try formField(form, "target_branch")).text(allocator) else "";
             defer if (comptime supports_drafts) allocator.free(target_branch);
 
-            if (!Event.fieldsValid(title, tags)) {
-                if (!evt.titleValid(title)) try self.rememberThreadFeedback(.required_title, title, tags, description, target_branch);
+            if (!Event.fieldsValid(title, labels)) {
+                if (!evt.titleValid(title)) try self.rememberThreadFeedback(.required_title, title, labels, description, target_branch);
                 return;
             }
             const src = self.data.repo_source orelse return;
 
             if (comptime supports_drafts) {
                 if (entryDraft(entry.*)) {
-                    self.data.editDraft(self.session, allocator, author, entry.id, title, tags, description, target_branch) catch |err| {
+                    self.data.editDraft(self.session, allocator, author, entry.id, title, labels, description, target_branch) catch |err| {
                         const failure = FeedbackFailure.fromError(err) orelse return err;
-                        try self.rememberThreadFeedback(failure, title, tags, description, target_branch);
+                        try self.rememberThreadFeedback(failure, title, labels, description, target_branch);
                         return;
                     };
                     const route = listRoute(self.data.identity, entryStatus(entry.*), "", entry.id) orelse return;
@@ -2830,22 +2830,22 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                         inline else => |*repo| if (supports_drafts) {
                             Event.update(self.session.data.host_kind, repo_kind, repo.self_repo_opts, io, allocator, repo, &id_bytes, .{ .fields = .{
                                 .title = title,
-                                .tags = tags,
+                                .labels = labels,
                                 .description = description,
                                 .target_branch = target_branch,
                             } }, author) catch |err| {
                                 const failure = FeedbackFailure.fromError(err) orelse return err;
-                                try self.rememberThreadFeedback(failure, title, tags, description, target_branch);
+                                try self.rememberThreadFeedback(failure, title, labels, description, target_branch);
                                 return;
                             };
                         } else if (has_status)
                             try Event.update(self.session.data.host_kind, repo_kind, repo.self_repo_opts, io, allocator, repo, &id_bytes, .{ .fields = .{
                                 .title = title,
-                                .tags = tags,
+                                .labels = labels,
                                 .description = description,
                             } }, author)
                         else
-                            try Event.update(self.session.data.host_kind, repo_kind, repo.self_repo_opts, io, allocator, repo, &id_bytes, title, tags, description, author),
+                            try Event.update(self.session.data.host_kind, repo_kind, repo.self_repo_opts, io, allocator, repo, &id_bytes, title, labels, description, author),
                     }
                 },
             }
@@ -2854,7 +2854,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             try self.session.navigate(route);
         }
 
-        fn rememberThreadFeedback(self: *This, failure: FeedbackFailure, title: []const u8, tags: []const u8, description: []const u8, target_branch: []const u8) !void {
+        fn rememberThreadFeedback(self: *This, failure: FeedbackFailure, title: []const u8, labels: []const u8, description: []const u8, target_branch: []const u8) !void {
             const aa = self.session.arena.allocator();
             const source = if (supports_drafts) blk: {
                 const form = self.threadForm() orelse break :blk null;
@@ -2864,14 +2864,14 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 .failure = failure,
                 .fields = if (comptime supports_drafts) .{
                     .title = try aa.dupe(u8, title),
-                    .tags = try aa.dupe(u8, tags),
+                    .labels = try aa.dupe(u8, labels),
                     .description = try aa.dupe(u8, description),
                     .target_branch = try aa.dupe(u8, target_branch),
                     .source_branch = if (source) |value| try value.field().text(aa) else "",
                     .source_kind = if (source) |value| value.selectedKind() else .fork,
                 } else .{
                     .title = try aa.dupe(u8, title),
-                    .tags = try aa.dupe(u8, tags),
+                    .labels = try aa.dupe(u8, labels),
                     .description = try aa.dupe(u8, description),
                 },
             });

@@ -39,7 +39,7 @@ pub const CreateInput = struct {
     repo_id: [evt.event_id_size]u8,
     title: []const u8,
     description: []const u8,
-    tags: []const u8,
+    labels: []const u8,
     target_branch: []const u8,
     author: evt.CommitAuthor,
     timestamp: u64,
@@ -53,7 +53,7 @@ pub fn create(
     admin_repo: *rp.Repo(.xit, evt.admin_repo_opts),
     input: CreateInput,
 ) ![]u8 {
-    if (!evt.Patch.fieldsValid(input.title, input.tags)) return error.InvalidPatch;
+    if (!evt.Patch.fieldsValid(input.title, input.labels)) return error.InvalidPatch;
     if (!evt.Patch.branchValid(input.target_branch)) return error.InvalidTargetBranch;
 
     // get the fork id and path
@@ -185,7 +185,7 @@ pub fn create(
         .event = .{ .patch = .{
             .title = input.title,
             .description = input.description,
-            .tags = input.tags,
+            .labels = input.labels,
             .target_branch = input.target_branch,
         } },
     }});

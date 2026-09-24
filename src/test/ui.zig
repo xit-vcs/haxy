@@ -27,7 +27,7 @@ test "preloaded thread forms receive typing after switching tabs" {
         try ui.inputKey(allocator, &root, key, &session);
         try root.build(allocator, constraint, focus);
     }
-    for ([_][]const u8{ "title", "tags", "description" }) |name| {
+    for ([_][]const u8{ "title", "labels", "description" }) |name| {
         const input = session.text_inputs.get(focus.grandchild_id orelse return error.NoFocus) orelse return error.MissingInput;
         try std.testing.expectEqualStrings(name, input.options.name);
         try ui.inputKey(allocator, &root, .{ .codepoint = 'x' }, &session);
@@ -355,7 +355,7 @@ test "sync creates missing event branches and preserves head" {
         try evt.consume(.local, .repo, .git, .{}, io, allocator, &local, evt.events_ref, &.{.{
             .id = std.fmt.bytesToHex(id, .lower),
             .author = .{ .name = "haxy", .email = "user@haxy" },
-            .event = .{ .issue = .{ .title = "sync", .description = "", .tags = "" } },
+            .event = .{ .issue = .{ .title = "sync", .description = "", .labels = "" } },
         }});
     }
 
@@ -367,7 +367,7 @@ test "sync creates missing event branches and preserves head" {
         try evt.consume(.local, .repo, .git, .{}, io, allocator, &local, evt.events_ref, &.{.{
             .id = std.fmt.bytesToHex(id, .lower),
             .author = .{ .name = "haxy", .email = "user@haxy" },
-            .event = .{ .issue = .{ .title = "local", .description = "", .tags = "" } },
+            .event = .{ .issue = .{ .title = "local", .description = "", .labels = "" } },
         }});
     }
     {
@@ -377,7 +377,7 @@ test "sync creates missing event branches and preserves head" {
         try evt.consume(.local, .repo, .git, .{}, io, allocator, &remote, evt.events_ref, &.{.{
             .id = std.fmt.bytesToHex(id, .lower),
             .author = .{ .name = "haxy", .email = "user@haxy" },
-            .event = .{ .issue = .{ .title = "remote", .description = "", .tags = "" } },
+            .event = .{ .issue = .{ .title = "remote", .description = "", .labels = "" } },
         }});
     }
     try std.testing.expectEqual(null, try Events.sync(io, allocator, .{ .path = local_path, .repo_kind = .git }));

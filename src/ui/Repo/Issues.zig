@@ -15,8 +15,8 @@ const wasm = builtin.target.cpu.arch == .wasm32;
 // how many issues one window shows before a "next" link appears.
 pub const page_size = 20;
 
-// how many tags the tags view shows at most.
-pub const max_tags = 1000;
+// how many labels the labels view shows at most.
+pub const max_labels = 1000;
 
 // one issue from the repo's consumed event database, with its hex event id
 // (the id lives in the event envelope, not the payload).
@@ -48,7 +48,7 @@ pub const FieldConflict = struct {
 // record; the chunks split the description against the merge base.
 pub const Conflict = struct {
     title: ?FieldConflict = null,
-    tags: ?FieldConflict = null,
+    labels: ?FieldConflict = null,
     description: ?struct {
         chunks: []const diff3.Chunk,
         ours_author: ui.Author = .unknown,
@@ -75,8 +75,8 @@ pub const Window = struct {
 
 // "owner/name", so the view can build /repo/owner/name/issues/... links.
 identity: []const u8,
-// the url-encoded tag the lists are filtered to ("" = unfiltered).
-tag: []const u8,
+// the url-encoded label the lists are filtered to ("" = unfiltered).
+label: []const u8,
 // the decoded query the lists are filtered to, or null when unfiltered.
 search: ?[]const u8 = null,
 // the hex event id of the issue its status's window is rooted at ("" = the
@@ -102,8 +102,8 @@ view: ui.RoutablePage.IssuesView,
 // the /description page: the detail pane shows the selected issue's whole
 // description behind a back link.
 description_page: bool = false,
-// every tag in the repo, in sorted order, for the tags view.
-tags: []const []const u8,
+// every label in the repo, in sorted order, for the labels view.
+labels: []const []const u8,
 // the on-disk repo this page was read from, for the terminal submit path
 // (the web posts the new-issue form to the issue route instead).
 repo_source: ?ui.RepoSource = null,
@@ -120,8 +120,8 @@ pub fn statusKind(event: Event) Status {
     return event.status;
 }
 
-pub fn listRoute(identity: []const u8, status: Status, tag: []const u8, selected: []const u8) ?ui.RoutablePage {
-    return ui.RoutablePage.repoIssuesRoute(identity, status, tag, selected);
+pub fn listRoute(identity: []const u8, status: Status, label: []const u8, selected: []const u8) ?ui.RoutablePage {
+    return ui.RoutablePage.repoIssuesRoute(identity, status, label, selected);
 }
 
 pub fn conflictsRoute(identity: []const u8, selected: []const u8) ?ui.RoutablePage {
@@ -162,10 +162,10 @@ pub fn selectedThread(self: *const Self) ?*const IssueWithId {
 }
 
 // an empty listing, for the wasm / no-repo paths.
-pub fn emptyResult(aa: std.mem.Allocator, identity: []const u8, tag: []const u8, search: []const u8, selected_id: []const u8, comment_id: []const u8, comments_start: usize, theirs_picks: []const u8, view: ui.RoutablePage.IssuesView) !Self {
+pub fn emptyResult(aa: std.mem.Allocator, identity: []const u8, label: []const u8, search: []const u8, selected_id: []const u8, comment_id: []const u8, comments_start: usize, theirs_picks: []const u8, view: ui.RoutablePage.IssuesView) !Self {
     return .{
         .identity = try aa.dupe(u8, identity),
-        .tag = try aa.dupe(u8, tag),
+        .label = try aa.dupe(u8, label),
         .search = if (search.len == 0) null else std.Uri.percentDecodeInPlace(try aa.dupe(u8, search)),
         .selected_id = try aa.dupe(u8, selected_id),
         .comment_id = try aa.dupe(u8, comment_id),
@@ -182,11 +182,11 @@ pub fn emptyResult(aa: std.mem.Allocator, identity: []const u8, tag: []const u8,
             else => view,
         },
         .description_page = view == .description,
-        .tags = &.{},
+        .labels = &.{},
     };
 }
 
-// read one window per status of an opened repo's issues (filtered to `tag`
+// read one window per status of an opened repo's issues (filtered to `label`
 // when set), ordered by creation (newest first). the window of the issue
 // `selected_id` names starts at it ("" = the beginning). a git repo reads the
 // event db next to it (synced from the events branch on each page build); a
@@ -201,7 +201,7 @@ pub fn init(
     // in local mode, which has no users)
     admin_moment: ?evt.AdminDB.HashMap(.read_only),
     identity: []const u8,
-    tag: []const u8,
+    label: []const u8,
     search: []const u8,
     selected_id: []const u8,
     comment_id: []const u8,
@@ -209,15 +209,15 @@ pub fn init(
     theirs_picks: []const u8,
     view: ui.RoutablePage.IssuesView,
 ) !Self {
-    const empty = try emptyResult(arena.allocator(), identity, tag, search, selected_id, comment_id, comments_start, theirs_picks, view);
+    const empty = try emptyResult(arena.allocator(), identity, label, search, selected_id, comment_id, comments_start, theirs_picks, view);
 
     const aa = arena.allocator();
     const DB = evt.EventDB(repo_opts.hash);
     const rooted = empty.selected_id.len != 0;
-    const tagged = empty.tag.len != 0;
-    // an explicitly named issue or tag that doesn't exist is a bad url
+    const labeled = empty.label.len != 0;
+    // an explicitly named issue or label that doesn't exist is a bad url
     // (NotFound -> 404); the bare route falls through to an empty listing.
-    const strict = rooted or tagged;
+    const strict = rooted or labeled;
 
     // a repo with no consumed events has no moment yet.
     const gpa = arena.child_allocator;
@@ -233,17 +233,17 @@ pub fn init(
         return empty;
     };
 
-    // the sorted sets to window, per status: the tag's sets when filtered,
+    // the sorted sets to window, per status: the label's sets when filtered,
     // else the top-level per-status sets. a missing set is an empty window.
     var open_set: ?DB.SortedSet(.read_only) = null;
     var closed_set: ?DB.SortedSet(.read_only) = null;
-    if (tagged) {
-        const tag_to_issues_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Issue.tag_status_to_id_set_key)) orelse return error.NotFound;
-        const tag_to_issues = try DB.SortedMap(.read_only).init(tag_to_issues_cursor);
-        const decoded = std.Uri.percentDecodeInPlace(try aa.dupe(u8, empty.tag));
-        open_set = try thread.tagStatusSet(Self, DB, tag_to_issues, decoded, .open);
-        closed_set = try thread.tagStatusSet(Self, DB, tag_to_issues, decoded, .closed);
-        // a tag no issue carries is a bad url
+    if (labeled) {
+        const label_to_issues_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Issue.label_status_to_id_set_key)) orelse return error.NotFound;
+        const label_to_issues = try DB.SortedMap(.read_only).init(label_to_issues_cursor);
+        const decoded = std.Uri.percentDecodeInPlace(try aa.dupe(u8, empty.label));
+        open_set = try thread.labelStatusSet(Self, DB, label_to_issues, decoded, .open);
+        closed_set = try thread.labelStatusSet(Self, DB, label_to_issues, decoded, .closed);
+        // a label no issue carries is a bad url
         if (open_set == null and closed_set == null) return error.NotFound;
     } else if (try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Issue.status_to_id_set_key))) |status_to_issues_cursor| {
         const status_to_issues = try DB.SortedMap(.read_only).init(status_to_issues_cursor);
@@ -286,8 +286,8 @@ pub fn init(
             if (!try set.contains(order_key)) return error.NotFound;
             conflicts_root = order_key;
         } else {
-            // the named issue must be in its windowed set (a tag url can name
-            // an issue that doesn't carry the tag).
+            // the named issue must be in its windowed set (a label url can name
+            // an issue that doesn't carry the label).
             const set = (switch (issue_event.event.status) {
                 .open => open_set,
                 .closed => closed_set,
@@ -333,11 +333,11 @@ pub fn init(
     else
         try Comment.init(repo_opts.hash, arena, admin_moment, haxy_moment, empty.selected_id, empty.comment_id, comments_start);
 
-    const tags = try thread.loadTags(Self, repo_opts.hash, arena, haxy_moment);
+    const labels = try thread.loadLabels(Self, repo_opts.hash, arena, haxy_moment);
 
     return .{
         .identity = empty.identity,
-        .tag = empty.tag,
+        .label = empty.label,
         .search = empty.search,
         .selected_id = empty.selected_id,
         .comment_id = empty.comment_id,
@@ -350,7 +350,7 @@ pub fn init(
         .theirs_picks = empty.theirs_picks,
         .view = resolved_view,
         .description_page = empty.description_page,
-        .tags = tags,
+        .labels = labels,
     };
 }
 
@@ -362,7 +362,7 @@ pub const Header = thread.Header;
 
 const open_tab_label = "open";
 const closed_tab_label = "closed";
-const tags_tab_label = "tags";
+const labels_tab_label = "labels";
 const edit_tab_label = "edit";
 const reply_tab_label = "reply";
 const remove_tab_label = "remove";
@@ -381,22 +381,22 @@ pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *con
     // a list tab per status, labeled with its listing's issue count
     const status_labels = [_][]const u8{ open_tab_label, closed_tab_label };
     for ([_]evt.Issue.Status{ .open, .closed }, status_labels, 0..) |status, status_label, index| {
-        const route = try thread.searchRoute(ui.RoutablePage.repoIssuesRoute(data.identity, status, data.tag, ""), data.search);
+        const route = try thread.searchRoute(ui.RoutablePage.repoIssuesRoute(data.identity, status, data.label, ""), data.search);
         const link = try ui.inPageTabLink(session, route, page_selected and selected_index == index);
         var label_buf: [64]u8 = undefined;
         const label = try thread.countLabel(&label_buf, status_label, data.window(status).*);
         try header.addTab(allocator, label, link, index);
     }
 
-    // tags tab, labeled with the active tag filter
+    // labels tab, showing the active label filter
     {
-        const tags_route = try thread.searchRoute(ui.RoutablePage.repoThreadTagsRoute(.issue, data.identity, data.tag), data.search);
-        const tags_link = try ui.inPageTabLink(session, tags_route, page_selected and selected_index == View.viewIndex(.tags));
-        const label = if (data.tag.len == 0) tags_tab_label else blk: {
-            const decoded = std.Uri.percentDecodeInPlace(try aa.dupe(u8, data.tag));
-            break :blk try std.fmt.allocPrint(aa, tags_tab_label ++ " ({s})", .{decoded});
+        const labels_route = try thread.searchRoute(ui.RoutablePage.repoThreadLabelsRoute(.issue, data.identity, data.label), data.search);
+        const labels_link = try ui.inPageTabLink(session, labels_route, page_selected and selected_index == View.viewIndex(.labels));
+        const label = if (data.label.len == 0) labels_tab_label else blk: {
+            const decoded = std.Uri.percentDecodeInPlace(try aa.dupe(u8, data.label));
+            break :blk try std.fmt.allocPrint(aa, labels_tab_label ++ " ({s})", .{decoded});
         };
-        try header.addTab(allocator, label, tags_link, View.viewIndex(.tags));
+        try header.addTab(allocator, label, labels_link, View.viewIndex(.labels));
     }
 
     // new-issue tab; an edit or resolve url shows its tab in this place

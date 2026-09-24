@@ -14,8 +14,8 @@ const wasm = builtin.target.cpu.arch == .wasm32;
 // how many discussions one window shows before a "next" link appears.
 pub const page_size = 20;
 
-// how many tags the tags view shows at most.
-pub const max_tags = 1000;
+// how many labels the labels view shows at most.
+pub const max_labels = 1000;
 
 // one discussion from the repo's consumed event database, with its hex event id
 // (the id lives in the event envelope, not the payload).
@@ -41,7 +41,7 @@ pub const Window = struct {
 };
 
 identity: []const u8,
-tag: []const u8,
+label: []const u8,
 // the decoded query the list is filtered to, or null when unfiltered.
 search: ?[]const u8 = null,
 selected_id: []const u8,
@@ -51,7 +51,7 @@ comment_page: ?Comment.Permalink = null,
 recent: Window,
 view: ui.RoutablePage.DiscussionsView,
 description_page: bool = false,
-tags: []const []const u8,
+labels: []const []const u8,
 repo_source: ?ui.RepoSource = null,
 
 const Self = @This();
@@ -62,8 +62,8 @@ pub const ViewKind = ui.RoutablePage.DiscussionsView;
 pub const thread_name = "discussion";
 pub const header_widget_name = "repo_discussions_header";
 
-pub fn listRoute(identity: []const u8, _: Status, tag: []const u8, selected: []const u8) ?ui.RoutablePage {
-    return ui.RoutablePage.repoDiscussionsRoute(identity, tag, selected);
+pub fn listRoute(identity: []const u8, _: Status, label: []const u8, selected: []const u8) ?ui.RoutablePage {
+    return ui.RoutablePage.repoDiscussionsRoute(identity, label, selected);
 }
 
 pub fn selectedThread(self: *const Self) ?*const DiscussionWithId {
@@ -81,7 +81,7 @@ pub fn window(self: *const Self, _: Status) *const Window {
 pub fn emptyResult(
     aa: std.mem.Allocator,
     identity: []const u8,
-    tag: []const u8,
+    label: []const u8,
     search: []const u8,
     selected_id: []const u8,
     comment_id: []const u8,
@@ -90,7 +90,7 @@ pub fn emptyResult(
 ) !Self {
     return .{
         .identity = try aa.dupe(u8, identity),
-        .tag = try aa.dupe(u8, tag),
+        .label = try aa.dupe(u8, label),
         .search = if (search.len == 0) null else std.Uri.percentDecodeInPlace(try aa.dupe(u8, search)),
         .selected_id = try aa.dupe(u8, selected_id),
         .comment_id = try aa.dupe(u8, comment_id),
@@ -98,7 +98,7 @@ pub fn emptyResult(
         .recent = .empty,
         .view = if (view == .description) .recent else view,
         .description_page = view == .description,
-        .tags = &.{},
+        .labels = &.{},
     };
 }
 
@@ -110,19 +110,19 @@ pub fn init(
     io: std.Io,
     admin_moment: ?evt.AdminDB.HashMap(.read_only),
     identity: []const u8,
-    tag: []const u8,
+    label: []const u8,
     search: []const u8,
     selected_id: []const u8,
     comment_id: []const u8,
     comments_start: usize,
     view: ui.RoutablePage.DiscussionsView,
 ) !Self {
-    const empty = try emptyResult(arena.allocator(), identity, tag, search, selected_id, comment_id, comments_start, view);
+    const empty = try emptyResult(arena.allocator(), identity, label, search, selected_id, comment_id, comments_start, view);
     const aa = arena.allocator();
     const DB = evt.EventDB(repo_opts.hash);
     const rooted = empty.selected_id.len != 0;
-    const tagged = empty.tag.len != 0;
-    const strict = rooted or tagged;
+    const labeled = empty.label.len != 0;
+    const strict = rooted or labeled;
 
     const gpa = arena.child_allocator;
     var event_db_maybe: ?evt.LocalEventDB(repo_opts.hash) = if (repo_kind == .git) try evt.LocalEventDB(repo_opts.hash).openReadOnly(io, gpa, repo.core.repo_dir) else null;
@@ -137,11 +137,11 @@ pub fn init(
         return empty;
     };
 
-    const set_maybe: ?DB.SortedSet(.read_only) = if (tagged) blk: {
-        const tags_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Discussion.tag_to_id_set_key)) orelse return error.NotFound;
-        const tag_sets = try DB.SortedMap(.read_only).init(tags_cursor);
-        const decoded = std.Uri.percentDecodeInPlace(try aa.dupe(u8, empty.tag));
-        const cursor = try tag_sets.getCursor(decoded) orelse return error.NotFound;
+    const set_maybe: ?DB.SortedSet(.read_only) = if (labeled) blk: {
+        const labels_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Discussion.label_to_id_set_key)) orelse return error.NotFound;
+        const label_sets = try DB.SortedMap(.read_only).init(labels_cursor);
+        const decoded = std.Uri.percentDecodeInPlace(try aa.dupe(u8, empty.label));
+        const cursor = try label_sets.getCursor(decoded) orelse return error.NotFound;
         break :blk try DB.SortedSet(.read_only).init(cursor);
     } else if (try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Discussion.active_id_set_key))) |cursor|
         try DB.SortedSet(.read_only).init(cursor)
@@ -174,21 +174,21 @@ pub fn init(
     else
         try Comment.init(repo_opts.hash, arena, admin_moment, haxy_moment, empty.selected_id, empty.comment_id, comments_start);
 
-    var tag_names: std.ArrayList([]const u8) = .empty;
-    if (try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Discussion.tag_to_id_set_key))) |tags_cursor| {
-        const tag_sets = try DB.SortedMap(.read_only).init(tags_cursor);
-        var tag_iter = try tag_sets.iterator();
-        while (try tag_iter.next()) |entry_cursor| {
-            if (tag_names.items.len == max_tags) break;
+    var label_names: std.ArrayList([]const u8) = .empty;
+    if (try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Discussion.label_to_id_set_key))) |labels_cursor| {
+        const label_sets = try DB.SortedMap(.read_only).init(labels_cursor);
+        var label_iter = try label_sets.iterator();
+        while (try label_iter.next()) |entry_cursor| {
+            if (label_names.items.len == max_labels) break;
             var entry = entry_cursor;
             const pair = try entry.readKeyValuePair();
-            try tag_names.append(aa, try pair.key_cursor.readBytesAlloc(aa, null));
+            try label_names.append(aa, try pair.key_cursor.readBytesAlloc(aa, null));
         }
     }
 
     return .{
         .identity = empty.identity,
-        .tag = empty.tag,
+        .label = empty.label,
         .search = empty.search,
         .selected_id = empty.selected_id,
         .comment_id = empty.comment_id,
@@ -197,7 +197,7 @@ pub fn init(
         .recent = loaded_window,
         .view = empty.view,
         .description_page = empty.description_page,
-        .tags = tag_names.items,
+        .labels = label_names.items,
     };
 }
 
@@ -208,7 +208,7 @@ pub const detail_widget_name = "repo_discussion_detail";
 pub const Header = thread.Header;
 
 const recent_tab_label = "recent";
-const tags_tab_label = "tags";
+const labels_tab_label = "labels";
 const edit_tab_label = "edit";
 const reply_tab_label = "reply";
 const remove_tab_label = "remove";
@@ -224,22 +224,22 @@ pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *con
 
     // recent discussions
     {
-        const route = try thread.searchRoute(ui.RoutablePage.repoDiscussionsRoute(data.identity, data.tag, ""), data.search);
+        const route = try thread.searchRoute(ui.RoutablePage.repoDiscussionsRoute(data.identity, data.label, ""), data.search);
         const link = try ui.inPageTabLink(session, route, page_selected and selected_index == 0);
         var label_buf: [64]u8 = undefined;
         const label = try thread.countLabel(&label_buf, recent_tab_label, data.recent);
         try header.addTab(allocator, label, link, 0);
     }
 
-    // tags tab, labeled with the active tag filter
+    // labels tab, showing the active label filter
     {
-        const tags_route = try thread.searchRoute(ui.RoutablePage.repoThreadTagsRoute(.discuss, data.identity, data.tag), data.search);
-        const tags_link = try ui.inPageTabLink(session, tags_route, page_selected and selected_index == View.viewIndex(.tags));
-        const label = if (data.tag.len == 0) tags_tab_label else blk: {
-            const decoded = std.Uri.percentDecodeInPlace(try aa.dupe(u8, data.tag));
-            break :blk try std.fmt.allocPrint(aa, tags_tab_label ++ " ({s})", .{decoded});
+        const labels_route = try thread.searchRoute(ui.RoutablePage.repoThreadLabelsRoute(.discuss, data.identity, data.label), data.search);
+        const labels_link = try ui.inPageTabLink(session, labels_route, page_selected and selected_index == View.viewIndex(.labels));
+        const label = if (data.label.len == 0) labels_tab_label else blk: {
+            const decoded = std.Uri.percentDecodeInPlace(try aa.dupe(u8, data.label));
+            break :blk try std.fmt.allocPrint(aa, labels_tab_label ++ " ({s})", .{decoded});
         };
-        try header.addTab(allocator, label, tags_link, View.viewIndex(.tags));
+        try header.addTab(allocator, label, labels_link, View.viewIndex(.labels));
     }
 
     // new-discussion tab; an edit or comment url shows its tab in this place

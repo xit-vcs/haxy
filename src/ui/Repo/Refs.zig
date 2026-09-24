@@ -141,7 +141,7 @@ fn prevRoot(aa: std.mem.Allocator, iter: anytype, prefix: []const u8, from: []co
 pub const View = struct {
     // a vertical box: the search sub-header above a horizontal box of two
     // columns. each column is a fixed label above a
-    // Scroll of a TagFlow, so the names wrap across the column and scroll
+    // Scroll of a WordFlow, so the names wrap across the column and scroll
     // beneath the label. focus points at the header or the active column and,
     // in its flow, the selected name.
     box: wgt.Box(ui.Widget),
@@ -235,17 +235,17 @@ pub const View = struct {
         // navigation brackets them: "← previous" off the first window, "next →"
         // when more remain, each a full reload.
         {
-            var items: std.ArrayList(ui.widget.TagFlow.Item) = .empty;
+            var items: std.ArrayList(ui.widget.WordFlow.Item) = .empty;
             defer items.deinit(allocator);
             if (data.prev) |p| try items.append(allocator, .{ .text = "← previous", .link = try windowLink(session.page_arena, identity, kind, p, search) });
             for (data.names) |name| try items.append(allocator, .{ .text = name, .link = try refLink(session.page_arena, identity, kind, name) });
             if (data.next) |n| try items.append(allocator, .{ .text = "next →", .link = try windowLink(session.page_arena, identity, kind, n, search) });
 
             var scroll = blk: {
-                var flow = try ui.widget.TagFlow.init(allocator);
+                var flow = try ui.widget.WordFlow.init(allocator);
                 errdefer flow.deinit(allocator);
                 try flow.setItems(allocator, items.items);
-                break :blk try wgt.Scroll(ui.Widget).init(allocator, .{ .tag_flow = flow }, .{ .direction = .vert, .web_native = !session.is_terminal, .fill = true });
+                break :blk try wgt.Scroll(ui.Widget).init(allocator, .{ .word_flow = flow }, .{ .direction = .vert, .web_native = !session.is_terminal, .fill = true });
             };
             errdefer scroll.deinit(allocator);
 
@@ -364,16 +364,16 @@ pub const View = struct {
         return &self.columns().children.values()[index].widget.box.children.values()[1].widget.scroll;
     }
 
-    fn flowAt(self: *View, index: usize) *ui.widget.TagFlow {
-        return &self.scrollAt(index).child.tag_flow;
+    fn flowAt(self: *View, index: usize) *ui.widget.WordFlow {
+        return &self.scrollAt(index).child.word_flow;
     }
 
-    fn rowStart(flow: *ui.widget.TagFlow, item: usize) bool {
+    fn rowStart(flow: *ui.widget.WordFlow, item: usize) bool {
         const rects = flow.rects.items;
         return item == 0 or rects[item - 1].y != rects[item].y;
     }
 
-    fn rowEnd(flow: *ui.widget.TagFlow, item: usize) bool {
+    fn rowEnd(flow: *ui.widget.WordFlow, item: usize) bool {
         const rects = flow.rects.items;
         return item + 1 == rects.len or rects[item + 1].y != rects[item].y;
     }

@@ -414,27 +414,27 @@ fn respondThreadFormFailure(request: *std.http.Server.Request, allocator: std.me
     };
 }
 
-fn requiredTitleFeedback(kind: evt.EventKind, title: []const u8, tags: []const u8, description: []const u8, target_branch: []const u8, source_branch: ?[]const u8) ui.Session.FormFeedback {
+fn requiredTitleFeedback(kind: evt.EventKind, title: []const u8, labels: []const u8, description: []const u8, target_branch: []const u8, source_branch: ?[]const u8) ui.Session.FormFeedback {
     return switch (kind) {
         .issue => .{ .issue = .{ .failure = .required_title, .fields = .{
             .title = title,
-            .tags = tags,
+            .labels = labels,
             .description = description,
         } } },
-        .patch => patchFeedback(.required_title, title, tags, description, target_branch, source_branch),
+        .patch => patchFeedback(.required_title, title, labels, description, target_branch, source_branch),
         .discuss => .{ .discussion = .{ .failure = .required_title, .fields = .{
             .title = title,
-            .tags = tags,
+            .labels = labels,
             .description = description,
         } } },
         else => unreachable,
     };
 }
 
-fn patchFeedback(failure: ui.Session.FormFeedback.PatchFailure, title: []const u8, tags: []const u8, description: []const u8, target_branch: []const u8, source_branch: ?[]const u8) ui.Session.FormFeedback {
+fn patchFeedback(failure: ui.Session.FormFeedback.PatchFailure, title: []const u8, labels: []const u8, description: []const u8, target_branch: []const u8, source_branch: ?[]const u8) ui.Session.FormFeedback {
     return .{ .patch = .{ .failure = failure, .fields = .{
         .title = title,
-        .tags = tags,
+        .labels = labels,
         .description = description,
         .target_branch = target_branch,
         .source_branch = source_branch orelse "",
@@ -642,8 +642,8 @@ fn handleThreadNew(
 
     const title = (try parseFormField(allocator, body, "title")) orelse try allocator.dupe(u8, "");
     defer allocator.free(title);
-    const tags = (try parseFormField(allocator, body, "tags")) orelse try allocator.dupe(u8, "");
-    defer allocator.free(tags);
+    const labels = (try parseFormField(allocator, body, "labels")) orelse try allocator.dupe(u8, "");
+    defer allocator.free(labels);
     const description_crlf = (try parseFormField(allocator, body, "description")) orelse try allocator.dupe(u8, "");
     defer allocator.free(description_crlf);
     // form submission normalizes textarea line breaks to CRLF; store plain
@@ -657,9 +657,9 @@ fn handleThreadNew(
     defer if (source_branch) |branch| allocator.free(branch);
 
     const valid = switch (kind) {
-        .issue => evt.Issue.fieldsValid(title, tags),
-        .patch => evt.Patch.fieldsValid(title, tags),
-        .discuss => evt.Discussion.fieldsValid(title, tags),
+        .issue => evt.Issue.fieldsValid(title, labels),
+        .patch => evt.Patch.fieldsValid(title, labels),
+        .discuss => evt.Discussion.fieldsValid(title, labels),
         else => unreachable,
     };
     if (!valid) {
@@ -672,7 +672,7 @@ fn handleThreadNew(
         const form_location = try std.fmt.allocPrint(allocator, "{s}/{s}/new", .{ base, list_name });
         defer allocator.free(form_location);
         if (!evt.titleValid(title)) {
-            return respondThreadFormFailure(request, allocator, host, form_location, requiredTitleFeedback(kind, title, tags, description, target_branch, source_branch));
+            return respondThreadFormFailure(request, allocator, host, form_location, requiredTitleFeedback(kind, title, labels, description, target_branch, source_branch));
         }
         try request.respond("", .{
             .status = .see_other,
@@ -704,7 +704,7 @@ fn handleThreadNew(
         if (!evt.Patch.branchValid(target_branch) or !try request_repo.source.hasBranch(io, allocator, target_branch)) {
             const form_location = try std.fmt.allocPrint(allocator, "{s}/patches/new", .{base});
             defer allocator.free(form_location);
-            return respondThreadFormFailure(request, allocator, host, form_location, patchFeedback(.invalid_target_branch, title, tags, description, target_branch, null));
+            return respondThreadFormFailure(request, allocator, host, form_location, patchFeedback(.invalid_target_branch, title, labels, description, target_branch, null));
         }
         const repo_id = evt.parseEventId(std.fs.path.basename(request_repo.source.path)) catch return respondRemoveNotFound(request);
         var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = server.admin_repo_path });
@@ -717,7 +717,7 @@ fn handleThreadNew(
             .repo_id = repo_id,
             .title = title,
             .description = description,
-            .tags = tags,
+            .labels = labels,
             .target_branch = target_branch,
             .author = author,
             .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
@@ -729,9 +729,9 @@ fn handleThreadNew(
             .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
             .author = author,
             .event = switch (kind) {
-                .issue => .{ .issue = .{ .title = title, .description = description, .tags = tags } },
-                .patch => .{ .patch = .{ .title = title, .description = description, .tags = tags, .target_branch = target_branch, .source_branch = source_branch } },
-                .discuss => .{ .discuss = .{ .title = title, .description = description, .tags = tags } },
+                .issue => .{ .issue = .{ .title = title, .description = description, .labels = labels } },
+                .patch => .{ .patch = .{ .title = title, .description = description, .labels = labels, .target_branch = target_branch, .source_branch = source_branch } },
+                .discuss => .{ .discuss = .{ .title = title, .description = description, .labels = labels } },
                 else => unreachable,
             },
         };
@@ -751,7 +751,7 @@ fn handleThreadNew(
                             const failure = ui.Session.FormFeedback.PatchFailure.fromError(err) orelse return err;
                             const form_location = try std.fmt.allocPrint(allocator, "{s}/patches/new", .{base});
                             defer allocator.free(form_location);
-                            return respondThreadFormFailure(request, allocator, host, form_location, patchFeedback(failure, title, tags, description, target_branch, source_branch));
+                            return respondThreadFormFailure(request, allocator, host, form_location, patchFeedback(failure, title, labels, description, target_branch, source_branch));
                         };
                     },
                 }
@@ -1403,7 +1403,7 @@ fn updateDiscussion(
     repo_base: []const u8,
     id: *const [evt.event_id_size]u8,
     title: []const u8,
-    tags: []const u8,
+    labels: []const u8,
     description: []const u8,
     author: evt.CommitAuthor,
 ) !void {
@@ -1415,7 +1415,7 @@ fn updateDiscussion(
             var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, source.localInitOpts());
             defer any_repo.deinit(io, allocator);
             switch (any_repo) {
-                inline else => |*repo| try evt.Discussion.update(std.meta.activeTag(host), repo_kind, repo.self_repo_opts, io, allocator, repo, id, title, tags, description, author),
+                inline else => |*repo| try evt.Discussion.update(std.meta.activeTag(host), repo_kind, repo.self_repo_opts, io, allocator, repo, id, title, labels, description, author),
             }
         },
     }
@@ -1494,8 +1494,8 @@ fn handleThreadEdit(
 
     const title = (try parseFormField(allocator, body, "title")) orelse try allocator.dupe(u8, "");
     defer allocator.free(title);
-    const tags = (try parseFormField(allocator, body, "tags")) orelse try allocator.dupe(u8, "");
-    defer allocator.free(tags);
+    const labels = (try parseFormField(allocator, body, "labels")) orelse try allocator.dupe(u8, "");
+    defer allocator.free(labels);
     const description_crlf = (try parseFormField(allocator, body, "description")) orelse try allocator.dupe(u8, "");
     defer allocator.free(description_crlf);
     // form submission normalizes textarea line breaks to CRLF; store plain
@@ -1507,16 +1507,16 @@ fn handleThreadEdit(
 
     // invalid fields send the user back to the edit form
     const valid = switch (parts.thread_kind) {
-        .issue => evt.Issue.fieldsValid(title, tags),
-        .patch => evt.Patch.fieldsValid(title, tags),
-        .discuss => evt.Discussion.fieldsValid(title, tags),
+        .issue => evt.Issue.fieldsValid(title, labels),
+        .patch => evt.Patch.fieldsValid(title, labels),
+        .discuss => evt.Discussion.fieldsValid(title, labels),
         else => unreachable,
     };
     if (!valid) {
         const form_location = try std.fmt.allocPrint(allocator, "{s}/edit", .{base});
         defer allocator.free(form_location);
         if (!evt.titleValid(title)) {
-            return respondThreadFormFailure(request, allocator, host, form_location, requiredTitleFeedback(parts.thread_kind, title, tags, description, target_branch, null));
+            return respondThreadFormFailure(request, allocator, host, form_location, requiredTitleFeedback(parts.thread_kind, title, labels, description, target_branch, null));
         }
         try request.respond("", .{
             .status = .see_other,
@@ -1537,7 +1537,7 @@ fn handleThreadEdit(
         if (!evt.Patch.branchValid(target_branch) or !try request_repo.source.hasBranch(io, allocator, target_branch)) {
             const form_location = try std.fmt.allocPrint(allocator, "{s}/edit", .{base});
             defer allocator.free(form_location);
-            return respondThreadFormFailure(request, allocator, host, form_location, patchFeedback(.invalid_target_branch, title, tags, description, target_branch, null));
+            return respondThreadFormFailure(request, allocator, host, form_location, patchFeedback(.invalid_target_branch, title, labels, description, target_branch, null));
         }
         const repo_id = evt.parseEventId(std.fs.path.basename(request_repo.source.path)) catch return respondRemoveNotFound(request);
         var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = server.admin_repo_path });
@@ -1552,7 +1552,7 @@ fn handleThreadEdit(
             .user_id = user_id,
             .repo_id = repo_id,
             .title = title,
-            .tags = tags,
+            .labels = labels,
             .description = description,
             .target_branch = target_branch,
             .author = author,
@@ -1578,16 +1578,16 @@ fn handleThreadEdit(
     (switch (parts.thread_kind) {
         .issue => updateThread(evt.Issue, io, allocator, host, parts.repo_base, &parts.thread_id, .{ .fields = .{
             .title = title,
-            .tags = tags,
+            .labels = labels,
             .description = description,
         } }, author),
         .patch => updateThread(evt.Patch, io, allocator, host, parts.repo_base, &parts.thread_id, .{ .fields = .{
             .title = title,
-            .tags = tags,
+            .labels = labels,
             .description = description,
             .target_branch = target_branch,
         } }, author),
-        .discuss => updateDiscussion(io, allocator, host, parts.repo_base, &parts.thread_id, title, tags, description, author),
+        .discuss => updateDiscussion(io, allocator, host, parts.repo_base, &parts.thread_id, title, labels, description, author),
         else => unreachable,
     }) catch |err| switch (err) {
         error.NotFound => {
@@ -1602,7 +1602,7 @@ fn handleThreadEdit(
             const failure = ui.Session.FormFeedback.PatchFailure.fromError(err) orelse return err;
             const form_location = try std.fmt.allocPrint(allocator, "{s}/edit", .{base});
             defer allocator.free(form_location);
-            return respondThreadFormFailure(request, allocator, host, form_location, patchFeedback(failure, title, tags, description, target_branch, null));
+            return respondThreadFormFailure(request, allocator, host, form_location, patchFeedback(failure, title, labels, description, target_branch, null));
         },
     };
 
@@ -1639,7 +1639,7 @@ fn handleThreadResolve(
     defer field_arena.deinit();
     const aa = field_arena.allocator();
     const title = try parseFormField(aa, body, "title");
-    const tags = try parseFormField(aa, body, "tags");
+    const labels = try parseFormField(aa, body, "labels");
 
     // the hunk inputs are submitted as d0, d1, ...; form submission normalizes their
     // textarea line breaks to CRLF
@@ -1675,12 +1675,12 @@ fn handleThreadResolve(
     (switch (parts.thread_kind) {
         .issue => updateThread(evt.Issue, io, allocator, host, parts.repo_base, &parts.thread_id, .{ .resolve = .{
             .title = title,
-            .tags = tags,
+            .labels = labels,
             .hunks = hunks.items,
         } }, author),
         .patch => updateThread(evt.Patch, io, allocator, host, parts.repo_base, &parts.thread_id, .{ .resolve = .{
             .title = title,
-            .tags = tags,
+            .labels = labels,
             .hunks = hunks.items,
             .theirs = theirs,
         } }, author),

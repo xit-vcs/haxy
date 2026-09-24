@@ -93,7 +93,7 @@ test "rebase" {
                 .issue = .{
                     .title = "Login form clears password on validation error",
                     .description = "Submitting an invalid email address resets the password field. Preserve the field value and show an inline validation message.",
-                    .tags = "bug priority-high ui",
+                    .labels = "bug priority-high ui",
                 },
             },
         },
@@ -105,7 +105,7 @@ test "rebase" {
                 .issue = .{
                     .title = "Login form clears password on validation error",
                     .description = "Submitting an invalid email address resets the password field and removes typed input. Preserve the field value and show an inline validation message.",
-                    .tags = "bug priority-low ui",
+                    .labels = "bug priority-low ui",
                 },
             },
         },
@@ -116,7 +116,7 @@ test "rebase" {
                 .issue = .{
                     .title = "Search results ignore archived project filter",
                     .description = "Filtering search results to active projects still returns issues from archived projects. Apply the archived flag before ranking results.",
-                    .tags = "bug search backend",
+                    .labels = "bug search backend",
                 },
             },
         },
@@ -127,7 +127,7 @@ test "rebase" {
                 .issue = .{
                     .title = "Issue list does not persist selected sort order",
                     .description = "Changing the issue list sort order is lost after refresh. Store the selected sort field and direction with the user's view preferences.",
-                    .tags = "enhancement frontend preferences",
+                    .labels = "enhancement frontend preferences",
                 },
             },
         },
@@ -177,8 +177,8 @@ test "rebase" {
         // the description was correctly edited
         try std.testing.expectEqualStrings(events_to_consume[1].event.issue.?.description, first_issue.event.description);
 
-        // the tags were correctly edited
-        try std.testing.expectEqualStrings(events_to_consume[1].event.issue.?.tags, first_issue.event.tags);
+        // the labels were correctly edited
+        try std.testing.expectEqualStrings(events_to_consume[1].event.issue.?.labels, first_issue.event.labels);
     }
 
     //
@@ -193,7 +193,7 @@ test "rebase" {
                 .issue = .{
                     .title = "Double clicking causes the form to submit twice",
                     .description = "When I double click the submit button I see duplicate submissions.",
-                    .tags = "bug priority-high ui",
+                    .labels = "bug priority-high ui",
                 },
             },
         },
@@ -259,8 +259,8 @@ test "rebase" {
         // the description is no longer edited
         try std.testing.expectEqualStrings(events_to_consume[0].event.issue.?.description, first_issue.event.description);
 
-        // the tags are no longer edited
-        try std.testing.expectEqualStrings(events_to_consume[0].event.issue.?.tags, first_issue.event.tags);
+        // the labels are no longer edited
+        try std.testing.expectEqualStrings(events_to_consume[0].event.issue.?.labels, first_issue.event.labels);
 
         // an event added by the second push is no longer there because it was wiped out by the rebase
         try std.testing.expect(null == try event_id_to_issue.getCursor(hash.hashInt(repo_opts.hash, &events_to_consume2[0].id)));
@@ -349,7 +349,7 @@ test "merge" {
                 .issue = .{
                     .title = "Login form clears password on validation error",
                     .description = "Submitting an invalid email address resets the password field. Preserve the field value and show an inline validation message.",
-                    .tags = "bug priority-high ui",
+                    .labels = "bug priority-high ui",
                 },
             },
         },
@@ -360,7 +360,7 @@ test "merge" {
                 .issue = .{
                     .title = "Search results ignore archived project filter",
                     .description = "Filtering search results to active projects still returns issues from archived projects. Apply the archived flag before ranking results.",
-                    .tags = "bug search backend",
+                    .labels = "bug search backend",
                 },
             },
         },
@@ -371,7 +371,7 @@ test "merge" {
                 .issue = .{
                     .title = "Issue list does not persist selected sort order",
                     .description = "Changing the issue list sort order is lost after refresh. Store the selected sort field and direction with the user's view preferences.",
-                    .tags = "enhancement frontend preferences",
+                    .labels = "enhancement frontend preferences",
                 },
             },
         },
@@ -421,7 +421,7 @@ test "merge" {
         const first_issue = try evt.read(evt.Issue.Record, Repo.DB, repo_opts.hash, &arena, first_issue_map);
 
         try std.testing.expectEqualStrings(events_to_consume[0].event.issue.?.description, first_issue.event.description);
-        try std.testing.expectEqualStrings(events_to_consume[0].event.issue.?.tags, first_issue.event.tags);
+        try std.testing.expectEqualStrings(events_to_consume[0].event.issue.?.labels, first_issue.event.labels);
     }
 
     //
@@ -436,7 +436,7 @@ test "merge" {
                 .issue = .{
                     .title = "Kanban card status badge falls behind after drag",
                     .description = "Moving an issue between columns updates the card position immediately, but the status badge keeps showing the previous state until refresh.",
-                    .tags = "bug kanban frontend",
+                    .labels = "bug kanban frontend",
                 },
             },
         },
@@ -447,7 +447,7 @@ test "merge" {
                 .issue = .{
                     .title = "Assignee autocomplete omits recently invited users",
                     .description = "Users invited during the current session do not appear in the assignee picker until the project page is reloaded.",
-                    .tags = "bug assignees api",
+                    .labels = "bug assignees api",
                 },
             },
         },
@@ -458,7 +458,7 @@ test "merge" {
                 .issue = .{
                     .title = "Add due date warning for issues blocked by dependencies",
                     .description = "Show a warning when an issue's due date is earlier than an unresolved blocking issue so planners can adjust the schedule.",
-                    .tags = "enhancement planning dependencies",
+                    .labels = "enhancement planning dependencies",
                 },
             },
         },
@@ -528,7 +528,7 @@ test "merge" {
             const first_issue = try evt.read(evt.Issue.Record, Repo.DB, repo_opts.hash, &arena, first_issue_map);
 
             try std.testing.expectEqualStrings(events_to_consume[0].event.issue.?.description, first_issue.event.description);
-            try std.testing.expectEqualStrings(events_to_consume[0].event.issue.?.tags, first_issue.event.tags);
+            try std.testing.expectEqualStrings(events_to_consume[0].event.issue.?.labels, first_issue.event.labels);
         }
 
         // make sure one of the new issues is there
@@ -541,7 +541,7 @@ test "merge" {
             const first_issue = try evt.read(evt.Issue.Record, Repo.DB, repo_opts.hash, &arena, first_issue_map);
 
             try std.testing.expectEqualStrings(events_to_consume2[0].event.issue.?.description, first_issue.event.description);
-            try std.testing.expectEqualStrings(events_to_consume2[0].event.issue.?.tags, first_issue.event.tags);
+            try std.testing.expectEqualStrings(events_to_consume2[0].event.issue.?.labels, first_issue.event.labels);
         }
 
         // the ordered issue set unions both branches' additions
@@ -632,7 +632,7 @@ test "merge" {
                 .issue = .{
                     .title = "Login form clears password on validation error",
                     .description = "Submitting an invalid email address resets the password field. Preserve the field value and show an inline validation message.",
-                    .tags = "bug priority-low ui",
+                    .labels = "bug priority-low ui",
                 },
             },
         },
@@ -643,7 +643,7 @@ test "merge" {
                 .issue = .{
                     .title = "Login form clears password on validation error",
                     .description = "Submitting an invalid email address resets the password field. Preserve the field value and show an inline validation message.",
-                    .tags = "bug priority-medium ui",
+                    .labels = "bug priority-medium ui",
                 },
             },
         },
@@ -713,7 +713,7 @@ test "merge" {
 
         // the first parent is the events branch, so its version stays live
         const issue = try readIssue(Repo.DB, repo_opts.hash, haxy_moment, &arena, &issue_id);
-        try std.testing.expectEqualStrings("bug priority-low ui", issue.event.tags);
+        try std.testing.expectEqualStrings("bug priority-low ui", issue.event.labels);
 
         // the issue is listed as conflicted, with the merge base recorded
         const conflicts_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Issue.conflicts_key)) orelse return error.NotFound;
@@ -726,36 +726,36 @@ test "merge" {
 
         const base_cursor = try conflict.getCursor(hash.hashInt(repo_opts.hash, evt.base_record_key)) orelse return error.NotFound;
         const base = try evt.read(evt.Issue.Record, Repo.DB, repo_opts.hash, &arena, try Repo.DB.HashMap(.read_only).init(base_cursor));
-        try std.testing.expectEqualStrings("bug priority-high ui", base.event.tags);
+        try std.testing.expectEqualStrings("bug priority-high ui", base.event.labels);
 
-        // tags is the one field both sides changed differently
+        // labels is the one field both sides changed differently
         const fields_cursor = try conflict.getCursor(hash.hashInt(repo_opts.hash, evt.conflicted_fields_key)) orelse return error.NotFound;
         const conflicted_fields = try fields_cursor.readBytesAlloc(arena.allocator(), null);
-        try std.testing.expectEqualStrings("tags", conflicted_fields);
+        try std.testing.expectEqualStrings("labels", conflicted_fields);
 
         // their whole version is recorded, not just the conflicting field
         const their_cursor = try conflict.getCursor(hash.hashInt(repo_opts.hash, evt.their_record_key)) orelse return error.NotFound;
         const theirs = try evt.read(evt.Issue.Record, Repo.DB, repo_opts.hash, &arena, try Repo.DB.HashMap(.read_only).init(their_cursor));
-        try std.testing.expectEqualStrings("bug priority-medium ui", theirs.event.tags);
+        try std.testing.expectEqualStrings("bug priority-medium ui", theirs.event.labels);
         try std.testing.expectEqualStrings(issue.event.title, theirs.event.title);
         try std.testing.expectEqualStrings(issue.event.description, theirs.event.description);
 
         // their value is attributed to the commit that set it on their branch
         const oids_cursor = try conflict.getCursor(hash.hashInt(repo_opts.hash, evt.their_field_to_oid_key)) orelse return error.NotFound;
         const oids = try Repo.DB.SortedMap(.read_only).init(oids_cursor);
-        const oid_cursor = try oids.getCursor("tags") orelse return error.NotFound;
+        const oid_cursor = try oids.getCursor("labels") orelse return error.NotFound;
         var their_oid: [hash.byteLen(repo_opts.hash)]u8 = undefined;
         _ = try oid_cursor.readBytes(&their_oid);
         try std.testing.expectEqualSlices(u8, &conflicting_oids[1], &their_oid);
 
         // ours stays attributed to the commit on the events branch
-        try std.testing.expectEqualSlices(u8, &conflicting_oids[0], &try readOid(Repo.DB, repo_opts.hash, haxy_moment, &issue_id, "tags"));
+        try std.testing.expectEqualSlices(u8, &conflicting_oids[0], &try readOid(Repo.DB, repo_opts.hash, haxy_moment, &issue_id, "labels"));
 
-        // the losing side's tag didn't leak into the tag index
-        const tag_to_issues_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, "tag+status->issue-id-set")) orelse return error.NotFound;
-        const tag_to_issues = try Repo.DB.SortedMap(.read_only).init(tag_to_issues_cursor);
-        try std.testing.expect(null != try tag_to_issues.getCursor("priority-low open"));
-        try std.testing.expect(null == try tag_to_issues.getCursor("priority-medium open"));
+        // the losing side's label didn't leak into the label index
+        const label_to_issues_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, "label+status->issue-id-set")) orelse return error.NotFound;
+        const label_to_issues = try Repo.DB.SortedMap(.read_only).init(label_to_issues_cursor);
+        try std.testing.expect(null != try label_to_issues.getCursor("priority-low open"));
+        try std.testing.expect(null == try label_to_issues.getCursor("priority-medium open"));
     }
 
     //
@@ -774,7 +774,7 @@ test "merge" {
         const event = evt.EventWithId{ .id = events_to_consume3[1].id, .author = author, .event = .{ .issue = .{
             .title = their_issue.title,
             .description = "Rewritten on a branch that never merged.",
-            .tags = their_issue.tags,
+            .labels = their_issue.labels,
         } } };
         try std.json.Stringify.value(event, .{}, &json.writer);
         _ = try repo.commitAtRef(io, allocator, .{ .message = json.written() }, null, other_events_ref);
@@ -824,7 +824,7 @@ test "merge" {
     {
         try evt.Issue.update(.local, .xit, repo_opts, io, allocator, &repo, &issue_id, .{ .fields = .{
             .title = "Login form clears password on validation error",
-            .tags = "bug priority-medium ui",
+            .labels = "bug priority-medium ui",
             .description = "Submitting an invalid email address resets the password field.",
         } }, author);
     }
@@ -845,7 +845,7 @@ test "merge" {
         const event = evt.EventWithId{ .id = events_to_consume3[0].id, .author = author, .event = .{ .issue = .{
             .title = conflicted_issue.title,
             .description = conflicted_issue.description,
-            .tags = conflicted_issue.tags,
+            .labels = conflicted_issue.labels,
             .status = .closed,
         } } };
         try std.json.Stringify.value(event, .{}, &json.writer);
@@ -871,7 +871,7 @@ test "merge" {
 
         // and the resolution stands
         const issue = try readIssue(Repo.DB, repo_opts.hash, haxy_moment, &arena, &issue_id);
-        try std.testing.expectEqualStrings("bug priority-medium ui", issue.event.tags);
+        try std.testing.expectEqualStrings("bug priority-medium ui", issue.event.labels);
     }
 
     //
@@ -896,7 +896,7 @@ test "merge" {
             const event = evt.EventWithId{ .id = events_to_consume[1].id, .author = author, .event = .{ .issue = .{
                 .title = "Search results ignore the archived project filter",
                 .description = second_issue.description,
-                .tags = second_issue.tags,
+                .labels = second_issue.labels,
             } } };
             try std.json.Stringify.value(event, .{}, &json.writer);
             const oid = try repo.commitAtRef(io, allocator, .{ .message = json.written() }, null, evt.events_ref);
@@ -904,13 +904,13 @@ test "merge" {
         }
 
         // the other branch rewrites the second issue's description and drops one
-        // of its tags, then retags the third issue
+        // of its labels, then relabels the third issue
         {
             json.clearRetainingCapacity();
             const event = evt.EventWithId{ .id = events_to_consume[1].id, .author = author, .event = .{ .issue = .{
                 .title = second_issue.title,
                 .description = "Archived projects are ranked before the flag is applied.",
-                .tags = "bug search",
+                .labels = "bug search",
             } } };
             try std.json.Stringify.value(event, .{}, &json.writer);
             const oid = try repo.commitAtRef(io, allocator, .{ .parent_oids = &.{base_oid}, .message = json.written() }, null, other_events_ref);
@@ -921,7 +921,7 @@ test "merge" {
             const event = evt.EventWithId{ .id = events_to_consume[2].id, .author = author, .event = .{ .issue = .{
                 .title = third_issue.title,
                 .description = third_issue.description,
-                .tags = "enhancement roadmap",
+                .labels = "enhancement roadmap",
             } } };
             try std.json.Stringify.value(event, .{}, &json.writer);
             _ = try repo.commitAtRef(io, allocator, .{ .message = json.written() }, null, other_events_ref);
@@ -950,7 +950,7 @@ test "merge" {
         const merged = try readIssue(Repo.DB, repo_opts.hash, haxy_moment, &arena, &second_id);
         try std.testing.expectEqualStrings("Search results ignore the archived project filter", merged.event.title);
         try std.testing.expectEqualStrings("Archived projects are ranked before the flag is applied.", merged.event.description);
-        try std.testing.expectEqualStrings("bug search", merged.event.tags);
+        try std.testing.expectEqualStrings("bug search", merged.event.labels);
 
         // each merged field is attributed to the branch it came from
         try std.testing.expectEqualSlices(u8, &retitle_oid, &try readOid(Repo.DB, repo_opts.hash, haxy_moment, &second_id, "title"));
@@ -960,20 +960,20 @@ test "merge" {
         const conflicts = try Repo.DB.SortedMap(.read_only).init(conflicts_cursor);
         try std.testing.expectEqual(0, try conflicts.count());
 
-        // tags the merged-in side dropped don't survive in the tag index,
+        // labels the merged-in side dropped don't survive in the label index,
         // whether we edited that issue or left it alone
-        const tag_to_issues_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, "tag+status->issue-id-set")) orelse return error.NotFound;
-        const tag_to_issues = try Repo.DB.SortedMap(.read_only).init(tag_to_issues_cursor);
+        const label_to_issues_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, "label+status->issue-id-set")) orelse return error.NotFound;
+        const label_to_issues = try Repo.DB.SortedMap(.read_only).init(label_to_issues_cursor);
 
         var third_id: [evt.event_id_size]u8 = undefined;
         _ = try std.fmt.hexToBytes(&third_id, &events_to_consume[2].id);
-        const retagged = try readIssue(Repo.DB, repo_opts.hash, haxy_moment, &arena, &third_id);
-        try std.testing.expectEqualStrings("enhancement roadmap", retagged.event.tags);
+        const relabeled = try readIssue(Repo.DB, repo_opts.hash, haxy_moment, &arena, &third_id);
+        try std.testing.expectEqualStrings("enhancement roadmap", relabeled.event.labels);
 
-        try std.testing.expect(null == try tag_to_issues.getCursor("backend open"));
-        try std.testing.expect(null == try tag_to_issues.getCursor("preferences open"));
-        try std.testing.expect(null != try tag_to_issues.getCursor("roadmap open"));
-        try std.testing.expect(null != try tag_to_issues.getCursor("enhancement open"));
+        try std.testing.expect(null == try label_to_issues.getCursor("backend open"));
+        try std.testing.expect(null == try label_to_issues.getCursor("preferences open"));
+        try std.testing.expect(null != try label_to_issues.getCursor("roadmap open"));
+        try std.testing.expect(null != try label_to_issues.getCursor("enhancement open"));
     }
 
     //
@@ -994,7 +994,7 @@ test "merge" {
             const event = evt.EventWithId{ .id = events_to_consume2[1].id, .author = author, .event = .{ .issue = .{
                 .title = "Kept by the edit",
                 .description = edited_issue.description,
-                .tags = edited_issue.tags,
+                .labels = edited_issue.labels,
             } } };
             try std.json.Stringify.value(event, .{}, &json.writer);
             _ = try repo.commitAtRef(io, allocator, .{ .message = json.written() }, null, evt.events_ref);
@@ -1028,15 +1028,15 @@ test "merge" {
 
         const haxy_moment = try evt.currentMoment(repo_opts, &repo);
 
-        // the one we left alone is removed, and its tags left the index
+        // the one we left alone is removed, and its labels left the index
         var dropped_id: [evt.event_id_size]u8 = undefined;
         _ = try std.fmt.hexToBytes(&dropped_id, &events_to_consume2[0].id);
         const dropped = try readIssue(Repo.DB, repo_opts.hash, haxy_moment, &arena, &dropped_id);
         try std.testing.expect(dropped.removed);
 
-        const tag_to_issues_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, "tag+status->issue-id-set")) orelse return error.NotFound;
-        const tag_to_issues = try Repo.DB.SortedMap(.read_only).init(tag_to_issues_cursor);
-        try std.testing.expect(null == try tag_to_issues.getCursor("kanban open"));
+        const label_to_issues_cursor = try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, "label+status->issue-id-set")) orelse return error.NotFound;
+        const label_to_issues = try Repo.DB.SortedMap(.read_only).init(label_to_issues_cursor);
+        try std.testing.expect(null == try label_to_issues.getCursor("kanban open"));
 
         // the one we edited survives, with our edit
         var kept_id: [evt.event_id_size]u8 = undefined;

@@ -8,7 +8,7 @@ const hash = xit.hash;
 
 title: []const u8,
 description: []const u8,
-tags: []const u8, // space-separated
+labels: []const u8, // space-separated
 status: Status = .open,
 
 // what the db stores: the event's data plus the commit-derived fields
@@ -33,7 +33,7 @@ pub const Status = enum {
     };
 };
 
-pub const tag_max_len = 64;
+pub const label_max_len = 64;
 
 // the moment keys `evt.merge` reads and writes for this kind
 pub const merge_policy: evt.MergePolicy = .field_conflicts;
@@ -42,26 +42,26 @@ pub const all_id_set_key = "issue-id-set";
 pub const conflicts_key = "conflicted-issue-id->conflict";
 pub const id_to_field_to_oid_key = "issue-id->field->oid";
 pub const status_to_id_set_key = "status->issue-id-set";
-pub const tag_status_to_id_set_key = "tag+status->issue-id-set";
+pub const label_status_to_id_set_key = "label+status->issue-id-set";
 
-// a "tag status" key names a tag's per-status issue set (tags can't contain
+// a "label status" key names a label's per-status issue set (labels can't contain
 // spaces, so the pair is unambiguous)
-pub const TagStatusKey = [tag_max_len + 1 + Status.longest_len]u8;
+pub const LabelStatusKey = [label_max_len + 1 + Status.longest_len]u8;
 
-pub fn tagStatusKey(buffer: *TagStatusKey, tag: []const u8, status: Status) ![]const u8 {
-    return std.fmt.bufPrint(buffer, "{s} {s}", .{ tag, @tagName(status) });
+pub fn labelStatusKey(buffer: *LabelStatusKey, label: []const u8, status: Status) ![]const u8 {
+    return std.fmt.bufPrint(buffer, "{s} {s}", .{ label, @tagName(status) });
 }
 
-pub fn tagIterator(tags: []const u8) std.mem.SplitIterator(u8, .scalar) {
-    return std.mem.splitScalar(u8, tags, ' ');
+pub fn labelIterator(labels: []const u8) std.mem.SplitIterator(u8, .scalar) {
+    return std.mem.splitScalar(u8, labels, ' ');
 }
 
-// a title is required, and a too-long tag would go unindexed once consumed
-pub fn fieldsValid(title: []const u8, tags: []const u8) bool {
+// a title is required, and a too-long label would go unindexed once consumed
+pub fn fieldsValid(title: []const u8, labels: []const u8) bool {
     if (!evt.titleValid(title)) return false;
-    var tag_iter = tagIterator(tags);
-    while (tag_iter.next()) |tag| {
-        if (tag.len > tag_max_len) return false;
+    var label_iter = labelIterator(labels);
+    while (label_iter.next()) |label| {
+        if (label.len > label_max_len) return false;
     }
     return true;
 }
@@ -87,9 +87,9 @@ pub fn consume(
     const status_to_issues_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, status_to_id_set_key));
     const status_to_issues = try DB.SortedMap(.read_write).init(status_to_issues_cursor);
 
-    // the per-tag, per-status sets, keyed "tag,status"
-    const tag_to_issues_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, tag_status_to_id_set_key));
-    const tag_to_issues = try DB.SortedMap(.read_write).init(tag_to_issues_cursor);
+    // the per-label, per-status sets, keyed "label,status"
+    const label_to_issues_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, label_status_to_id_set_key));
+    const label_to_issues = try DB.SortedMap(.read_write).init(label_to_issues_cursor);
 
     const conflicts_cursor = try haxy_moment.putCursor(hash.hashInt(hash_kind, conflicts_key));
     const conflicts = try DB.SortedMap(.read_write).init(conflicts_cursor);
@@ -111,12 +111,12 @@ pub fn consume(
         record_to_write.created_order = existing_record.created_order;
         record_to_write.author_email = existing_record.author_email;
 
-        // drop the old status's and tags' entries; active values are re-added below
+        // drop the old status's and labels' entries; active values are re-added below
         const order_key = evt.orderKeyDesc(existing_record.created_order, event_id);
         if (!existing_record.removed) {
             const status_set = try statusSet(DB, status_to_issues, existing_record.event.status);
             _ = try status_set.remove(&order_key);
-            try removeFromTagSets(DB, tag_to_issues, existing_record.event.tags, existing_record.event.status, &order_key);
+            try removeFromLabelSets(DB, label_to_issues, existing_record.event.labels, existing_record.event.status, &order_key);
         }
 
         // any event settles the conflict, since resolving in the ui may
@@ -147,15 +147,15 @@ pub fn consume(
         const status_set = try statusSet(DB, status_to_issues, record_to_write.event.status);
         try status_set.put(&order_key);
 
-        var tag_iter = tagIterator(record_to_write.event.tags);
-        while (tag_iter.next()) |tag| {
-            // an over-long tag goes unindexed rather than failing the consume,
+        var label_iter = labelIterator(record_to_write.event.labels);
+        while (label_iter.next()) |label| {
+            // an over-long label goes unindexed rather than failing the consume,
             // which would wedge the branch it arrived on
-            if (tag.len == 0 or tag.len > tag_max_len) continue;
-            var key_buffer: TagStatusKey = undefined;
-            const tag_set_cursor = try tag_to_issues.putCursor(try tagStatusKey(&key_buffer, tag, record_to_write.event.status));
-            const tag_set = try DB.SortedSet(.read_write).init(tag_set_cursor);
-            try tag_set.put(&order_key);
+            if (label.len == 0 or label.len > label_max_len) continue;
+            var key_buffer: LabelStatusKey = undefined;
+            const label_set_cursor = try label_to_issues.putCursor(try labelStatusKey(&key_buffer, label, record_to_write.event.status));
+            const label_set = try DB.SortedSet(.read_write).init(label_set_cursor);
+            try label_set.put(&order_key);
         }
     }
 }
@@ -175,7 +175,7 @@ fn statusSet(
 // trailing ones keep our side)
 pub const Resolve = struct {
     title: ?[]const u8 = null,
-    tags: ?[]const u8 = null,
+    labels: ?[]const u8 = null,
     hunks: []const []const u8 = &.{},
 };
 
@@ -183,7 +183,7 @@ pub const Resolve = struct {
 // conflicted issue — the resolution of its conflict
 pub const Update = union(enum) {
     status: Status,
-    fields: struct { title: []const u8, tags: []const u8, description: []const u8 },
+    fields: struct { title: []const u8, labels: []const u8, description: []const u8 },
     resolve: Resolve,
 };
 
@@ -216,12 +216,12 @@ pub fn update(
         },
         .fields => |fields| {
             updated.title = fields.title;
-            updated.tags = fields.tags;
+            updated.labels = fields.labels;
             updated.description = fields.description;
         },
         .resolve => |resolve| {
             updated = try resolveFields(repo_kind, repo_opts, io, allocator, &arena, repo, id_bytes, issue, resolve);
-            if (!fieldsValid(updated.title, updated.tags)) return error.InvalidFields;
+            if (!fieldsValid(updated.title, updated.labels)) return error.InvalidFields;
         },
     }
 
@@ -233,7 +233,7 @@ pub fn update(
     }});
 }
 
-// the live fields with `resolve` applied: submitted title/tags stand in for the
+// the live fields with `resolve` applied: submitted title/labels stand in for the
 // live ones, and a conflicted description is reassembled from the hunk
 // resolutions against the conflict entry. the chunking is deterministic: the
 // entry holds immutable slots and any event since would have removed it, so
@@ -255,7 +255,7 @@ fn resolveFields(
 
     var updated = live.event;
     if (resolve.title) |title| updated.title = title;
-    if (resolve.tags) |tags| updated.tags = tags;
+    if (resolve.labels) |labels| updated.labels = labels;
 
     var event_db_maybe: ?evt.LocalEventDB(repo_opts.hash) = if (repo_kind == .git) try evt.LocalEventDB(repo_opts.hash).openReadOnly(io, allocator, repo.core.repo_dir) else null;
     defer if (event_db_maybe) |*event_db| event_db.deinit(io, allocator);
@@ -325,24 +325,24 @@ fn readById(
     return try evt.read(Record, DB, repo_opts.hash, arena, issue_map);
 }
 
-// remove an issue's order key from its tags' `status` sets, pruning entries
+// remove an issue's order key from its labels' `status` sets, pruning entries
 // whose set becomes empty
-fn removeFromTagSets(
+fn removeFromLabelSets(
     comptime DB: type,
-    tag_to_issues: DB.SortedMap(.read_write),
-    tags: []const u8,
+    label_to_issues: DB.SortedMap(.read_write),
+    labels: []const u8,
     status: Status,
     order_key: []const u8,
 ) !void {
-    var tag_iter = tagIterator(tags);
-    while (tag_iter.next()) |tag| {
+    var label_iter = labelIterator(labels);
+    while (label_iter.next()) |label| {
         // skipped the same way consume skipped it, so it was never indexed
-        if (tag.len == 0 or tag.len > tag_max_len) continue;
-        var key_buffer: TagStatusKey = undefined;
-        const key = try tagStatusKey(&key_buffer, tag, status);
-        const tag_set_cursor = try tag_to_issues.putCursor(key);
-        const tag_set = try DB.SortedSet(.read_write).init(tag_set_cursor);
-        _ = try tag_set.remove(order_key);
-        if (0 == try tag_set.count()) _ = try tag_to_issues.remove(key);
+        if (label.len == 0 or label.len > label_max_len) continue;
+        var key_buffer: LabelStatusKey = undefined;
+        const key = try labelStatusKey(&key_buffer, label, status);
+        const label_set_cursor = try label_to_issues.putCursor(key);
+        const label_set = try DB.SortedSet(.read_write).init(label_set_cursor);
+        _ = try label_set.remove(order_key);
+        if (0 == try label_set.count()) _ = try label_to_issues.remove(key);
     }
 }

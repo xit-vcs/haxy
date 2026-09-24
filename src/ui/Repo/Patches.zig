@@ -133,8 +133,8 @@ pub const Source = struct {
 // how many patches one window shows before a "next" link appears.
 pub const page_size = 20;
 
-// how many tags the tags view shows at most.
-pub const max_tags = 1000;
+// how many labels the labels view shows at most.
+pub const max_labels = 1000;
 
 // one patch from the repo's consumed event database, with its hex event id
 // (the id lives in the event envelope, not the payload).
@@ -173,7 +173,7 @@ pub const FieldConflict = struct {
 // record; the chunks split the description against the merge base.
 pub const Conflict = struct {
     title: ?FieldConflict = null,
-    tags: ?FieldConflict = null,
+    labels: ?FieldConflict = null,
     status: ?FieldConflict = null,
     revision: ?FieldConflict = null,
     target_branch: ?FieldConflict = null,
@@ -204,8 +204,8 @@ pub const Window = struct {
 // "owner/name", so the view can build /repo/owner/name/patches/... links.
 identity: []const u8,
 default_target_branch: []const u8 = "",
-// the url-encoded tag the lists are filtered to ("" = unfiltered).
-tag: []const u8,
+// the url-encoded label the lists are filtered to ("" = unfiltered).
+label: []const u8,
 // the decoded query the lists are filtered to, or null when unfiltered.
 search: ?[]const u8 = null,
 // the hex event id of the patch its status's window is rooted at ("" = the
@@ -233,8 +233,8 @@ view: ui.RoutablePage.PatchesView,
 // the /description page: the detail pane shows the selected patch's whole
 // description behind a back link.
 description_page: bool = false,
-// every tag in the repo, in sorted order, for the tags view.
-tags: []const []const u8,
+// every label in the repo, in sorted order, for the labels view.
+labels: []const []const u8,
 // the on-disk repo this page was read from, for the terminal submit path
 // (the web posts the new-patch form to the patch route instead).
 repo_source: ?ui.RepoSource = null,
@@ -252,8 +252,8 @@ pub fn statusKind(event: Event) Status {
     return event.status.kind();
 }
 
-pub fn listRoute(identity: []const u8, status: Status, tag: []const u8, selected: []const u8) ?ui.RoutablePage {
-    return ui.RoutablePage.repoPatchesRoute(identity, status, tag, selected);
+pub fn listRoute(identity: []const u8, status: Status, label: []const u8, selected: []const u8) ?ui.RoutablePage {
+    return ui.RoutablePage.repoPatchesRoute(identity, status, label, selected);
 }
 
 pub fn commitsRoute(identity: []const u8, entry: PatchWithId) !?ui.RoutablePage {
@@ -312,12 +312,12 @@ pub fn create(
     allocator: std.mem.Allocator,
     author: evt.CommitAuthor,
     title: []const u8,
-    tags: []const u8,
+    labels: []const u8,
     description: []const u8,
     target_branch: []const u8,
     source_branch: ?[]const u8,
 ) ![evt.event_id_size * 2]u8 {
-    if (!evt.Patch.fieldsValid(title, tags)) return error.InvalidFields;
+    if (!evt.Patch.fieldsValid(title, labels)) return error.InvalidFields;
     const io = session.io orelse return error.NotFound;
     const repo_source = data.repo_source orelse return error.NotFound;
     var id_bytes: [evt.event_id_size]u8 = undefined;
@@ -331,7 +331,7 @@ pub fn create(
                 switch (any_repo) {
                     inline else => |*repo| try pch.writeBranchPatch(session.data.host_kind, repo_kind, repo.self_repo_opts, io, allocator, repo, id, .{
                         .title = title,
-                        .tags = tags,
+                        .labels = labels,
                         .description = description,
                         .target_branch = target_branch,
                         .source_branch = branch,
@@ -353,7 +353,7 @@ pub fn create(
         .repo_id = repo_id,
         .title = title,
         .description = description,
-        .tags = tags,
+        .labels = labels,
         .target_branch = target_branch,
         .author = author,
         .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
@@ -412,7 +412,7 @@ pub fn editDraft(
     author: evt.CommitAuthor,
     id: []const u8,
     title: []const u8,
-    tags: []const u8,
+    labels: []const u8,
     description: []const u8,
     target_branch: []const u8,
 ) !void {
@@ -433,7 +433,7 @@ pub fn editDraft(
         .user_id = user_id,
         .repo_id = repo_id,
         .title = title,
-        .tags = tags,
+        .labels = labels,
         .description = description,
         .target_branch = target_branch,
         .author = author,
@@ -482,11 +482,11 @@ pub fn selectedThread(self: *const Self) ?*const PatchWithId {
 }
 
 // an empty listing, for the wasm / no-repo paths.
-pub fn emptyResult(aa: std.mem.Allocator, identity: []const u8, tag: []const u8, search: []const u8, selected_id: []const u8, comment_id: []const u8, comments_start: usize, theirs_picks: []const u8, view: ui.RoutablePage.PatchesView) !Self {
+pub fn emptyResult(aa: std.mem.Allocator, identity: []const u8, label: []const u8, search: []const u8, selected_id: []const u8, comment_id: []const u8, comments_start: usize, theirs_picks: []const u8, view: ui.RoutablePage.PatchesView) !Self {
     return .{
         .identity = try aa.dupe(u8, identity),
         .default_target_branch = "",
-        .tag = try aa.dupe(u8, tag),
+        .label = try aa.dupe(u8, label),
         .search = if (search.len == 0) null else std.Uri.percentDecodeInPlace(try aa.dupe(u8, search)),
         .selected_id = try aa.dupe(u8, selected_id),
         .comment_id = try aa.dupe(u8, comment_id),
@@ -505,7 +505,7 @@ pub fn emptyResult(aa: std.mem.Allocator, identity: []const u8, tag: []const u8,
             else => view,
         },
         .description_page = view == .description,
-        .tags = &.{},
+        .labels = &.{},
     };
 }
 
@@ -530,7 +530,7 @@ pub fn detailResult(aa: std.mem.Allocator, identity: []const u8, entry: PatchWit
     return result;
 }
 
-// read one window per status of an opened repo's patches (filtered to `tag`
+// read one window per status of an opened repo's patches (filtered to `label`
 // when set), ordered by creation (newest first). the window of the patch
 // `selected_id` names starts at it ("" = the beginning). a git repo reads the
 // event db next to it (synced from the events branch on each page build); a
@@ -548,7 +548,7 @@ pub fn init(
     repo_id_maybe: ?[evt.event_id_size]u8,
     identity: []const u8,
     target_branch: []const u8,
-    tag: []const u8,
+    label: []const u8,
     search: []const u8,
     selected_id: []const u8,
     comment_id: []const u8,
@@ -557,13 +557,13 @@ pub fn init(
     view: ui.RoutablePage.PatchesView,
 ) !Self {
     const allowed_view: ui.RoutablePage.PatchesView = if (session.local != null and view == .drafts) .open else view;
-    var empty = try emptyResult(arena.allocator(), identity, tag, search, selected_id, comment_id, comments_start, theirs_picks, allowed_view);
+    var empty = try emptyResult(arena.allocator(), identity, label, search, selected_id, comment_id, comments_start, theirs_picks, allowed_view);
     empty.default_target_branch = try arena.allocator().dupe(u8, target_branch);
 
     const aa = arena.allocator();
     const DB = evt.EventDB(repo_opts.hash);
     const rooted = empty.selected_id.len != 0;
-    const tagged = empty.tag.len != 0;
+    const labeled = empty.label.len != 0;
     const drafts_window = if (admin_moment) |admin|
         if (repo_id_maybe) |repo_id|
             if (session.data.user_id != null and session.repos_dir != null)
@@ -585,7 +585,7 @@ pub fn init(
     if (draft_selected and view != .edit and view != .publish and view != .remove) empty.view = .drafts;
 
     // an explicitly named published patch that doesn't exist is a bad url
-    // (NotFound -> 404); drafts, tags, and bare routes can use the empty fallback.
+    // (NotFound -> 404); drafts, labels, and bare routes can use the empty fallback.
     const strict = rooted and !draft_selected;
 
     // a repo with no consumed events has no moment yet.
@@ -602,18 +602,18 @@ pub fn init(
         return empty;
     };
 
-    // the sorted sets to window, per status: the tag's sets when filtered,
+    // the sorted sets to window, per status: the label's sets when filtered,
     // else the top-level per-status sets. a missing set is an empty window.
     var open_set: ?DB.SortedSet(.read_only) = null;
     var closed_set: ?DB.SortedSet(.read_only) = null;
     var merged_set: ?DB.SortedSet(.read_only) = null;
-    if (tagged) {
-        if (try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Patch.tag_status_to_id_set_key))) |tag_to_patches_cursor| {
-            const tag_to_patches = try DB.SortedMap(.read_only).init(tag_to_patches_cursor);
-            const decoded = std.Uri.percentDecodeInPlace(try aa.dupe(u8, empty.tag));
-            open_set = try thread.tagStatusSet(Self, DB, tag_to_patches, decoded, .open);
-            closed_set = try thread.tagStatusSet(Self, DB, tag_to_patches, decoded, .closed);
-            merged_set = try thread.tagStatusSet(Self, DB, tag_to_patches, decoded, .merged);
+    if (labeled) {
+        if (try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Patch.label_status_to_id_set_key))) |label_to_patches_cursor| {
+            const label_to_patches = try DB.SortedMap(.read_only).init(label_to_patches_cursor);
+            const decoded = std.Uri.percentDecodeInPlace(try aa.dupe(u8, empty.label));
+            open_set = try thread.labelStatusSet(Self, DB, label_to_patches, decoded, .open);
+            closed_set = try thread.labelStatusSet(Self, DB, label_to_patches, decoded, .closed);
+            merged_set = try thread.labelStatusSet(Self, DB, label_to_patches, decoded, .merged);
         }
     } else if (try haxy_moment.getCursor(hash.hashInt(repo_opts.hash, evt.Patch.status_to_id_set_key))) |status_to_patches_cursor| {
         const status_to_patches = try DB.SortedMap(.read_only).init(status_to_patches_cursor);
@@ -658,8 +658,8 @@ pub fn init(
             if (!try set.contains(order_key)) return error.NotFound;
             conflicts_root = order_key;
         } else {
-            // the named patch must be in its windowed set (a tag url can name
-            // an patch that doesn't carry the tag).
+            // the named patch must be in its windowed set (a label url can name
+            // an patch that doesn't carry the label).
             const set = (switch (patch_event.event.status) {
                 .open => open_set,
                 .closed => closed_set,
@@ -712,12 +712,12 @@ pub fn init(
     else
         try Comment.init(repo_opts.hash, arena, admin_moment, haxy_moment, empty.selected_id, empty.comment_id, comments_start);
 
-    const tags = try thread.loadTags(Self, repo_opts.hash, arena, haxy_moment);
+    const labels = try thread.loadLabels(Self, repo_opts.hash, arena, haxy_moment);
 
     return .{
         .identity = empty.identity,
         .default_target_branch = empty.default_target_branch,
-        .tag = empty.tag,
+        .label = empty.label,
         .search = empty.search,
         .selected_id = empty.selected_id,
         .comment_id = empty.comment_id,
@@ -732,7 +732,7 @@ pub fn init(
         .theirs_picks = empty.theirs_picks,
         .view = resolved_view,
         .description_page = empty.description_page,
-        .tags = tags,
+        .labels = labels,
     };
 }
 
@@ -900,7 +900,7 @@ pub const Header = thread.Header;
 const open_tab_label = "open";
 const closed_tab_label = "closed";
 const merged_tab_label = "merged";
-const tags_tab_label = "tags";
+const labels_tab_label = "labels";
 const edit_tab_label = "edit";
 const publish_tab_label = "publish";
 const merge_tab_label = "merge";
@@ -1009,22 +1009,22 @@ pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *con
     // a list tab per status, labeled with its listing's patch count
     const status_labels = [_][]const u8{ open_tab_label, closed_tab_label, merged_tab_label };
     for ([_]Status{ .open, .closed, .merged }, status_labels, 0..) |status, status_label, index| {
-        const route = try thread.searchRoute(ui.RoutablePage.repoPatchesRoute(data.identity, status, data.tag, ""), data.search);
+        const route = try thread.searchRoute(ui.RoutablePage.repoPatchesRoute(data.identity, status, data.label, ""), data.search);
         const link = try ui.inPageTabLink(session, route, page_selected and selected_index == index);
         var label_buf: [64]u8 = undefined;
         const label = try thread.countLabel(&label_buf, status_label, data.window(status).*);
         try header.addTab(allocator, label, link, index);
     }
 
-    // tags tab, labeled with the active tag filter
+    // labels tab, showing the active label filter
     {
-        const tags_route = try thread.searchRoute(ui.RoutablePage.repoThreadTagsRoute(.patch, data.identity, data.tag), data.search);
-        const tags_link = try ui.inPageTabLink(session, tags_route, page_selected and selected_index == View.viewIndex(.tags));
-        const label = if (data.tag.len == 0) tags_tab_label else blk: {
-            const decoded = std.Uri.percentDecodeInPlace(try aa.dupe(u8, data.tag));
-            break :blk try std.fmt.allocPrint(aa, tags_tab_label ++ " ({s})", .{decoded});
+        const labels_route = try thread.searchRoute(ui.RoutablePage.repoThreadLabelsRoute(.patch, data.identity, data.label), data.search);
+        const labels_link = try ui.inPageTabLink(session, labels_route, page_selected and selected_index == View.viewIndex(.labels));
+        const label = if (data.label.len == 0) labels_tab_label else blk: {
+            const decoded = std.Uri.percentDecodeInPlace(try aa.dupe(u8, data.label));
+            break :blk try std.fmt.allocPrint(aa, labels_tab_label ++ " ({s})", .{decoded});
         };
-        try header.addTab(allocator, label, tags_link, View.viewIndex(.tags));
+        try header.addTab(allocator, label, labels_link, View.viewIndex(.labels));
     }
 
     // new-patch tab; an edit or resolve url shows its tab in this place

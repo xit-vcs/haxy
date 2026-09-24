@@ -127,10 +127,10 @@ pub fn init(
         .repo_refs => |*r| r.search.slice(),
         else => "",
     };
-    // the issues tab's tag filter, the issue its window is rooted at, and the
+    // the issues tab's label filter, the issue its window is rooted at, and the
     // view it shows.
-    const issues_tag: []const u8 = switch (route) {
-        .repo_issues => |*i| i.tag.slice(),
+    const issues_label: []const u8 = switch (route) {
+        .repo_issues => |*i| i.label.slice(),
         else => "",
     };
     const issues_search: []const u8 = switch (route) {
@@ -157,8 +157,8 @@ pub fn init(
         .repo_issues => |i| i.comments_start,
         else => 0,
     };
-    const patches_tag: []const u8 = switch (route) {
-        .repo_patches => |*p| p.tag.slice(),
+    const patches_label: []const u8 = switch (route) {
+        .repo_patches => |*p| p.label.slice(),
         else => "",
     };
     const patches_search: []const u8 = switch (route) {
@@ -185,8 +185,8 @@ pub fn init(
         .repo_patches => |p| p.comments_start,
         else => 0,
     };
-    const discussions_tag: []const u8 = switch (route) {
-        .repo_discussions => |*t| t.tag.slice(),
+    const discussions_label: []const u8 = switch (route) {
+        .repo_discussions => |*t| t.label.slice(),
         else => "",
     };
     const discussions_search: []const u8 = switch (route) {
@@ -321,9 +321,9 @@ pub fn init(
                                 files_data,
                                 changes_data,
                                 try Refs.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, repo_identity.identity, refs_kind, refs_from, refs_search),
-                                try Issues.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, issues_tag, issues_search, issues_selected, issues_comment, issues_comments_start, issues_theirs, issues_view),
-                                try Patches.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, session, repo_id_maybe, repo_identity.identity, target_branch, patches_tag, patches_search, patches_selected, patches_comment, patches_comments_start, patches_theirs, patches_view),
-                                try Discussions.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, discussions_tag, discussions_search, discussions_selected, discussions_comment, discussions_comments_start, discussions_view),
+                                try Issues.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, issues_label, issues_search, issues_selected, issues_comment, issues_comments_start, issues_theirs, issues_view),
+                                try Patches.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, session, repo_id_maybe, repo_identity.identity, target_branch, patches_label, patches_search, patches_selected, patches_comment, patches_comments_start, patches_theirs, patches_view),
+                                try Discussions.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, discussions_label, discussions_search, discussions_selected, discussions_comment, discussions_comments_start, discussions_view),
                                 try Events.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, events_view, events_kind, events_selected, events_moment, session.local != null, session.data.sync_failure),
                             };
                         },
@@ -336,9 +336,9 @@ pub fn init(
             try Files.emptyResult(aa, location, requested_ref_or_oid orelse .branch, requested_ref_value, files_dir),
             Changes{ .commits = try Commits.emptyResult(aa, location, requested_ref_or_oid orelse .branch, requested_ref_value, commits_content, commits_base_oid) },
             try Refs.emptyResult(arena, repo_identity.identity, refs_kind, refs_from, refs_search),
-            try Issues.emptyResult(aa, repo_identity.identity, issues_tag, issues_search, issues_selected, issues_comment, issues_comments_start, issues_theirs, issues_view),
-            try Patches.emptyResult(aa, repo_identity.identity, patches_tag, patches_search, patches_selected, patches_comment, patches_comments_start, patches_theirs, patches_view),
-            try Discussions.emptyResult(aa, repo_identity.identity, discussions_tag, discussions_search, discussions_selected, discussions_comment, discussions_comments_start, discussions_view),
+            try Issues.emptyResult(aa, repo_identity.identity, issues_label, issues_search, issues_selected, issues_comment, issues_comments_start, issues_theirs, issues_view),
+            try Patches.emptyResult(aa, repo_identity.identity, patches_label, patches_search, patches_selected, patches_comment, patches_comments_start, patches_theirs, patches_view),
+            try Discussions.emptyResult(aa, repo_identity.identity, discussions_label, discussions_search, discussions_selected, discussions_comment, discussions_comments_start, discussions_view),
             try Events.empty(aa, repo_identity.identity, events_view, session.local != null, session.data.sync_failure),
         };
     };
@@ -354,7 +354,7 @@ pub fn init(
 
     return .{
         // use the files tab's resolved ref for the header
-        .header = try Header.init(arena, repo.event.name, owner_name, files.ref_or_oid, files.ref_or_oid_value, issues.tag, patches.tag, discussions.tag),
+        .header = try Header.init(arena, repo.event.name, owner_name, files.ref_or_oid, files.ref_or_oid_value, issues.label, patches.label, discussions.label),
         .repo = repo,
         .files = files,
         .changes = changes,
