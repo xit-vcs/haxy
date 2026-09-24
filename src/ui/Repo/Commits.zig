@@ -449,7 +449,8 @@ pub const View = struct {
         if (session.data.host_kind == .server) {
             var header_view = try ui.widget.SearchHeader.init(allocator, session, data.location, " search ", "search", data.search, data.search_available);
             errdefer header_view.deinit(allocator);
-            try outer.children.put(allocator, header_view.getFocus().id, .{ .widget = .{ .search_header = header_view }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
+            // a row taller than the header, leaving a blank line beneath it
+            try outer.children.put(allocator, header_view.getFocus().id, .{ .widget = .{ .search_header = header_view }, .rect = null, .min_size = .{ .width = null, .height = 4 } });
         }
 
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });

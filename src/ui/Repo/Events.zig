@@ -389,7 +389,8 @@ pub const View = struct {
 
         var header_view = try Header.View.init(allocator, data, session);
         errdefer header_view.deinit(allocator);
-        try outer.children.put(allocator, header_view.getFocus().id, .{ .widget = .{ .repo_events_header = header_view }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
+        // a row taller than the header, leaving a blank line beneath it
+        try outer.children.put(allocator, header_view.getFocus().id, .{ .widget = .{ .repo_events_header = header_view }, .rect = null, .min_size = .{ .width = null, .height = 4 } });
 
         var content_stack = try wgt.Stack(ui.Widget).init(allocator);
         errdefer content_stack.deinit(allocator);

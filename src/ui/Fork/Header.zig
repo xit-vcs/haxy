@@ -40,6 +40,7 @@ pub const View = struct {
     scroll: wgt.Scroll(ui.Widget),
     tab_ids: std.AutoArrayHashMapUnmanaged(usize, void),
     tabs_id: usize,
+    gap_id: usize,
     first_group_width: usize,
     session: *ui.Session,
 
@@ -167,6 +168,14 @@ pub const View = struct {
         const tabs_id = tabs_box.getFocus().id;
         try box.children.put(allocator, title_id, .{ .widget = .{ .box = title_box }, .rect = null, .min_size = null });
         title_box_owned = true;
+        // a blank row between the title and the tabs, shown only when they wrap
+        const gap_id = blk: {
+            var gap = try wgt.Text.init(allocator, " ");
+            errdefer gap.deinit(allocator);
+            const id = gap.getFocus().id;
+            try box.children.put(allocator, id, .{ .widget = .{ .text = gap }, .rect = null, .min_size = null, .hidden = true });
+            break :blk id;
+        };
         try box.children.put(allocator, tabs_id, .{ .widget = .{ .box = tabs_box }, .rect = null, .min_size = null });
         tabs_box_owned = true;
         box.getFocus().child_id = tabs_id;
@@ -175,6 +184,7 @@ pub const View = struct {
             .scroll = try wgt.Scroll(ui.Widget).init(allocator, .{ .box = box }, .{ .direction = .horiz, .show_bar = false, .web_native = !session.is_terminal }),
             .tab_ids = tab_ids,
             .tabs_id = tabs_id,
+            .gap_id = gap_id,
             .first_group_width = first_group_width,
             .session = session,
         };
@@ -214,6 +224,7 @@ pub const View = struct {
         const wrap = if (content_width) |width| self.first_group_width + back_width + tabs_width > width else false;
         box.options.direction = if (wrap) .vert else .horiz;
         tabs_child.min_size = if (wrap) .{ .width = content_width, .height = null } else null;
+        (box.children.getPtr(self.gap_id) orelse unreachable).hidden = !wrap;
 
         var scroll_constraint = constraint;
         scroll_constraint.min_size.width = viewport_width;

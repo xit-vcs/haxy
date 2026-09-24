@@ -406,7 +406,8 @@ pub const View = struct {
             const link = try std.fmt.allocPrint(session.page_arena.allocator(), "a:{s}", .{try route.toUrl(session.page_arena)});
             try addText(allocator, &header, "clear undo history", link, .single);
             header.getFocus().child_id = header.children.keys()[0];
-            try outer.children.put(allocator, header.getFocus().id, .{ .widget = .{ .box = header }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
+            // a row taller than the header, leaving a blank line beneath it
+            try outer.children.put(allocator, header.getFocus().id, .{ .widget = .{ .box = header }, .rect = null, .min_size = .{ .width = null, .height = 4 } });
         }
 
         if (data.clear) {

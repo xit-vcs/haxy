@@ -482,7 +482,11 @@ pub const Header = struct {
                 else => {},
             }
         }
-        try self.box.build(allocator, constraint, root_focus);
+        // a row taller than the tabs, leaving a blank line beneath them. the
+        // parent sets no min, which would make it lay the focused content out first.
+        var header_constraint = constraint;
+        header_constraint.min_size.height = @max(constraint.min_size.height orelse 0, 4);
+        try self.box.build(allocator, header_constraint, root_focus);
     }
 
     pub fn input(self: *Header, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
