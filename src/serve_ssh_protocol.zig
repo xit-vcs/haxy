@@ -414,7 +414,14 @@ pub const SessionCtx = struct {
         if (self.closed or self.remote_closed) return true;
         self.conn.read_timeout = probe_timeout.toDeadline(self.conn.io);
         defer self.conn.read_timeout = .none;
-        self.processOneBackgroundPacket() catch |err| return err != error.Timeout;
+        self.processOneBackgroundPacket() catch |err| switch (err) {
+            error.Timeout => return false,
+            else => {
+                // the session reports this cause rather than the cancellation
+                self.read_err = err;
+                return true;
+            },
+        };
         return self.remote_closed;
     }
 
@@ -1925,7 +1932,7 @@ fn runChannelLayer(
             },
 
             SSH_MSG_CHANNEL_REQUEST => {
-                const ch = if (channel) |*c| c else continue;
+                const ch = if (channel) |*c| c else return error.UnknownChannel;
                 const start_request = try handleChannelRequest(conn, ch, packet);
                 // the request borrows from the packet, which outlives the session
                 if (start_request) |request| {
@@ -1938,6 +1945,9 @@ fn runChannelLayer(
                     };
                     defer sess.deinit();
                     handler.handleSession(&sess, request) catch |session_err| {
+                        // a failed read leaves the protocol unusable, so the
+                        // disconnect names it instead of a clean close
+                        if (sess.read_err) |read_err| return read_err;
                         // try to send a non-zero exit status before closing
                         sess.exit(1) catch {};
                         return sess.underlyingError(session_err);
@@ -1948,12 +1958,12 @@ fn runChannelLayer(
             },
 
             SSH_MSG_CHANNEL_WINDOW_ADJUST => {
-                const ch = if (channel) |*c| c else continue;
+                const ch = if (channel) |*c| c else return error.UnknownChannel;
                 try handleWindowAdjust(ch, packet);
             },
 
             SSH_MSG_CHANNEL_DATA, SSH_MSG_CHANNEL_EXTENDED_DATA => {
-                const ch = if (channel) |*c| c else continue;
+                const ch = if (channel) |*c| c else return error.UnknownChannel;
                 // before shell/exec the client shouldn't be sending data, but
                 // some clients are chatty; discard and refill window. nothing
                 // is buffered yet, so the whole window is available to credit.
@@ -1962,15 +1972,15 @@ fn runChannelLayer(
             },
 
             SSH_MSG_CHANNEL_EOF => {
-                if (channel) |*c| try parseChannelId(packet, c.local_id);
+                const ch = if (channel) |*c| c else return error.UnknownChannel;
+                try parseChannelId(packet, ch.local_id);
             },
 
             SSH_MSG_CHANNEL_CLOSE => {
-                if (channel) |*c| {
-                    try parseChannelId(packet, c.local_id);
-                    try sendChannelMessage(conn, c, SSH_MSG_CHANNEL_CLOSE);
-                    drainConnection(conn);
-                }
+                const ch = if (channel) |*c| c else return error.UnknownChannel;
+                try parseChannelId(packet, ch.local_id);
+                try sendChannelMessage(conn, ch, SSH_MSG_CHANNEL_CLOSE);
+                drainConnection(conn);
                 return;
             },
 
