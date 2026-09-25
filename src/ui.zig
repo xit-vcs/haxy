@@ -2601,7 +2601,7 @@ pub const Author = union(enum) {
         const email = author_email orelse return .unknown;
         if (haxy_moment) |moment| {
             if (try evt.User.readByEmail(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, email)) |user| {
-                return .{ .user_name = user.event.name };
+                return .{ .user_name = user.name };
             }
         }
         return .{ .email = try arena.allocator().dupe(u8, email) };

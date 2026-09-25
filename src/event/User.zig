@@ -211,28 +211,40 @@ pub fn readById(
     arena: *std.heap.ArenaAllocator,
     user_id: []const u8,
 ) !?Record {
-    const event_id_to_user_cursor = try haxy_moment.getCursor(hash.hashInt(hash_kind, "event-id->user")) orelse return null;
-    const event_id_to_user = try DB.HashMap(.read_only).init(event_id_to_user_cursor);
-    const user_cursor = try event_id_to_user.getCursor(hash.hashInt(hash_kind, user_id)) orelse return null;
-    const user_map = try DB.HashMap(.read_only).init(user_cursor);
+    const user_map = try userMap(DB, hash_kind, haxy_moment, user_id) orelse return null;
     return try evt.read(Record, DB, hash_kind, arena, user_map);
 }
 
-// read a user by email via the email->user-id index, or null when no user has
-// the email. field byte slices are allocated in `arena`.
+// read just the public part of a user by email via the email->user-id index, or
+// null when no user has the email. field byte slices are allocated in `arena`.
 pub fn readByEmail(
     comptime DB: type,
     comptime hash_kind: hash.HashKind,
     haxy_moment: DB.HashMap(.read_only),
     arena: *std.heap.ArenaAllocator,
     email: []const u8,
-) !?Record {
+) !?Public {
     const email_to_user_id_cursor = (try haxy_moment.getCursor(hash.hashInt(hash_kind, email_to_user_id_key))) orelse return null;
     const email_to_user_id = try DB.HashMap(.read_only).init(email_to_user_id_cursor);
     const user_id_cursor = (try email_to_user_id.getCursor(hash.hashInt(hash_kind, email))) orelse return null;
     var user_id: [evt.event_id_size]u8 = undefined;
     _ = try user_id_cursor.readBytes(&user_id);
-    return try readById(DB, hash_kind, haxy_moment, arena, &user_id);
+    const user_map = try userMap(DB, hash_kind, haxy_moment, &user_id) orelse return null;
+    const record = try evt.read(struct { event: Public }, DB, hash_kind, arena, user_map);
+    return record.event;
+}
+
+// a user's record map via the event-id->user index
+fn userMap(
+    comptime DB: type,
+    comptime hash_kind: hash.HashKind,
+    haxy_moment: DB.HashMap(.read_only),
+    user_id: []const u8,
+) !?DB.HashMap(.read_only) {
+    const event_id_to_user_cursor = try haxy_moment.getCursor(hash.hashInt(hash_kind, "event-id->user")) orelse return null;
+    const event_id_to_user = try DB.HashMap(.read_only).init(event_id_to_user_cursor);
+    const user_cursor = try event_id_to_user.getCursor(hash.hashInt(hash_kind, user_id)) orelse return null;
+    return try DB.HashMap(.read_only).init(user_cursor);
 }
 
 // read a user by name from the admin event store, or null if the admin repo or
