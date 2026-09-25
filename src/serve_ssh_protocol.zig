@@ -591,6 +591,8 @@ pub const SessionCtx = struct {
                 try sendChannelMessage(conn, self.channel, SSH_MSG_CHANNEL_CLOSE);
             },
             SSH_MSG_GLOBAL_REQUEST => try handleGlobalRequest(conn, packet),
+            // refused, so a multiplexing client doesn't wait on it
+            SSH_MSG_CHANNEL_OPEN => _ = try handleChannelOpen(conn, packet, true),
             // RFC 4252 §5.1: silently ignored once authenticated
             SSH_MSG_USERAUTH_REQUEST => {},
             else => try sendUnimplemented(conn),
@@ -1817,6 +1819,8 @@ fn verifyEd25519(pubkey_blob: []const u8, signature_blob: []const u8, signed: []
     if (!std.mem.eql(u8, pk_algo, "ssh-ed25519")) return false;
     const raw_pubkey = try takeString(&pubkey_reader, 64);
     if (raw_pubkey.len != Ed25519.PublicKey.encoded_length) return false;
+    // the fingerprint hashes the whole blob, so it must hold nothing else
+    if (pubkey_reader.bufferedLen() != 0) return false;
 
     // parse signature_blob: string "ssh-ed25519" || string raw_signature
     var sig_reader = std.Io.Reader.fixed(signature_blob);
@@ -1840,8 +1844,10 @@ fn verifyRsa(comptime Hash: type, algo: []const u8, pubkey_blob: []const u8, sig
     // parse pubkey_blob: string "ssh-rsa" || mpint e || mpint n
     var pubkey_reader = std.Io.Reader.fixed(pubkey_blob);
     if (!std.mem.eql(u8, try takeString(&pubkey_reader, 64), "ssh-rsa")) return false;
-    const e = std.mem.trimStart(u8, try takeString(&pubkey_reader, 1024), &.{0});
-    const n = std.mem.trimStart(u8, try takeString(&pubkey_reader, 1024), &.{0});
+    // the fingerprint hashes the whole blob, so one key must have one encoding
+    const e = canonicalMpintMagnitude(try takeString(&pubkey_reader, 1024)) orelse return false;
+    const n = canonicalMpintMagnitude(try takeString(&pubkey_reader, 1024)) orelse return false;
+    if (pubkey_reader.bufferedLen() != 0) return false;
 
     // parse signature_blob: string algo || string sig
     var sig_reader = std.Io.Reader.fixed(signature_blob);
@@ -1857,6 +1863,15 @@ fn verifyRsa(comptime Hash: type, algo: []const u8, pubkey_blob: []const u8, sig
         },
         else => return false,
     }
+}
+
+// the unsigned bytes of a positive mpint in its shortest encoding (RFC 4251
+// §5), or null for zero, negative, or padded encodings
+fn canonicalMpintMagnitude(bytes: []const u8) ?[]const u8 {
+    if (bytes.len == 0 or bytes[0] & 0x80 != 0) return null;
+    if (bytes[0] != 0) return bytes;
+    if (bytes.len < 2 or bytes[1] & 0x80 == 0) return null;
+    return bytes[1..];
 }
 
 // ---------------------------------------------------------------------------
