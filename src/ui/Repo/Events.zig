@@ -240,21 +240,6 @@ fn formatId(aa: std.mem.Allocator, id: *const [evt.event_id_size]u8) ![]const u8
     return try aa.dupe(u8, &hex);
 }
 
-fn readRecord(
-    comptime T: type,
-    comptime hash_kind: hash.HashKind,
-    arena: *std.heap.ArenaAllocator,
-    haxy_moment: evt.EventDB(hash_kind).HashMap(.read_only),
-    id: *const [evt.event_id_size]u8,
-) !?T.Record {
-    const DB = evt.EventDB(hash_kind);
-    const records_cursor = try haxy_moment.getCursor(hash.hashInt(hash_kind, T.record_map_key)) orelse return null;
-    const records = try DB.HashMap(.read_only).init(records_cursor);
-    const record_cursor = try records.getCursor(hash.hashInt(hash_kind, id)) orelse return null;
-    const record = try DB.HashMap(.read_only).init(record_cursor);
-    return try evt.read(T.Record, DB, hash_kind, arena, record);
-}
-
 const EventMeta = struct {
     updated_order: u64,
     removed: bool,
@@ -280,8 +265,7 @@ fn readMeta(
                 .patchrev => evt.PatchRev,
                 .patch => evt.Patch,
             };
-            const record = (try readRecord(T, hash_kind, arena, haxy_moment, id)) orelse return error.NotFound;
-            break :blk .{ .updated_order = record.updated_order, .removed = record.removed };
+            break :blk (try evt.readRecordSubset(T, EventMeta, evt.EventDB(hash_kind), hash_kind, haxy_moment, arena, id)) orelse return error.NotFound;
         },
     };
 }
@@ -297,6 +281,10 @@ fn readItem(
     kind: evt.EventKind,
     id: *const [evt.event_id_size]u8,
 ) !?Item {
+    const DB = evt.EventDB(hash_kind);
+    // the parts of a record a row shows
+    const Authored = struct { author_email: ?[]const u8 };
+    const Owned = struct { event: struct { user_id: []const u8 } };
     var item: Item = .{
         .id = try formatId(arena.allocator(), id),
         .kind = kind,
@@ -304,39 +292,39 @@ fn readItem(
     };
     switch (kind) {
         .user => {
-            const record = (try readRecord(evt.User, hash_kind, arena, haxy_moment, id)) orelse return null;
+            const record = (try evt.readRecordSubset(evt.User, struct { event: struct { email: []const u8 } }, DB, hash_kind, haxy_moment, arena, id)) orelse return null;
             item.author = try ui.Author.initFromEmail(admin_moment, arena, record.event.email);
         },
         .repo => {
-            const record = (try readRecord(evt.Repo, hash_kind, arena, haxy_moment, id)) orelse return null;
+            const record = (try evt.readRecordSubset(evt.Repo, Owned, DB, hash_kind, haxy_moment, arena, id)) orelse return null;
             if (admin_moment) |moment| {
                 if (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, record.event.user_id)) |user|
                     item.author = .{ .user_name = user.event.name };
             }
         },
         .fork => {
-            const record = (try readRecord(evt.Fork, hash_kind, arena, haxy_moment, id)) orelse return null;
+            const record = (try evt.readRecordSubset(evt.Fork, Owned, DB, hash_kind, haxy_moment, arena, id)) orelse return null;
             if (admin_moment) |moment| {
                 if (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, record.event.user_id)) |user|
                     item.author = .{ .user_name = user.event.name };
             }
         },
         .issue => {
-            const record = (try readRecord(evt.Issue, hash_kind, arena, haxy_moment, id)) orelse return null;
+            const record = (try evt.readRecordSubset(evt.Issue, Authored, DB, hash_kind, haxy_moment, arena, id)) orelse return null;
             item.author = try ui.Author.initFromEmail(admin_moment, arena, record.author_email);
             if (!include_view_url) return item;
             const route = ui.RoutablePage.repoThreadCommentsRoute(.issue, identity, item.id, 0) orelse return error.RouteTooLong;
             item.view_url = try route.toUrl(arena);
         },
         .discuss => {
-            const record = (try readRecord(evt.Discussion, hash_kind, arena, haxy_moment, id)) orelse return null;
+            const record = (try evt.readRecordSubset(evt.Discussion, Authored, DB, hash_kind, haxy_moment, arena, id)) orelse return null;
             item.author = try ui.Author.initFromEmail(admin_moment, arena, record.author_email);
             if (!include_view_url) return item;
             const route = ui.RoutablePage.repoThreadCommentsRoute(.discuss, identity, item.id, 0) orelse return error.RouteTooLong;
             item.view_url = try route.toUrl(arena);
         },
         .comment => {
-            const record = (try readRecord(evt.Comment, hash_kind, arena, haxy_moment, id)) orelse return null;
+            const record = (try evt.readRecordSubset(evt.Comment, struct { author_email: ?[]const u8, event: struct { thread_id: [evt.event_id_size * 2]u8 } }, DB, hash_kind, haxy_moment, arena, id)) orelse return null;
             item.author = try ui.Author.initFromEmail(admin_moment, arena, record.author_email);
             if (!include_view_url) return item;
             var thread_id: [evt.event_id_size]u8 = undefined;
@@ -346,7 +334,7 @@ fn readItem(
             item.view_url = try route.toUrl(arena);
         },
         .attach => {
-            const record = (try readRecord(evt.Attachment, hash_kind, arena, haxy_moment, id)) orelse return null;
+            const record = (try evt.readRecordSubset(evt.Attachment, struct { author_email: ?[]const u8, event: struct { parent_id: [evt.event_id_size * 2]u8 } }, DB, hash_kind, haxy_moment, arena, id)) orelse return null;
             item.author = try ui.Author.initFromEmail(admin_moment, arena, record.author_email);
             if (!include_view_url) return item;
             var parent_id: [evt.event_id_size]u8 = undefined;
@@ -356,14 +344,14 @@ fn readItem(
             item.view_url = try route.toUrl(arena);
         },
         .patch => {
-            const record = (try readRecord(evt.Patch, hash_kind, arena, haxy_moment, id)) orelse return null;
+            const record = (try evt.readRecordSubset(evt.Patch, Authored, DB, hash_kind, haxy_moment, arena, id)) orelse return null;
             item.author = try ui.Author.initFromEmail(admin_moment, arena, record.author_email);
             if (!include_view_url) return item;
             const route = ui.RoutablePage.repoThreadCommentsRoute(.patch, identity, item.id, 0) orelse return error.RouteTooLong;
             item.view_url = try route.toUrl(arena);
         },
         .patchrev => {
-            const record = (try readRecord(evt.PatchRev, hash_kind, arena, haxy_moment, id)) orelse return null;
+            const record = (try evt.readRecordSubset(evt.PatchRev, Authored, DB, hash_kind, haxy_moment, arena, id)) orelse return null;
             item.author = try ui.Author.initFromEmail(admin_moment, arena, record.author_email);
         },
     }

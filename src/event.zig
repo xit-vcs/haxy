@@ -1677,6 +1677,36 @@ pub fn resolveOrCreateRepo(
 // reading from xitdb
 //
 
+// read just `Fields`, a subset of `T.Record`, from the record with event id
+// `id`, or null when there is none
+pub fn readRecordSubset(
+    comptime T: type,
+    comptime Fields: type,
+    comptime DB: type,
+    comptime hash_kind: hash.HashKind,
+    haxy_moment: DB.HashMap(.read_only),
+    arena: *std.heap.ArenaAllocator,
+    id: []const u8,
+) !?Fields {
+    comptime assertFieldSubset(Fields, T.Record);
+    const records_cursor = try haxy_moment.getCursor(hash.hashInt(hash_kind, T.record_map_key)) orelse return null;
+    const records = try DB.HashMap(.read_only).init(records_cursor);
+    const record_cursor = try records.getCursor(hash.hashInt(hash_kind, id)) orelse return null;
+    return try read(Fields, DB, hash_kind, arena, try DB.HashMap(.read_only).init(record_cursor));
+}
+
+fn assertFieldSubset(comptime Sub: type, comptime Full: type) void {
+    for (@typeInfo(Sub).@"struct".fields) |field| {
+        if (!@hasField(Full, field.name)) @compileError(@typeName(Full) ++ " has no field " ++ field.name);
+        const FullField = @FieldType(Full, field.name);
+        if (@typeInfo(field.type) == .@"struct") {
+            assertFieldSubset(field.type, FullField);
+        } else if (field.type != FullField) {
+            @compileError(@typeName(Full) ++ "." ++ field.name ++ " is a " ++ @typeName(FullField));
+        }
+    }
+}
+
 pub fn read(
     comptime T: type,
     comptime DB: type,

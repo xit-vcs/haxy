@@ -752,7 +752,7 @@ fn setPatchDetails(
         const id = try evt.parseEventId(item.id);
         const status = item.record.event.status.kind();
         if (admin_moment) |moment| {
-            const record = try evt.Fork.readById(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, &id);
+            const record = try evt.readRecordSubset(evt.Fork, struct { removed: bool }, evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, &id);
             item.fork_exists = if (record) |value| !value.removed else false;
         }
         const target_branch = item.record.event.target_branch;

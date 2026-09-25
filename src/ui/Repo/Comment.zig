@@ -117,7 +117,7 @@ fn readOneBytes(
     const comment = (try evt.Comment.readById(DB, hash_kind, haxy_moment, arena, id_bytes)) orelse return null;
     const parent_author: ?ui.Author = if (!std.mem.eql(u8, &comment.event.parent_id, &comment.event.thread_id)) blk: {
         const parent_bytes = idBytes(&comment.event.parent_id) orelse break :blk null;
-        const parent = (try evt.Comment.readById(DB, hash_kind, haxy_moment, arena, &parent_bytes)) orelse break :blk null;
+        const parent = (try evt.readRecordSubset(evt.Comment, struct { author_email: ?[]const u8 }, DB, hash_kind, haxy_moment, arena, &parent_bytes)) orelse break :blk null;
         break :blk try ui.Author.initFromEmail(admin_moment, arena, parent.author_email);
     } else null;
     return .{
