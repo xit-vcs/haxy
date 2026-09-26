@@ -43,7 +43,7 @@ pub fn init(arena: *std.heap.ArenaAllocator, name: []const u8, owner_name: []con
     return .{
         .name = name,
         .owner_name = owner_name,
-        .title = try ui.Title.init(arena, name),
+        .title = try ui.Title.init(arena, name, .scanlines),
         .ref_or_oid = ref_or_oid,
         .ref_or_oid_value = ref_or_oid_value,
         .issues_label = issues_label,

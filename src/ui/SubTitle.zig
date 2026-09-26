@@ -62,7 +62,7 @@ pub const View = struct {
 // the two share a look. (the glyphs are 4 sub-pixels wide rather than 6, which
 // is one sextant cell narrower per character.) the four 2x3 patterns that
 // aren't sextants (empty, left column, right column, full) fall back to
-// U+0020, U+258C, U+2590, U+2588 respectively. unlike Title there is no dither:
+// U+0020, U+258C, U+2590, U+2588 respectively. unlike Title there are no scanlines:
 // at this height every sub-pixel renders, which keeps the shorter glyphs
 // legible.
 

@@ -21,7 +21,7 @@ const Self = @This();
 
 pub fn init(arena: *std.heap.ArenaAllocator) !Self {
     return .{
-        .title = try ui.Title.init(arena, "haxy"),
+        .title = try ui.Title.init(arena, "haxy", .scanlines),
     };
 }
 

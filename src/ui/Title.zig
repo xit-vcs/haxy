@@ -12,9 +12,11 @@ content: []const u8,
 
 const Self = @This();
 
-pub fn init(arena: *std.heap.ArenaAllocator, orig_content: []const u8) !Self {
+pub const Style = enum { solid, scanlines };
+
+pub fn init(arena: *std.heap.ArenaAllocator, orig_content: []const u8, style: Style) !Self {
     return .{
-        .content = try renderTitle(arena.allocator(), orig_content),
+        .content = try renderTitle(arena.allocator(), orig_content, style),
     };
 }
 
@@ -60,7 +62,7 @@ pub const View = struct {
     }
 };
 
-// 3-row sextant title font with row-aligned dither.
+// 3-row sextant title font, optionally with scanlines.
 //
 // each glyph is a 6x9 sub-pixel bitmap that renders as a 3x3 grid of
 // sextant-block characters (U+1FB00-1FB3B). the four 2x3 patterns that
@@ -520,7 +522,7 @@ fn sextantCodepoint(pattern: u6) u21 {
     };
 }
 
-fn renderTitle(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
+fn renderTitle(allocator: std.mem.Allocator, input: []const u8, style: Style) ![]const u8 {
     var rows: [3]std.ArrayList(u8) = .{ .empty, .empty, .empty };
     defer for (&rows) |*r| r.deinit(allocator);
 
@@ -528,10 +530,10 @@ fn renderTitle(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
     for (input) |c| {
         const glyph = glyphFor(c) orelse continue;
 
-        // row-aligned dither: keep on-pixels only at even bitmap rows.
+        // scanlines: keep on-pixels only at even bitmap rows.
         var kept: [9][6]bool = std.mem.zeroes([9][6]bool);
         for (0..9) |r| {
-            if (r % 2 != 0) continue;
+            if (style == .scanlines and r % 2 != 0) continue;
             for (0..6) |col| {
                 kept[r][col] = glyph[r][col] == '#';
             }
