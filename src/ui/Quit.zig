@@ -27,7 +27,7 @@ pub const View = struct {
     button_id: usize,
 
     pub fn init(allocator: std.mem.Allocator, session: *ui.Session) !View {
-        var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .rounded_corners = true, .direction = .vert });
+        var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .round_corners = true, .direction = .vert });
         errdefer box.deinit(allocator);
 
         {
@@ -42,7 +42,7 @@ pub const View = struct {
 
         var button_id: usize = undefined;
         {
-            var button = try wgt.TextBox.init(allocator, "quit", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            var button = try wgt.TextBox.init(allocator, "quit", .{ .border_style = .single, .round_corners = true, .wrap_kind = .none });
             errdefer button.deinit(allocator);
             button.getFocus().mode = .all;
             button_id = button.getFocus().id;

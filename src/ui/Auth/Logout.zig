@@ -25,7 +25,7 @@ pub const View = struct {
     const button_index: usize = 1;
 
     pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !View {
-        var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .rounded_corners = true, .direction = .vert });
+        var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .round_corners = true, .direction = .vert });
         errdefer box.deinit(allocator);
         // marks this subtree as an HTML form scope for the web renderer
         box.getFocus().kind = .{ .custom = "form:logout" };
@@ -42,7 +42,7 @@ pub const View = struct {
 
         var button_id: usize = undefined;
         {
-            var button = try wgt.TextBox.init(allocator, "logout", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            var button = try wgt.TextBox.init(allocator, "logout", .{ .border_style = .single, .round_corners = true, .wrap_kind = .none });
             errdefer button.deinit(allocator);
             button.getFocus().mode = .all;
             // the renderer distinguishes plain clickables from buttons that

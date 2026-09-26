@@ -441,7 +441,7 @@ pub const View = struct {
                             break :blk3 try wgt.Scroll(ui.Widget).init(allocator, .{ .box = detail_inner }, .{ .direction = .both, .web_native = !session.is_terminal, .fill = true });
                         };
                         errdefer detail_scroll.deinit(allocator);
-                        var sf = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = .single, .rounded_corners = true, .direction = .vert });
+                        var sf = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = .single, .round_corners = true, .direction = .vert });
                         errdefer sf.deinit(allocator);
                         // the wrapper's selected child is its scroll, so the focus
                         // chain reaches the content box (populateDetail points the
@@ -476,7 +476,7 @@ pub const View = struct {
     }
 
     fn addRow(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8, bottom_label: []const u8, link: []const u8) !void {
-        var row = try wgt.TextBox.init(allocator, label, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .none, .bottom_label = bottom_label });
+        var row = try wgt.TextBox.init(allocator, label, .{ .border_style = .hidden, .round_corners = true, .wrap_kind = .none, .bottom_label = bottom_label });
         errdefer row.deinit(allocator);
         row.getFocus().mode = .all;
         if (link.len != 0) row.getFocus().kind = .{ .custom = link };
@@ -699,7 +699,7 @@ pub const View = struct {
         const path = try childDir(page_arena.allocator(), self.data.dir, entry.name);
         const route = self.data.filesRoute(path, target_start) orelse return error.RouteTooLong;
         const link = try std.fmt.allocPrint(page_arena.allocator(), "a:{s}", .{try route.toUrl(page_arena)});
-        var tb = try wgt.TextBox.init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+        var tb = try wgt.TextBox.init(allocator, label, .{ .border_style = .single, .round_corners = true, .wrap_kind = .none });
         errdefer tb.deinit(allocator);
         tb.getFocus().mode = .all;
         tb.getFocus().kind = .{ .custom = link };

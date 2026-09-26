@@ -426,10 +426,11 @@ fn trimIncompleteCodepoint(bytes: []const u8) []const u8 {
 fn messageBox(allocator: std.mem.Allocator, message: []const u8, bottom_label: []const u8) !wgt.TextBox {
     var tb = try wgt.TextBox.init(allocator, message, .{
         .border_style = .single,
-        .rounded_corners = true,
+        .round_corners = true,
         .wrap_kind = .word,
         .label = " message ",
         .bottom_label = bottom_label,
+        .detect_links = true,
     });
     tb.getFocus().mode = .all;
     return tb;
@@ -532,7 +533,7 @@ pub const View = struct {
     }
 
     fn addRow(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8, link: []const u8, bottom_label: []const u8) !void {
-        var row = try wgt.TextBox.init(allocator, label, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .word, .bottom_label = bottom_label });
+        var row = try wgt.TextBox.init(allocator, label, .{ .border_style = .hidden, .round_corners = true, .wrap_kind = .word, .bottom_label = bottom_label });
         errdefer row.deinit(allocator);
         row.getFocus().mode = .all;
         if (link.len != 0) row.getFocus().kind = .{ .custom = link };
@@ -541,7 +542,7 @@ pub const View = struct {
 
     // a focusable row following the "a:" `link`.
     fn addLink(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8, link: []const u8) !void {
-        var tb = try wgt.TextBox.init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+        var tb = try wgt.TextBox.init(allocator, label, .{ .border_style = .single, .round_corners = true, .wrap_kind = .none });
         errdefer tb.deinit(allocator);
         tb.getFocus().mode = .all;
         tb.getFocus().kind = .{ .custom = link };
@@ -725,7 +726,7 @@ pub const View = struct {
                         try inner.children.put(allocator, row.getFocus().id, .{ .widget = .{ .box = row }, .rect = null, .min_size = null });
                     }
                     {
-                        var tb = try wgt.TextBox.init(allocator, commit.timestamp, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none, .label = " timestamp " });
+                        var tb = try wgt.TextBox.init(allocator, commit.timestamp, .{ .border_style = .single, .round_corners = true, .wrap_kind = .none, .label = " timestamp " });
                         errdefer tb.deinit(allocator);
                         tb.getFocus().mode = .all;
                         try inner.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
@@ -744,7 +745,7 @@ pub const View = struct {
                             if (bytes_added) "added" else "removed", bytes, stats.files_added + stats.files_changed,
                         });
                         if (stats.files_removed != 0) try text.writer.print("\nfiles removed: {d}", .{stats.files_removed});
-                        var tb = try wgt.TextBox.init(allocator, text.written(), .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none, .label = " stats " });
+                        var tb = try wgt.TextBox.init(allocator, text.written(), .{ .border_style = .single, .round_corners = true, .wrap_kind = .none, .label = " stats " });
                         errdefer tb.deinit(allocator);
                         tb.getFocus().mode = .all;
                         try inner.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });

@@ -243,7 +243,7 @@ fn addHunk(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), hunk: Hunk) !
 }
 
 fn addSpans(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), spans: []const wgt.Span, link: []const u8) !void {
-    var tb = try wgt.TextBox.initSpans(allocator, spans, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+    var tb = try wgt.TextBox.initSpans(allocator, spans, .{ .border_style = .single, .round_corners = true, .wrap_kind = .none });
     errdefer tb.deinit(allocator);
     tb.getFocus().mode = .all;
     if (link.len != 0) tb.getFocus().kind = .{ .custom = link };

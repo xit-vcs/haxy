@@ -45,7 +45,7 @@ pub const View = struct {
     session: *ui.Session,
 
     pub fn init(allocator: std.mem.Allocator, data: *const Self, commit_count: ?u64, session: *ui.Session) !View {
-        var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = .hidden, .rounded_corners = true, .direction = .horiz });
+        var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = .hidden, .round_corners = true, .direction = .horiz });
         errdefer box.deinit(allocator);
 
         var title_box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
@@ -108,7 +108,7 @@ pub const View = struct {
 
         for (routes, tags, labels) |route, tag, label| {
             const selected = current_tag == tag;
-            var tab = try wgt.TextBox.init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            var tab = try wgt.TextBox.init(allocator, label, .{ .border_style = .single, .round_corners = true, .wrap_kind = .none });
             errdefer tab.deinit(allocator);
             tab.getFocus().mode = .all;
             tab.getFocus().kind = .{ .custom = try ui.inPageTabLink(session, route, selected) };
@@ -135,7 +135,7 @@ pub const View = struct {
 
         // settings are account preferences, so they require a login.
         if (session.data.user_id != null) {
-            var settings = try wgt.TextBox.init(allocator, settings_tab_label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            var settings = try wgt.TextBox.init(allocator, settings_tab_label, .{ .border_style = .single, .round_corners = true, .wrap_kind = .none });
             errdefer settings.deinit(allocator);
             settings.getFocus().mode = .all;
             settings.getFocus().kind = .{ .custom = settings_link };
@@ -155,7 +155,7 @@ pub const View = struct {
         }
 
         if (session.is_terminal) {
-            var quit = try wgt.TextBox.init(allocator, ui.Quit.tab_label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            var quit = try wgt.TextBox.init(allocator, ui.Quit.tab_label, .{ .border_style = .single, .round_corners = true, .wrap_kind = .none });
             errdefer quit.deinit(allocator);
             quit.getFocus().mode = .all;
             quit.getFocus().kind = .{ .custom = ui.Quit.tab_kind };

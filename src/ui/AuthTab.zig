@@ -18,7 +18,7 @@ pub const View = struct {
     bottom_label_buf: [ui.clipped_bottom_label_max_len]u8,
 
     pub fn init(allocator: std.mem.Allocator, session: *ui.Session) !View {
-        var text_box = try wgt.TextBox.init(allocator, login_tab_label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+        var text_box = try wgt.TextBox.init(allocator, login_tab_label, .{ .border_style = .single, .round_corners = true, .wrap_kind = .none });
         errdefer text_box.deinit(allocator);
         text_box.getFocus().mode = .all;
         text_box.getFocus().kind = .{ .custom = "ai:/auth" };

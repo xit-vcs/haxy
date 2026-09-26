@@ -122,7 +122,7 @@ const back_kind = "back";
 // while the rest stay borderless
 pub fn markSelected(text_box: *wgt.TextBox, selected: bool) void {
     text_box.options.border_style = if (selected) .single else .hidden;
-    text_box.options.inverted = selected;
+    text_box.options.invert = selected;
 }
 
 pub fn addBackButton(allocator: std.mem.Allocator, box: *wgt.Box(Widget), session: *ui.Session) !void {
@@ -245,7 +245,7 @@ pub const FlowBox = struct {
         self.focus.child_id = null;
 
         for (items) |item| {
-            var text_box = try wgt.TextBox.init(allocator, item.text, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .word });
+            var text_box = try wgt.TextBox.init(allocator, item.text, .{ .border_style = .hidden, .round_corners = true, .wrap_kind = .word });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().mode = .all;
 
@@ -504,7 +504,7 @@ pub const WordFlow = struct {
         self.focus.child_id = null;
 
         for (items) |item| {
-            var text_box = try wgt.TextBox.init(allocator, item.text, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            var text_box = try wgt.TextBox.init(allocator, item.text, .{ .border_style = .single, .round_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().mode = .all;
 
@@ -686,7 +686,7 @@ pub const SearchBox = struct {
     pub const min_size: layout.MaybeSize = .{ .width = 20, .height = 3 };
 
     pub fn init(allocator: std.mem.Allocator, session: *ui.Session, label: []const u8, name: []const u8, text_value: ?[]const u8) !SearchBox {
-        var text_input = try wgt.TextInput.init(allocator, .{ .label = label, .name = name, .rounded_corners = true, .visible_width = 18, .render_content = session.is_terminal });
+        var text_input = try wgt.TextInput.init(allocator, .{ .label = label, .name = name, .round_corners = true, .visible_width = 18, .render_content = session.is_terminal });
         errdefer text_input.deinit(allocator);
         text_input.getFocus().mode = .all;
         if (text_value) |value| try text_input.setContent(allocator, value);
@@ -963,7 +963,7 @@ pub const SectionLabel = struct {
         }
 
         {
-            var tb = try wgt.TextBox.init(allocator, content, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            var tb = try wgt.TextBox.init(allocator, content, .{ .border_style = .single, .round_corners = true, .wrap_kind = .none });
             errdefer tb.deinit(allocator);
             tb.getFocus().mode = .all;
             try box.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
@@ -1021,7 +1021,7 @@ pub const SubmitButton = struct {
         }
 
         {
-            var button = try wgt.TextBox.init(allocator, label, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            var button = try wgt.TextBox.init(allocator, label, .{ .border_style = .single, .round_corners = true, .wrap_kind = .none });
             errdefer button.deinit(allocator);
             button.getFocus().mode = .all;
             // the renderer distinguishes plain clickables from buttons that
@@ -1515,7 +1515,7 @@ pub const CopyableText = struct {
         errdefer box.deinit(allocator);
 
         if (choices.len > 1) for (choices) |choice| {
-            var selector_box = try wgt.TextBox.init(allocator, choice.selector, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .none });
+            var selector_box = try wgt.TextBox.init(allocator, choice.selector, .{ .border_style = .hidden, .round_corners = true, .wrap_kind = .none });
             errdefer selector_box.deinit(allocator);
             selector_box.getFocus().mode = .all;
             try box.children.put(allocator, selector_box.getFocus().id, .{ .widget = .{ .text_box = selector_box }, .rect = null, .min_size = .{ .width = choice.selector.len + 2, .height = 3 } });
@@ -1523,7 +1523,7 @@ pub const CopyableText = struct {
 
         var text_input = try wgt.TextInput.init(allocator, .{
             .border_style = .single,
-            .rounded_corners = true,
+            .round_corners = true,
             .label = choices[0].label,
             .bottom_label = choices[0].bottom_label,
             .read_only = true,

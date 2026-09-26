@@ -2622,7 +2622,7 @@ pub fn authorBox(allocator: std.mem.Allocator, page_arena: *std.heap.ArenaAlloca
         .unknown => "",
         .email, .user_name => |t| t,
     };
-    var tb = try wgt.TextBox.init(allocator, text, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none, .label = " author " });
+    var tb = try wgt.TextBox.init(allocator, text, .{ .border_style = .single, .round_corners = true, .wrap_kind = .none, .label = " author " });
     errdefer tb.deinit(allocator);
     tb.getFocus().mode = .all;
     switch (author) {

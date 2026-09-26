@@ -427,7 +427,7 @@ pub const View = struct {
     }
 
     fn addRow(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), text: []const u8, link: []const u8) !void {
-        var row = try wgt.TextBox.init(allocator, text, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .none });
+        var row = try wgt.TextBox.init(allocator, text, .{ .border_style = .hidden, .round_corners = true, .wrap_kind = .none });
         errdefer row.deinit(allocator);
         row.getFocus().mode = .all;
         row.getFocus().kind = .{ .custom = link };
@@ -523,14 +523,14 @@ pub const View = struct {
 
         const item = self.eventWindow().events[index];
         if (item.view_url) |url| {
-            var link = try wgt.TextBox.init(allocator, "view event", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            var link = try wgt.TextBox.init(allocator, "view event", .{ .border_style = .single, .round_corners = true, .wrap_kind = .none });
             errdefer link.deinit(allocator);
             link.getFocus().mode = .all;
             link.getFocus().kind = .{ .custom = try std.fmt.allocPrint(self.session.page_arena.allocator(), "a:{s}", .{url}) };
             try box.children.put(allocator, link.getFocus().id, .{ .widget = .{ .text_box = link }, .rect = null, .min_size = null });
         }
         {
-            var kind = try wgt.TextBox.init(allocator, @tagName(item.kind), .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .word, .label = " kind " });
+            var kind = try wgt.TextBox.init(allocator, @tagName(item.kind), .{ .border_style = .single, .round_corners = true, .wrap_kind = .word, .label = " kind " });
             errdefer kind.deinit(allocator);
             kind.getFocus().mode = .all;
             try box.children.put(allocator, kind.getFocus().id, .{ .widget = .{ .text_box = kind }, .rect = null, .min_size = null });
@@ -664,7 +664,7 @@ pub const Header = struct {
                 const count = data.window(view).count;
                 var label_buf: [64]u8 = undefined;
                 const label = try std.fmt.bufPrint(&label_buf, "{s} ({d})", .{ view_label, count });
-                var tab = try wgt.TextBox.init(allocator, label, .{ .border_style = .hidden, .rounded_corners = true, .wrap_kind = .none });
+                var tab = try wgt.TextBox.init(allocator, label, .{ .border_style = .hidden, .round_corners = true, .wrap_kind = .none });
                 errdefer tab.deinit(allocator);
                 tab.getFocus().mode = .all;
                 const selected = std.meta.activeTag(session.data.current_page) == .repo_events and data.view == view;
@@ -676,7 +676,7 @@ pub const Header = struct {
             var button_id: ?usize = null;
             if (data.header.sync_status != null) {
                 box.getFocus().kind = .{ .custom = "form:/sync" };
-                var button = try wgt.TextBox.init(allocator, "sync", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+                var button = try wgt.TextBox.init(allocator, "sync", .{ .border_style = .single, .round_corners = true, .wrap_kind = .none });
                 errdefer button.deinit(allocator);
                 button.getFocus().mode = .all;
                 button.getFocus().kind = .{ .custom = "submit" };

@@ -181,7 +181,7 @@ pub const Item = struct {
                 } else "";
                 var parent = try wgt.TextBox.init(allocator, parent_text, .{
                     .border_style = .single,
-                    .rounded_corners = true,
+                    .round_corners = true,
                     .wrap_kind = .none,
                     .label = " replying to ",
                 });
@@ -203,7 +203,7 @@ pub const Item = struct {
         }
 
         const body_text = if (entry.comment.removed) "(removed)" else entry.comment.event.body;
-        var body_box = try wgt.TextBox.init(allocator, body_text, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .word });
+        var body_box = try wgt.TextBox.init(allocator, body_text, .{ .border_style = .single, .round_corners = true, .wrap_kind = .word });
         errdefer body_box.deinit(allocator);
         body_box.getFocus().mode = .all;
         try box.children.put(allocator, body_box.getFocus().id, .{ .widget = .{ .text_box = body_box }, .rect = null, .min_size = null });
@@ -340,7 +340,7 @@ fn removeRoute(kind: evt.EventKind, identity: []const u8, thread_id: []const u8,
 }
 
 pub fn linkBox(allocator: std.mem.Allocator, session: *ui.Session, text: []const u8, route: ui.RoutablePage) !wgt.TextBox {
-    var box = try wgt.TextBox.init(allocator, text, .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+    var box = try wgt.TextBox.init(allocator, text, .{ .border_style = .single, .round_corners = true, .wrap_kind = .none });
     errdefer box.deinit(allocator);
     box.getFocus().mode = .all;
     box.getFocus().kind = .{ .custom = try std.fmt.allocPrint(session.page_arena.allocator(), "a:{s}", .{try route.toUrl(session.page_arena)}) };

@@ -56,7 +56,7 @@ pub fn appendRows(
 
         var tb = try wgt.TextBox.init(allocator, entry.name, .{
             .border_style = .single,
-            .rounded_corners = true,
+            .round_corners = true,
             .wrap_kind = .none,
             .label = " attachment ",
         });
@@ -66,7 +66,7 @@ pub fn appendRows(
         try row.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
 
         row.getFocus().kind = .{ .custom = try std.fmt.allocPrint(pa, "form:{s}/attachment:{s}/remove", .{ parent_url, &entry.id }) };
-        var remove = try wgt.TextBox.init(allocator, "✕", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+        var remove = try wgt.TextBox.init(allocator, "✕", .{ .border_style = .single, .round_corners = true, .wrap_kind = .none });
         errdefer remove.deinit(allocator);
         remove.getFocus().mode = .all;
         remove.getFocus().kind = .{ .custom = "submit" };

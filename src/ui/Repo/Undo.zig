@@ -463,7 +463,7 @@ pub const View = struct {
 
     // the same shape the thread views use to confirm a removal
     fn initClearForm(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !ui.widget.Center {
-        var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .rounded_corners = true, .direction = .vert });
+        var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .round_corners = true, .direction = .vert });
         errdefer box.deinit(allocator);
         const route = ui.RoutablePage.repoUndoClearRoute(data.identity) orelse return error.RouteTooLong;
         box.getFocus().kind = .{ .custom = try std.fmt.allocPrint(session.page_arena.allocator(), "form:{s}", .{try route.toUrl(session.page_arena)}) };
@@ -472,7 +472,7 @@ pub const View = struct {
         errdefer prompt.deinit(allocator);
         try box.children.put(allocator, prompt.getFocus().id, .{ .widget = .{ .text = prompt }, .rect = null, .min_size = null });
 
-        var button = try wgt.TextBox.init(allocator, "clear undo history", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+        var button = try wgt.TextBox.init(allocator, "clear undo history", .{ .border_style = .single, .round_corners = true, .wrap_kind = .none });
         errdefer button.deinit(allocator);
         button.getFocus().mode = .all;
         button.getFocus().kind = if (data.can_undo) .{ .custom = "submit" } else .text_box;
@@ -483,7 +483,7 @@ pub const View = struct {
     }
 
     fn addText(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), text: []const u8, link: ?[]const u8, border: wgt.BorderStyle) !void {
-        var row = try wgt.TextBox.init(allocator, text, .{ .border_style = border, .rounded_corners = true, .wrap_kind = .word });
+        var row = try wgt.TextBox.init(allocator, text, .{ .border_style = border, .round_corners = true, .wrap_kind = .word });
         errdefer row.deinit(allocator);
         row.getFocus().mode = .all;
         if (link) |value| row.getFocus().kind = .{ .custom = value };

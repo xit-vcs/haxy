@@ -33,7 +33,7 @@ pub const View = struct {
     const button_index: usize = 2;
 
     pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !View {
-        var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .rounded_corners = true, .direction = .vert });
+        var box = try wgt.Box(ui.Widget).init(allocator, .{ .border_style = null, .round_corners = true, .direction = .vert });
         errdefer box.deinit(allocator);
         // marks this subtree as an HTML form scope for the web renderer
         box.getFocus().kind = .{ .custom = "form:login" };
@@ -41,7 +41,7 @@ pub const View = struct {
         var nav_ids: [3]usize = undefined;
 
         {
-            var username = try wgt.TextInput.init(allocator, .{ .label = " username ", .name = "username", .rounded_corners = true, .render_content = session.is_terminal });
+            var username = try wgt.TextInput.init(allocator, .{ .label = " username ", .name = "username", .round_corners = true, .render_content = session.is_terminal });
             errdefer username.deinit(allocator);
             username.getFocus().mode = .all;
             if (session.formFeedback(.login)) |feedback| try username.setContent(allocator, feedback.username);
@@ -54,7 +54,7 @@ pub const View = struct {
         }
 
         {
-            var password = try wgt.TextInput.init(allocator, .{ .label = " password ", .password = true, .name = "password", .rounded_corners = true, .render_content = session.is_terminal });
+            var password = try wgt.TextInput.init(allocator, .{ .label = " password ", .password = true, .name = "password", .round_corners = true, .render_content = session.is_terminal });
             errdefer password.deinit(allocator);
             password.getFocus().mode = .all;
             nav_ids[password_index] = password.getFocus().id;
@@ -66,7 +66,7 @@ pub const View = struct {
         }
 
         {
-            var button = try wgt.TextBox.init(allocator, "login", .{ .border_style = .single, .rounded_corners = true, .wrap_kind = .none });
+            var button = try wgt.TextBox.init(allocator, "login", .{ .border_style = .single, .round_corners = true, .wrap_kind = .none });
             errdefer button.deinit(allocator);
             button.getFocus().mode = .all;
             // the renderer distinguishes plain clickables from buttons that

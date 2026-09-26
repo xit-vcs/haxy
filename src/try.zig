@@ -378,9 +378,11 @@ pub fn main(init: std.process.Init) !void {
                     if (len >= msg_target or len + 1 + word.len > 120) break;
                     try msg_writer.writer.print(" {s}", .{word});
                 }
-                // the newest commit's message runs past what the detail pane
-                // reads, so it shows the truncated message and its link.
+                // the newest commit's message links to the project and runs
+                // past what the detail pane reads, so it shows the truncated
+                // message and its link.
                 if (c == commit_count - 1) {
+                    try msg_writer.writer.writeAll("\n\nsee https://github.com/xit-vcs/haxy");
                     for (0..ui.detail_preview_lines) |line| {
                         try msg_writer.writer.print("\n{d} {s}", .{ line, scatter_words[line % scatter_words.len] });
                     }

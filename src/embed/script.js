@@ -442,6 +442,8 @@ WebAssembly.instantiateStreaming(fetch("/haxy.wasm"), importObject).then(async (
             wasmInstance.exports._tick(minRows(), maxCols());
             return;
         }
+        // a link inside a cell's text opens in a new tab on its own
+        if (event.target.closest("a.cell-link")) return;
         const span = event.target.closest(".clickable");
         if (!span) return;
         // leave modified / non-left clicks (open-in-new-tab, etc.) to the browser
