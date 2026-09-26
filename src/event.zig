@@ -30,6 +30,25 @@ pub const last_object_id_key = "haxy/last-object-id";
 pub const admin_repo_opts: rp.RepoOpts(.xit) = .{};
 pub const AdminDB = rp.Repo(.xit, admin_repo_opts).DB;
 
+// the admin repo's file the home page renders
+pub const admin_about_path = "ABOUT.md";
+
+// create the admin repo with a master branch holding the default about page.
+// pushes to master update its work dir.
+pub fn initAdminRepo(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !rp.Repo(.xit, admin_repo_opts) {
+    var repo = try rp.Repo(.xit, admin_repo_opts).init(io, allocator, .{ .path = path });
+    errdefer repo.deinit(io, allocator);
+    try repo.addConfig(io, allocator, .{ .name = "receive.denycurrentbranch", .value = "updateInstead" });
+    {
+        const file = try repo.core.work_dir.createFile(io, admin_about_path, .{});
+        defer file.close(io);
+        try file.writeStreamingAll(io, "# HAXY\n\nWelcome to your Haxy instance!\n\nEdit `admin/ABOUT.md` in the server dir to change what this page says.");
+    }
+    try repo.add(io, allocator, &.{admin_about_path});
+    _ = try repo.commit(io, allocator, .{ .author = "haxy <haxy@localhost>", .message = "init" });
+    return repo;
+}
+
 // the xitdb type events are stored in. it only depends on the hash kind, so
 // this matches the db of any xit repo using that hash kind.
 pub fn EventDB(comptime hash_kind: hash.HashKind) type {

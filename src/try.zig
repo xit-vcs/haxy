@@ -104,7 +104,7 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(work_path);
 
     const Repo = rp.Repo(.xit, evt.admin_repo_opts);
-    var repo = try Repo.init(io, allocator, .{ .path = work_path, .bare = true });
+    var repo = try evt.initAdminRepo(io, allocator, work_path);
     defer repo.deinit(io, allocator);
 
     var session_arena = std.heap.ArenaAllocator.init(allocator);

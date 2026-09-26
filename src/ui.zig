@@ -70,7 +70,7 @@ pub const Page = union(PageKind) {
         // the repo page can build without a moment in local mode; the home and
         // user pages always read from the admin db.
         return switch (route.parent()) {
-            .home => .{ .home = try Home.init(arena, session.haxy_moment orelse return error.NoMoment, session.userId(), switch (route) {
+            .home => .{ .home = try Home.init(arena, session, session.haxy_moment orelse return error.NoMoment, switch (route) {
                 .home_users => |start| start,
                 else => 0,
             }, switch (route) {
@@ -110,6 +110,7 @@ pub const Snapshot = struct {
 // .user parent page, so switching between them stays on that page (and just
 // updates the url) rather than navigating away.
 pub const RoutablePage = union(enum) {
+    home_about,
     home_users: usize, // 0 = first page
     home_repos: usize, // 0 = first page
     home_settings,
@@ -180,7 +181,7 @@ pub const RoutablePage = union(enum) {
     fork_settings: ForkRoute,
     fork_auth: ForkRoute,
 
-    pub const default: RoutablePage = .{ .home_repos = 0 };
+    pub const default: RoutablePage = .home_about;
 
     pub const RefKind = enum { branch, tag };
 
@@ -1016,6 +1017,7 @@ pub const RoutablePage = union(enum) {
 
     pub fn toUrl(self: RoutablePage, arena: *std.heap.ArenaAllocator) ![]const u8 {
         return switch (self) {
+            .home_about => "/",
             .home_users => |start| if (start == 0) @as([]const u8, "/users") else try std.fmt.allocPrint(arena.allocator(), "/users/" ++ start_seg ++ "{d}", .{start}),
             .home_repos => |start| if (start == 0) @as([]const u8, "/repos") else try std.fmt.allocPrint(arena.allocator(), "/repos/" ++ start_seg ++ "{d}", .{start}),
             .home_settings => "/settings",
@@ -1401,7 +1403,7 @@ pub const RoutablePage = union(enum) {
 
     pub fn parent(self: RoutablePage) PageKind {
         return switch (self) {
-            .home_users, .home_repos, .home_settings, .home_auth => .home,
+            .home_about, .home_users, .home_repos, .home_settings, .home_auth => .home,
             .user_repos, .user_forks, .user_settings, .user_auth => .user,
             .repo_files, .repo_commits, .repo_diff, .repo_refs, .repo_issues, .repo_patches, .repo_discussions, .repo_events, .repo_undo, .repo_settings, .repo_auth => .repo,
             .fork_patch, .fork_diff, .fork_files, .fork_commits, .fork_settings, .fork_auth => .fork,

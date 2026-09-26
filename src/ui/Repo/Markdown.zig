@@ -12,13 +12,14 @@ const Focus = xitui.focus.Focus;
 const RichText = ui.widget.RichText;
 
 // a rendered markdown file: one child per block, word-wrapped to the width.
+// without `data` (a file outside any repo), repo-relative links aren't clickable.
 pub const View = struct {
     box: wgt.Box(ui.Widget),
     // where focus rests off the links, covering the whole document; it's
     // registered after the links so they win hit-testing
     body: *Focus,
 
-    pub fn init(allocator: std.mem.Allocator, doc: md.Document, data: *const Files, file_path: []const u8, page_arena: *std.heap.ArenaAllocator) !View {
+    pub fn init(allocator: std.mem.Allocator, doc: md.Document, data: ?*const Files, file_path: []const u8, page_arena: *std.heap.ArenaAllocator) !View {
         const builder: Builder = .{
             .allocator = allocator,
             .data = data,
@@ -127,7 +128,7 @@ fn addStops(allocator: std.mem.Allocator, rich_text: *RichText, view_focus: *Foc
 // turns blocks into widgets, resolving links against the viewed file.
 const Builder = struct {
     allocator: std.mem.Allocator,
-    data: *const Files,
+    data: ?*const Files,
     // the viewed file's directory, which relative links resolve against
     dir: []const u8,
     page_arena: *std.heap.ArenaAllocator,
@@ -219,6 +220,7 @@ const Builder = struct {
             if (std.ascii.startsWithIgnoreCase(dest, scheme)) return std.fmt.allocPrint(aa, "{s}{s}", .{ ui.raw_link_prefix, dest });
         }
         if (hasScheme(dest) or std.mem.startsWith(u8, dest, "//")) return "";
+        const data = b.data orelse return "";
         const end = std.mem.indexOfAny(u8, dest, "?#") orelse dest.len;
         if (end == 0) return "";
         const decoded = std.Uri.percentDecodeInPlace(try aa.dupe(u8, dest[0..end]));
@@ -239,7 +241,7 @@ const Builder = struct {
             try segments.append(aa, part);
         }
         const path = try std.mem.join(aa, "/", segments.items);
-        const route = b.data.filesRoute(path, 0) orelse return "";
+        const route = data.filesRoute(path, 0) orelse return "";
         return std.fmt.allocPrint(aa, "a:{s}", .{try route.toUrl(b.page_arena)});
     }
 };
