@@ -1115,6 +1115,8 @@ pub const Footer = struct {
         while (utf8.nextCodepoint()) |ch| {
             const rune_width = xitui.width.cellWidth(ch);
             if (i + rune_width > width) break;
+            // a terminal hyperlink to the page
+            (try grid.cell(i, 0)).link = text;
             try grid.setRune(i, 0, ch);
             i += rune_width;
         }

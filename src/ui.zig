@@ -2797,7 +2797,8 @@ pub fn initRoot(allocator: std.mem.Allocator, page: *const Page, session: *Sessi
 
     chooseAnsiArtForNavigation(session);
 
-    // on the TUI/SSH, the page sits above a one-row footer showing the url
+    // on the TUI/SSH, the page sits above a one-row footer showing its web
+    // url, when there's a web UI to point at
     var root = if (session.is_terminal) blk: {
         var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });
         errdefer box.deinit(allocator);
@@ -2808,7 +2809,7 @@ pub fn initRoot(allocator: std.mem.Allocator, page: *const Page, session: *Sessi
             try box.children.put(allocator, id, .{ .widget = .{ .background = background }, .rect = null, .min_size = null });
             break :bg_blk id;
         };
-        {
+        if (session.web_port != null) {
             var footer = try widget.Footer.init(allocator, session);
             errdefer footer.deinit(allocator);
             try box.children.put(allocator, footer.getFocus().id, .{ .widget = .{ .footer = footer }, .rect = null, .min_size = .{ .width = null, .height = 1 } });
