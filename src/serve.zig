@@ -7,6 +7,7 @@ const serve_common = @import("./serve_common.zig");
 const serve_ssh_protocol = @import("./serve_ssh_protocol.zig");
 const serve_ssh = @import("./serve_ssh.zig");
 const serve_http = @import("./serve_http.zig");
+const evt = @import("./event.zig");
 
 pub const Options = struct {
     http_listen: ?[]const u8 = "127.0.0.1:8080",
@@ -71,6 +72,15 @@ pub fn run(
 
     const admin_repo_path = try std.fs.path.resolve(allocator, &.{ data_dir_path, "admin" });
     defer allocator.free(admin_repo_path);
+
+    // create the admin repo on first run
+    {
+        var admin_repo = rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = admin_repo_path }) catch |open_err| switch (open_err) {
+            error.RepoNotFound, error.FileNotFound => try evt.initAdminRepo(io, allocator, admin_repo_path),
+            else => |e| return e,
+        };
+        defer admin_repo.deinit(io, allocator);
+    }
 
     // create http listener
 
