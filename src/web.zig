@@ -2036,14 +2036,14 @@ fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: 
     try output.appendSlice(allocator, "<div class=\"grid-cells\">");
 
     // emit this panel's grid as rows of text, coalescing adjacent cells that
-    // share a focus id and colors into one tag (a clickable span, a link, or a
-    // plain colored span). cells under a child scroll keep only their background.
+    // share a focus id and style into one tag (a clickable span, a link, or a
+    // plain styled span). cells under a child scroll keep only their background.
+    // a cell's own link is an anchor nested in that tag.
     for (0..grid.size.height) |y| {
         var cur_id: ?usize = null;
-        var cur_fg: ?Grid.Color = null;
-        var cur_bg: ?Grid.Color = null;
-        var cur_inverted = false;
+        var cur_style: Grid.Style = .{};
         var open_tag: ?CellTag = null;
+        var open_link: ?[]const u8 = null;
         var first = true;
         for (0..grid.size.width) |x| {
             const cell = (try grid.cell(x, y)).*;
@@ -2060,11 +2060,11 @@ fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: 
             };
             // the focusable owning the cell at (x, y); none for a covered cell.
             const cell_id = if (covered_by_scroll) null else owners[y * grid.size.width + x];
-            const fg = if (covered_by_scroll) null else cell.style.fg;
-            const bg = cell.style.bg;
-            const inverted = !covered_by_scroll and cell.style.inverted;
+            const style: Grid.Style = if (covered_by_scroll) .{ .bg = cell.style.bg } else cell.style;
 
-            if (first or cell_id != cur_id or !std.meta.eql(fg, cur_fg) or !std.meta.eql(bg, cur_bg) or inverted != cur_inverted) {
+            if (first or cell_id != cur_id or !style.eql(cur_style)) {
+                if (open_link != null) try output.appendSlice(allocator, "</a>");
+                open_link = null;
                 if (open_tag) |t| try output.appendSlice(allocator, t.closeTag());
 
                 var new_tag: ?CellTag = null;
@@ -2076,19 +2076,30 @@ fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: 
                         };
                     }
                 }
-                if (new_tag == null and (fg != null or bg != null or inverted)) new_tag = .plain;
+                if (new_tag == null and !style.eql(.{})) new_tag = .plain;
 
                 if (new_tag) |t| {
-                    var style_buf: [64]u8 = undefined;
-                    try t.writeOpenTag(allocator, output, cell_id orelse 0, styleAttr(&style_buf, fg, bg, inverted));
+                    var style_buf: [192]u8 = undefined;
+                    try t.writeOpenTag(allocator, output, cell_id orelse 0, styleAttr(&style_buf, style));
                 }
 
                 open_tag = new_tag;
                 cur_id = cell_id;
-                cur_fg = fg;
-                cur_bg = bg;
-                cur_inverted = inverted;
+                cur_style = style;
                 first = false;
+            }
+
+            // an anchor can't nest in another, so a link tag's cells skip theirs
+            const in_anchor = if (open_tag) |t| t == .a else false;
+            const link = if (covered_by_scroll or in_anchor) null else webLink(cell.link);
+            if (!sameLink(link, open_link)) {
+                if (open_link != null) try output.appendSlice(allocator, "</a>");
+                if (link) |url| {
+                    try output.appendSlice(allocator, "<a class=\"cell-link\" tabindex=\"-1\" target=\"_blank\" rel=\"noopener noreferrer\" href=\"");
+                    try appendEscapedHtml(allocator, output, url);
+                    try output.appendSlice(allocator, "\">");
+                }
+                open_link = link;
             }
 
             if (covered_by_scroll) {
@@ -2113,6 +2124,7 @@ fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: 
                 try appendEscapedHtml(allocator, output, " ");
             }
         }
+        if (open_link != null) try output.appendSlice(allocator, "</a>");
         if (open_tag) |t| try output.appendSlice(allocator, t.closeTag());
         try output.append(allocator, '\n');
     }
@@ -2317,16 +2329,34 @@ fn colorRgb(color: Grid.Color) Grid.Color.Rgb {
 }
 
 // builds an HTML ` style="color:…;background-color:…"` attribute from a
-// cell's fg/bg into `buf`, omitting whichever color is unset. an inverted
+// cell's style into `buf`, omitting whichever color is unset. an inverted
 // cell swaps the two, falling back to the page's --fg/--bg variables for
-// whichever side is unset. returns an empty slice when nothing is set.
-fn styleAttr(buf: []u8, fg: ?Grid.Color, bg: ?Grid.Color, inverted: bool) []const u8 {
-    if (fg == null and bg == null and !inverted) return buf[0..0];
+// whichever side is unset. text attributes follow the colors. returns an
+// empty slice when nothing is set.
+fn styleAttr(buf: []u8, style: Grid.Style) []const u8 {
+    if (style.eql(.{})) return buf[0..0];
     const prefix = " style=\"";
     @memcpy(buf[0..prefix.len], prefix);
     var i: usize = prefix.len;
-    i = cssColor(buf, i, "color", if (inverted) bg else fg, if (inverted) "var(--bg)" else null) orelse return buf[0..0];
-    i = cssColor(buf, i, "background-color", if (inverted) fg else bg, if (inverted) "var(--fg)" else null) orelse return buf[0..0];
+    const inverted = style.inverted;
+    i = cssColor(buf, i, "color", if (inverted) style.bg else style.fg, if (inverted) "var(--bg)" else null) orelse return buf[0..0];
+    i = cssColor(buf, i, "background-color", if (inverted) style.fg else style.bg, if (inverted) "var(--fg)" else null) orelse return buf[0..0];
+    const decoration: []const u8 = if (style.underline and style.strikethrough)
+        "text-decoration:underline line-through;"
+    else if (style.underline)
+        "text-decoration:underline;"
+    else if (style.strikethrough)
+        "text-decoration:line-through;"
+    else
+        "";
+    const attributes = std.fmt.bufPrint(buf[i..], "{s}{s}{s}{s}", .{
+        if (style.bold) "font-weight:bold;" else "",
+        if (style.italic) "font-style:italic;" else "",
+        decoration,
+        if (style.dim) "opacity:.6;" else "",
+    }) catch return buf[0..0];
+    i += attributes.len;
+    if (i >= buf.len) return buf[0..0];
     buf[i] = '"';
     return buf[0 .. i + 1];
 }
@@ -2343,6 +2373,20 @@ fn cssColor(buf: []u8, i: usize, prop: []const u8, color: ?Grid.Color, fallback:
     else
         return i;
     return i + s.len;
+}
+
+// a cell's link as an href, when it's a web or mail url
+fn webLink(link: ?[]const u8) ?[]const u8 {
+    const url = link orelse return null;
+    for ([_][]const u8{ "http://", "https://", "mailto:" }) |scheme| {
+        if (std.ascii.startsWithIgnoreCase(url, scheme)) return url;
+    }
+    return null;
+}
+
+fn sameLink(a: ?[]const u8, b: ?[]const u8) bool {
+    if (a) |x| return if (b) |y| std.mem.eql(u8, x, y) else false;
+    return b == null;
 }
 
 fn appendEscapedHtml(allocator: std.mem.Allocator, out: *std.ArrayList(u8), input: []const u8) !void {

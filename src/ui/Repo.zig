@@ -14,6 +14,7 @@ const inp = @import("./input.zig");
 
 pub const Header = @import("./Repo/Header.zig");
 pub const Files = @import("./Repo/Files.zig");
+pub const Markdown = @import("./Repo/Markdown.zig");
 pub const Commits = @import("./Repo/Commits.zig");
 pub const Diff = @import("./Repo/Diff.zig");
 pub const Refs = @import("./Repo/Refs.zig");

@@ -278,13 +278,28 @@ pub fn main(init: std.process.Init) !void {
                 try readme.writeStreamingAll(io,
                     \\# Sample Repo
                     \\
-                    \\A repository seeded with test data for exercising the UI.
+                    \\A repository seeded with test data for exercising the UI. Text can be
+                    \\*italic*, **bold**, ***both*** or ~~struck through~~, and links go to
+                    \\[the contributing guide](docs/dev/contribute.md) or to
+                    \\[an external site](https://github.com/xit-vcs/haxy).
                     \\
                     \\## Features
                     \\
                     \\- Fast and lightweight
                     \\- Zero configuration required
+                    \\  - Sensible defaults
+                    \\  - Nothing to edit
                     \\- Works out of the box
+                    \\
+                    \\## Roadmap
+                    \\
+                    \\- [x] Render markdown
+                    \\- [ ] Render tables
+                    \\
+                    \\> Simplicity is prerequisite for reliability. A quote this long wraps
+                    \\> onto more than one line in a narrow pane.
+                    \\
+                    \\---
                     \\
                     \\## Installation
                     \\
@@ -316,6 +331,10 @@ pub fn main(init: std.process.Init) !void {
                     \\Contributions are welcome! Please open an issue to discuss
                     \\any significant changes before submitting a pull request.
                     \\See the docs under `docs/dev` for more details.
+                    \\
+                    \\## A Heading Far Too Long To Fit In The Subtitle Font Within A Pane
+                    \\
+                    \\Long headings fall back to bold text.
                     \\
                     \\## License
                     \\

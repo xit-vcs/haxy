@@ -21,6 +21,7 @@ pub const Widget = union(enum) {
     flow_box: FlowBox,
     flow_box_scroll: FlowBox.Scroll,
     word_flow: WordFlow,
+    rich_text: RichText,
     spacer: Spacer,
     center: Center,
     section_label: SectionLabel,
@@ -44,6 +45,9 @@ pub const Widget = union(enum) {
     repo_patches_header: ui.Repo.Patches.Header,
     repo_discussions_header: ui.Repo.Discussions.Header,
     repo_files: ui.Repo.Files.View,
+    markdown: ui.Repo.Markdown.View,
+    markdown_heading: ui.Repo.Markdown.Heading,
+    markdown_gutter: ui.Repo.Markdown.Gutter,
     repo_commits: ui.Repo.Commits.View,
     diff_view: ui.Repo.Diff.View,
     repo_refs: ui.Repo.Refs.View,
@@ -620,6 +624,206 @@ pub const WordFlow = struct {
             while (i < rects.len and rects[i].y == y) i += 1;
         }
         return prev_first;
+    }
+};
+
+// a word-wrapped paragraph of styled runs. each line a link touches is a
+// focusable piece, and a focused link draws all its pieces inverted.
+pub const RichText = struct {
+    focus: *Focus,
+    grid: ?Grid,
+    // backs the decoded content and the link targets
+    arena: std.heap.ArenaAllocator,
+    runes: []const u21,
+    // each rune's span
+    span_of: []const usize,
+    styles: []const Grid.Style,
+    // each span's link index, null outside a link
+    span_links: []const ?usize,
+    links: []const []const u8,
+    // each link's piece focuses in line order, kept across builds so a link
+    // keeps its ids when the text rewraps
+    link_focuses: []std.ArrayList(*Focus),
+    lines: std.ArrayList(wgt.Line),
+    // scratch for each build's link pieces
+    pieces: std.ArrayList(Piece),
+
+    pub const Span = struct {
+        text: []const u8,
+        style: Grid.Style = .{},
+        // the focus kind a click or enter follows; empty for plain text
+        link: []const u8 = "",
+    };
+
+    const Piece = struct {
+        link: usize,
+        rect: layout.URect,
+    };
+
+    pub fn init(allocator: std.mem.Allocator, spans: []const Span) !RichText {
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        errdefer arena.deinit();
+        const aa = arena.allocator();
+
+        var runes: std.ArrayList(u21) = .empty;
+        var span_of: std.ArrayList(usize) = .empty;
+        const styles = try aa.alloc(Grid.Style, spans.len);
+        const span_links = try aa.alloc(?usize, spans.len);
+        var links: std.ArrayList([]const u8) = .empty;
+        for (spans, 0..) |span, i| {
+            styles[i] = span.style;
+            span_links[i] = null;
+            if (span.link.len > 0) {
+                // adjacent spans with the same target are one link
+                const same = i > 0 and spans[i - 1].link.len > 0 and std.mem.eql(u8, spans[i - 1].link, span.link);
+                if (!same) try links.append(aa, try aa.dupe(u8, span.link));
+                span_links[i] = links.items.len - 1;
+            }
+            var utf8 = (try std.unicode.Utf8View.init(span.text)).iterator();
+            while (utf8.nextCodepoint()) |codepoint| {
+                try runes.append(aa, codepoint);
+                try span_of.append(aa, i);
+            }
+        }
+
+        const link_focuses = try aa.alloc(std.ArrayList(*Focus), links.items.len);
+        @memset(link_focuses, .empty);
+
+        return .{
+            .focus = try Focus.create(allocator, .container),
+            .grid = null,
+            .arena = arena,
+            .runes = runes.items,
+            .span_of = span_of.items,
+            .styles = styles,
+            .span_links = span_links,
+            .links = links.items,
+            .link_focuses = link_focuses,
+            .lines = .empty,
+            .pieces = .empty,
+        };
+    }
+
+    pub fn deinit(self: *RichText, allocator: std.mem.Allocator) void {
+        self.focus.destroy(allocator);
+        self.clearGrid();
+        for (self.link_focuses) |*focuses| {
+            for (focuses.items) |focus| focus.destroy(allocator);
+            focuses.deinit(allocator);
+        }
+        self.pieces.deinit(allocator);
+        self.lines.deinit(allocator);
+        self.arena.deinit();
+    }
+
+    // the url a terminal can open for a link: raw links to absolute urls
+    fn terminalLink(link: []const u8) ?[]const u8 {
+        if (!std.mem.startsWith(u8, link, ui.raw_link_prefix)) return null;
+        const url = link[ui.raw_link_prefix.len..];
+        return if (std.mem.startsWith(u8, url, "/")) null else url;
+    }
+
+    // the link one of whose pieces has focus id `id`
+    fn linkOf(self: *const RichText, id: ?usize) ?usize {
+        for (self.link_focuses, 0..) |focuses, l| {
+            for (focuses.items) |focus| if (focus.id == id) return l;
+        }
+        return null;
+    }
+
+    pub fn build(self: *RichText, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
+        self.clearGrid();
+        self.focus.clear();
+        const max_width = constraint.max_size.width;
+        if (max_width == 0 or constraint.max_size.height == 0) return;
+        const focused_link = self.linkOf(root_focus.grandchild_id);
+
+        try wgt.wrapLines(allocator, &self.lines, self.runes, .word, max_width);
+        // trailing spaces are dropped so a wrapped link doesn't highlight them
+        for (self.lines.items) |*line| {
+            while (line.end > line.start and self.runes[line.end - 1] == ' ') {
+                line.end -= 1;
+                line.width -= 1;
+            }
+        }
+        const visible = @min(self.lines.items.len, constraint.max_size.height orelse self.lines.items.len);
+        var width: usize = 1;
+        for (self.lines.items[0..visible]) |line| width = @max(width, line.width);
+        if (max_width) |w| width = @min(width, w);
+
+        var grid = try Grid.init(allocator, .{ .width = width, .height = visible });
+        errdefer grid.deinit();
+        self.pieces.clearRetainingCapacity();
+        for (self.lines.items[0..visible], 0..) |line, y| {
+            var x: usize = 0;
+            for (self.runes[line.start..line.end], line.start..) |rune, i| {
+                const rune_width = xitui.width.cellWidth(rune);
+                if (x + rune_width > width) break;
+                const link = self.span_links[self.span_of[i]];
+                const cell = try grid.cell(x, y);
+                cell.style = self.styles[self.span_of[i]];
+                if (link) |l| {
+                    cell.link = terminalLink(self.links[l]);
+                    if (l == focused_link) cell.style.inverted = true;
+                    // extend this line's piece of the link, or start one
+                    const items = self.pieces.items;
+                    if (items.len > 0 and items[items.len - 1].link == l and items[items.len - 1].rect.y == y) {
+                        items[items.len - 1].rect.size.width += rune_width;
+                    } else {
+                        try self.pieces.append(allocator, .{ .link = l, .rect = .{ .x = x, .y = y, .size = .{ .width = rune_width, .height = 1 } } });
+                    }
+                }
+                try grid.setRune(x, y, rune);
+                x += rune_width;
+            }
+        }
+
+        // a link's pieces are consecutive, since its runes are
+        var piece_index: usize = 0;
+        for (self.pieces.items, 0..) |piece, i| {
+            piece_index = if (i > 0 and self.pieces.items[i - 1].link == piece.link) piece_index + 1 else 0;
+            const focuses = &self.link_focuses[piece.link];
+            if (piece_index == focuses.items.len) {
+                const focus = try Focus.create(allocator, .{ .custom = self.links[piece.link] });
+                errdefer focus.destroy(allocator);
+                focus.mode = .all;
+                try focuses.append(allocator, focus);
+            }
+            try self.focus.addChild(allocator, focuses.items[piece_index], piece.rect.size, piece.rect.x, piece.rect.y);
+        }
+
+        // focus rests on a link's first piece, which stays while the link shows
+        if (focused_link) |l| if (self.link_focuses[l].items.len > 0) {
+            const first = self.link_focuses[l].items[0].id;
+            if (self.focus.children.contains(first)) {
+                root_focus.grandchild_id = first;
+                self.focus.child_id = first;
+            }
+        };
+
+        self.grid = grid;
+    }
+
+    pub fn input(self: *RichText, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
+        _ = self;
+        _ = allocator;
+        _ = key;
+        _ = root_focus;
+    }
+
+    pub fn clearGrid(self: *RichText) void {
+        if (self.grid) |*grid| {
+            grid.deinit();
+            self.grid = null;
+        }
+    }
+
+    pub fn getGrid(self: RichText) ?Grid {
+        return self.grid;
+    }
+
+    pub fn getFocus(self: *RichText) *Focus {
+        return self.focus;
     }
 };
 

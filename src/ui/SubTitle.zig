@@ -18,6 +18,11 @@ pub fn init(arena: *std.heap.ArenaAllocator, orig_content: []const u8) !Self {
     };
 }
 
+pub fn width(self: Self) !usize {
+    const line_end = std.mem.indexOfScalar(u8, self.content, '\n') orelse self.content.len;
+    return xitui.width.displayWidth(self.content[0..line_end]);
+}
+
 pub const View = struct {
     text_box: wgt.TextBox,
 
@@ -384,6 +389,14 @@ fn glyphFor(c: u8) ?Glyph {
         },
         else => null,
     };
+}
+
+// whether every char of `text` has a glyph
+pub fn covers(text: []const u8) bool {
+    for (text) |c| {
+        if (glyphFor(c) == null) return false;
+    }
+    return true;
 }
 
 // map a 2x3 sub-pixel pattern to its corresponding sextant codepoint

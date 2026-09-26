@@ -2538,6 +2538,8 @@ fn requestRawLink(session: *Session, url: []const u8) !void {
 }
 
 pub fn terminalWebUrl(allocator: std.mem.Allocator, session: *const Session, path: []const u8) ![]const u8 {
+    // an absolute url is already complete
+    if (!std.mem.startsWith(u8, path, "/")) return path;
     return if (session.web_port) |port|
         try std.fmt.allocPrint(allocator, "http://localhost:{d}{s}", .{ port, path })
     else

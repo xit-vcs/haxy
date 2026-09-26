@@ -13,9 +13,14 @@ const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
 const inp = @import("../input.zig");
 const fnd = @import("../../find.zig");
+const md = @import("../../markdown.zig");
+const Markdown = @import("Markdown.zig");
 
 // how many lines of a file's content one window shows before a "next" link.
 const file_page = 5000;
+
+// a longer markdown file shows as numbered source rather than rendered.
+const max_markdown_lines = 2000;
 
 // budget for the total bytes of file content preloaded (windowed) per page,
 // so selecting a preloaded file shows its contents without a reload.
@@ -594,8 +599,7 @@ pub const View = struct {
         // the content scroll's border is single normally and double when the
         // content is focused (the content box itself is borderless).
         const has_content = self.detailInner().children.count() > 0;
-        const content_focused = if (root_focus.grandchild_id) |g| self.detailInner().children.contains(g) else false;
-        self.detailScrollFrame().options.border_style = if (!has_content) null else if (content_focused) .double else .single;
+        self.detailScrollFrame().options.border_style = if (!has_content) null else if (self.focusOnContent(root_focus)) .double else .single;
 
         // cap the list at list_max_width only while the detail pane fits beside
         // it. the box drops the detail pane when the width can't hold both
@@ -654,6 +658,7 @@ pub const View = struct {
 
         // only files have contents to show; directories and the ".." row leave
         // the pane empty.
+        var markdown = false;
         if (self.selectedEntry()) |entry| {
             if (!entry.is_dir) {
                 // the window links sit above the scroll, so they stay put
@@ -668,6 +673,14 @@ pub const View = struct {
                     try self.addContentBox(allocator, inner, "(press enter to load this file)", link);
                 } else if (entry.is_binary) {
                     try self.addContentBox(allocator, inner, "(binary file)", "");
+                } else if (isMarkdown(entry.name) and entry.window_start == 0 and !entry.has_more and entry.lines.len <= max_markdown_lines) {
+                    const page_arena = self.session.page_arena;
+                    const doc = try md.parse(page_arena.allocator(), entry.lines);
+                    const path = try childDir(page_arena.allocator(), self.data.dir, entry.name);
+                    var view = try Markdown.View.init(allocator, doc, self.data, path, page_arena);
+                    errdefer view.deinit(allocator);
+                    try inner.children.put(allocator, view.getFocus().id, .{ .widget = .{ .markdown = view }, .rect = null, .min_size = null });
+                    markdown = true;
                 } else {
                     const text = try numberedContent(self.session.page_arena.allocator(), entry.lines, entry.window_start);
                     try self.addContentBox(allocator, inner, text, "");
@@ -682,10 +695,13 @@ pub const View = struct {
         self.detailOuter().children.values()[detail_nav_index].min_size =
             if (nav_box.children.count() > 0) .{ .width = null, .height = row_height } else null;
 
+        // rendered markdown wraps to the pane's width, so it only scrolls down
+        const sc = self.detailScroll();
+        sc.options.direction = if (markdown) .vert else .both;
+
         // reset the scroll to the top for the newly-shown file: directly on the
         // terminal (the wasm offset), and via a version bump on the web (so the
         // renderer's scroll id changes and JS drops the preserved position).
-        const sc = self.detailScroll();
         sc.x = 0;
         sc.y = 0;
         sc.getFocus().version +%= 1;
@@ -724,7 +740,7 @@ pub const View = struct {
         }
         if (direction == .up and self.contentAtTop() and self.focusHeader(root_focus)) return;
         if (self.detailActive()) {
-            try self.detailInput(key, root_focus);
+            try self.detailInput(allocator, key, root_focus);
         } else {
             try self.listInput(key, root_focus);
         }
@@ -756,10 +772,21 @@ pub const View = struct {
     // whether focus is on the content box (vs. a "previous"/"next" nav link).
     fn focusOnContent(self: *View, root_focus: *Focus) bool {
         const g = root_focus.grandchild_id orelse return false;
+        if (self.markdownView()) |view| return view.owns(g);
         return self.detailInner().children.contains(g);
     }
 
-    fn detailInput(self: *View, key: Key, root_focus: *Focus) !void {
+    // the rendered markdown in the detail pane, if that's what it shows
+    fn markdownView(self: *View) ?*Markdown.View {
+        const inner = self.detailInner();
+        if (inner.children.count() == 0) return null;
+        return switch (inner.children.values()[0].widget) {
+            .markdown => |*view| view,
+            else => null,
+        };
+    }
+
+    fn detailInput(self: *View, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
         const sc = self.detailScroll();
         const on_content = self.focusOnContent(root_focus);
         // the "next" link sits above the content scroll. on the link, left returns
@@ -823,6 +850,10 @@ pub const View = struct {
                 },
                 else => {},
             },
+            // step between the rendered markdown's links; the web leaves tab to the browser
+            .tab, .back_tab => if (on_content and self.session.is_terminal) if (self.markdownView()) |view| {
+                try view.stepLink(allocator, root_focus, sc, key == .tab);
+            },
             else => {},
         }
     }
@@ -836,6 +867,7 @@ pub const View = struct {
     }
 
     fn focusContent(self: *View, root_focus: *Focus) void {
+        if (self.markdownView()) |view| return root_focus.setFocus(view.body.id);
         const inner = self.detailInner();
         const id = inner.getFocus().child_id orelse (if (inner.children.count() > 0) inner.children.keys()[0] else return);
         root_focus.setFocus(id);
@@ -938,6 +970,11 @@ fn readmeIndex(entries: []const Entry) ?usize {
         if (!entry.is_dir and isReadme(entry.name)) return i;
     }
     return null;
+}
+
+fn isMarkdown(name: []const u8) bool {
+    const extension = std.fs.path.extension(name);
+    return std.ascii.eqlIgnoreCase(extension, ".md") or std.ascii.eqlIgnoreCase(extension, ".markdown");
 }
 
 fn isReadme(name: []const u8) bool {

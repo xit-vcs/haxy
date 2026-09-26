@@ -506,6 +506,14 @@ fn glyphFor(c: u8) ?Glyph {
     };
 }
 
+// whether every char of `text` has a glyph
+pub fn covers(text: []const u8) bool {
+    for (text) |c| {
+        if (glyphFor(c) == null) return false;
+    }
+    return true;
+}
+
 // map a 2x3 sub-pixel pattern to its corresponding sextant codepoint
 fn sextantCodepoint(pattern: u6) u21 {
     return switch (pattern) {
