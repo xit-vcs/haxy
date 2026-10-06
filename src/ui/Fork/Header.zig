@@ -29,7 +29,8 @@ const Self = @This();
 pub fn init(arena: *std.heap.ArenaAllocator, name: []const u8, forker_name: []const u8, id: []const u8, oid: []const u8) !Self {
     return .{
         .name = name,
-        .forker_name = forker_name,
+        // the name can borrow from a temporary route; retain it for the snapshot.
+        .forker_name = try arena.allocator().dupe(u8, forker_name),
         .title = try ui.Title.init(arena, name, .scanlines),
         .id = try arena.allocator().dupe(u8, id),
         .oid = try arena.allocator().dupe(u8, oid),

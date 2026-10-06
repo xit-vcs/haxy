@@ -96,7 +96,7 @@ pub fn init(arena: *std.heap.ArenaAllocator, session: *ui.Session, route: ui.Rou
                 .draft = fork_record.event.stage == .draft,
                 .revision_oid = try aa.dupe(u8, &fork_oid),
                 .fork_exists = true,
-                .forker = identity.owner,
+                .forker = try aa.dupe(u8, identity.owner),
             };
             var patch_data = try Patches.detailResult(aa, target_identity, retained_entry);
 

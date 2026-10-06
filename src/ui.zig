@@ -1910,8 +1910,8 @@ pub fn ResolvedRefOrOid(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.
             else
                 std.Uri.percentDecodeInPlace(try aa.dupe(u8, requested_value));
             // no ref named: fall back to HEAD's branch (or its oid when detached).
+            var head_buf: [rf.MAX_REF_CONTENT_SIZE]u8 = undefined;
             if (requested_ref_or_oid == null) {
-                var head_buf: [rf.MAX_REF_CONTENT_SIZE]u8 = undefined;
                 if (repo.head(io, &head_buf)) |head| switch (head) {
                     .ref => |r| {
                         ref_or_oid = .branch;
