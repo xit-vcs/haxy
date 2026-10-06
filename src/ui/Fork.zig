@@ -226,7 +226,7 @@ pub const View = struct {
                 try stack.children.put(allocator, new_user.getFocus().id, .{ .new_user = new_user });
             }
             if (session.data.host_kind == .server) {
-                var user_view = try ui.UserLogout.initView(allocator, session);
+                var user_view = try ui.UserSettings.initView(allocator, session);
                 errdefer user_view.deinit(allocator);
                 try stack.children.put(allocator, user_view.getFocus().id, user_view);
             }

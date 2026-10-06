@@ -31,7 +31,7 @@ pub const Unauthorized = @import("./ui/Unauthorized.zig");
 pub const NotFound = @import("./ui/NotFound.zig");
 pub const NewRepo = @import("./ui/NewRepo.zig");
 pub const NewUser = @import("./ui/NewUser.zig");
-pub const UserLogout = @import("./ui/UserLogout.zig");
+pub const UserSettings = @import("./ui/UserSettings.zig");
 pub const UserLogin = @import("./ui/UserLogin.zig");
 pub const widget = @import("./ui/widget.zig");
 pub const Widget = widget.Widget;
@@ -2219,6 +2219,7 @@ pub const Session = struct {
             email_taken,
             required_password,
             password_mismatch,
+            wrong_password,
 
             pub fn fromError(err: anyerror) ?UserFailure {
                 return switch (err) {
@@ -2229,6 +2230,7 @@ pub const Session = struct {
                     error.EmailTaken => .email_taken,
                     error.PasswordEmpty => .required_password,
                     error.PasswordMismatch => .password_mismatch,
+                    error.WrongPassword => .wrong_password,
                     else => null,
                 };
             }
@@ -2245,6 +2247,11 @@ pub const Session = struct {
                 name: []const u8,
                 email: []const u8,
             },
+        },
+        user_settings: struct {
+            failure: UserFailure,
+            // passwords are never retained
+            fields: struct { email: []const u8 },
         },
         repo: struct {
             failure: RepoFailure,
@@ -2300,8 +2307,9 @@ pub const Session = struct {
     // serializable data sent down to web client
     pub const Data = struct {
         user_id: ?[]const u8 = null,
-        // the logged-in user's name, for the views that show it
+        // the logged-in user's name and email, for the views that show them
         user_name: ?[]const u8 = null,
+        user_email: ?[]const u8 = null,
         // a failed form retained long enough to render it for correction
         form_feedback: ?FormFeedback = null,
         // a transient local event-sync error
@@ -2349,12 +2357,14 @@ pub const Session = struct {
         const moment = self.haxy_moment orelse return;
         const user = (try activeUser(moment, self.arena, user_id)) orelse return self.logOut();
         self.data.user_name = user.event.name;
+        self.data.user_email = user.event.email;
     }
 
     // forget the logged-in user, on a logout or once their account is removed
     pub fn logOut(self: *Self) void {
         self.data.user_id = null;
         self.data.user_name = null;
+        self.data.user_email = null;
     }
 
     pub fn userId(self: *const Self) ?[evt.event_id_size]u8 {

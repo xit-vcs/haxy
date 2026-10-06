@@ -356,7 +356,7 @@ pub const View = struct {
 
         // user tab. local mode has no users, so it has none.
         if (session.data.host_kind == .server) {
-            const label = ui.UserLogout.tabLabel(session);
+            const label = ui.UserSettings.tabLabel(session);
             var text_box = try wgt.TextBox.init(allocator, label, .{ .border = .single, .round_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().mode = .all;

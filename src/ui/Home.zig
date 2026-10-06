@@ -85,7 +85,7 @@ pub const View = struct {
             }
 
             {
-                var user_view = try ui.UserLogout.initView(allocator, session);
+                var user_view = try ui.UserSettings.initView(allocator, session);
                 errdefer user_view.deinit(allocator);
                 try stack.children.put(allocator, user_view.getFocus().id, user_view);
             }

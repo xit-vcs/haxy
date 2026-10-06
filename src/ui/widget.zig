@@ -73,7 +73,7 @@ pub const Widget = union(enum) {
     new_repo: ui.NewRepo.View,
     new_user: ui.NewUser.View,
     user_login: ui.UserLogin.View,
-    user_logout: ui.UserLogout.View,
+    user_settings: ui.UserSettings.View,
     footer: Footer,
 
     pub fn deinit(self: *Widget, allocator: std.mem.Allocator) void {
@@ -115,7 +115,7 @@ pub const Widget = union(enum) {
     // whether moving up should return to the page header
     pub fn atTop(self: *Widget, root_focus: *Focus) bool {
         return switch (self.*) {
-            inline .home_about, .home_users, .user_repos, .flow_box_scroll, .new_repo, .new_user, .user_login, .user_logout, .quit, .repo_files, .repo_commits, .diff_view, .repo_refs, .repo_issues, .repo_patches, .repo_discussions, .repo_events, .repo_undo, .repo_settings => |*view| view.atTop(),
+            inline .home_about, .home_users, .user_repos, .flow_box_scroll, .new_repo, .new_user, .user_login, .user_settings, .quit, .repo_files, .repo_commits, .diff_view, .repo_refs, .repo_issues, .repo_patches, .repo_discussions, .repo_events, .repo_undo, .repo_settings => |*view| view.atTop(),
             inline .repo_patch_detail => |*view| view.atTop(root_focus),
             else => false,
         };
@@ -1470,6 +1470,15 @@ pub const SubmitButton = struct {
         return self.box.children.keys()[1];
     }
 };
+
+// keep `rect`, in a centered widget's space, in view within its scroll
+pub fn scrollToCenteredRect(scroll: *wgt.Scroll(Widget), rect: layout.IRect) void {
+    const center = &scroll.child.center;
+    const center_grid = center.getGrid() orelse return;
+    const child_grid = center.child.getGrid() orelse return;
+    const offset_y: isize = @intCast((center_grid.size.height -| child_grid.size.height) / 2);
+    scroll.scrollToRect(.{ .x = rect.x, .y = rect.y + offset_y, .size = rect.size });
+}
 
 pub const Center = struct {
     focus: *Focus,

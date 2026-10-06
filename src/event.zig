@@ -2123,6 +2123,45 @@ pub fn createUser(
     return id_bytes;
 }
 
+// change a user's email, and their password when the password fields are
+// filled in
+pub fn updateUser(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    users_dir: []const u8,
+    admin_repo: *rp.Repo(.xit, admin_repo_opts),
+    user_id: *const [event_id_size]u8,
+    email: []const u8,
+    current_password: []const u8,
+    new_password: []const u8,
+    new_password_again: []const u8,
+) !void {
+    if (email.len == 0) return error.EmailEmpty;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const moment = try currentMoment(admin_repo_opts, admin_repo);
+    const user = (try User.readById(AdminDB, admin_repo_opts.hash, moment, &arena, user_id)) orelse return error.NotFound;
+    if (user.removed) return error.NotFound;
+    if (!std.mem.eql(u8, email, user.event.email) and try User.readByEmail(AdminDB, admin_repo_opts.hash, moment, &arena, email) != null) return error.EmailTaken;
+
+    var event = user.event;
+    event.email = email;
+    var password_hash_buf: [User.password_hash_max_len]u8 = undefined;
+    if (current_password.len + new_password.len + new_password_again.len > 0) {
+        if (!User.verifyPassword(user.event.password_hash, current_password)) return error.WrongPassword;
+        if (new_password.len == 0) return error.PasswordEmpty;
+        if (!std.mem.eql(u8, new_password, new_password_again)) return error.PasswordMismatch;
+        event.password_hash = try User.hashPassword(new_password, &password_hash_buf, io);
+    }
+
+    try consume(.{ .server = .{ .users_dir = users_dir } }, .admin, .xit, admin_repo_opts, io, allocator, admin_repo, events_ref, &[_]EventWithId{.{
+        .id = std.fmt.bytesToHex(user_id.*, .lower),
+        .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
+        .author = .{ .name = event.name, .email = email },
+        .event = .{ .user = event },
+    }});
+}
+
 // consume a new repo's event into its owner's user repo and mark it active
 fn writeRepoEvent(
     io: std.Io,

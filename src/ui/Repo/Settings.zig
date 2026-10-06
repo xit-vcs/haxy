@@ -177,7 +177,7 @@ pub const View = struct {
                 if (self.formBox().children.values()[next].widget != .text_box) break;
             }
             root_focus.setFocus(keys[next]);
-            if (self.session.is_terminal) self.scrollToChild(next);
+            if (self.session.is_terminal) if (self.formBox().children.values()[next].rect) |rect| ui.widget.scrollToCenteredRect(&self.scroll, rect);
             return;
         }
         switch (key) {
@@ -188,15 +188,6 @@ pub const View = struct {
             else => {},
         }
         try child.widget.input(allocator, key, root_focus);
-    }
-
-    // keep the form child at `index` in view, its rect shifted by the centering
-    fn scrollToChild(self: *View, index: usize) void {
-        const rect = self.formBox().children.values()[index].rect orelse return;
-        const center_grid = self.scroll.child.center.getGrid() orelse return;
-        const form_grid = self.formBox().getGrid() orelse return;
-        const offset_y: isize = @intCast((center_grid.size.height -| form_grid.size.height) / 2);
-        self.scroll.scrollToRect(.{ .x = rect.x, .y = rect.y + offset_y, .size = rect.size });
     }
 
     fn formRadio(form: *wgt.Box(ui.Widget), name: []const u8) !*ui.widget.Radio {

@@ -156,7 +156,7 @@ fn handleRequest(
         switch (host) {
             .server => |server| {
                 // "repo/new" and "user/new" come before "new", which would claim them
-                const PostRoute = enum { login, logout, @"repo/new", @"user/new", repo, new, edit, remove, open, close, resolve, publish, merge, squash, attach, undo, clear };
+                const PostRoute = enum { login, logout, @"repo/new", @"user/new", user, repo, new, edit, remove, open, close, resolve, publish, merge, squash, attach, undo, clear };
                 inline for (@typeInfo(PostRoute).@"enum".field_names) |name| {
                     const suffix = "/" ++ name;
                     if (std.mem.endsWith(u8, path, suffix)) {
@@ -166,6 +166,7 @@ fn handleRequest(
                             .logout => handleLogout(request, base, server.session_store),
                             .@"repo/new" => handleRepoNew(io, request, allocator, path, server.admin_repo_path, server.users_dir, server.session_store),
                             .@"user/new" => handleUserNew(io, request, allocator, path, server.admin_repo_path, server.users_dir, server.session_store),
+                            .user => handleUserSettings(io, request, allocator, path, server.admin_repo_path, server.users_dir, server.session_store),
                             .repo => handleRepoSettings(io, request, allocator, path, base, host),
                             .new => handleNew(io, request, allocator, base, host),
                             .edit => handleEdit(io, request, allocator, base, host),
@@ -769,6 +770,48 @@ fn handleUserNew(
             .{ .name = "location", .value = location },
             .{ .name = "set-cookie", .value = cookie },
         },
+    });
+}
+
+// change the logged-in user's settings, then return to the page that posted
+// the form, which a failure also goes back to.
+fn handleUserSettings(
+    io: std.Io,
+    request: *std.http.Server.Request,
+    allocator: std.mem.Allocator,
+    form_location: []const u8,
+    admin_repo_path: []const u8,
+    users_dir: []const u8,
+    session_store: SessionStore,
+) !void {
+    const user_id = requestUserId(request, session_store) orelse return respondLoginRequired(request);
+
+    const body = try readFormBody(request, allocator);
+    defer allocator.free(body);
+    const email = (try parseFormField(allocator, body, "email")) orelse try allocator.dupe(u8, "");
+    defer allocator.free(email);
+    const current_password = (try parseFormField(allocator, body, "current_password")) orelse try allocator.dupe(u8, "");
+    defer allocator.free(current_password);
+    const new_password = (try parseFormField(allocator, body, "new_password")) orelse try allocator.dupe(u8, "");
+    defer allocator.free(new_password);
+    const new_password_again = (try parseFormField(allocator, body, "new_password_again")) orelse try allocator.dupe(u8, "");
+    defer allocator.free(new_password_again);
+
+    {
+        var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = admin_repo_path });
+        defer admin_repo.deinit(io, allocator);
+        evt.updateUser(io, allocator, users_dir, &admin_repo, &user_id, email, current_password, new_password, new_password_again) catch |err| switch (err) {
+            error.NotFound => return respondLoginRequired(request),
+            else => {
+                const failure = ui.Session.FormFeedback.UserFailure.fromError(err) orelse return err;
+                return respondFormFailure(request, allocator, session_store, form_location, .{ .user_settings = .{ .failure = failure, .fields = .{ .email = email } } });
+            },
+        };
+    }
+
+    try request.respond("", .{
+        .status = .see_other,
+        .extra_headers = &.{.{ .name = "location", .value = form_location }},
     });
 }
 

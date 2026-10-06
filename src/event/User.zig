@@ -159,11 +159,14 @@ pub fn verifyCredentials(
     const user_map = try DB.HashMap(.read_only).init(user_cursor);
     const user_event = try evt.read(Record, DB, hash_kind, arena, user_map);
 
-    bcrypt.strVerify(user_event.event.password_hash, password, .{ .silently_truncate_password = false }) catch {
-        return .wrong_password;
-    };
+    if (!verifyPassword(user_event.event.password_hash, password)) return .wrong_password;
 
     return .{ .success = user_id };
+}
+
+pub fn verifyPassword(password_hash: []const u8, password: []const u8) bool {
+    bcrypt.strVerify(password_hash, password, .{ .silently_truncate_password = false }) catch return false;
+    return true;
 }
 
 // read a user by event id via the event-id->user index, or null if the id

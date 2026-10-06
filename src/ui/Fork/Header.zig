@@ -161,7 +161,7 @@ pub const View = struct {
         }
 
         if (session.data.host_kind == .server) {
-            const label = ui.UserLogout.tabLabel(session);
+            const label = ui.UserSettings.tabLabel(session);
             var user_tab = try wgt.TextBox.init(allocator, label, .{ .border = .single, .round_corners = true, .wrap_kind = .none });
             errdefer user_tab.deinit(allocator);
             user_tab.getFocus().mode = .all;
