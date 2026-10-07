@@ -19,7 +19,7 @@ pub const View = struct {
     center: ui.widget.Center,
 
     const message =
-        \\you must be logged in to view this.
+        \\you can't view this.
         \\
         \\here's an emoticon from the early 2000s instead:
         \\

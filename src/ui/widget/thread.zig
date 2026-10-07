@@ -1595,10 +1595,10 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             }
 
             // the new-thread form, or — on an edit, comment, or resolve url — that form in
-            // its place, prefilled with the selected thread's content. a
-            // logged-out session can't create events, so the unauthorized view
-            // stands in.
-            if (session.data.host_kind == .local or session.data.user_id != null) {
+            // its place, prefilled with the selected thread's content. a viewer
+            // who can't write in this tab gets the unauthorized view instead,
+            // while local mode always writes.
+            if (session.data.host_kind == .local or data.viewer != null) {
                 if (confirmation(data.view)) |confirmation_kind| {
                     const aa = session.page_arena.allocator();
                     const route = switch (confirmation_kind) {
