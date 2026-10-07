@@ -130,7 +130,7 @@ pub const View = struct {
             try outer.children.put(allocator, scroll.getFocus().id, .{ .widget = .{ .scroll = scroll }, .rect = null, .min_size = null });
         }
 
-        outer.getFocus().child_id = outer.children.keys()[scroll_index];
+        outer.getFocus().child_id = outer.children.keys()[header_index];
         return .{ .box = outer, .session = session, .logout_id = logout_id, .control_ids = control_ids };
     }
 
