@@ -70,7 +70,7 @@ pub const View = struct {
         // the forker's name links to their page.
         {
             var text_buf: [evt.User.name_max_len + 1]u8 = undefined;
-            const text = try std.fmt.bufPrint(&text_buf, "{s}/", .{data.forker_name});
+            const text = try std.fmt.bufPrint(&text_buf, "{s}:", .{data.forker_name});
             var forker = try wgt.TextBox.init(allocator, text, .{ .border = .hidden, .wrap_kind = .none });
             errdefer forker.deinit(allocator);
             forker.getFocus().mode = .all;

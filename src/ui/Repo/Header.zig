@@ -94,7 +94,7 @@ pub const View = struct {
         // the user's name (local mode has no user pages to link to)
         if (session.data.host_kind == .server) {
             var text_buf: [evt.User.name_max_len + 1]u8 = undefined;
-            const text = try std.fmt.bufPrint(&text_buf, "{s}/", .{data.owner_name});
+            const text = try std.fmt.bufPrint(&text_buf, "{s}:", .{data.owner_name});
             const link = try aa.print("a:/{s}", .{data.owner_name});
 
             const private_label = if (page.repo.event.read_access == .private) "(private)" else "";
