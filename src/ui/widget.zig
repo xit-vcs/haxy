@@ -122,6 +122,13 @@ pub const Widget = union(enum) {
     }
 };
 
+// whether `mouse` is a left click on the selected row of `list`. the host
+// selects a clicked row before forwarding the press.
+pub fn clickOnSelectedRow(list: *wgt.Box(Widget), root_focus: *Focus, mouse: xitui.input.Mouse) bool {
+    const cid = list.getFocus().child_id orelse return false;
+    return inp.leftClickOn(root_focus, cid, mouse);
+}
+
 pub const back_button_width = 3;
 const back_button_height = 3;
 const back_kind = "back";

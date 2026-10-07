@@ -163,6 +163,14 @@ fn onMouseClick(focus_id: usize) !void {
     }
     if (ui.currentPageLink(root_ptr.getFocus(), focus_id, session.data)) return;
     try setFocus(focus_id);
+    // an in-page link selects within the page, and a list row's view may open
+    // its detail on the press. other clickables only focus: a form control's
+    // border reaches here too, and the press must not fire its form.
+    const root_focus = root_ptr.getFocus();
+    if (ui.inPageLink(root_focus, focus_id, session.data) != null) {
+        const rect = (root_focus.children.get(focus_id) orelse return).rect;
+        try root_ptr.input(allocator, .{ .mouse = .{ .x = @intCast(rect.x), .y = @intCast(rect.y), .action = .{ .press = .left } } }, root_focus);
+    }
 }
 
 fn setFocus(focus_id: usize) !void {

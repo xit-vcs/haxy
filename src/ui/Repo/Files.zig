@@ -757,7 +757,7 @@ pub const View = struct {
         if (self.detailActive()) {
             try self.detailInput(allocator, key, root_focus);
         } else {
-            try self.listInput(key, root_focus);
+            try self.listInput(allocator, key, root_focus);
         }
     }
 
@@ -769,7 +769,7 @@ pub const View = struct {
         try self.session.navigate(route.withFind(term) orelse return);
     }
 
-    fn listInput(self: *View, key: Key, root_focus: *Focus) !void {
+    fn listInput(self: *View, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
         // up/down (and the scroll wheel) move the selection; page up/down jump a
         // fixed amount. right/Enter cross into the detail pane. Enter/clicks on a
         // directory (or "..") row are turned into navigation by the host
@@ -780,6 +780,13 @@ pub const View = struct {
         }
         switch (key) {
             .enter, .arrow_right => try self.focusDetail(root_focus),
+            // when the window is too narrow to lay out the detail pane beside
+            // the list, a click on a row opens it like enter. the row was just
+            // selected, so the detail is swapped to it ahead of the build.
+            .mouse => |mouse| if (self.contentBox().children.values()[detail_index].rect == null and ui.widget.clickOnSelectedRow(self.listBox(), root_focus, mouse)) {
+                try self.refreshDetail(allocator);
+                try self.focusDetail(root_focus);
+            },
             else => {},
         }
     }

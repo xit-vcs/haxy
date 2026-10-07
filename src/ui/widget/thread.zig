@@ -2269,6 +2269,14 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             return idx - lead;
         }
 
+        // swap the detail pane to the selected thread when it changes
+        fn refreshDetail(self: *This, allocator: std.mem.Allocator, index: usize) !void {
+            const selected = self.selectedThreadIndex(index) orelse return;
+            const entry = self.window(index).items[selected];
+            const changed = if (self.detail(index).entry) |current| !std.mem.eql(u8, current.id, entry.id) else true;
+            if (changed) try self.detail(index).setEntry(allocator, entry);
+        }
+
         pub fn build(self: *This, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
             self.clearGrid();
 
@@ -2279,14 +2287,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             }
 
             if (self.selectedSplitIndex()) |i| {
-                // swap the detail pane to the selected thread when it changes.
-                if (self.selectedThreadIndex(i)) |selected| {
-                    const entry = self.window(i).items[selected];
-                    const changed = if (self.detail(i).entry) |current| !std.mem.eql(u8, current.id, entry.id) else true;
-                    if (changed) {
-                        try self.detail(i).setEntry(allocator, entry);
-                    }
-                }
+                try self.refreshDetail(allocator, i);
 
                 // the selected list row shows a border (the focused TextBox
                 // upgrades it to a double border itself); the rest stay borderless.
@@ -2396,7 +2397,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     .header => self.focusHeader(root_focus),
                 }
             } else {
-                self.listInput(i, key, root_focus);
+                try self.listInput(allocator, i, key, root_focus);
             }
         }
 
@@ -2429,7 +2430,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             }
         }
 
-        fn listInput(self: *This, index: usize, key: Key, root_focus: *Focus) void {
+        fn listInput(self: *This, allocator: std.mem.Allocator, index: usize, key: Key, root_focus: *Focus) !void {
             // up/down (and the scroll wheel) move the selection a row; page up/down
             // jump a fixed amount. right/Enter cross into the detail pane. up from
             // the top row crosses into the header tabs.
@@ -2442,6 +2443,13 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             }
             switch (key) {
                 .enter, .arrow_right => _ = self.detail(index).focusFirst(root_focus),
+                // when the window is too narrow to lay out the detail pane beside
+                // the list, a click on a row opens it like enter. the row was just
+                // selected, so the detail is swapped to it ahead of the build.
+                .mouse => |mouse| if (self.resultsBox(index).children.values()[detail_index].rect == null and widget.clickOnSelectedRow(self.listBox(index), root_focus, mouse)) {
+                    try self.refreshDetail(allocator, index);
+                    _ = self.detail(index).focusFirst(root_focus);
+                },
                 else => {},
             }
         }
