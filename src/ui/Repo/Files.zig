@@ -340,8 +340,13 @@ pub const View = struct {
     box: wgt.Box(ui.Widget), // vert: [header_index] = header row, [content_index] = split
     data: *const Self,
     session: *ui.Session,
-    // the list row whose contents the detail pane currently shows.
-    shown_index: ?usize,
+    // what the detail pane was last filled for: the selected list row, and
+    // whether the window was too narrow to show the list beside it
+    shown: Shown = .{ .index = null, .narrow = false },
+    // the detail's way back to a list that isn't shown beside it
+    back_id: ?usize = null,
+
+    const Shown = struct { index: ?usize, narrow: bool };
 
     // the sub-header leads the box where there is one; local mode has none
     const header_index: usize = 0;
@@ -365,7 +370,7 @@ pub const View = struct {
             errdefer center.deinit(allocator);
             outer.getFocus().child_id = center.getFocus().id;
             try outer.children.put(allocator, center.getFocus().id, .{ .widget = .{ .center = center }, .rect = null, .min_size = null });
-            return .{ .box = outer, .data = data, .session = session, .shown_index = null };
+            return .{ .box = outer, .data = data, .session = session };
         }
 
         // the search box and the clone url at the top. local mode has neither.
@@ -492,7 +497,7 @@ pub const View = struct {
         // focus lives in the split, except that search results start in the
         // search box so the term can be refined right away.
         outer.getFocus().child_id = outer.children.keys()[if (data.find != null) header_index else outer.children.count() - 1];
-        return .{ .box = outer, .data = data, .session = session, .shown_index = null };
+        return .{ .box = outer, .data = data, .session = session };
     }
 
     fn addRow(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8, bottom_label: []const u8, link: []const u8) !void {
@@ -599,8 +604,12 @@ pub const View = struct {
         self.clearGrid();
         if (self.data.no_commits) return self.box.build(allocator, constraint, root_focus);
 
+        // whether the detail pane fits beside the list, which decides the list
+        // cap below and whether the detail carries a way back to the list
+        const both_panes_fit = if (constraint.max_size.width) |w| w >= list_max_width + detail_min_width else true;
+
         // swap the detail pane to the selected entry when the selection changes.
-        try self.refreshDetail(allocator);
+        try self.refreshDetail(allocator, !both_panes_fit);
 
         // the selected list row shows a border (the focused TextBox upgrades it
         // to a double border itself); the rest stay borderless.
@@ -621,7 +630,6 @@ pub const View = struct {
         // it. the box drops the detail pane when the width can't hold both
         // minimums, so when it's that narrow we lift the cap and let the list
         // fill the whole width.
-        const both_panes_fit = if (constraint.max_size.width) |w| w >= list_max_width + detail_min_width else true;
         self.contentBox().children.values()[list_index].max_size = if (both_panes_fit) .{ .width = list_max_width, .height = null } else null;
 
         // stretch the detail pane and its bordered scroll frame across the rest
@@ -654,14 +662,14 @@ pub const View = struct {
         if (constraint.max_size.height != null) self.listScroll().clampToContent();
     }
 
-    fn refreshDetail(self: *View, allocator: std.mem.Allocator) !void {
-        const cur = self.selectedRowIndex();
-        if (std.meta.eql(cur, self.shown_index)) return;
-        try self.populateDetail(allocator);
-        self.shown_index = cur;
+    fn refreshDetail(self: *View, allocator: std.mem.Allocator, narrow: bool) !void {
+        const next: Shown = .{ .index = self.selectedRowIndex(), .narrow = narrow };
+        if (std.meta.eql(next, self.shown)) return;
+        try self.populateDetail(allocator, narrow);
+        self.shown = next;
     }
 
-    fn populateDetail(self: *View, allocator: std.mem.Allocator) !void {
+    fn populateDetail(self: *View, allocator: std.mem.Allocator, narrow: bool) !void {
         const nav_box = self.navBox();
         const inner = self.detailInner();
 
@@ -671,6 +679,7 @@ pub const View = struct {
         for (inner.children.values()) |*child| child.widget.deinit(allocator);
         inner.children.clearAndFree(allocator);
         inner.getFocus().child_id = null;
+        self.back_id = null;
 
         // only files have contents to show; directories and the ".." row leave
         // the pane empty.
@@ -678,6 +687,14 @@ pub const View = struct {
         if (self.selectedEntry()) |entry| {
             if (!entry.is_dir) {
                 const path = try childDir(self.session.page_arena.allocator(), self.data.dir, entry.name);
+                // with the list hidden beside it, the detail leads with the way
+                // back. an in-page link to this very page, so both hosts hand
+                // its press and enter to detailInput instead of navigating.
+                if (narrow) {
+                    const page_arena = self.session.page_arena;
+                    const link = try page_arena.allocator().print("ai:{s}", .{try self.session.data.current_page.toUrl(page_arena)});
+                    self.back_id = try addNavButton(allocator, nav_box, "← back to file list", link);
+                }
                 // the window links sit above the scroll, so they stay put
                 // while the content scrolls.
                 if (entry.window_start > 0) try self.addNavLink(allocator, nav_box, "scroll to top", entry, 0);
@@ -701,9 +718,11 @@ pub const View = struct {
                 }
             }
         }
-        // point each box at its first child so focus can descend into it.
+        // point each box at its first child so focus can descend into it, and
+        // the pane at its nav row when it has one, else at the content
         if (nav_box.children.count() > 0) nav_box.getFocus().child_id = nav_box.children.keys()[0];
         if (inner.children.count() > 0) inner.getFocus().child_id = inner.children.keys()[0];
+        self.detailOuter().getFocus().child_id = if (nav_box.children.count() > 0) nav_box.getFocus().id else self.detailScrollFrame().getFocus().id;
 
         // reserve the nav row's height (the shrink scroll frame yields it).
         self.detailOuter().children.values()[detail_nav_index].min_size =
@@ -729,11 +748,17 @@ pub const View = struct {
         const path = try childDir(page_arena.allocator(), self.data.dir, entry.name);
         const route = self.data.filesRoute(path, target_start) orelse return error.RouteTooLong;
         const link = try page_arena.allocator().print("a:{s}", .{try route.toUrl(page_arena)});
+        _ = try addNavButton(allocator, box, label, link);
+    }
+
+    // a bordered button in the nav row carrying `link`, returning its focus id
+    fn addNavButton(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8, link: []const u8) !usize {
         var tb = try wgt.TextBox.init(allocator, label, .{ .border = .single, .round_corners = true, .wrap_kind = .none });
         errdefer tb.deinit(allocator);
         tb.getFocus().mode = .all;
         tb.getFocus().kind = .{ .custom = link };
         try box.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
+        return tb.getFocus().id;
     }
 
     pub fn input(self: *View, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
@@ -784,7 +809,7 @@ pub const View = struct {
             // the list, a click on a row opens it like enter. the row was just
             // selected, so the detail is swapped to it ahead of the build.
             .mouse => |mouse| if (self.contentBox().children.values()[detail_index].rect == null and ui.widget.clickOnSelectedRow(self.listBox(), root_focus, mouse)) {
-                try self.refreshDetail(allocator);
+                try self.refreshDetail(allocator, true);
                 try self.focusDetail(root_focus);
             },
             else => {},
@@ -809,13 +834,37 @@ pub const View = struct {
     }
 
     fn detailInput(self: *View, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
+        // the way back to the list, by enter or a click
+        if (self.back_id) |id| {
+            if ((key == .enter and root_focus.grandchild_id == id) or (key == .mouse and inp.leftClickOn(root_focus, id, key.mouse))) return self.focusList(root_focus);
+        }
         const sc = self.detailScroll();
         const on_content = self.focusOnContent(root_focus);
         // the "next" link sits above the content scroll. on the link, left returns
         // to the file list and down drops into the content. in the content, the
-        // terminal scrolls by offset and reaching the top then pressing up crosses
-        // back up to the link; on the web vertical scrolling is the browser's job
-        // so up just crosses to the link.
+        // terminal scrolls by offset (the wheel five rows at a time) and reaching
+        // the top then pressing up crosses back up to the link; on the web
+        // vertical scrolling is the browser's job so up just crosses to the link.
+        const step: isize = if (key == .mouse) 5 else 1;
+        switch (inp.vertDirection(key)) {
+            .up => {
+                if (!on_content) return;
+                if (self.session.is_terminal and sc.y > 0) {
+                    sc.y -= step;
+                    self.detailScroll().clampToContent();
+                } else self.focusNav(root_focus);
+                return;
+            },
+            .down => {
+                if (!on_content) return self.focusContent(root_focus);
+                if (self.session.is_terminal) {
+                    sc.y += step;
+                    self.detailScroll().clampToContent();
+                }
+                return;
+            },
+            .none => {},
+        }
         switch (key) {
             .arrow_left => {
                 if (on_content) {
@@ -833,22 +882,6 @@ pub const View = struct {
                     self.detailScroll().clampToContent();
                 } else _ = self.moveNav(root_focus, 1);
             },
-            .arrow_up => {
-                if (on_content) {
-                    if (self.session.is_terminal and sc.y > 0) {
-                        sc.y -= 1;
-                        self.detailScroll().clampToContent();
-                    } else self.focusNav(root_focus); // cross up to the links
-                }
-            },
-            .arrow_down => {
-                if (on_content) {
-                    if (self.session.is_terminal) {
-                        sc.y += 1;
-                        self.detailScroll().clampToContent();
-                    }
-                } else self.focusContent(root_focus); // links -> content
-            },
             .page_up => if (on_content and self.session.is_terminal) {
                 sc.y -= 10;
                 self.detailScroll().clampToContent();
@@ -864,13 +897,6 @@ pub const View = struct {
             .end => if (on_content and self.session.is_terminal) {
                 sc.y = std.math.maxInt(isize);
                 self.detailScroll().clampToContent();
-            },
-            .mouse => |mouse| switch (mouse.action) {
-                .scroll => |dir| if (on_content and self.session.is_terminal) {
-                    sc.y += if (dir == .up) -5 else 5;
-                    self.detailScroll().clampToContent();
-                },
-                else => {},
             },
             // step between the rendered markdown's links; the web leaves tab to the browser
             .tab, .back_tab => if (on_content and self.session.is_terminal) if (self.markdownView()) |view| {
