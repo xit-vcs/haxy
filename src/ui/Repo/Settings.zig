@@ -104,9 +104,9 @@ pub const View = struct {
         }
 
         const roles = [_]struct { name: []const u8, label: []const u8, role: ?evt.Repo.Role }{
-            .{ .name = "discuss_role", .label = " who can create discussions ", .role = if (saved_fields) |saved| saved.discuss_role else data.discuss_role },
-            .{ .name = "issue_role", .label = " who can create issues ", .role = if (saved_fields) |saved| saved.issue_role else data.issue_role },
-            .{ .name = "patch_role", .label = " who can create patches ", .role = if (saved_fields) |saved| saved.patch_role else data.patch_role },
+            .{ .name = "discuss_role", .label = " new discussions can be made by ", .role = if (saved_fields) |saved| saved.discuss_role else data.discuss_role },
+            .{ .name = "issue_role", .label = " new issues can be made by ", .role = if (saved_fields) |saved| saved.issue_role else data.issue_role },
+            .{ .name = "patch_role", .label = " new patches can be made by ", .role = if (saved_fields) |saved| saved.patch_role else data.patch_role },
         };
         for (roles) |role| {
             var role_radio = try ui.widget.Radio.init(allocator, session, role.name, &role_labels, roleLabel(role.role), role.label);
