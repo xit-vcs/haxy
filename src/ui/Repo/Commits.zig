@@ -638,7 +638,7 @@ pub const View = struct {
             if (commit.merge) if (self.data.handle.location.commitsMergeRoute(commit.oid)) |route| {
                 try addLink(allocator, inner, "view commits from this merge", try pa.allocator().print("a:{s}", .{try route.toUrl(pa)}));
             };
-            if (commit.author != .unknown or commit.committer != .unknown) {
+            {
                 var row = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .horiz });
                 errdefer row.deinit(allocator);
                 if (commit.author != .unknown) {
@@ -652,14 +652,12 @@ pub const View = struct {
                     tb.options.top_label.text = " committer ";
                     try row.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
                 }
-                row.getFocus().child_id = row.children.keys()[0];
-                try inner.children.put(allocator, row.getFocus().id, .{ .widget = .{ .box = row }, .rect = null, .min_size = null });
-            }
-            {
-                var tb = try wgt.TextBox.init(allocator, commit.timestamp, .{ .border = .single, .round_corners = true, .wrap_kind = .none, .top_label = .{ .text = " timestamp " } });
+                var tb = try wgt.TextBox.init(allocator, commit.timestamp, .{ .border = .single, .round_corners = true, .wrap_kind = .none });
                 errdefer tb.deinit(allocator);
                 tb.getFocus().mode = .all;
-                try inner.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
+                try row.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
+                row.getFocus().child_id = row.children.keys()[0];
+                try inner.children.put(allocator, row.getFocus().id, .{ .widget = .{ .box = row }, .rect = null, .min_size = null });
             }
             if (commit.stats) |stats| {
                 var text: std.Io.Writer.Allocating = .init(allocator);
