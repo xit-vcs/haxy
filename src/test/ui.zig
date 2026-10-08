@@ -201,12 +201,12 @@ test "commits list next row is a cross-page link" {
         .ref_or_oid_value = oid0,
         .base_oid = base_oid,
         .commits = &.{
-            .{ .oid = oid0, .parent_oid = base_oid, .date = "2024-01-01", .message = "first", .timestamp = "Jan 1, 2024, 00:00:00 UTC" },
+            .{ .oid = oid0, .parent_oid = base_oid, .message = "first", .timestamp = 1_704_067_200 },
         },
         .next_start = next_oid,
     };
 
-    var session = ui.Session{ .arena = &arena, .page_arena = &arena, .is_terminal = true };
+    var session = ui.Session{ .arena = &arena, .page_arena = &arena, .io = std.testing.io, .is_terminal = true };
     session.data.current_page = ui.RoutablePage.repoCommitsRoute(identity, .object, oid0, base_oid).?;
 
     var view = try Commits.View.init(allocator, &data, &session);

@@ -32,7 +32,7 @@ pub const Item = struct {
     index: u64,
     action: []const u8,
     description: []const u8,
-    timestamp: []const u8,
+    timestamp: i64,
     link: []const u8,
     form: []const u8,
     buttons: []const DetailButton = &.{},
@@ -95,7 +95,7 @@ pub fn init(comptime opts: rp.RepoOpts(.xit), arena: *std.heap.ArenaAllocator, r
             .action = shown.action,
             .description = shown.description,
             .buttons = shown.buttons,
-            .timestamp = if (record) |value| try formatTimestamp(aa, value.timestamp) else "timestamp unavailable",
+            .timestamp = if (record) |value| value.timestamp else -1,
             .link = try aa.print("ai:{s}", .{url}),
             .form = try aa.print("form:{s}/undo", .{url}),
             .undone = row_undone,
@@ -308,16 +308,6 @@ fn momentIndex(comptime opts: rp.RepoOpts(.xit), haxy_moment: evt.EventDB(opts.h
     return try cursor.readUint();
 }
 
-pub fn formatTimestamp(aa: std.mem.Allocator, timestamp: i64) ![]const u8 {
-    if (timestamp < 0) return aa.dupe(u8, "timestamp unavailable");
-    const seconds = std.time.epoch.EpochSeconds{ .secs = @intCast(timestamp) };
-    const year = seconds.getEpochDay().calculateYearDay();
-    const month = year.calculateMonthDay();
-    const day = seconds.getDaySeconds();
-    const months = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
-    return aa.print("{s} {d}, {d}, {d:0>2}:{d:0>2}:{d:0>2} UTC", .{ months[month.month.numeric() - 1], month.day_index + 1, year.year, day.getHoursIntoDay(), day.getMinutesIntoHour(), day.getSecondsIntoMinute() });
-}
-
 pub fn execute(io: std.Io, allocator: std.mem.Allocator, source: ui.RepoSource, index: u64) !void {
     if (source.repo_kind != .xit) return error.NotFound;
     var any_repo = try rp.AnyRepo(.xit, .{}).open(io, allocator, source.localInitOpts());
@@ -392,7 +382,7 @@ pub const View = struct {
     const detail_min_width = 40;
     const header_index = 0;
     const content_index = 1;
-    // the undo button and the timestamp; everything below them is rebuilt
+    // the undo button and timestamp stay; everything below them is rebuilt
     const fixed_rows = 2;
 
     pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !View {
@@ -447,7 +437,7 @@ pub const View = struct {
                 errdefer details.deinit(allocator);
                 if (data.items.len > 0) {
                     try addText(allocator, &details, "", null, .single);
-                    try addLabeled(allocator, &details, " timestamp ", "", null);
+                    try addText(allocator, &details, "", null, .single);
                     details.getFocus().child_id = details.children.keys()[0];
                 }
                 break :blk try wgt.Scroll(ui.Widget).init(allocator, .{ .box = details }, .{ .direction = .vert, .web_native = !session.is_terminal, .fill = true });
@@ -491,7 +481,7 @@ pub const View = struct {
         try box.children.put(allocator, row.getFocus().id, .{ .widget = .{ .text_box = row }, .rect = null, .min_size = null });
     }
 
-    // a labeled row below the timestamp, added as the selected action needs it
+    // a labeled box, added as the selected action needs it
     fn addLabeled(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8, text: []const u8, link: ?[]const u8) !void {
         try addText(allocator, box, text, link, .single);
         box.children.values()[box.children.count() - 1].widget.text_box.options.top_label.text = label;
@@ -557,7 +547,9 @@ pub const View = struct {
             try button.setContent(allocator, if (item.index == 0) "initial state cannot be undone" else if (item.index == self.data.count - 1) "undo this" else "undo this and all above it");
             button.getFocus().kind = if (enabled) .{ .custom = "submit" } else .text_box;
         }
-        try details.children.values()[1].widget.text_box.setContent(allocator, item.timestamp);
+        const timestamp = try ui.timestamp.format(self.session.page_arena.allocator(), item.timestamp, try self.session.nowSeconds());
+        try details.children.values()[1].widget.text_box.setContent(allocator, timestamp.relative);
+        details.children.values()[1].widget.text_box.options.bottom_label.text = timestamp.exact;
 
         // some actions put buttons where the description would go
         if (item.buttons.len == 0) {
@@ -622,7 +614,11 @@ pub const View = struct {
                     return;
                 }
             }
-            if (key == .arrow_left) root_focus.setFocus(self.listScroll().getFocus().id) else if (inp.rowDelta(key, @intCast(details.children.count()))) |delta| ui.widget.moveRowFocus(details, self.detailScroll(), root_focus, delta);
+            if (inp.rowDelta(key, @intCast(details.children.count()))) |delta| {
+                ui.widget.moveRowFocus(details, self.detailScroll(), root_focus, delta);
+            } else if (key == .arrow_left) {
+                root_focus.setFocus(self.listScroll().getFocus().id);
+            }
         } else if (inp.rowDelta(key, @intCast(self.listScroll().child.box.children.count()))) |delta| {
             ui.widget.moveRowFocus(&self.listScroll().child.box, self.listScroll(), root_focus, delta);
         } else switch (key) {

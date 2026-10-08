@@ -2187,6 +2187,7 @@ fn renderIndexHtml(
         },
     };
     session.io = io;
+    session.data.now = std.math.cast(i64, std.Io.Timestamp.now(io, .real).toSeconds()) orelse return error.TimestampOutOfRange;
 
     var page = try ui.Page.init(session.page_arena, &session, session.data.current_page);
     var root = try ui.initRoot(allocator, &page, &session);

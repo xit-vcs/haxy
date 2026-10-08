@@ -3,7 +3,6 @@ const evt = @import("../../event.zig");
 const ui = @import("../../ui.zig");
 const xit = @import("xit");
 const rp = xit.repo;
-const Undo = @import("Undo.zig");
 const obj = xit.object;
 const mrg = xit.merge;
 const srch_cmmt = @import("../../search_commit.zig");
@@ -27,15 +26,14 @@ pub const Commit = struct {
     oid: []const u8,
     // what its diff is against: the first parent, all zeros for a root commit
     parent_oid: []const u8,
-    date: []const u8, // "YYYY-MM-DD"
     message: []const u8, // trimmed, may be multi-line
     // whether `message` is a shortened preview.
     message_truncated: bool = false,
     author: ui.Author = .unknown,
     // .unknown when the committer is the author.
     committer: ui.Author = .unknown,
-    // the committer timestamp, human-readable.
-    timestamp: []const u8,
+    // the committer timestamp, in unix seconds.
+    timestamp: i64,
     // whether it has a second parent.
     merge: bool = false,
     stats: ?xit.patch.CommitStats = null,
@@ -235,7 +233,6 @@ fn commitEntry(
     return .{
         .oid = try aa.dupe(u8, &commit_object.oid),
         .parent_oid = if (md.firstParent()) |parent| try aa.dupe(u8, parent) else &@as([xit.hash.hexLen(repo_opts.hash)]u8, @splat('0')),
-        .date = try formatDate(aa, md.timestamp),
         .message = text,
         .message_truncated = truncated,
         .author = try ui.Author.init(admin_moment, arena, md.author orelse ""),
@@ -243,7 +240,7 @@ fn commitEntry(
             (if (std.mem.eql(u8, identityOf(committer), identityOf(md.author orelse ""))) .unknown else try ui.Author.init(admin_moment, arena, committer))
         else
             .unknown,
-        .timestamp = try Undo.formatTimestamp(aa, std.math.cast(i64, md.timestamp) orelse -1),
+        .timestamp = std.math.cast(i64, md.timestamp) orelse -1,
         .merge = if (md.parent_oids) |parent_oids| parent_oids.len > 1 else false,
         .stats = if (repo_kind == .xit) try repo.commitStats(io, gpa, .{ .oid = &commit_object.oid }) else null,
     };
@@ -294,18 +291,6 @@ pub fn emptyResult(aa: std.mem.Allocator, handle: ui.RepoHandle, ref_or_oid: ui.
         .commits = &.{},
         .next_start = null,
     };
-}
-
-// "YYYY-MM-DD" for a unix timestamp.
-fn formatDate(arena: std.mem.Allocator, timestamp: u64) ![]const u8 {
-    const epoch_secs = std.time.epoch.EpochSeconds{ .secs = timestamp };
-    const year_day = epoch_secs.getEpochDay().calculateYearDay();
-    const month_day = year_day.calculateMonthDay();
-    return arena.print("{d:0>4}-{d:0>2}-{d:0>2}", .{
-        year_day.year,
-        month_day.month.numeric(),
-        month_day.day_index + 1,
-    });
 }
 
 // the commit message, trimmed and read into `aa`, plus whether its preview was
@@ -652,7 +637,8 @@ pub const View = struct {
                     tb.options.top_label.text = " committer ";
                     try row.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
                 }
-                var tb = try wgt.TextBox.init(allocator, commit.timestamp, .{ .border = .single, .round_corners = true, .wrap_kind = .none });
+                const timestamp = try ui.timestamp.format(pa.allocator(), commit.timestamp, try self.session.nowSeconds());
+                var tb = try wgt.TextBox.init(allocator, timestamp.relative, .{ .border = .single, .round_corners = true, .wrap_kind = .none, .bottom_label = .{ .text = timestamp.exact } });
                 errdefer tb.deinit(allocator);
                 tb.getFocus().mode = .all;
                 try row.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });

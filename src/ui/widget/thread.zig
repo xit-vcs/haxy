@@ -926,8 +926,8 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                     var author = try ui.authorBox(allocator, self.session.page_arena, entry.author);
                     errdefer author.deinit(allocator);
                     try row.children.put(allocator, author.getFocus().id, .{ .widget = .{ .text_box = author }, .rect = null, .min_size = null });
-                    const timestamp = try ui.Repo.Undo.formatTimestamp(self.session.page_arena.allocator(), std.math.cast(i64, entry.record.created_timestamp) orelse -1);
-                    var time = try wgt.TextBox.init(allocator, timestamp, .{ .border = .single, .round_corners = true, .wrap_kind = .none });
+                    const timestamp = try ui.timestamp.format(self.session.page_arena.allocator(), std.math.cast(i64, entry.record.created_timestamp) orelse -1, try self.session.nowSeconds());
+                    var time = try wgt.TextBox.init(allocator, timestamp.relative, .{ .border = .single, .round_corners = true, .wrap_kind = .none, .bottom_label = .{ .text = timestamp.exact } });
                     errdefer time.deinit(allocator);
                     time.getFocus().mode = .all;
                     try row.children.put(allocator, time.getFocus().id, .{ .widget = .{ .text_box = time }, .rect = null, .min_size = null });

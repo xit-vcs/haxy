@@ -198,11 +198,12 @@ pub const Item = struct {
                 try bar.children.put(allocator, parent.getFocus().id, .{ .widget = .{ .text_box = parent }, .rect = null, .min_size = .{ .width = @max(parent_text.len, " replying to ".len) + 2, .height = null } });
             }
 
-            const timestamp = try ui.Repo.Undo.formatTimestamp(session.page_arena.allocator(), std.math.cast(i64, entry.comment.created_timestamp) orelse -1);
-            var permalink = try linkBox(allocator, session, timestamp, commentsRoute(thread_kind, identity, &entry.comment.event.thread_id, &entry.id, 0) orelse return error.RouteTooLong);
+            const timestamp = try ui.timestamp.format(session.page_arena.allocator(), std.math.cast(i64, entry.comment.created_timestamp) orelse -1, try session.nowSeconds());
+            var permalink = try linkBox(allocator, session, timestamp.relative, commentsRoute(thread_kind, identity, &entry.comment.event.thread_id, &entry.id, 0) orelse return error.RouteTooLong);
             errdefer permalink.deinit(allocator);
             permalink.options.top_label.text = " permalink ";
-            try bar.children.put(allocator, permalink.getFocus().id, .{ .widget = .{ .text_box = permalink }, .rect = null, .min_size = .{ .width = @max(timestamp.len, " permalink ".len) + 2, .height = null } });
+            permalink.options.bottom_label.text = timestamp.exact;
+            try bar.children.put(allocator, permalink.getFocus().id, .{ .widget = .{ .text_box = permalink }, .rect = null, .min_size = .{ .width = @max(timestamp.relative.len, timestamp.exact.len) + 2, .height = null } });
 
             if (entry.can_modify and !entry.comment.removed) {
                 var remove = try linkBox(allocator, session, "✕", removeRoute(thread_kind, identity, &entry.comment.event.thread_id, &entry.id) orelse return error.RouteTooLong);

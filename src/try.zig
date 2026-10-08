@@ -32,6 +32,7 @@ pub fn main(init: std.process.Init) !void {
     });
     defer threaded.deinit();
     const io = threaded.io();
+    const now: u64 = @intCast(std.Io.Timestamp.now(io, .real).toSeconds());
 
     const temp_dir_name = "temp-try";
 
@@ -219,8 +220,8 @@ pub fn main(init: std.process.Init) !void {
         for (user_data, 0..) |u, i| {
             events_to_consume[i] = .{
                 .id = std.fmt.bytesToHex(user_ids[i], .lower),
-                // stepped timestamps give the seeds a stable creation order
-                .timestamp = @intCast(i + 1),
+                // spread the accounts over the months before the repo activity
+                .timestamp = seedTimestamp(now, i, user_data.len, 120 * std.time.s_per_day, 100 * std.time.s_per_day),
                 .author = .{ .name = "admin", .email = "admin@example.test" },
                 .event = .{
                     .user = .{
@@ -244,7 +245,7 @@ pub fn main(init: std.process.Init) !void {
             const author: evt.CommitAuthor = .{ .name = user_data[r.user_index].name, .email = user_data[r.user_index].email };
             repo_events[i] = .{
                 .id = std.fmt.bytesToHex(repo_event_ids[i], .lower),
-                .timestamp = @intCast(user_data.len + i + 1),
+                .timestamp = seedTimestamp(now, i, repo_data.len, 90 * std.time.s_per_day, 70 * std.time.s_per_day),
                 .author = author,
                 .event = .{
                     .repo = .{
@@ -260,7 +261,7 @@ pub fn main(init: std.process.Init) !void {
             };
             grant_events[i] = .{
                 .id = std.fmt.bytesToHex(evt.Grant.idOf(&repo_event_ids[i], &admin_user_id), .lower),
-                .timestamp = @intCast(user_data.len + i + 1),
+                .timestamp = seedTimestamp(now, i, repo_data.len, 90 * std.time.s_per_day, 70 * std.time.s_per_day),
                 .author = author,
                 .event = .{ .grant = .{ .target_id = &repo_event_ids[i], .user_id = &admin_user_id, .role = .owner } },
             };
@@ -381,7 +382,7 @@ pub fn main(init: std.process.Init) !void {
             }
 
             try template_repo.add(io, allocator, &.{ "README.md", "docs/dev/contribute.md" });
-            _ = try template_repo.commit(io, allocator, .{ .message = "let there be light" });
+            _ = try template_repo.commit(io, allocator, .{ .message = "let there be light", .timestamp = now - 61 * std.time.s_per_day });
 
             // tag every commit in creation order, three versions at a time
             var tag_num: usize = 1;
@@ -391,7 +392,7 @@ pub fn main(init: std.process.Init) !void {
             // paginate through. each rewrites a few files with scattered line
             // edits, so every commit is a multi-file diff with several separate
             // hunks to look at. stepped timestamps vary the date column.
-            const base_ts: u64 = 1_700_000_000; // 2023-11-14
+            const base_ts = now - 60 * std.time.s_per_day;
             const edit_files = [_][]const u8{ "src/alpha.txt", "src/beta.txt", "src/gamma.txt" };
             // commit subjects, cycled then padded to a varying length.
             const subjects = [_][]const u8{
@@ -642,8 +643,8 @@ pub fn main(init: std.process.Init) !void {
                     issue.description;
                 issue_events[i] = .{
                     .id = std.fmt.bytesToHex(evt.EventWithId.randomId(prng.random()), .lower),
-                    // stepped timestamps so the issues list in a stable order
-                    .timestamp = @intCast(i + 1),
+                    // threads span several weeks, with time for replies on the newest one
+                    .timestamp = seedTimestamp(now, i, issue_data.len, 25 * std.time.s_per_day, 3 * std.time.s_per_hour),
                     .author = .{ .name = user_data[i % user_data.len].name, .email = user_data[i % user_data.len].email },
                     .event = .{
                         .issue = .{
@@ -675,7 +676,7 @@ pub fn main(init: std.process.Init) !void {
 
                 const ours = [_]evt.EventWithId{ .{
                     .id = issue_events[issue_data.len - 4].id,
-                    .timestamp = 100,
+                    .timestamp = now - 120 * std.time.s_per_min,
                     .author = .{ .name = user_data[1].name, .email = user_data[1].email },
                     .event = .{ .issue = .{
                         .title = "Crash when resizing the window during the splash animation",
@@ -684,7 +685,7 @@ pub fn main(init: std.process.Init) !void {
                     } },
                 }, .{
                     .id = issue_events[issue_data.len - 3].id,
-                    .timestamp = 101,
+                    .timestamp = now - 115 * std.time.s_per_min,
                     .author = .{ .name = user_data[1].name, .email = user_data[1].email },
                     .event = .{ .issue = .{
                         .title = sync_issue.title,
@@ -694,7 +695,7 @@ pub fn main(init: std.process.Init) !void {
                     } },
                 }, .{
                     .id = issue_events[issue_data.len - 2].id,
-                    .timestamp = 102,
+                    .timestamp = now - 110 * std.time.s_per_min,
                     .author = .{ .name = user_data[1].name, .email = user_data[1].email },
                     .event = .{ .issue = .{
                         .title = desc_issue.title,
@@ -705,7 +706,7 @@ pub fn main(init: std.process.Init) !void {
                 } };
                 const theirs = [_]evt.EventWithId{ .{
                     .id = issue_events[issue_data.len - 4].id,
-                    .timestamp = 103,
+                    .timestamp = now - 105 * std.time.s_per_min,
                     .author = .{ .name = user_data[2].name, .email = user_data[2].email },
                     .event = .{ .issue = .{
                         .title = "Segfault on early window resize",
@@ -714,7 +715,7 @@ pub fn main(init: std.process.Init) !void {
                     } },
                 }, .{
                     .id = issue_events[issue_data.len - 3].id,
-                    .timestamp = 104,
+                    .timestamp = now - 100 * std.time.s_per_min,
                     .author = .{ .name = user_data[2].name, .email = user_data[2].email },
                     .event = .{ .issue = .{
                         .title = sync_issue.title,
@@ -724,7 +725,7 @@ pub fn main(init: std.process.Init) !void {
                     } },
                 }, .{
                     .id = issue_events[issue_data.len - 2].id,
-                    .timestamp = 105,
+                    .timestamp = now - 95 * std.time.s_per_min,
                     .author = .{ .name = user_data[2].name, .email = user_data[2].email },
                     .event = .{ .issue = .{
                         .title = desc_issue.title,
@@ -773,7 +774,7 @@ pub fn main(init: std.process.Init) !void {
             for (&comment_events, 0..) |*event, i| {
                 event.* = .{
                     .id = std.fmt.bytesToHex(comment_ids[i], .lower),
-                    .timestamp = @intCast(200 + i),
+                    .timestamp = seedTimestamp(now, i, comment_events.len, 2 * std.time.s_per_hour, 45),
                     .author = .{ .name = user_data[(i + 1) % user_data.len].name, .email = user_data[(i + 1) % user_data.len].email },
                     .event = .{ .comment = .{
                         .thread_id = issue_events[issue_events.len - 1].id,
@@ -825,7 +826,7 @@ pub fn main(init: std.process.Init) !void {
             for (discussion_data, 0..) |discussion, i| {
                 discussion_events[i] = .{
                     .id = std.fmt.bytesToHex(evt.EventWithId.randomId(prng.random()), .lower),
-                    .timestamp = @intCast(300 + i),
+                    .timestamp = seedTimestamp(now, i, discussion_data.len, 21 * std.time.s_per_day, 2 * std.time.s_per_hour),
                     .author = .{ .name = user_data[i % user_data.len].name, .email = user_data[i % user_data.len].email },
                     .event = .{ .discuss = .{
                         .title = discussion.title,
@@ -846,7 +847,7 @@ pub fn main(init: std.process.Init) !void {
                 const comment_index = i % 3;
                 event.* = .{
                     .id = std.fmt.bytesToHex(discussion_comment_ids[discussion_index][comment_index], .lower),
-                    .timestamp = @intCast(400 + i),
+                    .timestamp = seedTimestamp(now, i, discussion_comment_events.len, 90 * std.time.s_per_min, 30),
                     .author = .{ .name = user_data[(i + 1) % user_data.len].name, .email = user_data[(i + 1) % user_data.len].email },
                     .event = .{ .comment = .{
                         .thread_id = discussion_events[discussion_index].id,
@@ -898,7 +899,7 @@ pub fn main(init: std.process.Init) !void {
                 if (repo_index + 1 == repo_data.len) {
                     var target_repo = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = repo_path, .require_repo_root = true });
                     defer target_repo.deinit(io, allocator);
-                    try seedPatches(io, allocator, server_path, &repo, &target_repo, &repo_event_ids[repo_index], &user_ids[repo_data[repo_index].user_index], &admin_user_id, prng.random());
+                    try seedPatches(io, allocator, server_path, &repo, &target_repo, &repo_event_ids[repo_index], &user_ids[repo_data[repo_index].user_index], &admin_user_id, prng.random(), now);
                 }
             }
         }
@@ -1077,6 +1078,12 @@ fn commitTree(
     };
 }
 
+// distribute a seed batch from oldest to newest relative to this run.
+fn seedTimestamp(now: u64, index: usize, count: usize, oldest_age: u64, newest_age: u64) u64 {
+    const age = if (count > 1) oldest_age - (oldest_age - newest_age) * index / (count - 1) else newest_age;
+    return now - age;
+}
+
 fn seedPatchRevision(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -1180,6 +1187,7 @@ fn seedPatches(
     repo_user_id: *const [evt.event_id_size]u8,
     user_id: *const [evt.event_id_size]u8,
     random: std.Random,
+    now: u64,
 ) !void {
     const patch_data = [_]struct {
         title: []const u8,
@@ -1239,7 +1247,7 @@ fn seedPatches(
     const patch_author = evt.CommitAuthor{ .name = "admin", .email = "admin@example.test" };
     var patch_ids: [patch_data.len][evt.event_id_size]u8 = undefined;
     for (patch_data, 0..) |patch, i| {
-        const timestamp: u64 = @intCast(500 + i * 10);
+        const timestamp = seedTimestamp(now, i, patch_data.len, 25 * std.time.s_per_day, 3 * std.time.s_per_hour);
         patch_ids[i] = evt.EventWithId.randomId(random);
         const patch_hex = std.fmt.bytesToHex(patch_ids[i], .lower);
         const path = try fork.create(.{}, io, allocator, users_dir, .{
@@ -1325,7 +1333,7 @@ fn seedPatches(
     for (&comments, 0..) |*comment, i| {
         comment.* = .{
             .id = std.fmt.bytesToHex(comment_ids[i], .lower),
-            .timestamp = @intCast(700 + i),
+            .timestamp = seedTimestamp(now, i, comments.len, 2 * std.time.s_per_hour, 45),
             .author = .{ .name = if (i % 2 == 0) "alice" else "bobby", .email = if (i % 2 == 0) "alice@example.test" else "bobby@example.test" },
             .event = .{ .comment = .{
                 .thread_id = std.fmt.bytesToHex(patch_ids[patch_ids.len - 1], .lower),
@@ -1370,32 +1378,32 @@ fn seedPatches(
     var ours = [_]evt.EventWithId{
         .{
             .id = std.fmt.bytesToHex(patch_ids[1], .lower),
-            .timestamp = 800,
+            .timestamp = now - 30 * std.time.s_per_min,
             .author = .{ .name = "alice", .email = "alice@example.test" },
             .event = .{ .patch = ours_values[0] },
         },
         .{
             .id = std.fmt.bytesToHex(patch_ids[2], .lower),
-            .timestamp = 801,
+            .timestamp = now - 29 * std.time.s_per_min,
             .author = .{ .name = "alice", .email = "alice@example.test" },
             .event = .{ .patch = ours_values[1] },
         },
         .{
             .id = std.fmt.bytesToHex(patch_ids[3], .lower),
-            .timestamp = 802,
+            .timestamp = now - 28 * std.time.s_per_min,
             .author = .{ .name = "alice", .email = "alice@example.test" },
             .event = .{ .patch = ours_values[2] },
         },
     };
 
     var theirs = ours;
-    theirs[0].timestamp = 810;
+    theirs[0].timestamp = now - 25 * std.time.s_per_min;
     theirs[0].author = .{ .name = "bobby", .email = "bobby@example.test" };
     theirs[0].event.patch = theirs_values[0];
-    theirs[1].timestamp = 811;
+    theirs[1].timestamp = now - 24 * std.time.s_per_min;
     theirs[1].author = .{ .name = "bobby", .email = "bobby@example.test" };
     theirs[1].event.patch = theirs_values[1];
-    theirs[2].timestamp = 812;
+    theirs[2].timestamp = now - 23 * std.time.s_per_min;
     theirs[2].author = .{ .name = "bobby", .email = "bobby@example.test" };
     theirs[2].event.patch = theirs_values[2];
 
@@ -1418,14 +1426,14 @@ fn seedPatches(
 
     // a push onto the branch that patch tracks, so the undo tab shows the
     // action and the patch refresh it sets off
-    try seedPush(io, allocator, target_repo, users_dir, patch_author);
+    try seedPush(io, allocator, target_repo, users_dir, patch_author, now - 15);
     try pch.refreshBranches(.{ .server = .{ .users_dir = users_dir } }, .xit, .{}, io, allocator, target_repo, null, null);
 }
 
 // stand in for a client push, which the fixture has no server to receive: one
 // transaction moves the branch, refreshes the patches tracking it and records
 // the action, the way receive-pack does
-fn seedPush(io: std.Io, allocator: std.mem.Allocator, repo: *rp.Repo(.xit, .{}), users_dir: []const u8, author: evt.CommitAuthor) !void {
+fn seedPush(io: std.Io, allocator: std.mem.Allocator, repo: *rp.Repo(.xit, .{}), users_dir: []const u8, author: evt.CommitAuthor, timestamp: u64) !void {
     const Repo = rp.Repo(.xit, .{});
     const DB = Repo.DB;
     const Ctx = struct {
@@ -1434,6 +1442,7 @@ fn seedPush(io: std.Io, allocator: std.mem.Allocator, repo: *rp.Repo(.xit, .{}),
         allocator: std.mem.Allocator,
         users_dir: []const u8,
         author: evt.CommitAuthor,
+        timestamp: u64,
 
         pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
             const opts: rp.RepoOpts(.xit) = .{};
@@ -1450,7 +1459,7 @@ fn seedPush(io: std.Io, allocator: std.mem.Allocator, repo: *rp.Repo(.xit, .{}),
             const feature_new = try obj.writeCommit(.xit, opts, state, ctx.io, ctx.allocator, .{
                 .message = "Revise the feature branch",
                 .author = author_line,
-                .timestamp = 820,
+                .timestamp = ctx.timestamp,
             }, null, .{ .kind = .head, .name = "feature" });
 
             // a branch the push creates has no old tip, so its range is open
@@ -1475,7 +1484,7 @@ fn seedPush(io: std.Io, allocator: std.mem.Allocator, repo: *rp.Repo(.xit, .{}),
         }
     };
 
-    try transaction(io, repo, Ctx{ .core = &repo.core, .io = io, .allocator = allocator, .users_dir = users_dir, .author = author });
+    try transaction(io, repo, Ctx{ .core = &repo.core, .io = io, .allocator = allocator, .users_dir = users_dir, .author = author, .timestamp = timestamp });
 }
 
 // commit `events` onto `ref`, rooted at `parent`, as one transaction.

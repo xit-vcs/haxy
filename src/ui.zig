@@ -20,6 +20,8 @@ const ansi_art = if (builtin.target.cpu.arch == .wasm32) struct {
 const evt = @import("./event.zig");
 const inp = @import("./ui/input.zig");
 
+pub const timestamp = @import("./ui/timestamp.zig");
+
 pub const Home = @import("./ui/Home.zig");
 pub const User = @import("./ui/User.zig");
 pub const Repo = @import("./ui/Repo.zig");
@@ -2373,6 +2375,8 @@ pub const Session = struct {
 
     // serializable data sent down to web client
     pub const Data = struct {
+        // the server's reference time for relative timestamps on this page.
+        now: i64 = 0,
         user_id: ?[]const u8 = null,
         // the logged-in user's name and email, for the views that show them
         user_name: ?[]const u8 = null,
@@ -2416,6 +2420,13 @@ pub const Session = struct {
         };
         try session.loadUser();
         return session;
+    }
+
+    // web views share the page's reference time; terminals use the live clock.
+    pub fn nowSeconds(self: *const Self) !i64 {
+        if (builtin.target.cpu.arch == .wasm32 or !self.is_terminal) return self.data.now;
+        const io = self.io orelse return error.NoClock;
+        return std.math.cast(i64, std.Io.Timestamp.now(io, .real).toSeconds()) orelse error.TimestampOutOfRange;
     }
 
     // load the logged-in user's name and persisted preferences from the db
