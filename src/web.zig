@@ -156,7 +156,7 @@ fn handleRequest(
         switch (host) {
             .server => |server| {
                 // "repo/new" and "user/new" come before "new", which would claim them
-                const PostRoute = enum { login, logout, @"repo/new", @"user/new", user, repo, new, edit, remove, open, close, resolve, publish, merge, squash, attach, undo, clear };
+                const PostRoute = enum { login, logout, @"repo/new", @"user/new", user, settings, grant, revoke, promote, demote, new, edit, remove, open, close, resolve, publish, merge, squash, attach, undo, clear };
                 inline for (@typeInfo(PostRoute).@"enum".field_names) |name| {
                     const suffix = "/" ++ name;
                     if (std.mem.endsWith(u8, path, suffix)) {
@@ -167,7 +167,11 @@ fn handleRequest(
                             .@"repo/new" => handleRepoNew(io, request, allocator, path, server.admin_repo_path, server.users_dir, server.session_store),
                             .@"user/new" => handleUserNew(io, request, allocator, path, server.admin_repo_path, server.users_dir, server.session_store),
                             .user => handleUserSettings(io, request, allocator, path, server.admin_repo_path, server.users_dir, server.session_store),
-                            .repo => handleRepoSettings(io, request, allocator, path, base, host),
+                            .settings => handleRepoSettings(io, request, allocator, path, host),
+                            .grant => handleRoles(io, request, allocator, base, host, .grant),
+                            .revoke => handleRoles(io, request, allocator, base, host, .revoke),
+                            .promote => handleRoles(io, request, allocator, base, host, .promote),
+                            .demote => handleRoles(io, request, allocator, base, host, .demote),
                             .new => handleNew(io, request, allocator, base, host),
                             .edit => handleEdit(io, request, allocator, base, host),
                             .remove => handleRemove(io, request, allocator, base, host),
@@ -662,22 +666,25 @@ fn handleRepoNew(
     });
 }
 
-// change the repo `repo_base` names as its owner, then redirect to its
-// settings under its new name. a failure goes back to the settings page.
+// change the repo the settings url `form_location` names as its owner, then
+// redirect to its settings under its new name. a failure goes back to the
+// settings page.
 fn handleRepoSettings(
     io: std.Io,
     request: *std.http.Server.Request,
     allocator: std.mem.Allocator,
     form_location: []const u8,
-    repo_base: []const u8,
     host: Host,
 ) !void {
     const server = switch (host) {
         .server => |server| server,
         .local => return respondRepoNotFound(request),
     };
+    const route = routeFromUrl(host, form_location) orelse return respondRepoNotFound(request);
+    if (route != .repo_settings) return respondRepoNotFound(request);
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
+    const repo_base = try arena.allocator().print("/{s}", .{route.repo_settings.slice()});
     const actor = (try authorizeWrite(io, allocator, &arena, request, host, repo_base, .owner, null)) orelse return;
 
     const body = try readFormBody(request, allocator);
@@ -697,9 +704,7 @@ fn handleRepoSettings(
     }
     const discuss_role, const issue_role, const patch_role = roles;
 
-    // authorizeWrite refused any other base
-    const identity = repoBaseIdentity(repo_base) orelse unreachable;
-    const route = ui.Repo.Settings.update(io, allocator, server.users_dir, actor, identity, name, description, access, discuss_role, issue_role, patch_role) catch |err| switch (err) {
+    const updated = ui.Repo.Settings.update(io, allocator, server.users_dir, actor, route.repo_settings.slice(), name, description, access, discuss_role, issue_role, patch_role) catch |err| switch (err) {
         error.NotFound => return respondRepoNotFound(request),
         else => {
             const failure = ui.Session.FormFeedback.RepoFailure.fromError(err) orelse return err;
@@ -716,8 +721,50 @@ fn handleRepoSettings(
 
     try request.respond("", .{
         .status = .see_other,
-        .extra_headers = &.{.{ .name = "location", .value = try route.toUrl(&arena) }},
+        .extra_headers = &.{.{ .name = "location", .value = try updated.toUrl(&arena) }},
     });
+}
+
+// act on a user's role in the repo the roles url `base` names, as one of its
+// owners, then redirect back to the list. the add form names the user in its
+// body and the row forms in the url.
+fn handleRoles(io: std.Io, request: *std.http.Server.Request, allocator: std.mem.Allocator, base: []const u8, host: Host, action: ui.Repo.Roles.Action) !void {
+    const server = switch (host) {
+        .server => |server| server,
+        .local => return respondRepoNotFound(request),
+    };
+    const route = routeFromUrl(host, base) orelse return respondRepoNotFound(request);
+    if (route != .repo_roles) return respondRepoNotFound(request);
+    const target = route.repo_roles;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const identity = target.name.slice();
+    const actor = (try authorizeWrite(io, allocator, &arena, request, host, try arena.allocator().print("/{s}", .{identity}), .owner, null)) orelse return;
+
+    const name = switch (action) {
+        .grant => blk: {
+            const body = try readFormBody(request, allocator);
+            defer allocator.free(body);
+            break :blk (try parseFormField(arena.allocator(), body, "name")) orelse "";
+        },
+        .revoke, .promote, .demote => if (target.user.len != 0) target.user.slice() else return respondRepoNotFound(request),
+    };
+
+    const failure = blk: {
+        var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = server.admin_repo_path });
+        defer admin_repo.deinit(io, allocator);
+        const moment = try evt.currentMoment(evt.admin_repo_opts, &admin_repo);
+        break :blk ui.Repo.Roles.perform(io, allocator, moment, server.users_dir, actor, identity, action, name) catch |err| switch (err) {
+            error.NotFound, error.EventNotFound => return respondRepoNotFound(request),
+            else => return err,
+        };
+    };
+    if (failure) |value| {
+        const location = try (ui.RoutablePage.repoRolesRoute(identity, target.start) orelse return error.RouteTooLong).toUrl(&arena);
+        return respondFormFailure(request, allocator, server.session_store, location, .{ .repo_roles = .{ .failure = value, .name = name } });
+    }
+    const location = try (ui.Repo.Roles.landingRoute(identity, target.start, actor, action, name) orelse return error.RouteTooLong).toUrl(&arena);
+    try request.respond("", .{ .status = .see_other, .keep_alive = false, .extra_headers = &.{.{ .name = "location", .value = location }} });
 }
 
 // create a user, log them in, and redirect to their page. a failure goes

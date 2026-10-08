@@ -65,6 +65,8 @@ pub const Widget = union(enum) {
     repo_events: ui.Repo.Events.View,
     repo_undo: ui.Repo.Undo.View,
     repo_settings: ui.Repo.Settings.View,
+    repo_settings_form: ui.Repo.Settings.Form,
+    repo_roles: ui.Repo.Roles.View,
     repo_comment: ui.Repo.Comment.Item,
     copyable_text: CopyableText,
     patch_source: ui.Repo.Patches.Source,
@@ -115,7 +117,7 @@ pub const Widget = union(enum) {
     // whether moving up should return to the page header
     pub fn atTop(self: *Widget, root_focus: *Focus) bool {
         return switch (self.*) {
-            inline .home_about, .home_users, .user_repos, .flow_box_scroll, .new_repo, .new_user, .user_login, .user_settings, .quit, .repo_files, .repo_commits, .diff_view, .repo_refs, .repo_issues, .repo_patches, .repo_discussions, .repo_events, .repo_undo, .repo_settings => |*view| view.atTop(),
+            inline .home_about, .home_users, .user_repos, .flow_box_scroll, .new_repo, .new_user, .user_login, .user_settings, .quit, .repo_files, .repo_commits, .diff_view, .repo_refs, .repo_issues, .repo_patches, .repo_discussions, .repo_events, .repo_undo, .repo_settings, .repo_settings_form, .repo_roles => |*view| view.atTop(),
             inline .repo_patch_detail => |*view| view.atTop(root_focus),
             else => false,
         };

@@ -380,8 +380,11 @@ WebAssembly.instantiateStreaming(fetch("/haxy.wasm"), importObject).then(async (
                 return;
             } else if (tag === "INPUT" && event.key === "Enter") {
                 // enter in a form's text input never submits it; only the
-                // submit button does. an input outside a form has no submit
-                // button, so the TUI handles its enter instead.
+                // submit button does. a form with no button submits on enter.
+                // an input outside a form has no submit button, so the TUI
+                // handles its enter instead.
+                const form = document.activeElement.form;
+                if (form && ![...form.elements].some((element) => element.tagName === "BUTTON")) return;
                 event.preventDefault();
                 if (!document.activeElement.form) {
                     wasmInstance.exports._onKeyDown(event.keyCode);

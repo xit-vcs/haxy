@@ -301,13 +301,14 @@ pub const View = struct {
         }
 
         if (page.settings != null) {
-            const route = ui.RoutablePage.repoRepoRoute(identity) orelse return error.RouteTooLong;
+            const route = ui.RoutablePage.repoSettingsRoute(identity) orelse return error.RouteTooLong;
             var text_box = try wgt.TextBox.init(allocator, ui.Repo.Settings.tab_label, .{ .border = .single, .round_corners = true, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().mode = .all;
-            text_box.getFocus().kind = .{ .custom = try ui.inPageTabLink(session, route, current_tag == .repo_repo) };
+            const selected = current_tag == .repo_settings or current_tag == .repo_roles;
+            text_box.getFocus().kind = .{ .custom = try ui.inPageTabLink(session, route, selected) };
             try tab_ids.put(allocator, text_box.getFocus().id, {});
-            if (current_tag == .repo_repo) selected_tab = text_box.getFocus().id;
+            if (selected) selected_tab = text_box.getFocus().id;
             try tabs_box.children.put(allocator, text_box.getFocus().id, .{
                 .widget = .{ .text_box = text_box },
                 .rect = null,

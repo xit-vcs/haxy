@@ -25,6 +25,7 @@ pub const Comment = @import("./Repo/Comment.zig");
 pub const Undo = @import("./Repo/Undo.zig");
 pub const Events = @import("./Repo/Events.zig");
 pub const Settings = @import("./Repo/Settings.zig");
+pub const Roles = @import("./Repo/Roles.zig");
 pub const Quit = @import("./Quit.zig");
 
 header: Header,
@@ -220,6 +221,10 @@ pub fn init(
         .repo_events => |*e| e.selected.slice(),
         else => "",
     };
+    const roles_start: usize = switch (route) {
+        .repo_roles => |r| r.start,
+        else => 0,
+    };
 
     // where the on-disk repo lives (null keeps the views' empty fallback), plus
     // the repo and owner-name metadata the header shows. local mode already
@@ -307,16 +312,22 @@ pub fn init(
                                 try evt.consume(.local, .repo, repo_kind, opened.self_repo_opts, io, gpa, opened, evt.events_ref, &.{});
                                 try pch.refreshBranches(.local, repo_kind, opened.self_repo_opts, io, gpa, opened, null, null);
                             }
-                            if (session.data.host_kind == .server and handle.canUndo()) settings = .{
-                                .identity = try arena.allocator().dupe(u8, repo_identity.identity),
-                                .name = repo.event.name,
-                                .description = repo.event.description,
-                                .access = repo.event.read_access,
-                                .discuss_role = repo.event.discuss_role,
-                                .issue_role = repo.event.issue_role,
-                                .patch_role = repo.event.patch_role,
-                                .hash_kind = opened.self_repo_opts.hash,
-                            };
+                            if (session.data.host_kind == .server and handle.canUndo()) {
+                                // a server page always resolved its repo id
+                                const repo_id = repo_id_maybe orelse unreachable;
+                                settings = .{
+                                    .identity = try arena.allocator().dupe(u8, repo_identity.identity),
+                                    .name = repo.event.name,
+                                    .description = repo.event.description,
+                                    .access = repo.event.read_access,
+                                    .discuss_role = repo.event.discuss_role,
+                                    .issue_role = repo.event.issue_role,
+                                    .patch_role = repo.event.patch_role,
+                                    .hash_kind = opened.self_repo_opts.hash,
+                                    .view = if (route == .repo_roles) .roles else .settings,
+                                    .roles = try Roles.init(io, gpa, arena, session.haxy_moment orelse return error.NoMoment, session.users_dir orelse return error.NoMoment, repo_identity.identity, repo.event.user_id[0..evt.event_id_size], &repo_id, roles_start),
+                                };
+                            }
                             // tabs switch in-page, so every tab's data is read here
                             if (repo_kind == .xit and handle.canWrite()) {
                                 undo_data = Undo.init(opened.self_repo_opts, arena, opened, session.haxy_moment, repo_identity.identity, undo_index, handle) catch |err| switch (err) {
@@ -368,7 +379,7 @@ pub fn init(
         };
     };
     if (route == .repo_undo and undo_data == null) return error.NotFound;
-    if (route == .repo_repo and settings == null) return error.NotFound;
+    if ((route == .repo_settings or route == .repo_roles) and settings == null) return error.NotFound;
     if (undo_data) |*undo| undo.clear = undo_clear;
     discussions.repo_source = source;
     issues.repo_source = source;
@@ -580,6 +591,7 @@ pub const View = struct {
                                     .repo_refs => |*v| if (v.focusHeader(root_focus)) return,
                                     .repo_events => |*v| if (v.focusHeader(root_focus)) return,
                                     .repo_undo => |*v| if (v.focusHeader(root_focus)) return,
+                                    .repo_settings => |*v| if (v.focusHeader(root_focus)) return,
                                     else => {},
                                 };
                                 index = stack_index;

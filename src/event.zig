@@ -2074,6 +2074,50 @@ pub fn updateRepo(
     }});
 }
 
+// grant `user_id` `role` on the repo `repo_id` in its owner's user repo,
+// replacing any role they held
+pub fn grantRole(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    users_dir: []const u8,
+    owner_id: *const [event_id_size]u8,
+    repo_id: *const [event_id_size]u8,
+    user_id: *const [event_id_size]u8,
+    role: Repo.Role,
+    author: CommitAuthor,
+) !void {
+    var user_repo = (try openUserRepo(io, allocator, users_dir, owner_id)) orelse return error.NotFound;
+    defer user_repo.deinit(io, allocator);
+    try consume(.{ .server = .{ .users_dir = users_dir } }, .user, .xit, user_repo_opts, io, allocator, &user_repo, events_ref, &[_]EventWithId{.{
+        .id = std.fmt.bytesToHex(Grant.idOf(repo_id, user_id), .lower),
+        .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
+        .author = author,
+        .event = .{ .grant = .{ .target_id = repo_id, .user_id = user_id, .role = role } },
+    }});
+}
+
+// revoke `user_id`'s grant on the repo `repo_id` in its owner's user repo
+pub fn revokeRole(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    users_dir: []const u8,
+    owner_id: *const [event_id_size]u8,
+    repo_id: *const [event_id_size]u8,
+    user_id: *const [event_id_size]u8,
+    author: CommitAuthor,
+) !void {
+    var user_repo = (try openUserRepo(io, allocator, users_dir, owner_id)) orelse return error.NotFound;
+    defer user_repo.deinit(io, allocator);
+    // a revoked grant stays in the kind index, which is all `remove` checks
+    {
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const moment = (try userMoment(&user_repo)) orelse return error.EventNotFound;
+        if (try Grant.readRole(UserDB, user_repo_opts.hash, moment, &arena, repo_id, user_id) == null) return error.EventNotFound;
+    }
+    try remove(.{ .server = .{ .users_dir = users_dir } }, .user, .xit, user_repo_opts, io, allocator, &user_repo, &Grant.idOf(repo_id, user_id), .grant, author);
+}
+
 // create a user and their user repo, returning the new user's id
 pub fn createUser(
     io: std.Io,

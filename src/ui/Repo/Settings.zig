@@ -12,6 +12,8 @@ const Key = xitui.input.Key;
 const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
 
+const Roles = @import("./Roles.zig");
+
 const wasm = builtin.target.cpu.arch == .wasm32;
 
 pub const tab_label = "☼";
@@ -26,6 +28,9 @@ discuss_role: ?evt.Repo.Role,
 issue_role: ?evt.Repo.Role,
 patch_role: ?evt.Repo.Role,
 hash_kind: hash.HashKind,
+// the sub tab the route names
+view: enum { settings, roles },
+roles: Roles,
 
 const Self = @This();
 
@@ -55,16 +60,137 @@ pub fn labelRole(label: []const u8) error{InvalidRole}!?evt.Repo.Role {
     return error.InvalidRole;
 }
 
+// the repo settings and user roles sub tabs over their content
 pub const View = struct {
+    box: wgt.Box(ui.Widget),
+
+    const header_index = 0;
+    const content_index = 1;
+
+    pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !View {
+        var box = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .vert });
+        errdefer box.deinit(allocator);
+
+        {
+            var header = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .horiz });
+            errdefer header.deinit(allocator);
+            const on_tab = switch (session.data.current_page) {
+                .repo_settings, .repo_roles => true,
+                else => false,
+            };
+            const routes = [_]?ui.RoutablePage{ ui.RoutablePage.repoSettingsRoute(data.identity), ui.RoutablePage.repoRolesRoute(data.identity, 0) };
+            for ([_]@FieldType(Self, "view"){ .settings, .roles }, [_][]const u8{ "repo settings", "user roles" }, routes) |view, label, route| {
+                var tab = try wgt.TextBox.init(allocator, label, .{ .border = .hidden, .round_corners = true, .wrap_kind = .none });
+                errdefer tab.deinit(allocator);
+                tab.getFocus().mode = .all;
+                tab.getFocus().kind = .{ .custom = try ui.inPageTabLink(session, route orelse return error.RouteTooLong, on_tab and data.view == view) };
+                try header.children.put(allocator, tab.getFocus().id, .{ .widget = .{ .text_box = tab }, .rect = null, .min_size = .{ .width = label.len + 2, .height = null } });
+            }
+            header.getFocus().child_id = header.children.keys()[@backingInt(data.view)];
+            // a row taller than the header, leaving a blank line beneath it
+            try box.children.put(allocator, header.getFocus().id, .{ .widget = .{ .box = header }, .rect = null, .min_size = .{ .width = null, .height = 4 } });
+        }
+
+        {
+            var stack = try wgt.Stack(ui.Widget).init(allocator);
+            errdefer stack.deinit(allocator);
+            {
+                var form = try Form.init(allocator, data, session);
+                errdefer form.deinit(allocator);
+                try stack.children.put(allocator, form.getFocus().id, .{ .repo_settings_form = form });
+            }
+            {
+                var roles = try Roles.View.init(allocator, &data.roles, session);
+                errdefer roles.deinit(allocator);
+                try stack.children.put(allocator, roles.getFocus().id, .{ .repo_roles = roles });
+            }
+            stack.getFocus().child_id = stack.children.keys()[@backingInt(data.view)];
+            try box.children.put(allocator, stack.getFocus().id, .{ .widget = .{ .stack = stack }, .rect = null, .min_size = null });
+        }
+        box.getFocus().child_id = box.children.keys()[content_index];
+        return .{ .box = box };
+    }
+
+    pub fn deinit(self: *View, allocator: std.mem.Allocator) void {
+        self.box.deinit(allocator);
+    }
+
+    fn headerBox(self: *View) *wgt.Box(ui.Widget) {
+        return &self.box.children.values()[header_index].widget.box;
+    }
+
+    fn contentStack(self: *View) *wgt.Stack(ui.Widget) {
+        return &self.box.children.values()[content_index].widget.stack;
+    }
+
+    fn headerActive(self: *View) bool {
+        return self.box.getFocus().child_id == self.headerBox().getFocus().id;
+    }
+
+    pub fn build(self: *View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
+        self.clearGrid();
+        const header = self.headerBox();
+        if (header.getFocus().child_id) |selected_id| {
+            for (header.children.keys(), header.children.values(), 0..) |id, *child, index| {
+                ui.widget.markSelected(&child.widget.text_box, id == selected_id);
+                if (id == selected_id) self.contentStack().getFocus().child_id = self.contentStack().children.keys()[index];
+            }
+        }
+        try self.box.build(allocator, constraint, root_focus);
+    }
+
+    pub fn input(self: *View, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
+        const direction = inp.vertDirection(key);
+        if (self.headerActive()) {
+            const header = self.headerBox();
+            if (direction == .down) {
+                root_focus.setFocus(self.contentStack().getFocus().id);
+            } else if (header.children.getIndex(header.getFocus().child_id orelse return)) |current| {
+                if (inp.moveTab(key, current, header.children.count())) |next| root_focus.setFocus(header.children.keys()[next]);
+            }
+            return;
+        }
+        if (direction == .up) if (self.contentStack().getSelected()) |selected| if (selected.atTop(root_focus)) {
+            root_focus.setFocus(self.headerBox().getFocus().id);
+            return;
+        };
+        try self.contentStack().input(allocator, key, root_focus);
+    }
+
+    // moving up from the sub header returns to the page's tabs
+    pub fn atTop(self: *View) bool {
+        return self.headerActive();
+    }
+
+    // arriving from the page's tabs lands on the sub header, not the content
+    pub fn focusHeader(self: *View, root_focus: *Focus) bool {
+        root_focus.setFocus(self.headerBox().getFocus().id);
+        return true;
+    }
+
+    pub fn clearGrid(self: *View) void {
+        self.box.clearGrid();
+    }
+
+    pub fn getGrid(self: View) ?Grid {
+        return self.box.getGrid();
+    }
+
+    pub fn getFocus(self: *View) *Focus {
+        return self.box.getFocus();
+    }
+};
+
+pub const Form = struct {
     // a centered form, scrolled when it outgrows the window
     scroll: wgt.Scroll(ui.Widget),
     data: *const Self,
     session: *ui.Session,
 
-    pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !View {
+    pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !Form {
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .vert });
         errdefer box.deinit(allocator);
-        const route = ui.RoutablePage.repoRepoRoute(data.identity) orelse return error.RouteTooLong;
+        const route = ui.RoutablePage.repoSettingsRoute(data.identity) orelse return error.RouteTooLong;
         box.getFocus().kind = .{ .custom = try session.page_arena.allocator().print("form:{s}", .{try route.toUrl(session.page_arena)}) };
 
         const saved_fields = if (session.formFeedback(.repo_settings)) |saved| saved.fields else null;
@@ -129,11 +255,11 @@ pub const View = struct {
         };
     }
 
-    pub fn deinit(self: *View, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *Form, allocator: std.mem.Allocator) void {
         self.scroll.deinit(allocator);
     }
 
-    pub fn build(self: *View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
+    pub fn build(self: *Form, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
         self.clearGrid();
         const failure = if (self.session.formFeedback(.repo_settings)) |saved| saved.failure else null;
         (try formField(self.formBox(), "name")).options.top_label.text = if (failure) |value| switch (value) {
@@ -154,7 +280,7 @@ pub const View = struct {
         }, root_focus);
     }
 
-    pub fn input(self: *View, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
+    pub fn input(self: *Form, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
         const cid = self.formBox().getFocus().child_id orelse return;
         const cur = self.formBox().children.getIndex(cid) orelse return;
         const child = &self.formBox().children.values()[cur];
@@ -208,7 +334,7 @@ pub const View = struct {
 
     // update the repo and navigate to its new url. this is the terminal path;
     // the web posts the form to the settings route.
-    fn submitForm(self: *View, allocator: std.mem.Allocator) !void {
+    fn submitForm(self: *Form, allocator: std.mem.Allocator) !void {
         if (comptime wasm) return;
         const io = self.session.io orelse return;
         const users_dir = self.session.users_dir orelse return;
@@ -239,24 +365,24 @@ pub const View = struct {
         try self.session.navigate(route);
     }
 
-    fn formBox(self: *View) *wgt.Box(ui.Widget) {
+    fn formBox(self: *Form) *wgt.Box(ui.Widget) {
         return &self.scroll.child.center.child.box;
     }
 
-    pub fn clearGrid(self: *View) void {
+    pub fn clearGrid(self: *Form) void {
         self.scroll.clearGrid();
     }
 
-    pub fn getGrid(self: View) ?Grid {
+    pub fn getGrid(self: Form) ?Grid {
         return self.scroll.getGrid();
     }
 
-    pub fn getFocus(self: *View) *Focus {
+    pub fn getFocus(self: *Form) *Focus {
         return self.scroll.getFocus();
     }
 
     // up leaves the form from its first control
-    pub fn atTop(self: View) bool {
+    pub fn atTop(self: Form) bool {
         const box = &self.scroll.child.center.child.box;
         return box.focus.child_id == box.children.keys()[0];
     }
@@ -282,5 +408,5 @@ pub fn update(
     try evt.updateRepo(io, allocator, users_dir, &owner_id, actor.author, parsed.name, name, description, access, discuss_role, issue_role, patch_role);
     var buf: [ui.RoutablePage.repo_route_max_len]u8 = undefined;
     const new_identity = std.fmt.bufPrint(&buf, "{s}:{s}", .{ parsed.owner, name }) catch return error.RouteTooLong;
-    return ui.RoutablePage.repoRepoRoute(new_identity) orelse error.RouteTooLong;
+    return ui.RoutablePage.repoSettingsRoute(new_identity) orelse error.RouteTooLong;
 }
