@@ -1245,6 +1245,7 @@ pub fn consumeInTransaction(
                     const record_maybe: ?Comment.Record = if (event_maybe) |event| .{
                         .event = event,
                         .author_email = authorEmail(commit_object.content.commit.metadata.author orelse ""),
+                        .created_timestamp = commit_object.content.commit.metadata.timestamp,
                         .created_order = event_order,
                         .updated_order = event_order,
                     } else null;
