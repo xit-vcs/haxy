@@ -265,6 +265,7 @@ fn readMeta(
                 .issue => evt.Issue,
                 .comment => evt.Comment,
                 .attach => evt.Attachment,
+                .assign => evt.Assignment,
                 .patchrev => evt.PatchRev,
                 .patch => evt.Patch,
             };
@@ -343,6 +344,10 @@ fn readItem(
             if (repo_event.threadRole(parent_kind) == null) return item;
             const route = ui.RoutablePage.repoThreadCommentsRoute(parent_kind, identity, &record.event.parent_id, 0) orelse return item;
             item.view_url = try route.toUrl(arena);
+        },
+        .assign => {
+            const record = (try evt.readRecordSubset(evt.Assignment, Authored, DB, hash_kind, haxy_moment, arena, id)) orelse return null;
+            item.author = try ui.Author.initFromEmail(admin_moment, arena, record.author_email);
         },
         .patch => {
             const record = (try evt.readRecordSubset(evt.Patch, Authored, DB, hash_kind, haxy_moment, arena, id)) orelse return null;

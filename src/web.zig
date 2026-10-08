@@ -21,6 +21,7 @@ const form_flash_cookie = "haxy_form_flash";
 const local_flash_cookie = "haxy_local_flash";
 const local_required_title_prefix = "required_title:";
 const local_sync_failure_prefix = "sync:";
+const local_assignment_prefix = "assignment:";
 
 const Embed = struct {
     path: []const u8,
@@ -156,7 +157,7 @@ fn handleRequest(
         switch (host) {
             .server => |server| {
                 // "repo/new" and "user/new" come before "new", which would claim them
-                const PostRoute = enum { login, logout, @"repo/new", @"user/new", user, settings, grant, revoke, promote, demote, new, edit, remove, open, close, resolve, publish, merge, squash, attach, undo, clear };
+                const PostRoute = enum { login, logout, @"repo/new", @"user/new", user, settings, grant, revoke, promote, demote, new, edit, remove, open, close, resolve, publish, merge, squash, attach, assign, unassign, undo, clear };
                 inline for (@typeInfo(PostRoute).@"enum".field_names) |name| {
                     const suffix = "/" ++ name;
                     if (std.mem.endsWith(u8, path, suffix)) {
@@ -184,12 +185,14 @@ fn handleRequest(
                             .undo => handleUndo(io, request, allocator, base, host, .undo),
                             .clear => handleUndo(io, request, allocator, base, host, .clear),
                             .attach => handleAttach(io, request, allocator, base, host),
+                            .assign => handleAssign(io, request, allocator, base, host),
+                            .unassign => handleUnassign(io, request, allocator, base, host),
                         };
                     }
                 }
             },
             .local => |local| {
-                const PostRoute = enum { new, edit, remove, open, close, resolve, sync, attach, undo, clear };
+                const PostRoute = enum { new, edit, remove, open, close, resolve, sync, attach, assign, unassign, undo, clear };
                 inline for (@typeInfo(PostRoute).@"enum".field_names) |name| {
                     const suffix = "/" ++ name;
                     if (std.mem.endsWith(u8, path, suffix)) {
@@ -205,6 +208,8 @@ fn handleRequest(
                             .undo => handleUndo(io, request, allocator, base, host, .undo),
                             .clear => handleUndo(io, request, allocator, base, host, .clear),
                             .attach => handleAttach(io, request, allocator, base, host),
+                            .assign => handleAssign(io, request, allocator, base, host),
+                            .unassign => handleUnassign(io, request, allocator, base, host),
                         };
                     }
                 }
@@ -300,6 +305,14 @@ fn handleRequest(
                             .discussion => .{ .discussion = .{ .failure = .required_title } },
                             else => null,
                         } else null;
+                    } else if (std.mem.startsWith(u8, raw, local_assignment_prefix)) {
+                        const rest = raw[local_assignment_prefix.len..];
+                        if (std.mem.indexOfScalar(u8, rest, ':')) |colon| {
+                            if (std.meta.stringToEnum(ui.Session.FormFeedback.AssignmentFailure, rest[0..colon])) |failure| {
+                                const text = std.Uri.percentDecodeInPlace(try form_arena.allocator().dupe(u8, rest[colon + 1 ..]));
+                                form_feedback = .{ .assignment = .{ .failure = failure, .text = text } };
+                            }
+                        }
                     } else if (std.mem.startsWith(u8, raw, local_sync_failure_prefix)) {
                         const value = try allocator.dupe(u8, raw[local_sync_failure_prefix.len..]);
                         sync_failure_allocated = value;
@@ -417,16 +430,24 @@ fn respondThreadFormFailure(request: *std.http.Server.Request, allocator: std.me
     return switch (host) {
         .server => |server| respondFormFailure(request, allocator, server.session_store, location, feedback),
         .local => {
-            const tag = std.meta.activeTag(feedback);
-            const required_title = switch (feedback) {
-                .issue => |value| value.failure == .required_title,
-                .discussion => |value| value.failure == .required_title,
-                .patch => |value| value.failure == .required_title,
-                else => false,
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            defer arena.deinit();
+            const cookie = switch (feedback) {
+                .assignment => |value| try arena.allocator().print(
+                    local_flash_cookie ++ "=" ++ local_assignment_prefix ++ "{s}:{s}; Path=/; HttpOnly; SameSite=Strict",
+                    .{ @tagName(value.failure), try ui.urlEncodeRef(arena.allocator(), value.text) },
+                ),
+                else => blk: {
+                    const required_title = switch (feedback) {
+                        .issue => |value| value.failure == .required_title,
+                        .discussion => |value| value.failure == .required_title,
+                        .patch => |value| value.failure == .required_title,
+                        else => false,
+                    };
+                    if (!required_title) return error.InvalidFormFeedback;
+                    break :blk try arena.allocator().print(local_flash_cookie ++ "=" ++ local_required_title_prefix ++ "{s}; Path=/; HttpOnly; SameSite=Strict", .{@tagName(std.meta.activeTag(feedback))});
+                },
             };
-            if (!required_title) return error.InvalidFormFeedback;
-            const cookie = try allocator.print(local_flash_cookie ++ "=" ++ local_required_title_prefix ++ "{s}; Path=/; HttpOnly; SameSite=Strict", .{@tagName(tag)});
-            defer allocator.free(cookie);
             try request.respond("", .{
                 .status = .see_other,
                 .extra_headers = &.{
@@ -1388,6 +1409,104 @@ fn handleAttach(
 
     // the client reloads the page itself
     try request.respond("", .{ .status = .no_content, .keep_alive = false });
+}
+
+// assign the posted email, or the email of the user it names, to the thread the
+// url names, then reload it
+fn handleAssign(
+    io: std.Io,
+    request: *std.http.Server.Request,
+    allocator: std.mem.Allocator,
+    base: []const u8,
+    host: Host,
+) !void {
+    const parts = commentBaseParts(host, base) orelse return respondRemoveNotFound(request);
+    if (parts.comment_id != null) return respondRemoveNotFound(request);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const actor = (try authorizeWrite(io, allocator, &arena, request, host, parts.repo_base, .read, parts.thread_kind)) orelse return;
+    const request_repo = (try requestRepoSource(io, allocator, host, parts.repo_base)) orelse return respondRemoveNotFound(request);
+    defer request_repo.deinit(allocator);
+    const source = request_repo.source;
+    if (!try source.canModify(io, allocator, actor, parts.thread_kind, &parts.thread_id)) return respondForbidden(request);
+
+    const text = blk: {
+        const body = try readFormBody(request, allocator);
+        defer allocator.free(body);
+        break :blk (try parseFormField(arena.allocator(), body, "assignee")) orelse "";
+    };
+    const failure: ?ui.Session.FormFeedback.AssignmentFailure = blk: {
+        const lookup = switch (host) {
+            .local => try ui.assigneeEmail(null, &arena, text),
+            .server => |server| server: {
+                var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = server.admin_repo_path });
+                defer admin_repo.deinit(io, allocator);
+                break :server try ui.assigneeEmail(try evt.currentMoment(evt.admin_repo_opts, &admin_repo), &arena, text);
+            },
+        };
+        const email = switch (lookup) {
+            .email => |email| email,
+            .failure => |value| break :blk value,
+        };
+        const thread_id_hex = std.fmt.bytesToHex(parts.thread_id, .lower);
+        switch (source.repo_kind) {
+            inline else => |repo_kind| {
+                var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, source.localInitOpts());
+                defer any_repo.deinit(io, allocator);
+                switch (any_repo) {
+                    inline else => |*repo| _ = evt.Assignment.create(host.event(), repo_kind, repo.self_repo_opts, io, allocator, repo, parts.thread_kind, &thread_id_hex, email, actor.author) catch |err| switch (err) {
+                        error.AlreadyAssigned => break :blk .already_assigned,
+                        error.InvalidFields => break :blk .not_an_email,
+                        error.NotFound => return respondRemoveNotFound(request),
+                        else => |e| return e,
+                    },
+                }
+            },
+        }
+        break :blk null;
+    };
+    if (failure) |value| return respondThreadFormFailure(request, allocator, host, base, .{ .assignment = .{ .failure = value, .text = text } });
+    try request.respond("", .{ .status = .see_other, .keep_alive = false, .extra_headers = &.{.{ .name = "location", .value = base }} });
+}
+
+// unassign the email the url's last segment carries from the thread before it,
+// then reload the thread
+fn handleUnassign(
+    io: std.Io,
+    request: *std.http.Server.Request,
+    allocator: std.mem.Allocator,
+    base: []const u8,
+    host: Host,
+) !void {
+    const infix = "/assignee:";
+    const at = std.mem.lastIndexOf(u8, base, infix) orelse return respondRemoveNotFound(request);
+    const thread_url = base[0..at];
+    const parts = commentBaseParts(host, thread_url) orelse return respondRemoveNotFound(request);
+    if (parts.comment_id != null) return respondRemoveNotFound(request);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const email = std.Uri.percentDecodeInPlace(try arena.allocator().dupe(u8, base[at + infix.len ..]));
+    const actor = (try authorizeWrite(io, allocator, &arena, request, host, parts.repo_base, .read, parts.thread_kind)) orelse return;
+    const request_repo = (try requestRepoSource(io, allocator, host, parts.repo_base)) orelse return respondRemoveNotFound(request);
+    defer request_repo.deinit(allocator);
+    const source = request_repo.source;
+    if (!try source.canModify(io, allocator, actor, parts.thread_kind, &parts.thread_id)) return respondForbidden(request);
+
+    switch (source.repo_kind) {
+        inline else => |repo_kind| {
+            var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, source.localInitOpts());
+            defer any_repo.deinit(io, allocator);
+            switch (any_repo) {
+                inline else => |*repo| evt.removeInThread(host.event(), repo_kind, repo.self_repo_opts, io, allocator, repo, parts.thread_kind, &parts.thread_id, .assign, &evt.Assignment.idOf(&parts.thread_id, email), actor.author) catch |err| switch (err) {
+                    error.EventNotFound => return respondRemoveNotFound(request),
+                    else => |e| return e,
+                },
+            }
+        },
+    }
+    try request.respond("", .{ .status = .see_other, .keep_alive = false, .extra_headers = &.{.{ .name = "location", .value = thread_url }} });
 }
 
 // the name the upload declares for its file, percent-encoded so it survives a

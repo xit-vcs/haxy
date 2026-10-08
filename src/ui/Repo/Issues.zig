@@ -29,6 +29,9 @@ pub const IssueWithId = struct {
     conflicted: bool = false,
     comments: Comment.Window = .empty,
     attachments: []const Attachment.WithId = &.{},
+    assignees: []const []const u8 = &.{},
+    // whether the viewer may change the thread, computed here so the web ui has it
+    can_modify: bool = false,
 };
 
 pub const Entry = IssueWithId;

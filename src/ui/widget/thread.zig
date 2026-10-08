@@ -366,8 +366,8 @@ fn windowKnown(comptime Data: type, keys: []const OrderKey, root: []const u8) bo
     return std.mem.order(u8, &keys[keys.len - 1 - Data.page_size], root) != .lt;
 }
 
-// one list entry: the record `order_key` names, with its author, comments and
-// attachments. null when the record is gone.
+// one list entry: the record `order_key` names, with its author, comments,
+// attachments and assignees. null when the record is gone.
 fn loadEntry(
     comptime Data: type,
     comptime hash_kind: hash.HashKind,
@@ -401,6 +401,8 @@ fn loadEntry(
             viewer,
         ),
         .attachments = try Attachment.load(hash_kind, arena, haxy_moment, &id_hex),
+        .assignees = try evt.Assignment.load(hash_kind, arena, haxy_moment, &id_hex),
+        .can_modify = if (viewer) |v| v.role.canModify(v.email, record.author_email) else false,
     };
     if (comptime @hasField(Data.Entry, "conflicted")) {
         entry.conflicted = if (conflict_set) |conflicts| try conflicts.contains(order_key) else false;
@@ -557,6 +559,81 @@ pub const Header = struct {
 };
 
 // the selected thread's scrollable contents, shared by repo and fork views
+// the assignee row's form action, which also identifies the row
+const assign_suffix = "/assign";
+
+// an input that assigns on enter, then one unassign button per assignee. a
+// viewer who may not change the thread only sees who is assigned.
+fn appendAssigneeRow(
+    allocator: std.mem.Allocator,
+    box: *wgt.Box(Widget),
+    session: *ui.Session,
+    thread_url: []const u8,
+    assignees: []const []const u8,
+    can_modify: bool,
+) !void {
+    const pa = session.page_arena.allocator();
+    if (!can_modify) {
+        if (assignees.len == 0) return;
+        const joined = try std.mem.join(pa, " ", assignees);
+        var assigned = try wgt.TextBox.init(allocator, joined, .{ .border = .single, .round_corners = true, .wrap_kind = .word, .top_label = .{ .text = " assigned " } });
+        errdefer assigned.deinit(allocator);
+        try box.children.put(allocator, assigned.getFocus().id, .{ .widget = .{ .text_box = assigned }, .rect = null, .min_size = null });
+        return;
+    }
+    var row = try wgt.Box(Widget).init(allocator, .{ .border = null, .direction = .horiz });
+    errdefer row.deinit(allocator);
+    row.getFocus().kind = .{ .custom = try pa.print("form:{s}" ++ assign_suffix, .{thread_url}) };
+
+    var text_input = try wgt.TextInput.init(allocator, .{ .name = "assignee", .visible_width = 30, .round_corners = true, .render_content = session.is_terminal });
+    errdefer text_input.deinit(allocator);
+    text_input.getFocus().mode = .all;
+    if (session.formFeedback(.assignment)) |saved| try text_input.setContent(allocator, saved.text);
+    row.getFocus().child_id = text_input.getFocus().id;
+    try row.children.put(allocator, text_input.getFocus().id, .{ .widget = .{ .text_input = text_input }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
+
+    if (assignees.len > 0) {
+        const items = try pa.alloc(WordFlow.Item, assignees.len);
+        for (items, assignees) |*item, email| item.* = .{
+            .text = try pa.print(" unassign {s} ", .{email}),
+            .link = try pa.print("{s}{s}/assignee:{s}/unassign", .{ ui.submit_action_prefix, thread_url, try ui.urlEncodeRef(pa, email) }),
+        };
+        var flow = try WordFlow.init(allocator);
+        errdefer flow.deinit(allocator);
+        try flow.setItems(allocator, items);
+        // the buttons post their own forms, so enter in the input still submits
+        // the assign form
+        flow.getFocus().kind = .{ .custom = try pa.print("form:{s}", .{thread_url}) };
+        try row.children.put(allocator, flow.getFocus().id, .{ .widget = .{ .word_flow = flow }, .rect = null, .min_size = null });
+    }
+
+    try box.children.put(allocator, row.getFocus().id, .{ .widget = .{ .box = row }, .rect = null, .min_size = null });
+}
+
+// whether `row` is the assignee row
+fn isAssigneeRow(row: *wgt.Box(Widget)) bool {
+    const action = switch (row.getFocus().kind) {
+        .custom => |custom| custom,
+        else => return false,
+    };
+    return std.mem.startsWith(u8, action, "form:") and std.mem.endsWith(u8, action, assign_suffix);
+}
+
+// label the row's input for this frame and register it for the web form
+// handling
+fn buildAssigneeRow(row: *wgt.Box(Widget), session: *ui.Session, root_focus: *Focus) !void {
+    const text_input = &row.children.values()[0].widget.text_input;
+    const local = session.data.host_kind == .local;
+    const failure = if (session.formFeedback(.assignment)) |saved| saved.failure else null;
+    text_input.options.top_label.text = if (failure) |value| switch (value) {
+        .not_found => " assign by name or email (not found) ",
+        .not_an_email => if (local) " assign by email (not an email) " else " assign by name or email (not an email) ",
+        .already_assigned => if (local) " assign by email (already assigned) " else " assign by name or email (already assigned) ",
+    } else if (local) " assign by email " else " assign by name or email ";
+    text_input.options.bottom_label.text = if (root_focus.grandchild_id == text_input.getFocus().id) " press enter " else "";
+    try session.text_inputs.put(session.arena.allocator(), text_input.getFocus().id, text_input);
+}
+
 pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
     const Entry = Data.Entry;
     const Event = Data.Event;
@@ -612,6 +689,12 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
 
         pub fn build(self: *This, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
             self.clearGrid();
+            if (kind == .issue) {
+                for (self.inner().children.values()) |*child| switch (child.widget) {
+                    .box => |*row| if (isAssigneeRow(row)) try buildAssigneeRow(row, self.session, root_focus),
+                    else => {},
+                };
+            }
             try self.scroll.build(allocator, constraint, root_focus);
         }
 
@@ -857,6 +940,11 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                 }
             }
 
+            if (kind == .issue) {
+                const parent_route = ui.RoutablePage.repoThreadCommentsRoute(kind, self.data.identity, entry.id, 0) orelse return error.RouteTooLong;
+                try appendAssigneeRow(allocator, inner_box, self.session, try parent_route.toUrl(self.session.page_arena), entry.assignees, entry.can_modify);
+            }
+
             const whole = entry.record.event.description;
             const preview_end = if (description_page) null else ui.detailPreviewEnd(whole);
             const shown = if (preview_end) |end|
@@ -876,7 +964,8 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
 
             if (!supports_drafts or !entryDraft(entry)) {
                 const parent_route = ui.RoutablePage.repoThreadCommentsRoute(kind, self.data.identity, entry.id, 0) orelse return error.RouteTooLong;
-                try Attachment.appendRows(allocator, inner_box, self.session, self.data.identity, try parent_route.toUrl(self.session.page_arena), entry.attachments);
+                const parent_url = try parent_route.toUrl(self.session.page_arena);
+                try Attachment.appendRows(allocator, inner_box, self.session, self.data.identity, parent_url, entry.attachments);
 
                 if (!description_page) {
                     if (self.data.viewer != null) {
@@ -915,6 +1004,12 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
             else
                 raw_key;
 
+            // a focused assignee input keeps its editing keys
+            if (key == .home or key == .end) if (self.focusedAssigneeInput(root_focus)) |text_input| {
+                try text_input.input(allocator, key, root_focus);
+                return self.exit;
+            };
+
             switch (key) {
                 .page_up => self.pageDetail(root_focus, -10),
                 .page_down => self.pageDetail(root_focus, 10),
@@ -937,6 +1032,15 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                 },
             }
             return self.exit;
+        }
+
+        // the assignee row's input, when it holds focus
+        fn focusedAssigneeInput(self: *This, root_focus: *Focus) ?*wgt.TextInput {
+            const child_index = self.focusedChild(root_focus) orelse return null;
+            const child = &self.inner().children.values()[child_index].widget;
+            if (child.* != .box or !isAssigneeRow(&child.box)) return null;
+            const text_input = &child.box.children.values()[0].widget.text_input;
+            return if (root_focus.grandchild_id == text_input.getFocus().id) text_input else null;
         }
 
         fn childInput(self: *This, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
@@ -982,7 +1086,9 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                     } else try copyable.input(allocator, key, root_focus),
                     else => try copyable.input(allocator, key, root_focus),
                 },
-                .box => |*row| if (Attachment.removeId(row)) |attachment_id| {
+                .box => |*row| if (isAssigneeRow(row)) {
+                    try self.assigneeInput(allocator, child_index, row, key, root_focus);
+                } else if (Attachment.removeId(row)) |attachment_id| {
                     const remove_id = row.children.keys()[1];
                     switch (key) {
                         .arrow_left => if (!self.moveHorizontal(root_focus, false)) {
@@ -1264,6 +1370,55 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
             return true;
         }
 
+        // the input takes typing and assigns on enter; the buttons after it
+        // unassign
+        fn assigneeInput(self: *This, allocator: std.mem.Allocator, child_index: usize, row: *wgt.Box(Widget), key: Key, root_focus: *Focus) !void {
+            const text_input = &row.children.values()[0].widget.text_input;
+            const flow: ?*WordFlow = if (row.children.count() > 1) &row.children.values()[1].widget.word_flow else null;
+            if (root_focus.grandchild_id == text_input.getFocus().id) {
+                switch (key) {
+                    .arrow_up => _ = self.moveVertical(root_focus, false),
+                    .arrow_down => _ = self.moveVertical(root_focus, true),
+                    .arrow_left => if (text_input.cursor == 0) {
+                        self.exit = .list;
+                    } else try text_input.input(allocator, key, root_focus),
+                    .arrow_right => {
+                        // right past the last character steps onto the first button
+                        if (flow) |buttons| if (text_input.cursor == text_input.content.items.len) return self.focusLabel(child_index, buttons, root_focus, 0);
+                        try text_input.input(allocator, key, root_focus);
+                    },
+                    .enter => {
+                        const text = try text_input.text(allocator);
+                        defer allocator.free(text);
+                        try self.assign(allocator, text);
+                    },
+                    else => try text_input.input(allocator, key, root_focus),
+                }
+                return;
+            }
+
+            const buttons = flow orelse return;
+            const cur = buttons.indexOfFocusId(root_focus.grandchild_id orelse return) orelse return;
+            const assignees = (self.entry orelse return).assignees;
+            switch (key) {
+                .arrow_left => if (cur > 0) self.focusLabel(child_index, buttons, root_focus, cur - 1) else root_focus.setFocus(text_input.getFocus().id),
+                .arrow_right => if (cur + 1 < buttons.text_boxes.items.len) self.focusLabel(child_index, buttons, root_focus, cur + 1),
+                .arrow_up => if (buttons.rowStep(cur, false)) |index| {
+                    self.focusLabel(child_index, buttons, root_focus, index);
+                } else {
+                    _ = self.moveVertical(root_focus, false);
+                },
+                .arrow_down => if (buttons.rowStep(cur, true)) |index| {
+                    self.focusLabel(child_index, buttons, root_focus, index);
+                } else {
+                    _ = self.moveVertical(root_focus, true);
+                },
+                .enter => try self.unassign(allocator, assignees[cur]),
+                .mouse => |mouse| if (inp.leftClickOn(root_focus, buttons.text_boxes.items[cur].getFocus().id, mouse)) try self.unassign(allocator, assignees[cur]),
+                else => {},
+            }
+        }
+
         fn labelsInput(self: *This, child_index: usize, labels: *WordFlow, key: Key, root_focus: *Focus) void {
             const child_id = labels.focus.child_id orelse return;
             const cur = labels.indexOfFocusId(child_id) orelse return;
@@ -1369,6 +1524,72 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
             const id_hex = std.fmt.bytesToHex(id, .lower);
             const route = ui.RoutablePage.repoEventsRoute(self.data.identity, .removed, event_kind, &id_hex, null) orelse return;
             try self.session.navigate(route);
+        }
+
+        // assign the typed email, or the email of the user the text names
+        fn assign(self: *This, allocator: std.mem.Allocator, text: []const u8) !void {
+            if (comptime wasm) return;
+            const entry = self.entry orelse return;
+            const io = self.session.io orelse return;
+            const source = self.data.repo_source orelse return;
+            const actor = (try self.session.authorize(self.data.identity, .read, kind)) orelse return;
+            const thread_id = try evt.parseEventId(entry.id);
+            if (!try source.canModify(io, allocator, actor, kind, &thread_id)) return;
+
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            defer arena.deinit();
+            const failure: ?ui.Session.FormFeedback.AssignmentFailure = blk: {
+                const moment = if (self.session.data.host_kind == .local) null else self.session.haxy_moment;
+                const email = switch (try ui.assigneeEmail(moment, &arena, text)) {
+                    .email => |email| email,
+                    .failure => |value| break :blk value,
+                };
+                const thread_id_hex = std.fmt.bytesToHex(thread_id, .lower);
+                switch (source.repo_kind) {
+                    inline else => |repo_kind| {
+                        var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, source.localInitOpts());
+                        defer any_repo.deinit(io, allocator);
+                        switch (any_repo) {
+                            inline else => |*repo| _ = evt.Assignment.create(self.session.eventHost(), repo_kind, repo.self_repo_opts, io, allocator, repo, kind, &thread_id_hex, email, actor.author) catch |err| switch (err) {
+                                error.AlreadyAssigned => break :blk .already_assigned,
+                                error.InvalidFields => break :blk .not_an_email,
+                                else => |e| return e,
+                            },
+                        }
+                    },
+                }
+                break :blk null;
+            };
+            if (failure) |value| {
+                self.session.data.form_feedback = .{ .assignment = .{ .failure = value, .text = try self.session.arena.allocator().dupe(u8, text) } };
+                return;
+            }
+            try self.session.navigate(ui.RoutablePage.repoThreadCommentsRoute(kind, self.data.identity, entry.id, 0) orelse return error.RouteTooLong);
+        }
+
+        fn unassign(self: *This, allocator: std.mem.Allocator, email: []const u8) !void {
+            if (comptime wasm) return;
+            const entry = self.entry orelse return;
+            const io = self.session.io orelse return;
+            const source = self.data.repo_source orelse return;
+            const actor = (try self.session.authorize(self.data.identity, .read, kind)) orelse return;
+            const thread_id = try evt.parseEventId(entry.id);
+            if (!try source.canModify(io, allocator, actor, kind, &thread_id)) return;
+
+            switch (source.repo_kind) {
+                inline else => |repo_kind| {
+                    var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, source.localInitOpts());
+                    defer any_repo.deinit(io, allocator);
+                    switch (any_repo) {
+                        inline else => |*repo| evt.removeInThread(self.session.eventHost(), repo_kind, repo.self_repo_opts, io, allocator, repo, kind, &thread_id, .assign, &evt.Assignment.idOf(&thread_id, email), actor.author) catch |err| switch (err) {
+                            // a stale button; the refresh below shows the row as it is
+                            error.EventNotFound => {},
+                            else => |e| return e,
+                        },
+                    }
+                },
+            }
+            try self.session.navigate(ui.RoutablePage.repoThreadCommentsRoute(kind, self.data.identity, entry.id, 0) orelse return error.RouteTooLong);
         }
 
         fn toggleStatus(self: *This, allocator: std.mem.Allocator) !void {

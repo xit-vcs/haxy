@@ -15,6 +15,7 @@ pub const Discussion = @import("event/Discussion.zig");
 pub const Issue = @import("event/Issue.zig");
 pub const Comment = @import("event/Comment.zig");
 pub const Attachment = @import("event/Attachment.zig");
+pub const Assignment = @import("event/Assignment.zig");
 pub const Patch = @import("event/Patch.zig");
 pub const PatchRev = @import("event/PatchRev.zig");
 
@@ -277,6 +278,7 @@ pub const EventKind = enum {
     issue,
     comment,
     attach,
+    assign,
     patchrev,
     patch,
 };
@@ -295,7 +297,7 @@ pub const RepoRole = enum {
                 else => false,
             },
             .repo => switch (kind) {
-                .discuss, .issue, .comment, .attach, .patchrev, .patch => true,
+                .discuss, .issue, .comment, .attach, .assign, .patchrev, .patch => true,
                 else => false,
             },
             .fork => switch (kind) {
@@ -326,6 +328,7 @@ pub const Event = union(EventKind) {
     issue: ?Issue,
     comment: ?Comment,
     attach: ?Attachment,
+    assign: ?Assignment,
     patchrev: ?PatchRev,
     patch: ?Patch,
 };
@@ -456,6 +459,12 @@ pub const EventWithId = struct {
                     else
                         null,
                 },
+                .assign => .{
+                    .assign = if (json_event.data) |value|
+                        try std.json.parseFromValueLeaky(Assignment, arena.allocator(), value, .{ .ignore_unknown_fields = true })
+                    else
+                        null,
+                },
                 .patch => .{
                     .patch = if (json_event.data) |value|
                         try std.json.parseFromValueLeaky(Patch, arena.allocator(), value, .{ .ignore_unknown_fields = true })
@@ -517,6 +526,7 @@ pub fn remove(
         .issue => .{ .issue = null },
         .comment => .{ .comment = null },
         .attach => .{ .attach = null },
+        .assign => .{ .assign = null },
         .patchrev => .{ .patchrev = null },
         .patch => .{ .patch = null },
     };
@@ -1252,6 +1262,15 @@ pub fn consumeInTransaction(
                     } else null;
                     try Attachment.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, record_maybe, &arena, &repo_event_oid);
                 },
+                .assign => |event_maybe| {
+                    const record_maybe: ?Assignment.Record = if (event_maybe) |event| .{
+                        .event = event,
+                        .author_email = authorEmail(commit_object.content.commit.metadata.author orelse ""),
+                        .created_order = event_order,
+                        .updated_order = event_order,
+                    } else null;
+                    try Assignment.consume(DB, repo_opts.hash, haxy_moment, &current_event_id, record_maybe, &arena, &repo_event_oid);
+                },
                 .patchrev => |event_maybe| {
                     const record_maybe: ?PatchRev.Record = if (event_maybe) |event| blk: {
                         const trees = try PatchRev.readTrees(repo_kind, repo_opts, read_state, io, allocator, &commit_object.content.commit.tree);
@@ -1654,10 +1673,11 @@ pub fn merge(
     }
 }
 
-// a comment or attachment a write names under a thread
+// a comment, attachment or assignment a write names under a thread
 pub const ThreadChild = union(enum) {
     comment: *const [event_id_size]u8,
     attach: *const [event_id_size]u8,
+    assign: *const [event_id_size]u8,
 };
 
 // whether `thread_id` names a thread of `thread_kind` in the repo's events, and
@@ -1705,11 +1725,16 @@ pub fn threadHolds(
             const attachment = (try readRecordSubset(Attachment, struct { event: struct { parent_id: [event_id_size * 2]u8 } }, DB, repo_opts.hash, moment, &arena, id)) orelse return false;
             return std.mem.eql(u8, &attachment.event.parent_id, &thread_id_hex);
         },
+        // only an active assignment can be removed
+        .assign => |id| {
+            const assignment = (try readRecordSubset(Assignment, struct { removed: bool, event: struct { thread_id: [event_id_size * 2]u8 } }, DB, repo_opts.hash, moment, &arena, id)) orelse return false;
+            return !assignment.removed and std.mem.eql(u8, &assignment.event.thread_id, &thread_id_hex);
+        },
     }
 }
 
-// remove an event a thread's page names: the thread itself, or a comment or
-// attachment, which must belong to it
+// remove an event a thread's page names: the thread itself, or a comment,
+// attachment or assignment, which must belong to it
 pub fn removeInThread(
     host: Host,
     comptime repo_kind: rp.RepoKind,
@@ -1726,6 +1751,7 @@ pub fn removeInThread(
     const child_maybe: ?ThreadChild = switch (kind) {
         .comment => .{ .comment = id },
         .attach => .{ .attach = id },
+        .assign => .{ .assign = id },
         else => null,
     };
     if (child_maybe) |child| {
@@ -1894,6 +1920,7 @@ pub fn readAuthorEmail(
         .issue => Issue.record_map_key,
         .comment => Comment.record_map_key,
         .attach => Attachment.record_map_key,
+        .assign => Assignment.record_map_key,
         .patchrev => PatchRev.record_map_key,
         .patch => Patch.record_map_key,
         .user, .repo, .fork, .grant => return null,

@@ -2098,6 +2098,23 @@ pub fn activeUser(
     return if (user.removed) null else user;
 }
 
+// what the typed assignee resolves to
+pub const AssigneeLookup = union(enum) {
+    email: []const u8,
+    failure: Session.FormFeedback.AssignmentFailure,
+};
+
+// the email `text` assigns: itself when it holds an @, else the email of the
+// user it names. a null moment is local mode, which has no users to look up.
+pub fn assigneeEmail(moment_maybe: ?evt.AdminDB.HashMap(.read_only), arena: *std.heap.ArenaAllocator, text: []const u8) !AssigneeLookup {
+    const trimmed = std.mem.trim(u8, text, " \t\r\n");
+    if (std.mem.indexOfScalar(u8, trimmed, '@') != null) return .{ .email = trimmed };
+    const moment = moment_maybe orelse return .{ .failure = .not_an_email };
+    const user_id = (try evt.User.readIdByName(evt.AdminDB, evt.admin_repo_opts.hash, moment, trimmed)) orelse return .{ .failure = .not_found };
+    const user = (try activeUser(moment, arena, user_id)) orelse return .{ .failure = .not_found };
+    return .{ .email = user.event.email };
+}
+
 // whether the user may write to the repo `identity` names with at least
 // `min_role`, and to the `thread_kind` tab when there is one
 pub fn authorizeUser(
@@ -2251,6 +2268,8 @@ pub const Session = struct {
 
         pub const RolesFailure = enum { not_found, already_added };
 
+        pub const AssignmentFailure = enum { not_found, not_an_email, already_assigned };
+
         pub const UserFailure = enum {
             required_name,
             invalid_name,
@@ -2316,6 +2335,10 @@ pub const Session = struct {
         repo_roles: struct {
             failure: RolesFailure,
             name: []const u8,
+        },
+        assignment: struct {
+            failure: AssignmentFailure,
+            text: []const u8,
         },
         issue: struct {
             failure: ThreadFailure,
