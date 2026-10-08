@@ -44,6 +44,7 @@ pub const Record = struct {
     event: Self,
     removed: bool = false,
     author_email: ?[]const u8 = null,
+    created_timestamp: u64 = 0,
     created_order: u64 = 0,
     updated_order: u64 = 0,
 };
@@ -171,6 +172,7 @@ pub fn consume(
         if (!evt.fieldEqual(?[]const u8, existing.event.source_branch, record.event.source_branch)) return error.PatchSourceChanged;
         record.created_order = existing.created_order;
         record.author_email = existing.author_email;
+        record.created_timestamp = existing.created_timestamp;
         const existing_status_kind = existing.event.status.kind();
         if (existing_status_kind == .merged and !evt.fieldEqual(Status, existing.event.status, record.event.status)) return error.PatchAlreadyMerged;
         if (existing_status_kind == .merged and !std.mem.eql(u8, existing.event.target_branch, record.event.target_branch)) return error.PatchAlreadyMerged;

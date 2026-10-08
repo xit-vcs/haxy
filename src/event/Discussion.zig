@@ -13,6 +13,7 @@ pub const Record = struct {
     event: Self,
     removed: bool = false,
     author_email: ?[]const u8 = null,
+    created_timestamp: u64 = 0,
     created_order: u64 = 0,
     updated_order: u64 = 0,
 };
@@ -65,6 +66,7 @@ pub fn consume(
     if (existing_record_maybe) |existing| {
         record_to_write.created_order = existing.created_order;
         record_to_write.author_email = existing.author_email;
+        record_to_write.created_timestamp = existing.created_timestamp;
     }
 
     const activity_order = if (existing_record_maybe != null)

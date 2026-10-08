@@ -920,10 +920,21 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                 try inner_box.children.put(allocator, title.getFocus().id, .{ .widget = .{ .text_box = title }, .rect = null, .min_size = null });
                 self.title_id = title.getFocus().id;
 
-                var author = try ui.authorBox(allocator, self.session.page_arena, entry.author);
-                errdefer author.deinit(allocator);
-                try inner_box.children.put(allocator, author.getFocus().id, .{ .widget = .{ .text_box = author }, .rect = null, .min_size = null });
-                self.author_id = author.getFocus().id;
+                {
+                    var row = try wgt.Box(Widget).init(allocator, .{ .border = null, .direction = .horiz });
+                    errdefer row.deinit(allocator);
+                    var author = try ui.authorBox(allocator, self.session.page_arena, entry.author);
+                    errdefer author.deinit(allocator);
+                    try row.children.put(allocator, author.getFocus().id, .{ .widget = .{ .text_box = author }, .rect = null, .min_size = null });
+                    const timestamp = try ui.Repo.Undo.formatTimestamp(self.session.page_arena.allocator(), std.math.cast(i64, entry.record.created_timestamp) orelse -1);
+                    var time = try wgt.TextBox.init(allocator, timestamp, .{ .border = .single, .round_corners = true, .wrap_kind = .none });
+                    errdefer time.deinit(allocator);
+                    time.getFocus().mode = .all;
+                    try row.children.put(allocator, time.getFocus().id, .{ .widget = .{ .text_box = time }, .rect = null, .min_size = null });
+                    row.getFocus().child_id = author.getFocus().id;
+                    self.author_id = row.getFocus().id;
+                    try inner_box.children.put(allocator, row.getFocus().id, .{ .widget = .{ .box = row }, .rect = null, .min_size = null });
+                }
 
                 var items: std.ArrayList(WordFlow.Item) = .empty;
                 defer items.deinit(allocator);
@@ -1062,7 +1073,10 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
             }
             if (child_id == self.author_id) {
                 switch (key) {
-                    .arrow_left => self.exit = .list,
+                    .arrow_left => if (!self.moveHorizontal(root_focus, false)) {
+                        self.exit = .list;
+                    },
+                    .arrow_right => _ = self.moveHorizontal(root_focus, true),
                     .arrow_up => _ = self.moveVertical(root_focus, false),
                     .arrow_down => _ = self.moveVertical(root_focus, true),
                     else => {},

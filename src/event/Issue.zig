@@ -16,6 +16,7 @@ pub const Record = struct {
     event: Self,
     removed: bool = false,
     author_email: ?[]const u8 = null,
+    created_timestamp: u64 = 0,
     created_order: u64 = 0,
     updated_order: u64 = 0,
 };
@@ -110,6 +111,7 @@ pub fn consume(
         // updates preserve the original creation order and author
         record_to_write.created_order = existing_record.created_order;
         record_to_write.author_email = existing_record.author_email;
+        record_to_write.created_timestamp = existing_record.created_timestamp;
 
         // drop the old status's and labels' entries; active values are re-added below
         const order_key = evt.orderKeyDesc(existing_record.created_order, event_id);
