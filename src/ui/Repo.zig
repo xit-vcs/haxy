@@ -153,6 +153,10 @@ pub fn init(
         .repo_issues => |*i| i.label.slice(),
         else => "",
     };
+    const issues_assignee: []const u8 = switch (route) {
+        .repo_issues => |*i| i.assignee.slice(),
+        else => "",
+    };
     const issues_search: []const u8 = switch (route) {
         .repo_issues => |*i| i.search.slice(),
         else => "",
@@ -358,7 +362,7 @@ pub fn init(
                                 changes_data,
                                 try Refs.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, repo_identity.identity, refs_kind, refs_from, refs_search),
                                 try Discussions.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, discussions_label, discussions_search, discussions_selected, discussions_comment, discussions_comments_start, discussions_view, tabViewer(handle, repo, .discuss)),
-                                try Issues.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, issues_label, issues_search, issues_selected, issues_comment, issues_comments_start, issues_theirs, issues_view, tabViewer(handle, repo, .issue)),
+                                try Issues.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, issues_label, issues_assignee, issues_search, issues_selected, issues_comment, issues_comments_start, issues_theirs, issues_view, tabViewer(handle, repo, .issue)),
                                 try Patches.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, session, repo_id_maybe, repo_identity.identity, target_branch, patches_label, patches_search, patches_selected, patches_comment, patches_comments_start, patches_theirs, patches_view, tabViewer(handle, repo, .patch)),
                                 try Events.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, repo.event, events_view, events_kind, events_selected, events_moment, session.local != null, session.data.sync_failure),
                             };
@@ -373,7 +377,7 @@ pub fn init(
             Changes{ .commits = try Commits.emptyResult(aa, handle, requested_ref_or_oid orelse .branch, requested_ref_value, commits_base_oid) },
             try Refs.emptyResult(arena, repo_identity.identity, refs_kind, refs_from, refs_search),
             try Discussions.emptyResult(aa, repo_identity.identity, discussions_label, discussions_search, discussions_selected, discussions_comment, discussions_comments_start, discussions_view),
-            try Issues.emptyResult(aa, repo_identity.identity, issues_label, issues_search, issues_selected, issues_comment, issues_comments_start, issues_theirs, issues_view),
+            try Issues.emptyResult(aa, repo_identity.identity, issues_label, issues_assignee, issues_search, issues_selected, issues_comment, issues_comments_start, issues_theirs, issues_view),
             try Patches.emptyResult(aa, repo_identity.identity, patches_label, patches_search, patches_selected, patches_comment, patches_comments_start, patches_theirs, patches_view),
             try Events.empty(aa, repo_identity.identity, events_view, session.local != null, session.data.sync_failure),
         };

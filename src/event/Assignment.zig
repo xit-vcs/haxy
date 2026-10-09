@@ -25,6 +25,11 @@ pub const all_id_set_key = "assignment-id-set";
 
 // the index a thread's view reads
 pub const thread_id_to_assignment_id_set_key = "thread-id->assignment-id-set";
+// the issues each email is assigned to, keyed like the issue status sets
+pub const assignee_to_issue_id_set_key = "assignee->issue-id-set";
+
+// the longest email an assignment holds
+pub const email_max_len = 254;
 
 // the id of the one assignment an email can hold on a thread
 pub fn idOf(thread_id: *const [evt.event_id_size]u8, email: []const u8) [evt.event_id_size]u8 {
@@ -37,7 +42,7 @@ pub fn idOf(thread_id: *const [evt.event_id_size]u8, email: []const u8) [evt.eve
 }
 
 fn emailValid(email: []const u8) bool {
-    if (email.len == 0) return false;
+    if (email.len == 0 or email.len > email_max_len) return false;
     for (email) |ch| {
         if (std.ascii.isWhitespace(ch)) return false;
     }
@@ -100,6 +105,33 @@ pub fn consume(
     } else {
         try thread_assignments.put(&order_key);
     }
+
+    // only an issue is indexed by assignee
+    const thread_id = try evt.parseEventId(&record.event.thread_id);
+    const issue = (try evt.readRecordSubset(evt.Issue, struct { created_order: u64, removed: bool }, DB, hash_kind, haxy_moment.readOnly(), arena, &thread_id)) orelse return;
+    try indexIssue(DB, hash_kind, haxy_moment, record.event.email, &evt.orderKeyDesc(issue.created_order, &thread_id), !record.removed and !issue.removed);
+}
+
+// put or drop an issue's order key in `email`'s assignee set, pruning an emptied set
+pub fn indexIssue(
+    comptime DB: type,
+    comptime hash_kind: hash.HashKind,
+    haxy_moment: DB.HashMap(.read_write),
+    email: []const u8,
+    order_key: []const u8,
+    active: bool,
+) !void {
+    const by_assignee = try DB.HashMap(.read_write).init(try haxy_moment.putCursor(hash.hashInt(hash_kind, assignee_to_issue_id_set_key)));
+    const email_key = hash.hashInt(hash_kind, email);
+    if (active) {
+        const issues = try DB.SortedSet(.read_write).init(try by_assignee.putCursor(email_key));
+        try issues.put(order_key);
+        return;
+    }
+    if (null == try by_assignee.getCursor(email_key)) return;
+    const issues = try DB.SortedSet(.read_write).init(try by_assignee.putCursor(email_key));
+    _ = try issues.remove(order_key);
+    if (0 == try issues.count()) _ = try by_assignee.remove(email_key);
 }
 
 // assign `email` to a thread and return the event id. `repo` must be writable.

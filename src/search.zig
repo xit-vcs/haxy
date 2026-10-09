@@ -69,7 +69,8 @@ fn removeWord(comptime DB: type, index: DB.SortedMap(.read_write), doc_key: []co
 // stop at their page size.
 pub fn Query(comptime DB: type) type {
     return struct {
-        // one per typed word; empty when nothing can match
+        // one per typed word, then one per required set. a term with no
+        // postings matches nothing, so neither does the query.
         terms: std.ArrayList(Term),
         // the key the next result starts from, plus room for the one byte that
         // steps past a returned key
@@ -147,18 +148,16 @@ pub fn Query(comptime DB: type) type {
                     if (!std.mem.startsWith(u8, indexed, word)) break;
                     try postings.append(aa, .{ .set = try DB.SortedSet(.read_only).init(pair.value_cursor) });
                 }
-                // a word nothing starts with rules out every document
-                if (postings.items.len == 0) return .{ .terms = .empty };
+                // a word nothing starts with leaves an empty term, which rules
+                // out every document
                 try terms.append(aa, .{ .postings = postings.items });
             }
             return .{ .terms = terms };
         }
 
         // narrow the results to the doc keys in `set`. it is one more term,
-        // with that set as its only posting. a query nothing can match stays
-        // empty, since requiring a set would turn it into every doc key in it.
+        // with that set as its only posting.
         pub fn require(self: *Self, aa: std.mem.Allocator, set: DB.SortedSet(.read_only)) !void {
-            if (self.terms.items.len == 0) return;
             const postings = try aa.alloc(Posting, 1);
             postings[0] = .{ .set = set };
             try self.terms.append(aa, .{ .postings = postings });
@@ -172,6 +171,7 @@ pub fn Query(comptime DB: type) type {
         }
 
         pub fn next(self: *Self) !?[]const u8 {
+            // with no terms at all nothing narrows the results, so none are listed
             if (self.terms.items.len == 0) return null;
             if (self.returned) {
                 // doc keys are at most max_doc_key_len, so appending a byte

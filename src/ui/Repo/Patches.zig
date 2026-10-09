@@ -147,7 +147,7 @@ pub const PatchWithId = struct {
     conflicted: bool = false,
     comments: Comment.Window = .empty,
     attachments: []const Attachment.WithId = &.{},
-    assignees: []const []const u8 = &.{},
+    assignees: []const ui.Assignee = &.{},
     // whether the viewer may change the thread, computed here so the web ui has it
     can_modify: bool = false,
     draft: bool = false,
@@ -713,10 +713,10 @@ pub fn init(
         }
     }
     const thread_comments_start = if (empty.comment_id.len == 0) comments_start else 0;
-    var open_window = try thread.loadWindow(Self, .patch, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_patch, open_set, open_root, conflict_set, empty.selected_id, thread_comments_start, empty.search, viewer);
-    var closed_window = try thread.loadWindow(Self, .patch, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_patch, closed_set, closed_root, conflict_set, empty.selected_id, thread_comments_start, empty.search, viewer);
-    var merged_window = try thread.loadWindow(Self, .patch, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_patch, merged_set, merged_root, conflict_set, empty.selected_id, thread_comments_start, empty.search, viewer);
-    var conflicts_window = try thread.loadWindow(Self, .patch, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_patch, conflict_set, conflicts_root, conflict_set, empty.selected_id, thread_comments_start, null, viewer);
+    var open_window = try thread.loadWindow(Self, .patch, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_patch, open_set, open_root, conflict_set, empty.selected_id, thread_comments_start, empty.search, null, viewer);
+    var closed_window = try thread.loadWindow(Self, .patch, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_patch, closed_set, closed_root, conflict_set, empty.selected_id, thread_comments_start, empty.search, null, viewer);
+    var merged_window = try thread.loadWindow(Self, .patch, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_patch, merged_set, merged_root, conflict_set, empty.selected_id, thread_comments_start, empty.search, null, viewer);
+    var conflicts_window = try thread.loadWindow(Self, .patch, repo_opts.hash, arena, admin_moment, haxy_moment, event_id_to_patch, conflict_set, conflicts_root, conflict_set, empty.selected_id, thread_comments_start, null, null, viewer);
     try setPatchDetails(repo_kind, repo_opts, io, arena, admin_moment, session.users_dir, haxy_moment, repo, &open_window);
     try setPatchDetails(repo_kind, repo_opts, io, arena, admin_moment, session.users_dir, haxy_moment, repo, &closed_window);
     try setPatchDetails(repo_kind, repo_opts, io, arena, admin_moment, session.users_dir, haxy_moment, repo, &merged_window);
@@ -1002,7 +1002,7 @@ pub fn appendDetails(self: *const Self, allocator: std.mem.Allocator, box: *wgt.
 
 // tabs switching between the patches page's views
 pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *const Self) !Header {
-    var header = try Header.init(allocator, session, data.search);
+    var header = try Header.init(allocator, session, data.search, null);
     errdefer header.deinit(allocator);
     const selected_index = View.viewIndex(data.view);
     const page_selected = std.meta.activeTag(session.data.current_page) == .repo_patches;

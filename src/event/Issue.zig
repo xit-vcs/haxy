@@ -160,6 +160,12 @@ pub fn consume(
             try label_set.put(&order_key);
         }
     }
+
+    // the assignee sets hold the issue while it exists, whatever its status
+    const id_hex = std.fmt.bytesToHex(event_id.*, .lower);
+    for (try evt.Assignment.load(hash_kind, arena, haxy_moment.readOnly(), &id_hex)) |email| {
+        try evt.Assignment.indexIssue(DB, hash_kind, haxy_moment, email, &order_key, !record_to_write.removed);
+    }
 }
 
 // `status`'s sorted set within `statuses`, keyed by status name

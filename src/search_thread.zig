@@ -41,8 +41,8 @@ pub fn update(
     try srch.replace(DB, index, allocator, key, old_text, new_text);
 }
 
-// the doc keys matching `query_text`, in key order, narrowed to `filter` when
-// it is keyed the same way
+// the doc keys matching `query_text`, in key order, narrowed to each non-null
+// set in `filters`, which must be keyed the same way
 pub fn query(
     comptime DB: type,
     comptime hash_kind: hash.HashKind,
@@ -50,12 +50,16 @@ pub fn query(
     haxy_moment: DB.HashMap(.read_only),
     aa: std.mem.Allocator,
     query_text: []const u8,
-    filter: ?DB.SortedSet(.read_only),
+    filters: []const ?DB.SortedSet(.read_only),
 ) !srch.Query(DB) {
-    const cursor = try haxy_moment.getCursor(hash.hashInt(hash_kind, indexKey(kind))) orelse return .{ .terms = .empty };
-    const index = try DB.SortedMap(.read_only).init(cursor);
-    var results = try srch.Query(DB).init(index, aa, query_text);
-    if (filter) |set| try results.require(aa, set);
+    // no index means no words match, which one empty term expresses
+    var results: srch.Query(DB) = .{ .terms = .empty };
+    if (try haxy_moment.getCursor(hash.hashInt(hash_kind, indexKey(kind)))) |cursor| {
+        results = try srch.Query(DB).init(try DB.SortedMap(.read_only).init(cursor), aa, query_text);
+    } else {
+        try results.terms.append(aa, .{ .postings = &.{} });
+    }
+    for (filters) |filter| if (filter) |set| try results.require(aa, set);
     return results;
 }
 

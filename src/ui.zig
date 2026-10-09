@@ -153,6 +153,9 @@ pub const RoutablePage = union(enum) {
         name: Array(repo_route_max_len),
         // the label the list is filtered to, url-encoded ("" = unfiltered).
         label: Array(issue_label_route_max_len) = .{},
+        // the assignee the list is filtered to, a url-encoded name or email as
+        // typed ("" = unfiltered).
+        assignee: Array(assignee_route_max_len) = .{},
         // the query the list is filtered to, url-encoded ("" = unfiltered).
         search: Array(search_route_max_len) = .{},
         // the issue the route names: the list's window root, or the issue the
@@ -224,7 +227,7 @@ pub const RoutablePage = union(enum) {
 
     // the "key:value" segments of a url tail, collected in any order
     const Params = struct {
-        const ParamKey = enum { start, line, branch, tag, label, object, base, patchrev, theirs, find, search, from, moment, merge, user };
+        const ParamKey = enum { start, line, branch, tag, label, assignee, object, base, patchrev, theirs, find, search, from, moment, merge, user };
 
         // a branch:/tag:/object: param; the value stays url-encoded
         const RefParam = struct { kind: RefOrOid, value: []const u8 };
@@ -310,6 +313,7 @@ pub const RoutablePage = union(enum) {
     const message_seg = "message";
     // the `Params` key spellings the url emitters use
     const label_filter_seg = @tagName(Params.ParamKey.label) ++ ":";
+    const assignee_seg = @tagName(Params.ParamKey.assignee) ++ ":";
     const start_seg = @tagName(Params.ParamKey.start) ++ ":";
     const line_seg = @tagName(Params.ParamKey.line) ++ ":";
     const find_seg = @tagName(Params.ParamKey.find) ++ ":";
@@ -344,6 +348,9 @@ pub const RoutablePage = union(enum) {
     pub const issue_label_route_max_len = evt.Issue.label_max_len * 3;
     pub const patch_label_route_max_len = evt.Patch.label_max_len * 3;
     pub const discussion_label_route_max_len = evt.Discussion.label_max_len * 3;
+
+    // a url-encoded email can grow to three bytes per source byte.
+    pub const assignee_route_max_len = evt.Assignment.email_max_len * 3;
 
     // caps the resolve view's theirs: field list (a longer one doesn't route).
     pub const theirs_route_max_len = 512;
@@ -648,9 +655,10 @@ pub const RoutablePage = union(enum) {
         return withEncodedSearch(self, search.slice());
     }
 
-    // the label and search segments of a thread list url, either one optional
-    fn writeListFilters(writer: *std.Io.Writer, label: []const u8, search: []const u8) !void {
+    // the label, assignee and search segments of a thread list url, each optional
+    fn writeListFilters(writer: *std.Io.Writer, label: []const u8, assignee: []const u8, search: []const u8) !void {
         if (label.len != 0) try writer.print("/" ++ label_filter_seg ++ "{s}", .{label});
+        if (assignee.len != 0) try writer.print("/" ++ assignee_seg ++ "{s}", .{assignee});
         if (search.len != 0) try writer.print("/" ++ search_seg ++ "{s}", .{search});
     }
 
@@ -659,6 +667,16 @@ pub const RoutablePage = union(enum) {
         var route = withEncodedSearch(self, search) orelse return null;
         switch (route) {
             inline .repo_issues, .repo_patches, .repo_discussions => |*thread| thread.label = @TypeOf(thread.label).from(label) orelse return null,
+            else => return null,
+        }
+        return route;
+    }
+
+    // carry an already-encoded assignee filter on an issues route
+    pub fn withEncodedAssignee(self: ?RoutablePage, value: []const u8) ?RoutablePage {
+        var route = self orelse return null;
+        switch (route) {
+            .repo_issues => |*i| i.assignee = Array(assignee_route_max_len).from(value) orelse return null,
             else => return null,
         }
         return route;
@@ -1156,12 +1174,12 @@ pub const RoutablePage = union(enum) {
                 // and reloading keep the label and the query
                 if (i.selected.len != 0) {
                     try out.writer.print("{s}/" ++ issue_seg ++ "{s}", .{ prefix, i.selected.slice() });
-                    try writeListFilters(&out.writer, i.label.slice(), i.search.slice());
+                    try writeListFilters(&out.writer, i.label.slice(), i.assignee.slice(), i.search.slice());
                     if (i.comments_start != 0) try out.writer.print("/" ++ start_seg ++ "{d}", .{i.comments_start});
                     break :blk out.written();
                 }
                 try out.writer.print("{s}/issues/{s}", .{ prefix, @tagName(i.view) });
-                try writeListFilters(&out.writer, i.label.slice(), i.search.slice());
+                try writeListFilters(&out.writer, i.label.slice(), i.assignee.slice(), i.search.slice());
                 break :blk out.written();
             },
             .repo_patches => |p| blk: {
@@ -1196,12 +1214,12 @@ pub const RoutablePage = union(enum) {
                 // and reloading keep the label and the query
                 if (p.selected.len != 0) {
                     try out.writer.print("{s}/" ++ patch_seg ++ "{s}", .{ prefix, p.selected.slice() });
-                    try writeListFilters(&out.writer, p.label.slice(), p.search.slice());
+                    try writeListFilters(&out.writer, p.label.slice(), "", p.search.slice());
                     if (p.comments_start != 0) try out.writer.print("/" ++ start_seg ++ "{d}", .{p.comments_start});
                     break :blk out.written();
                 }
                 try out.writer.print("{s}/patches/{s}", .{ prefix, @tagName(p.view) });
-                try writeListFilters(&out.writer, p.label.slice(), p.search.slice());
+                try writeListFilters(&out.writer, p.label.slice(), "", p.search.slice());
                 break :blk out.written();
             },
             .repo_discussions => |t| blk: {
@@ -1226,12 +1244,12 @@ pub const RoutablePage = union(enum) {
                 // and reloading keep the label and the query
                 if (t.selected.len != 0) {
                     try out.writer.print("{s}/" ++ discuss_seg ++ "{s}", .{ prefix, t.selected.slice() });
-                    try writeListFilters(&out.writer, t.label.slice(), t.search.slice());
+                    try writeListFilters(&out.writer, t.label.slice(), "", t.search.slice());
                     if (t.comments_start != 0) try out.writer.print("/" ++ start_seg ++ "{d}", .{t.comments_start});
                     break :blk out.written();
                 }
                 try out.writer.print("{s}/discussions/{s}", .{ prefix, @tagName(t.view) });
-                try writeListFilters(&out.writer, t.label.slice(), t.search.slice());
+                try writeListFilters(&out.writer, t.label.slice(), "", t.search.slice());
                 break :blk out.written();
             },
             .repo_undo => |u| blk: {
@@ -1560,8 +1578,8 @@ pub const RoutablePage = union(enum) {
                 }
                 return null;
             }
-            if (!params.only(&.{ .start, .label, .search })) return null;
-            return withEncodedFilters(repoThreadCommentsRoute(.issue, pair, issue_id, params.start() orelse return null), params.values.get(.label) orelse "", params.values.get(.search) orelse "");
+            if (!params.only(&.{ .start, .label, .assignee, .search })) return null;
+            return withEncodedAssignee(withEncodedFilters(repoThreadCommentsRoute(.issue, pair, issue_id, params.start() orelse return null), params.values.get(.label) orelse "", params.values.get(.search) orelse ""), params.values.get(.assignee) orelse "");
         }
         if (std.mem.startsWith(u8, tab, patch_seg)) {
             const patch_id = tab[patch_seg.len..];
@@ -1642,11 +1660,12 @@ pub const RoutablePage = union(enum) {
                 if (!params.only(&.{.start})) return null;
                 return repoIssuesConflictsRoute(pair, params.values.get(.start) orelse "");
             }
-            if (!params.only(&.{ .label, .search })) return null;
+            if (!params.only(&.{ .label, .assignee, .search })) return null;
             const search_value = params.values.get(.search) orelse "";
-            if (std.meta.stringToEnum(evt.Issue.Status, w)) |status| return withEncodedSearch(repoIssuesRoute(pair, status, label_value, ""), search_value);
-            if (std.mem.eql(u8, w, "labels")) return withEncodedSearch(repoThreadLabelsRoute(.issue, pair, label_value), search_value);
-            if (std.mem.eql(u8, w, "new")) return if (label_value.len == 0 and search_value.len == 0) repoThreadNewRoute(.issue, pair) else null;
+            const assignee_value = params.values.get(.assignee) orelse "";
+            if (std.meta.stringToEnum(evt.Issue.Status, w)) |status| return withEncodedAssignee(withEncodedSearch(repoIssuesRoute(pair, status, label_value, ""), search_value), assignee_value);
+            if (std.mem.eql(u8, w, "labels")) return withEncodedAssignee(withEncodedSearch(repoThreadLabelsRoute(.issue, pair, label_value), search_value), assignee_value);
+            if (std.mem.eql(u8, w, "new")) return if (label_value.len == 0 and assignee_value.len == 0 and search_value.len == 0) repoThreadNewRoute(.issue, pair) else null;
             return null;
         }
         if (std.mem.eql(u8, tab, "patches")) {
@@ -1800,6 +1819,7 @@ pub const RoutablePage = union(enum) {
             .repo_refs => |a_r| std.mem.eql(u8, a_r.name.slice(), b.repo_refs.name.slice()) and a_r.kind == b.repo_refs.kind and std.mem.eql(u8, a_r.from.slice(), b.repo_refs.from.slice()) and std.mem.eql(u8, a_r.search.slice(), b.repo_refs.search.slice()),
             .repo_issues => |a_i| std.mem.eql(u8, a_i.name.slice(), b.repo_issues.name.slice()) and
                 std.mem.eql(u8, a_i.label.slice(), b.repo_issues.label.slice()) and
+                std.mem.eql(u8, a_i.assignee.slice(), b.repo_issues.assignee.slice()) and
                 std.mem.eql(u8, a_i.search.slice(), b.repo_issues.search.slice()) and
                 std.mem.eql(u8, a_i.selected.slice(), b.repo_issues.selected.slice()) and
                 std.mem.eql(u8, a_i.theirs.slice(), b.repo_issues.theirs.slice()) and
@@ -2789,6 +2809,17 @@ fn pageLink(root_focus: *Focus, focus_id: usize, data: Session.Data, prefix: []c
     // local sessions build (and parse) links with the repo identity elided
     return if (data.host_kind == .local) RoutablePage.fromUrlLocal(path) else RoutablePage.fromUrl(path);
 }
+
+// an assignee as the detail view shows it: the stored email, and the name of
+// the user holding it on this instance when there is one
+pub const Assignee = struct {
+    email: []const u8,
+    name: ?[]const u8 = null,
+
+    pub fn display(self: Assignee) []const u8 {
+        return self.name orelse self.email;
+    }
+};
 
 // a display author, resolved against the admin db at read time
 pub const Author = union(enum) {

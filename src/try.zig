@@ -790,6 +790,28 @@ pub fn main(init: std.process.Init) !void {
             }
             try evt.consume(.local, .repo, .xit, .{}, io, allocator, &template_repo, evt.events_ref, &comment_events);
 
+            // assign a few issues so the assignee filter has something to show:
+            // alice and bobby share the newest issue, alice also holds the one
+            // before it, and admin an older one
+            const assignment_data = [_]struct { issue: usize, user: usize }{
+                .{ .issue = issue_data.len - 1, .user = 1 },
+                .{ .issue = issue_data.len - 1, .user = 2 },
+                .{ .issue = issue_data.len - 2, .user = 1 },
+                .{ .issue = issue_data.len - 5, .user = 0 },
+            };
+            var assignment_events: [assignment_data.len]evt.EventWithId = undefined;
+            for (&assignment_events, assignment_data, 0..) |*event, assignment, i| {
+                const thread_id = issue_events[assignment.issue].id;
+                const email = user_data[assignment.user].email;
+                event.* = .{
+                    .id = std.fmt.bytesToHex(evt.Assignment.idOf(&try evt.parseEventId(&thread_id), email), .lower),
+                    .timestamp = seedTimestamp(now, i, assignment_events.len, 90 * std.time.s_per_min, 20 * std.time.s_per_min),
+                    .author = .{ .name = user_data[0].name, .email = user_data[0].email },
+                    .event = .{ .assign = .{ .thread_id = thread_id, .email = email } },
+                };
+            }
+            try evt.consume(.local, .repo, .xit, .{}, io, allocator, &template_repo, evt.events_ref, &assignment_events);
+
             const discussion_data = [_]struct {
                 title: []const u8,
                 description: []const u8,

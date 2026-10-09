@@ -25,7 +25,7 @@ pub const DiscussionWithId = struct {
     author: ui.Author = .unknown,
     comments: Comment.Window = .empty,
     attachments: []const Attachment.WithId = &.{},
-    assignees: []const []const u8 = &.{},
+    assignees: []const ui.Assignee = &.{},
     // whether the viewer may change the thread, computed here so the web ui has it
     can_modify: bool = false,
 };
@@ -174,7 +174,7 @@ pub fn init(
     }
 
     const discussion_comments_start = if (empty.comment_id.len == 0) comments_start else 0;
-    const loaded_window = try thread.loadWindow(Self, .discuss, repo_opts.hash, arena, admin_moment, haxy_moment, records, set_maybe, root_key, null, empty.selected_id, discussion_comments_start, empty.search, viewer);
+    const loaded_window = try thread.loadWindow(Self, .discuss, repo_opts.hash, arena, admin_moment, haxy_moment, records, set_maybe, root_key, null, empty.selected_id, discussion_comments_start, empty.search, null, viewer);
     const comment_page = if (empty.comment_id.len == 0)
         null
     else
@@ -223,7 +223,7 @@ const new_tab_label = "new";
 
 // tabs switching between the discussions page's views
 pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *const Self) !Header {
-    var header = try Header.init(allocator, session, data.search);
+    var header = try Header.init(allocator, session, data.search, null);
     errdefer header.deinit(allocator);
     const selected_index = View.viewIndex(data.view);
     const page_selected = std.meta.activeTag(session.data.current_page) == .repo_discussions;

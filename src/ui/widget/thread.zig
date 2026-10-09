@@ -237,9 +237,11 @@ pub fn loadWindow(
     comments_start: usize,
     // the search the set is narrowed to, or null to list it whole
     query: ?[]const u8,
+    // a second set the listing is narrowed to, keyed like `set_maybe`
+    extra_set: ?evt.EventDB(hash_kind).SortedSet(.read_only),
     viewer: ?ui.Viewer,
 ) !Data.Window {
-    if (query) |text| return loadSearchWindow(Data, kind, hash_kind, arena, admin_moment, haxy_moment, records, set_maybe, root_key, conflict_set, selected_id, comments_start, text, viewer);
+    if (query != null or extra_set != null) return loadSearchWindow(Data, kind, hash_kind, arena, admin_moment, haxy_moment, records, set_maybe, root_key, conflict_set, selected_id, comments_start, query orelse "", extra_set, viewer);
     const set = set_maybe orelse return .empty;
     const aa = arena.allocator();
 
@@ -283,7 +285,8 @@ pub fn loadWindow(
 // how many matches one search counts before the count is marked as capped
 const max_search_results = 1000;
 
-// `set`'s entries matching `query_text`, windowed like `loadWindow`. one pass
+// `set`'s entries matching `query_text` (any when empty) and held by
+// `extra_set` when set, windowed like `loadWindow`. one pass
 // yields the window, its neighbours' roots and the match count, which stops at
 // the cap.
 fn loadSearchWindow(
@@ -300,6 +303,7 @@ fn loadSearchWindow(
     selected_id: []const u8,
     comments_start: usize,
     query_text: []const u8,
+    extra_set: ?evt.EventDB(hash_kind).SortedSet(.read_only),
     viewer: ?ui.Viewer,
 ) !Data.Window {
     const set = set_maybe orelse return .empty;
@@ -316,7 +320,7 @@ fn loadSearchWindow(
         // matching ids are gathered and the listed set is walked in its order
         // until every one has been found
         var matches: std.AutoHashMapUnmanaged([evt.event_id_size]u8, void) = .empty;
-        var results = try srch_thrd.query(DB, hash_kind, kind, haxy_moment, aa, query_text, null);
+        var results = try srch_thrd.query(DB, hash_kind, kind, haxy_moment, aa, query_text, &.{extra_set});
         while (try results.next()) |key| try matches.put(aa, (try resultKey(key))[@sizeOf(u64)..].*, {});
 
         var iter = try set.iteratorFromIndex(0);
@@ -331,7 +335,7 @@ fn loadSearchWindow(
     } else {
         // issues and patches list in the index's own order, so the listed set
         // narrows the query and the results stream out already sorted
-        var results = try srch_thrd.query(DB, hash_kind, kind, haxy_moment, aa, query_text, set);
+        var results = try srch_thrd.query(DB, hash_kind, kind, haxy_moment, aa, query_text, &.{ set, extra_set });
         while (try results.next()) |key| {
             try keys.append(aa, try resultKey(key));
             if (windowKnown(Data, keys.items, root)) break;
@@ -401,13 +405,35 @@ fn loadEntry(
             viewer,
         ),
         .attachments = try Attachment.load(hash_kind, arena, haxy_moment, &id_hex),
-        .assignees = try evt.Assignment.load(hash_kind, arena, haxy_moment, &id_hex),
+        .assignees = try loadAssignees(hash_kind, arena, admin_moment, haxy_moment, &id_hex),
         .can_modify = if (viewer) |v| v.role.canModify(v.email, record.author_email) else false,
     };
     if (comptime @hasField(Data.Entry, "conflicted")) {
         entry.conflicted = if (conflict_set) |conflicts| try conflicts.contains(order_key) else false;
     }
     return entry;
+}
+
+// a thread's assignees, each named after the user holding its email when one does
+fn loadAssignees(
+    comptime hash_kind: hash.HashKind,
+    arena: *std.heap.ArenaAllocator,
+    admin_moment: ?evt.AdminDB.HashMap(.read_only),
+    haxy_moment: evt.EventDB(hash_kind).HashMap(.read_only),
+    thread_id: []const u8,
+) ![]const ui.Assignee {
+    const emails = try evt.Assignment.load(hash_kind, arena, haxy_moment, thread_id);
+    const assignees = try arena.allocator().alloc(ui.Assignee, emails.len);
+    for (assignees, emails) |*assignee, email| {
+        const user = if (admin_moment) |moment| try evt.User.readByEmail(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, email) else null;
+        assignee.* = .{ .email = email, .name = if (user) |u| u.name else null };
+    }
+    return assignees;
+}
+
+// the url-encoded assignee filter a thread page carries, "" for kinds without one
+fn assigneeFilter(data: anytype) []const u8 {
+    return if (@hasField(@TypeOf(data.*), "assignee")) data.assignee else "";
 }
 
 // a tab link's route, carrying the page's query when it has one
@@ -422,20 +448,26 @@ pub fn countLabel(buffer: []u8, name: []const u8, win: anytype) ![]const u8 {
     return std.fmt.bufPrint(buffer, "{s} ({d}{s})", .{ name, win.count, if (win.more) "+" else "" });
 }
 
-// the common sub-header used by each thread page: the search box, then the
-// tab strip
+// the common sub-header used by each thread page: the search box, the
+// assignee box on the issues page, then the tab strip
 pub const Header = struct {
     box: wgt.Box(Widget),
     // focus id -> semantic stack index; some pages omit unavailable tabs
     tab_ids: std.AutoArrayHashMapUnmanaged(usize, usize),
-    // the tab whose view the stack shows. focus lands on the search box too,
+    // the tab whose view the stack shows. focus lands on the boxes too,
     // so the selection is remembered rather than read off the focus chain.
     selected_tab: ?usize = null,
+    // how many text boxes come before the tabs
+    box_count: usize,
 
-    // the search box's place in the box, ahead of the tabs
-    const search_index: usize = 0;
+    // which box enter submitted from
+    pub const Submission = struct { kind: enum { search, assignee }, text: []u8 };
 
-    pub fn init(allocator: std.mem.Allocator, session: *ui.Session, search: ?[]const u8) !Header {
+    // the assignee box's label and prefilled text
+    pub const AssigneeBox = struct { label: []const u8, text: []const u8 };
+
+    // a null `assignee` leaves out the assignee box
+    pub fn init(allocator: std.mem.Allocator, session: *ui.Session, search: ?[]const u8, assignee: ?AssigneeBox) !Header {
         var box = try wgt.Box(Widget).init(allocator, .{ .border = null, .direction = .horiz });
         errdefer box.deinit(allocator);
 
@@ -446,7 +478,13 @@ pub const Header = struct {
             try box.children.put(allocator, search_box.getFocus().id, .{ .widget = .{ .search_box = search_box }, .rect = null, .min_size = widget.SearchBox.min_size });
         }
 
-        return .{ .box = box, .tab_ids = .empty };
+        if (assignee) |value| {
+            var assignee_box = try widget.SearchBox.init(allocator, session, value.label, "assignee", value.text);
+            errdefer assignee_box.deinit(allocator);
+            try box.children.put(allocator, assignee_box.getFocus().id, .{ .widget = .{ .search_box = assignee_box }, .rect = null, .min_size = widget.SearchBox.min_size });
+        }
+
+        return .{ .box = box, .tab_ids = .empty, .box_count = box.children.count() };
     }
 
     pub fn addTab(self: *Header, allocator: std.mem.Allocator, label: []const u8, link: []const u8, view_index: usize) !void {
@@ -497,11 +535,16 @@ pub const Header = struct {
     }
 
     pub fn input(self: *Header, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
-        const search_box = self.searchBox();
-        if (self.box.getFocus().child_id == search_box.getFocus().id) {
-            // tab, and right-arrow past the last character, step to the tabs
+        if (self.focusedBox()) |index| {
+            const search_box = self.searchBox(index);
+            // tab, and right-arrow past the last character, step to the next box or the tabs
             if (key == .tab or (key == .arrow_right and search_box.atEnd())) {
-                root_focus.setFocus(self.tab_ids.keys()[0]);
+                root_focus.setFocus(if (index + 1 < self.box_count) self.searchBox(index + 1).getFocus().id else self.tab_ids.keys()[0]);
+                return;
+            }
+            // back-tab, and left-arrow before the first character, step to the previous box
+            if (index > 0 and (key == .back_tab or (key == .arrow_left and search_box.text_input.cursor == 0))) {
+                root_focus.setFocus(self.searchBox(index - 1).getFocus().id);
                 return;
             }
             return search_box.input(allocator, key, root_focus);
@@ -510,7 +553,7 @@ pub const Header = struct {
         if (key == .back_tab or (key == .arrow_left and current_tab == 0)) {
             // remembered here as well as in build, which may not run between keys
             self.selected_tab = current_tab;
-            root_focus.setFocus(search_box.getFocus().id);
+            root_focus.setFocus(self.searchBox(self.box_count - 1).getFocus().id);
             return;
         }
         if (inp.moveTab(key, current_tab, self.tab_ids.count())) |new_tab| {
@@ -518,16 +561,22 @@ pub const Header = struct {
         }
     }
 
-    // the typed query when enter should submit it: the box holds focus. the
+    // the typed text when enter should submit it: a box holds focus. the
     // caller owns the returned text.
-    pub fn submittedText(self: *Header, allocator: std.mem.Allocator) !?[]u8 {
-        const search_box = self.searchBox();
-        if (self.box.getFocus().child_id != search_box.getFocus().id) return null;
-        return try search_box.text(allocator);
+    pub fn submittedText(self: *Header, allocator: std.mem.Allocator) !?Submission {
+        const index = self.focusedBox() orelse return null;
+        return .{ .kind = if (index == 0) .search else .assignee, .text = try self.searchBox(index).text(allocator) };
     }
 
-    fn searchBox(self: *Header) *widget.SearchBox {
-        return &self.box.children.values()[search_index].widget.search_box;
+    // the index of the box holding focus, if one does
+    fn focusedBox(self: *Header) ?usize {
+        const child_id = self.box.getFocus().child_id orelse return null;
+        const index = self.box.children.getIndex(child_id) orelse return null;
+        return if (index < self.box_count) index else null;
+    }
+
+    fn searchBox(self: *Header, index: usize) *widget.SearchBox {
+        return &self.box.children.values()[index].widget.search_box;
     }
 
     pub fn clearGrid(self: *Header) void {
@@ -562,25 +611,9 @@ pub const Header = struct {
 // the assignee row's form action, which also identifies the row
 const assign_suffix = "/assign";
 
-// an input that assigns on enter, then one unassign button per assignee. a
-// viewer who may not change the thread only sees who is assigned.
-fn appendAssigneeRow(
-    allocator: std.mem.Allocator,
-    box: *wgt.Box(Widget),
-    session: *ui.Session,
-    thread_url: []const u8,
-    assignees: []const []const u8,
-    can_modify: bool,
-) !void {
+// an input that assigns on enter, in a form of its own
+fn appendAssigneeRow(allocator: std.mem.Allocator, box: *wgt.Box(Widget), session: *ui.Session, thread_url: []const u8) !void {
     const pa = session.page_arena.allocator();
-    if (!can_modify) {
-        if (assignees.len == 0) return;
-        const joined = try std.mem.join(pa, " ", assignees);
-        var assigned = try wgt.TextBox.init(allocator, joined, .{ .border = .single, .round_corners = true, .wrap_kind = .word, .top_label = .{ .text = " assigned " } });
-        errdefer assigned.deinit(allocator);
-        try box.children.put(allocator, assigned.getFocus().id, .{ .widget = .{ .text_box = assigned }, .rect = null, .min_size = null });
-        return;
-    }
     var row = try wgt.Box(Widget).init(allocator, .{ .border = null, .direction = .horiz });
     errdefer row.deinit(allocator);
     row.getFocus().kind = .{ .custom = try pa.print("form:{s}" ++ assign_suffix, .{thread_url}) };
@@ -592,22 +625,57 @@ fn appendAssigneeRow(
     row.getFocus().child_id = text_input.getFocus().id;
     try row.children.put(allocator, text_input.getFocus().id, .{ .widget = .{ .text_input = text_input }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
 
-    if (assignees.len > 0) {
-        const items = try pa.alloc(WordFlow.Item, assignees.len);
-        for (items, assignees) |*item, email| item.* = .{
-            .text = try pa.print(" unassign {s} ", .{email}),
-            .link = try pa.print("{s}{s}/assignee:{s}/unassign", .{ ui.submit_action_prefix, thread_url, try ui.urlEncodeRef(pa, email) }),
-        };
-        var flow = try WordFlow.init(allocator);
-        errdefer flow.deinit(allocator);
-        try flow.setItems(allocator, items);
-        // the buttons post their own forms, so enter in the input still submits
-        // the assign form
-        flow.getFocus().kind = .{ .custom = try pa.print("form:{s}", .{thread_url}) };
-        try row.children.put(allocator, flow.getFocus().id, .{ .widget = .{ .word_flow = flow }, .rect = null, .min_size = null });
-    }
-
     try box.children.put(allocator, row.getFocus().id, .{ .widget = .{ .box = row }, .rect = null, .min_size = null });
+}
+
+const unassign_suffix = "/unassign";
+const assignee_seg = "/assignee:";
+
+// one row per assignee: its name or email, linking to the issues assigned to
+// it, and for an editor a ✕ that unassigns
+fn appendAssignedRows(
+    allocator: std.mem.Allocator,
+    box: *wgt.Box(Widget),
+    session: *ui.Session,
+    thread_url: []const u8,
+    assignees: []const ui.Assignee,
+    links: []const []const u8,
+    can_modify: bool,
+) !void {
+    const pa = session.page_arena.allocator();
+    for (assignees, links) |assignee, link| {
+        var row = try wgt.Box(Widget).init(allocator, .{ .border = null, .direction = .horiz });
+        errdefer row.deinit(allocator);
+
+        var tb = try wgt.TextBox.init(allocator, assignee.display(), .{ .border = .single, .round_corners = true, .wrap_kind = .none, .top_label = .{ .text = " assigned " } });
+        errdefer tb.deinit(allocator);
+        tb.getFocus().mode = .all;
+        tb.getFocus().kind = .{ .custom = link };
+        try row.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
+
+        if (can_modify) {
+            var remove = try wgt.TextBox.init(allocator, "✕", .{ .border = .single, .round_corners = true, .wrap_kind = .none });
+            errdefer remove.deinit(allocator);
+            remove.getFocus().mode = .all;
+            remove.getFocus().kind = .{ .custom = try pa.print("{s}{s}" ++ assignee_seg ++ "{s}" ++ unassign_suffix, .{ ui.submit_action_prefix, thread_url, try ui.urlEncodeRef(pa, assignee.email) }) };
+            try row.children.put(allocator, remove.getFocus().id, .{ .widget = .{ .text_box = remove }, .rect = null, .min_size = .{ .width = 3, .height = null } });
+        }
+
+        row.getFocus().child_id = row.children.keys()[0];
+        try box.children.put(allocator, row.getFocus().id, .{ .widget = .{ .box = row }, .rect = null, .min_size = null });
+    }
+}
+
+// the url-encoded email an assignee row's ✕ unassigns
+fn unassignEmail(row: *wgt.Box(Widget)) ?[]const u8 {
+    if (row.children.count() < 2) return null;
+    const action = switch (row.children.values()[1].widget.getFocus().kind) {
+        .custom => |custom| custom,
+        else => return null,
+    };
+    if (!std.mem.startsWith(u8, action, ui.submit_action_prefix) or !std.mem.endsWith(u8, action, unassign_suffix)) return null;
+    const at = std.mem.lastIndexOf(u8, action, assignee_seg) orelse return null;
+    return action[at + assignee_seg.len .. action.len - unassign_suffix.len];
 }
 
 // whether `row` is the assignee row
@@ -774,16 +842,17 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
         }
 
         // a list link keeps the filters the page carries: the label, and the
-        // search query when one is set
-        fn listLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, status: Status, label: []const u8, id: []const u8, search: []const u8) ![]const u8 {
+        // search query and url-encoded assignee when set
+        fn listLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, status: Status, label: []const u8, id: []const u8, search: []const u8, assignee: []const u8) ![]const u8 {
             var route = listRoute(identity, status, label, id) orelse return error.RouteTooLong;
             if (search.len != 0) route = route.withSearch(search) orelse return error.RouteTooLong;
+            if (assignee.len != 0) route = route.withEncodedAssignee(assignee) orelse return error.RouteTooLong;
             return page_arena.allocator().print("a:{s}", .{try route.toUrl(page_arena)});
         }
 
-        fn labelLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, status: Status, label: []const u8, search: []const u8) ![]const u8 {
+        fn labelLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, status: Status, label: []const u8, search: []const u8, assignee: []const u8) ![]const u8 {
             const encoded = try ui.urlEncodeRef(page_arena.allocator(), label);
-            return listLink(page_arena, identity, status, encoded, "", search);
+            return listLink(page_arena, identity, status, encoded, "", search, assignee);
         }
 
         fn addToolButton(allocator: std.mem.Allocator, row: *wgt.Box(Widget), label: []const u8, bottom_label: []const u8, action: []const u8) !void {
@@ -910,7 +979,7 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                 var text_box = try wgt.TextBox.init(allocator, back_label, .{ .border = .single, .round_corners = true, .wrap_kind = .none });
                 errdefer text_box.deinit(allocator);
                 text_box.getFocus().mode = .all;
-                text_box.getFocus().kind = .{ .custom = try listLink(self.session.page_arena, self.data.identity, entryStatus(entry), "", entry.id, self.data.search orelse "") };
+                text_box.getFocus().kind = .{ .custom = try listLink(self.session.page_arena, self.data.identity, entryStatus(entry), "", entry.id, self.data.search orelse "", "") };
                 try inner_box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
                 self.title_id = text_box.getFocus().id;
             } else {
@@ -941,7 +1010,7 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                 var label_iter = Event.labelIterator(entry.record.event.labels);
                 while (label_iter.next()) |label| {
                     if (label.len == 0) continue;
-                    try items.append(allocator, .{ .text = label, .link = try labelLink(self.session.page_arena, self.data.identity, entryStatus(entry), label, self.data.search orelse "") });
+                    try items.append(allocator, .{ .text = label, .link = try labelLink(self.session.page_arena, self.data.identity, entryStatus(entry), label, self.data.search orelse "", assigneeFilter(self.data)) });
                 }
                 if (items.items.len > 0) {
                     var labels = try WordFlow.init(allocator);
@@ -952,8 +1021,14 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
             }
 
             if (kind == .issue) {
+                const pa = self.session.page_arena.allocator();
                 const parent_route = ui.RoutablePage.repoThreadCommentsRoute(kind, self.data.identity, entry.id, 0) orelse return error.RouteTooLong;
-                try appendAssigneeRow(allocator, inner_box, self.session, try parent_route.toUrl(self.session.page_arena), entry.assignees, entry.can_modify);
+                const thread_url = try parent_route.toUrl(self.session.page_arena);
+                if (entry.can_modify) try appendAssigneeRow(allocator, inner_box, self.session, thread_url);
+                // every viewer gets each assignee as a link to the issues assigned to it
+                const links = try pa.alloc([]const u8, entry.assignees.len);
+                for (links, entry.assignees) |*link, assignee| link.* = try listLink(self.session.page_arena, self.data.identity, entryStatus(entry), self.data.label, "", self.data.search orelse "", try ui.urlEncodeRef(pa, assignee.display()));
+                try appendAssignedRows(allocator, inner_box, self.session, thread_url, entry.assignees, links, entry.can_modify);
             }
 
             const whole = entry.record.event.description;
@@ -1101,20 +1176,11 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                     else => try copyable.input(allocator, key, root_focus),
                 },
                 .box => |*row| if (isAssigneeRow(row)) {
-                    try self.assigneeInput(allocator, child_index, row, key, root_focus);
+                    try self.assigneeInput(allocator, row, key, root_focus);
                 } else if (Attachment.removeId(row)) |attachment_id| {
-                    const remove_id = row.children.keys()[1];
-                    switch (key) {
-                        .arrow_left => if (!self.moveHorizontal(root_focus, false)) {
-                            self.exit = .list;
-                        },
-                        .arrow_right => _ = self.moveHorizontal(root_focus, true),
-                        .arrow_up => _ = self.moveVertical(root_focus, false),
-                        .arrow_down => _ = self.moveVertical(root_focus, true),
-                        .enter => if (row.getFocus().child_id == remove_id) try self.removeEvent(allocator, .attach, attachment_id),
-                        .mouse => |mouse| if (inp.leftClickOn(root_focus, remove_id, mouse)) try self.removeEvent(allocator, .attach, attachment_id),
-                        else => {},
-                    }
+                    if (self.removableRowInput(row, key, root_focus)) try self.removeEvent(allocator, .attach, attachment_id);
+                } else if (unassignEmail(row)) |encoded| {
+                    if (self.removableRowInput(row, key, root_focus)) try self.unassign(allocator, std.Uri.percentDecodeInPlace(try self.session.page_arena.allocator().dupe(u8, encoded)));
                 } else self.commentInput(key, root_focus),
                 else => self.commentInput(key, root_focus),
             }
@@ -1306,11 +1372,13 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                     }
                     if (last) comment.focusBody(root_focus) else comment.focusMetadata(root_focus);
                 },
+                // a row enters on its first cell from either direction; the tool
+                // row keeps the cell it was on
                 .box => |*box| if (box.children.count() > 0) {
                     target = if (child_index == tool_row_index)
                         box.getFocus().child_id orelse return
                     else
-                        box.children.keys()[if (last) box.children.count() - 1 else 0];
+                        box.children.keys()[0];
                     root_focus.setFocus(target);
                 },
                 else => root_focus.setFocus(target),
@@ -1384,53 +1452,40 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
             return true;
         }
 
-        // the input takes typing and assigns on enter; the buttons after it
-        // unassign
-        fn assigneeInput(self: *This, allocator: std.mem.Allocator, child_index: usize, row: *wgt.Box(Widget), key: Key, root_focus: *Focus) !void {
+        // the input takes typing and assigns on enter
+        fn assigneeInput(self: *This, allocator: std.mem.Allocator, row: *wgt.Box(Widget), key: Key, root_focus: *Focus) !void {
             const text_input = &row.children.values()[0].widget.text_input;
-            const flow: ?*WordFlow = if (row.children.count() > 1) &row.children.values()[1].widget.word_flow else null;
-            if (root_focus.grandchild_id == text_input.getFocus().id) {
-                switch (key) {
-                    .arrow_up => _ = self.moveVertical(root_focus, false),
-                    .arrow_down => _ = self.moveVertical(root_focus, true),
-                    .arrow_left => if (text_input.cursor == 0) {
-                        self.exit = .list;
-                    } else try text_input.input(allocator, key, root_focus),
-                    .arrow_right => {
-                        // right past the last character steps onto the first button
-                        if (flow) |buttons| if (text_input.cursor == text_input.content.items.len) return self.focusLabel(child_index, buttons, root_focus, 0);
-                        try text_input.input(allocator, key, root_focus);
-                    },
-                    .enter => {
-                        const text = try text_input.text(allocator);
-                        defer allocator.free(text);
-                        try self.assign(allocator, text);
-                    },
-                    else => try text_input.input(allocator, key, root_focus),
-                }
-                return;
-            }
-
-            const buttons = flow orelse return;
-            const cur = buttons.indexOfFocusId(root_focus.grandchild_id orelse return) orelse return;
-            const assignees = (self.entry orelse return).assignees;
             switch (key) {
-                .arrow_left => if (cur > 0) self.focusLabel(child_index, buttons, root_focus, cur - 1) else root_focus.setFocus(text_input.getFocus().id),
-                .arrow_right => if (cur + 1 < buttons.text_boxes.items.len) self.focusLabel(child_index, buttons, root_focus, cur + 1),
-                .arrow_up => if (buttons.rowStep(cur, false)) |index| {
-                    self.focusLabel(child_index, buttons, root_focus, index);
-                } else {
-                    _ = self.moveVertical(root_focus, false);
+                .arrow_up => _ = self.moveVertical(root_focus, false),
+                .arrow_down => _ = self.moveVertical(root_focus, true),
+                .arrow_left => if (text_input.cursor == 0) {
+                    self.exit = .list;
+                } else try text_input.input(allocator, key, root_focus),
+                .enter => {
+                    const text = try text_input.text(allocator);
+                    defer allocator.free(text);
+                    try self.assign(allocator, text);
                 },
-                .arrow_down => if (buttons.rowStep(cur, true)) |index| {
-                    self.focusLabel(child_index, buttons, root_focus, index);
-                } else {
-                    _ = self.moveVertical(root_focus, true);
+                else => try text_input.input(allocator, key, root_focus),
+            }
+        }
+
+        // arrows move along a row that ends in a ✕. returns whether enter or a
+        // click hit the ✕.
+        fn removableRowInput(self: *This, row: *wgt.Box(Widget), key: Key, root_focus: *Focus) bool {
+            const remove_id = row.children.keys()[row.children.count() - 1];
+            switch (key) {
+                .arrow_left => if (!self.moveHorizontal(root_focus, false)) {
+                    self.exit = .list;
                 },
-                .enter => try self.unassign(allocator, assignees[cur]),
-                .mouse => |mouse| if (inp.leftClickOn(root_focus, buttons.text_boxes.items[cur].getFocus().id, mouse)) try self.unassign(allocator, assignees[cur]),
+                .arrow_right => _ = self.moveHorizontal(root_focus, true),
+                .arrow_up => _ = self.moveVertical(root_focus, false),
+                .arrow_down => _ = self.moveVertical(root_focus, true),
+                .enter => return row.getFocus().child_id == remove_id,
+                .mouse => |mouse| return inp.leftClickOn(root_focus, remove_id, mouse),
                 else => {},
             }
+            return false;
         }
 
         fn labelsInput(self: *This, child_index: usize, labels: *WordFlow, key: Key, root_focus: *Focus) void {
@@ -1750,10 +1805,11 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         }
 
         // a list link keeps the filters the page carries: the label, and the
-        // search query when one is set
-        fn listLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, status: Status, label: []const u8, id: []const u8, search: []const u8) ![]const u8 {
+        // search query and url-encoded assignee when set
+        fn listLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, status: Status, label: []const u8, id: []const u8, search: []const u8, assignee: []const u8) ![]const u8 {
             var route = listRoute(identity, status, label, id) orelse return error.RouteTooLong;
             if (search.len != 0) route = route.withSearch(search) orelse return error.RouteTooLong;
+            if (assignee.len != 0) route = route.withEncodedAssignee(assignee) orelse return error.RouteTooLong;
             return page_arena.allocator().print("a:{s}", .{try route.toUrl(page_arena)});
         }
 
@@ -1780,12 +1836,12 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 const route = draftsRoute(data.identity) orelse return error.RouteTooLong;
                 return page_arena.allocator().print("a:{s}", .{try route.toUrl(page_arena)});
             }
-            return listLink(page_arena, data.identity, status_maybe orelse @fromBackingInt(@intCast(0)), data.label, id, data.search orelse "");
+            return listLink(page_arena, data.identity, status_maybe orelse @fromBackingInt(@intCast(0)), data.label, id, data.search orelse "", assigneeFilter(data));
         }
 
-        fn labelLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, status: Status, label: []const u8, search: []const u8) ![]const u8 {
+        fn labelLink(page_arena: *std.heap.ArenaAllocator, identity: []const u8, status: Status, label: []const u8, search: []const u8, assignee: []const u8) ![]const u8 {
             const encoded = try ui.urlEncodeRef(page_arena.allocator(), label);
-            return listLink(page_arena, identity, status, encoded, "", search);
+            return listLink(page_arena, identity, status, encoded, "", search, assignee);
         }
 
         pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !This {
@@ -1822,9 +1878,9 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 defer items.deinit(allocator);
                 // when filtered, the first item clears the filter
                 if (data.label.len != 0)
-                    try items.append(allocator, .{ .text = "✕", .link = try listLink(session.page_arena, data.identity, @fromBackingInt(@intCast(0)), "", "", data.search orelse "") });
+                    try items.append(allocator, .{ .text = "✕", .link = try listLink(session.page_arena, data.identity, @fromBackingInt(@intCast(0)), "", "", data.search orelse "", assigneeFilter(data)) });
                 for (data.labels) |label|
-                    try items.append(allocator, .{ .text = label, .link = try labelLink(session.page_arena, data.identity, @fromBackingInt(@intCast(0)), label, data.search orelse "") });
+                    try items.append(allocator, .{ .text = label, .link = try labelLink(session.page_arena, data.identity, @fromBackingInt(@intCast(0)), label, data.search orelse "", assigneeFilter(data)) });
                 try tf.setItems(allocator, items.items);
                 try stack.children.put(allocator, tf.getFocus().id, .{ .word_flow = tf });
             }
@@ -2601,9 +2657,12 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                     } else false;
                     if (enterable) root_focus.setFocus(self.box.children.keys()[stack_index]);
                 } else if (key == .enter) {
-                    if (try self.header().submittedText(allocator)) |text| {
-                        defer allocator.free(text);
-                        try self.submitSearch(text);
+                    if (try self.header().submittedText(allocator)) |submission| {
+                        defer allocator.free(submission.text);
+                        switch (submission.kind) {
+                            .search => try self.submitSearch(submission.text),
+                            .assignee => try self.submitAssignee(submission.text),
+                        }
                     }
                 } else {
                     try self.header().input(allocator, key, root_focus);
@@ -2643,8 +2702,23 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             if (text.len == 0 and self.data.search == null) return;
             const selected = self.header().getSelectedIndex() orelse 0;
             const status: Status = if (selected < status_count) splitStatus(selected) else @fromBackingInt(@intCast(0));
-            const route = listRoute(self.data.identity, status, self.data.label, "") orelse return;
+            var route = listRoute(self.data.identity, status, self.data.label, "") orelse return;
+            const assignee = assigneeFilter(self.data);
+            if (assignee.len != 0) route = route.withEncodedAssignee(assignee) orelse return;
             try self.session.navigate(route.withSearch(text) orelse return);
+        }
+
+        // navigate to the issues assigned to the typed name or email, keeping
+        // the label, the search and the status list. an empty box clears the
+        // filter and does nothing on an unfiltered page.
+        fn submitAssignee(self: *This, typed: []const u8) !void {
+            const text = std.mem.trim(u8, typed, " \t");
+            if (text.len == 0 and assigneeFilter(self.data).len == 0) return;
+            const selected = self.header().getSelectedIndex() orelse 0;
+            const status: Status = if (selected < status_count) splitStatus(selected) else @fromBackingInt(@intCast(0));
+            var route = listRoute(self.data.identity, status, self.data.label, "") orelse return;
+            if (self.data.search) |search| route = route.withSearch(search) orelse return;
+            try self.session.navigate(route.withEncodedAssignee(try ui.urlEncodeRef(self.session.page_arena.allocator(), text)) orelse return);
         }
 
         // arrow keys move the label selection; up from the top row crosses to the
