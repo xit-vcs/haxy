@@ -2705,11 +2705,13 @@ pub fn inputKey(allocator: std.mem.Allocator, root: *Widget, key: Key, session: 
             .background => |rgb| session.terminal_background = rgb,
             .resize => try root.input(allocator, key, root_focus),
         },
-        // a scroll tick goes to the pane under the pointer, focusing it first
+        // a scroll tick goes to the pane under the pointer, focusing it first.
+        // from a text input it moves like the arrows instead, so scrolling up
+        // from a search box reaches the header.
         .scroll_up, .scroll_down => |position| {
-            if (scrollUnder(root_focus, position)) |scroll_id| {
+            if (!focusInTextInput(root_focus)) if (scrollUnder(root_focus, position)) |scroll_id| {
                 if (!focusInside(root_focus, scroll_id)) root_focus.setFocus(scroll_id);
-            }
+            };
             try root.input(allocator, key, root_focus);
         },
         else => try root.input(allocator, key, root_focus),
@@ -2739,6 +2741,15 @@ fn scrollUnder(root_focus: *const Focus, position: xitui.input.Position) ?usize 
         }
     }
     return found;
+}
+
+fn focusInTextInput(root_focus: *const Focus) bool {
+    const focused = root_focus.grandchild_id orelse return false;
+    const child = root_focus.children.get(focused) orelse return false;
+    return switch (child.focus.kind) {
+        .text_input, .text_input_password, .text_area => true,
+        else => false,
+    };
 }
 
 // whether the focused widget is `id` or lies under it
