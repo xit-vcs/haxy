@@ -439,7 +439,8 @@ pub const View = struct {
             try box.children.put(allocator, detail_outer.getFocus().id, .{ .widget = .{ .box = detail_outer }, .rect = null, .min_size = .{ .width = detail_min_width, .height = null } });
         }
 
-        box.getFocus().child_id = box.children.keys()[if (data.commits.len > 0) detail_index else list_index];
+        // the page opens on the list, unless the url names a commit
+        box.getFocus().child_id = box.children.keys()[if (data.ref_or_oid == .object) detail_index else list_index];
         try outer.children.put(allocator, box.getFocus().id, .{ .widget = .{ .box = box }, .rect = null, .min_size = null });
 
         // focus lives in the split, except that search results start in the

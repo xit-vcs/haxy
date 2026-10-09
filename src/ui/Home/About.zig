@@ -75,10 +75,8 @@ pub const View = struct {
             .page_down => sc.y += 10,
             .home => sc.y = 0,
             .end => sc.y = std.math.maxInt(isize),
-            .mouse => |mouse| switch (mouse.action) {
-                .scroll => |dir| sc.y += if (dir == .up) -5 else 5,
-                else => {},
-            },
+            .scroll_up => sc.y -= 5,
+            .scroll_down => sc.y += 5,
             .tab, .back_tab => try self.markdownView().stepLink(allocator, root_focus, sc, 0, 0, key == .tab),
             else => {},
         }

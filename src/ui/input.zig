@@ -9,12 +9,8 @@ pub const Direction = enum { up, down, none };
 
 pub fn vertDirection(key: Key) Direction {
     return switch (key) {
-        .arrow_up => .up,
-        .arrow_down => .down,
-        .mouse => |mouse| if (mouse.action == .scroll)
-            (if (mouse.action.scroll == .up) .up else .down)
-        else
-            .none,
+        .arrow_up, .scroll_up => .up,
+        .arrow_down, .scroll_down => .down,
         else => .none,
     };
 }
@@ -30,10 +26,8 @@ pub fn rowDelta(key: Key, count: isize) ?isize {
         .page_down => return 10,
         .home => return -count,
         .end => return count,
-        .mouse => |mouse| switch (mouse.action) {
-            .scroll => |dir| return if (dir == .up) -1 else 1,
-            else => {},
-        },
+        .scroll_up => return -1,
+        .scroll_down => return 1,
         else => {},
     }
     return null;
@@ -41,7 +35,7 @@ pub fn rowDelta(key: Key, count: isize) ?isize {
 
 /// whether `mouse` is a left press inside the rect of `focus_id`'s focus entry
 pub fn leftClickOn(root_focus: *Focus, focus_id: usize, mouse: Mouse) bool {
-    if (mouse.action != .press or mouse.action.press != .left) return false;
+    if (mouse.button != .left) return false;
     const entry = root_focus.children.get(focus_id) orelse return false;
     const r = entry.rect;
     return mouse.x >= r.x and mouse.y >= r.y and

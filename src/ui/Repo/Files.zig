@@ -845,7 +845,10 @@ pub const View = struct {
         // terminal scrolls by offset (the wheel five rows at a time) and reaching
         // the top then pressing up crosses back up to the link; on the web
         // vertical scrolling is the browser's job so up just crosses to the link.
-        const step: isize = if (key == .mouse) 5 else 1;
+        const step: isize = switch (key) {
+            .scroll_up, .scroll_down => 5,
+            else => 1,
+        };
         switch (inp.vertDirection(key)) {
             .up => {
                 if (!on_content) return;

@@ -528,14 +528,9 @@ pub const FlowBox = struct {
                 // scroll wheel moves the focused cell by a full row so the
                 // viewport (via scrollToRect) follows in row-sized steps,
                 // matching how a scroll wheel feels in a grid view.
-                .mouse => |mouse| switch (mouse.action) {
-                    .scroll => |dir| switch (dir) {
-                        .up => index -|= cols,
-                        .down => if (index + cols < count) {
-                            index += cols;
-                        },
-                    },
-                    else => {},
+                .scroll_up => index -|= cols,
+                .scroll_down => if (index + cols < count) {
+                    index += cols;
                 },
                 else => {},
             }

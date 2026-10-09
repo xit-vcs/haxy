@@ -2669,7 +2669,7 @@ pub fn inputKey(allocator: std.mem.Allocator, root: *Widget, key: Key, session: 
             try root.input(allocator, key, root_focus);
         },
         .mouse => |mouse| {
-            if (mouse.action == .press and mouse.action.press == .left) {
+            if (mouse.button == .left) {
                 if (cellPageLink(root, mouse.x, mouse.y, session.data)) |route| return session.navigate(route);
                 if (root_focus.hitTest(mouse.x, mouse.y)) |hit| {
                     const focus_id = hit.id;
@@ -2705,6 +2705,13 @@ pub fn inputKey(allocator: std.mem.Allocator, root: *Widget, key: Key, session: 
             .background => |rgb| session.terminal_background = rgb,
             .resize => try root.input(allocator, key, root_focus),
         },
+        // a scroll tick goes to the pane under the pointer, focusing it first
+        .scroll_up, .scroll_down => |position| {
+            if (scrollUnder(root_focus, position)) |scroll_id| {
+                if (!focusInside(root_focus, scroll_id)) root_focus.setFocus(scroll_id);
+            }
+            try root.input(allocator, key, root_focus);
+        },
         else => try root.input(allocator, key, root_focus),
     }
 
@@ -2712,6 +2719,36 @@ pub fn inputKey(allocator: std.mem.Allocator, root: *Widget, key: Key, session: 
     if (!activate_in_page_link and focused_before == focused_after) return;
     const focus_id = focused_after orelse return;
     if (inPageLink(root_focus, focus_id, session.data)) |route| session.data.current_page = route;
+}
+
+// the innermost vertically scrolling widget laid out under `position`
+fn scrollUnder(root_focus: *const Focus, position: xitui.input.Position) ?usize {
+    var found: ?usize = null;
+    var found_area: usize = std.math.maxInt(usize);
+    var iter = root_focus.children.iterator();
+    while (iter.next()) |entry| {
+        const info = entry.value_ptr.focus.scroll orelse continue;
+        if (info.direction == .horiz) continue;
+        const r = entry.value_ptr.rect;
+        if (position.x < r.x or position.y < r.y or position.x >= r.x + r.size.width or position.y >= r.y + r.size.height) continue;
+        // a nested scroll lies within its parent, so the smallest is innermost
+        const area = r.size.width * r.size.height;
+        if (area < found_area) {
+            found = entry.key_ptr.*;
+            found_area = area;
+        }
+    }
+    return found;
+}
+
+// whether the focused widget is `id` or lies under it
+fn focusInside(root_focus: *const Focus, id: usize) bool {
+    var current = root_focus.grandchild_id orelse return false;
+    while (true) {
+        if (current == id) return true;
+        const child = root_focus.children.get(current) orelse return false;
+        current = child.parent_id;
+    }
 }
 
 // a link to bytes the server serves directly rather than to a page route, so

@@ -1085,10 +1085,11 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
 
         pub fn inputWithExit(self: *This, allocator: std.mem.Allocator, raw_key: Key, root_focus: *Focus) !Exit {
             self.exit = .none;
-            const key: Key = if (raw_key == .mouse and raw_key.mouse.action == .scroll)
-                (if (raw_key.mouse.action.scroll == .up) .arrow_up else .arrow_down)
-            else
-                raw_key;
+            const key: Key = switch (raw_key) {
+                .scroll_up => .arrow_up,
+                .scroll_down => .arrow_down,
+                else => raw_key,
+            };
 
             // a focused assignee input keeps its editing keys
             if (key == .home or key == .end) if (self.focusedAssigneeInput(root_focus)) |text_input| {
@@ -2076,7 +2077,8 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 try box.children.put(allocator, frame.getFocus().id, .{ .widget = .{ .box = frame }, .rect = null, .min_size = .{ .width = detail_min_width, .height = null } });
             }
 
-            box.getFocus().child_id = box.children.keys()[if (win.items.len > 0) detail_index else list_index];
+            // the page opens on the list, unless the url names a thread
+            box.getFocus().child_id = box.children.keys()[if (data.selected_id.len > 0) detail_index else list_index];
             return box;
         }
 
@@ -2639,10 +2641,11 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
 
         pub fn input(self: *This, allocator: std.mem.Allocator, raw_key: Key, root_focus: *Focus) !void {
             // wheel input moves focus like the arrows
-            const key: Key = if (raw_key == .mouse and raw_key.mouse.action == .scroll)
-                (if (raw_key.mouse.action.scroll == .up) .arrow_up else .arrow_down)
-            else
-                raw_key;
+            const key: Key = switch (raw_key) {
+                .scroll_up => .arrow_up,
+                .scroll_down => .arrow_down,
+                else => raw_key,
+            };
 
             if (self.headerActive()) {
                 // down from the sub-header re-enters the stack if the selected

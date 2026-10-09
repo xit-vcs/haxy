@@ -169,7 +169,7 @@ fn onMouseClick(focus_id: usize) !void {
     const root_focus = root_ptr.getFocus();
     if (ui.inPageLink(root_focus, focus_id, session.data) != null) {
         const rect = (root_focus.children.get(focus_id) orelse return).rect;
-        try root_ptr.input(allocator, .{ .mouse = .{ .x = @intCast(rect.x), .y = @intCast(rect.y), .action = .{ .press = .left } } }, root_focus);
+        try root_ptr.input(allocator, .{ .mouse = .{ .x = @intCast(rect.x), .y = @intCast(rect.y), .button = .left } }, root_focus);
     }
 }
 
