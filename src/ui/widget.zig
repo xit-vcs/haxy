@@ -131,6 +131,42 @@ pub fn clickOnSelectedRow(list: *wgt.Box(Widget), root_focus: *Focus, mouse: xit
     return inp.leftClickOn(root_focus, cid, mouse);
 }
 
+// a detail pane's way back to a list that isn't shown beside it. it leads the
+// pane's frame, above the pane's content, hidden while the list shows.
+const list_back_index = 0;
+pub const list_pane_index = 1;
+
+pub fn addListBack(allocator: std.mem.Allocator, frame: *wgt.Box(Widget), label: []const u8) !void {
+    var back = try wgt.TextBox.init(allocator, label, .{ .border = .single, .round_corners = true, .wrap_kind = .none });
+    errdefer back.deinit(allocator);
+    back.getFocus().mode = .all;
+    try frame.children.put(allocator, back.getFocus().id, .{ .widget = .{ .text_box = back }, .rect = null, .min_size = null, .hidden = true });
+}
+
+// point the way back at the shown list row's in-page link, so both hosts hand
+// its press and enter to the view instead of navigating
+pub fn setListBackLink(frame: *wgt.Box(Widget), link: []const u8) void {
+    frame.children.values()[list_back_index].widget.text_box.getFocus().kind = .{ .custom = link };
+}
+
+pub fn showListBack(frame: *wgt.Box(Widget), shown: bool) void {
+    frame.children.values()[list_back_index].hidden = !shown;
+    if (!shown and frame.getFocus().child_id == frame.children.keys()[list_back_index])
+        frame.getFocus().child_id = frame.children.keys()[list_pane_index];
+}
+
+// the way back's focus id while it shows
+pub fn listBackId(frame: *wgt.Box(Widget)) ?usize {
+    return if (frame.children.values()[list_back_index].hidden) null else frame.children.keys()[list_back_index];
+}
+
+// enter the pane on the way back. selecting it (then focusing the frame) also
+// handles the too-narrow case where the pane isn't laid out yet.
+pub fn focusListBack(frame: *wgt.Box(Widget), root_focus: *Focus) void {
+    frame.getFocus().child_id = frame.children.keys()[list_back_index];
+    root_focus.setFocus(frame.getFocus().id);
+}
+
 pub const back_button_width = 3;
 const back_button_height = 3;
 const back_kind = "back";

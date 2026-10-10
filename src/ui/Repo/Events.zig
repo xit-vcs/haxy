@@ -421,12 +421,20 @@ pub const View = struct {
         errdefer list_scroll.deinit(allocator);
         try content_box.children.put(allocator, list_scroll.getFocus().id, .{ .widget = .{ .scroll = list_scroll }, .rect = null, .min_size = .{ .width = list_max_width, .height = null }, .max_size = .{ .width = list_max_width, .height = null } });
 
-        var detail_box = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .vert });
-        errdefer detail_box.deinit(allocator);
-        var detail_scroll = try wgt.Scroll(ui.Widget).init(allocator, .{ .box = detail_box }, .{ .direction = .vert, .web_native = !session.is_terminal, .fill = true });
-        errdefer detail_scroll.deinit(allocator);
-        detail_scroll.getFocus().mode = .mouse;
-        try content_box.children.put(allocator, detail_scroll.getFocus().id, .{ .widget = .{ .scroll = detail_scroll }, .rect = null, .min_size = .{ .width = detail_min_width, .height = null } });
+        // the detail scroll, below the way back to a hidden list
+        var frame = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .vert });
+        errdefer frame.deinit(allocator);
+        try ui.widget.addListBack(allocator, &frame, "← back to event list");
+        {
+            var detail_box = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .vert });
+            errdefer detail_box.deinit(allocator);
+            var detail_scroll = try wgt.Scroll(ui.Widget).init(allocator, .{ .box = detail_box }, .{ .direction = .vert, .web_native = !session.is_terminal, .fill = true });
+            errdefer detail_scroll.deinit(allocator);
+            detail_scroll.getFocus().mode = .mouse;
+            frame.getFocus().child_id = detail_scroll.getFocus().id;
+            try frame.children.put(allocator, detail_scroll.getFocus().id, .{ .widget = .{ .scroll = detail_scroll }, .rect = null, .min_size = null });
+        }
+        try content_box.children.put(allocator, frame.getFocus().id, .{ .widget = .{ .box = frame }, .rect = null, .min_size = .{ .width = detail_min_width, .height = null } });
 
         content_box.getFocus().child_id = content_box.children.keys()[if (event_window.events.len > 0) detail_index else list_index];
         return content_box;
@@ -475,8 +483,12 @@ pub const View = struct {
         return &self.listScroll().child.box;
     }
 
+    fn detailFrame(self: *View) *wgt.Box(ui.Widget) {
+        return &self.content().children.values()[detail_index].widget.box;
+    }
+
     fn detailScroll(self: *View) *wgt.Scroll(ui.Widget) {
-        return &self.content().children.values()[detail_index].widget.scroll;
+        return &self.detailFrame().children.values()[ui.widget.list_pane_index].widget.scroll;
     }
 
     fn detailBox(self: *View) *wgt.Box(ui.Widget) {
@@ -484,7 +496,7 @@ pub const View = struct {
     }
 
     fn detailActive(self: *View) bool {
-        return self.content().getFocus().child_id == self.detailScroll().getFocus().id;
+        return self.content().getFocus().child_id == self.detailFrame().getFocus().id;
     }
 
     fn headerActive(self: *View) bool {
@@ -510,6 +522,7 @@ pub const View = struct {
         };
 
         const both_fit = if (constraint.max_size.width) |width| width >= list_max_width + detail_min_width else true;
+        ui.widget.showListBack(self.detailFrame(), !both_fit);
         self.content().children.values()[list_index].max_size = if (both_fit) .{ .width = list_max_width, .height = null } else null;
         const detail_width = if (constraint.max_size.width) |width| if (both_fit) width - list_max_width else width else detail_min_width;
         self.content().children.values()[detail_index].min_size = .{ .width = detail_width, .height = null };
@@ -551,6 +564,7 @@ pub const View = struct {
         self.detailScroll().x = 0;
         self.detailScroll().y = 0;
         self.detailScroll().getFocus().version +%= 1;
+        ui.widget.setListBackLink(self.detailFrame(), self.listBox().children.values()[index].widget.text_box.getFocus().kind.custom);
         detailed_index.* = index;
     }
 
@@ -561,23 +575,43 @@ pub const View = struct {
             if (direction == .down) root_focus.setFocus(self.content().getFocus().id) else try self.header().input(allocator, key, root_focus);
             return;
         }
+        // the way back to the list, by enter or a click
+        if (self.detailActive()) if (ui.widget.listBackId(self.detailFrame())) |id| {
+            if (inp.activated(root_focus, id, key)) return self.focusList(root_focus);
+            if (root_focus.grandchild_id == id) return switch (direction) {
+                .up => self.header().focusCurrent(root_focus),
+                .down => root_focus.setFocus(self.detailScroll().getFocus().id),
+                .none => if (key == .arrow_left) self.focusList(root_focus),
+            };
+            if (direction == .up and self.contentAtTop()) return root_focus.setFocus(id);
+        };
         if (direction == .up and self.contentAtTop()) {
             self.header().focusCurrent(root_focus);
             return;
         }
         if (self.detailActive()) {
             if (key == .arrow_left) {
-                root_focus.setFocus(self.listScroll().getFocus().id);
+                self.focusList(root_focus);
             } else if (inp.rowDelta(key, @intCast(self.detailBox().children.count()))) |delta| {
                 ui.widget.moveRowFocus(self.detailBox(), self.detailScroll(), root_focus, delta);
             }
         } else if (inp.rowDelta(key, @intCast(self.listBox().children.count()))) |delta| {
             ui.widget.moveRowFocus(self.listBox(), self.listScroll(), root_focus, delta);
         } else switch (key) {
-            .arrow_right => if (self.detailBox().children.count() > 0) root_focus.setFocus(self.detailScroll().getFocus().id),
-            .enter => if (self.selectedEventIndex() != null) root_focus.setFocus(self.detailScroll().getFocus().id),
+            .arrow_right => if (self.detailBox().children.count() > 0) self.focusDetail(root_focus),
+            .enter => if (self.selectedEventIndex() != null) self.focusDetail(root_focus),
             else => {},
         }
+    }
+
+    // enter the detail pane, landing on the way back to the list when it shows
+    fn focusDetail(self: *View, root_focus: *Focus) void {
+        if (ui.widget.listBackId(self.detailFrame()) != null) return ui.widget.focusListBack(self.detailFrame(), root_focus);
+        root_focus.setFocus(self.detailScroll().getFocus().id);
+    }
+
+    fn focusList(self: *View, root_focus: *Focus) void {
+        root_focus.setFocus(self.listScroll().getFocus().id);
     }
 
     fn contentAtTop(self: *View) bool {

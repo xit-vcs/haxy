@@ -1737,9 +1737,6 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         // indices within a split (the horizontal box inside the stack).
         const list_index: usize = 0;
         const detail_index: usize = 1;
-        // indices within the detail frame (the way back above the detail view).
-        const detail_back_index: usize = 0;
-        const detail_view_index: usize = 1;
         const list_max_width: usize = 35;
         const detail_min_width: usize = 40;
 
@@ -2074,13 +2071,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 var frame = try wgt.Box(Widget).init(allocator, .{ .border = .hidden, .direction = .vert });
                 errdefer frame.deinit(allocator);
                 frame.getFocus().mode = .mouse;
-                {
-                    const label = try session.page_arena.allocator().print("← back to {s} list", .{thread_name});
-                    var back = try wgt.TextBox.init(allocator, label, .{ .border = .single, .round_corners = true, .wrap_kind = .none });
-                    errdefer back.deinit(allocator);
-                    back.getFocus().mode = .all;
-                    try frame.children.put(allocator, back.getFocus().id, .{ .widget = .{ .text_box = back }, .rect = null, .min_size = null, .hidden = true });
-                }
+                try widget.addListBack(allocator, &frame, "← back to " ++ thread_name ++ " list");
                 var detail_view = try DetailType.init(allocator, data, session, null, .{});
                 errdefer detail_view.deinit(allocator);
                 frame.getFocus().child_id = detail_view.getFocus().id;
@@ -2521,13 +2512,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         }
 
         fn detail(self: *This, index: usize) *DetailType {
-            return &@field(self.detailFrame(index).children.values()[detail_view_index].widget, Data.detail_widget_name);
-        }
-
-        // the detail's way back to a list that isn't shown beside it
-        fn backId(self: *This, index: usize) ?usize {
-            const frame = self.detailFrame(index);
-            return if (frame.children.values()[detail_back_index].hidden) null else frame.children.keys()[detail_back_index];
+            return &@field(self.detailFrame(index).children.values()[widget.list_pane_index].widget, Data.detail_widget_name);
         }
 
         fn window(self: *This, index: usize) *const Window {
@@ -2589,18 +2574,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             const changed = if (self.detail(index).entry) |current| !std.mem.eql(u8, current.id, entry.id) else true;
             if (!changed) return;
             try self.detail(index).setEntry(allocator, entry);
-            // the way back links to the shown thread's own row, so both hosts
-            // hand its press and enter to input instead of navigating
-            const back = &self.detailFrame(index).children.values()[detail_back_index].widget.text_box;
-            back.getFocus().kind = .{ .custom = try rowLink(self.session.page_arena, self.data, entry.id) };
-        }
-
-        // show the way back to the list only while the list is hidden
-        fn showBack(self: *This, index: usize, shown: bool) void {
-            const frame = self.detailFrame(index);
-            frame.children.values()[detail_back_index].hidden = !shown;
-            if (!shown and frame.getFocus().child_id == frame.children.keys()[detail_back_index])
-                frame.getFocus().child_id = frame.children.keys()[detail_view_index];
+            widget.setListBackLink(self.detailFrame(index), try rowLink(self.session.page_arena, self.data, entry.id));
         }
 
         pub fn build(self: *This, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
@@ -2617,7 +2591,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 // the list cap below and whether the detail carries a way back
                 const both_panes_fit = if (constraint.max_size.width) |w| w >= list_max_width + detail_min_width else true;
                 try self.refreshDetail(allocator, i);
-                self.showBack(i, !both_panes_fit);
+                widget.showListBack(self.detailFrame(i), !both_panes_fit);
 
                 // the selected list row shows a border (the focused TextBox
                 // upgrades it to a double border itself); the rest stay borderless.
@@ -2725,7 +2699,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             const i = self.selectedSplitIndex() orelse return;
             if (self.detailActive(i)) {
                 // the way back to the list, by enter or a click
-                if (self.backId(i)) |id| {
+                if (widget.listBackId(self.detailFrame(i))) |id| {
                     if (inp.activated(root_focus, id, key)) return self.focusList(i, root_focus);
                     if (root_focus.grandchild_id == id) return switch (key) {
                         .arrow_left => self.focusList(i, root_focus),
@@ -2737,7 +2711,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 switch (try self.detail(i).inputWithExit(allocator, key, root_focus)) {
                     .none => {},
                     .list => self.focusList(i, root_focus),
-                    .header => if (self.backId(i)) |id| root_focus.setFocus(id) else self.focusHeader(root_focus),
+                    .header => if (widget.listBackId(self.detailFrame(i))) |id| root_focus.setFocus(id) else self.focusHeader(root_focus),
                 }
             } else {
                 try self.listInput(allocator, i, key, root_focus);
@@ -3319,17 +3293,10 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             try self.session.navigate(route);
         }
 
-        // enter the detail pane, landing on the way back to the list when it
-        // has one. selecting the frame's child (then focusing the frame) also
-        // handles the too-narrow case where the pane isn't laid out yet.
+        // enter the detail pane, landing on the way back to the list when it shows
         fn focusDetail(self: *This, index: usize, root_focus: *Focus) void {
-            if (self.backId(index) == null) {
-                _ = self.detail(index).focusFirst(root_focus);
-                return;
-            }
-            const frame = self.detailFrame(index);
-            frame.getFocus().child_id = frame.children.keys()[detail_back_index];
-            root_focus.setFocus(frame.getFocus().id);
+            if (widget.listBackId(self.detailFrame(index)) != null) return widget.focusListBack(self.detailFrame(index), root_focus);
+            _ = self.detail(index).focusFirst(root_focus);
         }
 
         // return to the list.

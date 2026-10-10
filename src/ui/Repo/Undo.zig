@@ -431,7 +431,11 @@ pub const View = struct {
             errdefer scroll.deinit(allocator);
             try box.children.put(allocator, scroll.getFocus().id, .{ .widget = .{ .scroll = scroll }, .rect = null, .min_size = .{ .width = list_max_width, .height = null }, .max_size = .{ .width = list_max_width, .height = null } });
         }
+        // the detail scroll, below the way back to a hidden list
         {
+            var frame = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .vert });
+            errdefer frame.deinit(allocator);
+            try ui.widget.addListBack(allocator, &frame, "← back to undo list");
             var scroll = blk: {
                 var details = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .vert });
                 errdefer details.deinit(allocator);
@@ -444,7 +448,9 @@ pub const View = struct {
             };
             errdefer scroll.deinit(allocator);
             scroll.getFocus().mode = .mouse;
-            try box.children.put(allocator, scroll.getFocus().id, .{ .widget = .{ .scroll = scroll }, .rect = null, .min_size = .{ .width = detail_min_width, .height = null } });
+            frame.getFocus().child_id = scroll.getFocus().id;
+            try frame.children.put(allocator, scroll.getFocus().id, .{ .widget = .{ .scroll = scroll }, .rect = null, .min_size = null });
+            try box.children.put(allocator, frame.getFocus().id, .{ .widget = .{ .box = frame }, .rect = null, .min_size = .{ .width = detail_min_width, .height = null } });
         }
         box.getFocus().child_id = box.children.keys()[if (data.items.len > 0) 1 else 0];
         try outer.children.put(allocator, box.getFocus().id, .{ .widget = .{ .box = box }, .rect = null, .min_size = null });
@@ -507,8 +513,11 @@ pub const View = struct {
     fn listScroll(self: *View) *wgt.Scroll(ui.Widget) {
         return &self.contentBox().children.values()[0].widget.scroll;
     }
+    fn detailFrame(self: *View) *wgt.Box(ui.Widget) {
+        return &self.contentBox().children.values()[1].widget.box;
+    }
     fn detailScroll(self: *View) *wgt.Scroll(ui.Widget) {
-        return &self.contentBox().children.values()[1].widget.scroll;
+        return &self.detailFrame().children.values()[ui.widget.list_pane_index].widget.scroll;
     }
     fn selected(self: *View) ?usize {
         const rows = &self.listScroll().child.box;
@@ -516,7 +525,7 @@ pub const View = struct {
         return if (index < self.data.items.len) index else null;
     }
     fn detailActive(self: *View) bool {
-        return self.contentBox().getFocus().child_id == self.detailScroll().getFocus().id;
+        return self.contentBox().getFocus().child_id == self.detailFrame().getFocus().id;
     }
 
     fn refreshDetail(self: *View, allocator: std.mem.Allocator) !void {
@@ -555,6 +564,7 @@ pub const View = struct {
         self.detailScroll().x = 0;
         self.detailScroll().y = 0;
         self.detailScroll().getFocus().version +%= 1;
+        ui.widget.setListBackLink(self.detailFrame(), item.link);
         self.detailed_index = index;
     }
 
@@ -573,6 +583,7 @@ pub const View = struct {
         }
         for (rows.children.keys(), rows.children.values()) |id, *child| ui.widget.markSelected(&child.widget.text_box, rows.getFocus().child_id == id);
         const both_fit = if (constraint.max_size.width) |width| width >= list_max_width + detail_min_width else true;
+        ui.widget.showListBack(self.detailFrame(), !both_fit);
         self.contentBox().children.values()[0].max_size = if (both_fit) .{ .width = list_max_width, .height = null } else null;
         const width = if (constraint.max_size.width) |value| if (both_fit) value - list_max_width else value else detail_min_width;
         self.contentBox().children.values()[1].min_size = .{ .width = width, .height = null };
@@ -592,6 +603,16 @@ pub const View = struct {
             if (direction == .up) root_focus.setFocus(self.headerBox().getFocus().id) else try self.clearInput(key, root_focus);
             return;
         }
+        // the way back to the list, by enter or a click
+        if (self.detailActive()) if (ui.widget.listBackId(self.detailFrame())) |id| {
+            if (inp.activated(root_focus, id, key)) return self.focusList(root_focus);
+            if (root_focus.grandchild_id == id) return switch (direction) {
+                .up => root_focus.setFocus(self.headerBox().getFocus().id),
+                .down => root_focus.setFocus(self.detailScroll().getFocus().id),
+                .none => if (key == .arrow_left) self.focusList(root_focus),
+            };
+            if (direction == .up and self.contentAtTop()) return root_focus.setFocus(id);
+        };
         if (direction == .up and self.contentAtTop()) {
             root_focus.setFocus(self.headerBox().getFocus().id);
             return;
@@ -608,16 +629,24 @@ pub const View = struct {
             if (inp.rowDelta(key, @intCast(details.children.count()))) |delta| {
                 ui.widget.moveRowFocus(details, self.detailScroll(), root_focus, delta);
             } else if (key == .arrow_left) {
-                root_focus.setFocus(self.listScroll().getFocus().id);
+                self.focusList(root_focus);
             }
         } else if (inp.rowDelta(key, @intCast(self.listScroll().child.box.children.count()))) |delta| {
             ui.widget.moveRowFocus(&self.listScroll().child.box, self.listScroll(), root_focus, delta);
         } else switch (key) {
-            .arrow_right, .enter => if (self.selected() != null) {
-                root_focus.setFocus(self.detailScroll().getFocus().id);
-            },
+            .arrow_right, .enter => if (self.selected() != null) self.focusDetail(root_focus),
             else => {},
         }
+    }
+
+    // enter the detail pane, landing on the way back to the list when it shows
+    fn focusDetail(self: *View, root_focus: *Focus) void {
+        if (ui.widget.listBackId(self.detailFrame()) != null) return ui.widget.focusListBack(self.detailFrame(), root_focus);
+        root_focus.setFocus(self.detailScroll().getFocus().id);
+    }
+
+    fn focusList(self: *View, root_focus: *Focus) void {
+        root_focus.setFocus(self.listScroll().getFocus().id);
     }
 
     // the confirm button submits the form the web renderer posts
