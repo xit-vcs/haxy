@@ -600,6 +600,13 @@ pub const View = struct {
         } else switch (key) {
             .arrow_right => if (self.detailBox().children.count() > 0) self.focusDetail(root_focus),
             .enter => if (self.selectedEventIndex() != null) self.focusDetail(root_focus),
+            // when the window is too narrow to lay out the detail pane beside
+            // the list, a click on a row opens it like enter. the row was just
+            // selected, so the detail is swapped to it ahead of the build.
+            .mouse => |mouse| if (self.selectedEventIndex() != null and self.content().children.values()[detail_index].rect == null and ui.widget.clickOnSelectedRow(self.listBox(), root_focus, mouse)) {
+                try self.refreshDetail(allocator);
+                self.focusDetail(root_focus);
+            },
             else => {},
         }
     }

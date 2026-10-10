@@ -635,6 +635,12 @@ pub const View = struct {
             ui.widget.moveRowFocus(&self.listScroll().child.box, self.listScroll(), root_focus, delta);
         } else switch (key) {
             .arrow_right, .enter => if (self.selected() != null) self.focusDetail(root_focus),
+            // when the window is too narrow to lay out the detail pane beside
+            // the list, a click on a row opens it like enter. the detail was
+            // swapped to the just-selected row above.
+            .mouse => |mouse| if (self.selected() != null and self.contentBox().children.values()[1].rect == null and ui.widget.clickOnSelectedRow(&self.listScroll().child.box, root_focus, mouse)) {
+                self.focusDetail(root_focus);
+            },
             else => {},
         }
     }
