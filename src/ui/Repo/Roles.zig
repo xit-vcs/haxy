@@ -121,12 +121,11 @@ pub fn landingRoute(identity: []const u8, start: usize, actor: ui.Actor, action:
 }
 
 pub const View = struct {
-    box: wgt.Box(ui.Widget),
+    scroll: wgt.Scroll(ui.Widget),
     data: *const Self,
     session: *ui.Session,
 
     const add_index = 0;
-    const list_index = 1;
 
     pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !View {
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .vert });
@@ -148,50 +147,49 @@ pub const View = struct {
             try box.children.put(allocator, add.getFocus().id, .{ .widget = .{ .box = add }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
         }
 
-        {
-            var rows = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .vert });
-            errdefer rows.deinit(allocator);
-            if (data.start > 0) {
-                var previous = try Comment.linkBox(allocator, session, "← previous", ui.RoutablePage.repoRolesRoute(data.identity, data.start -| page_size) orelse return error.RouteTooLong);
-                errdefer previous.deinit(allocator);
-                try rows.children.put(allocator, previous.getFocus().id, .{ .widget = .{ .text_box = previous }, .rect = null, .min_size = null });
-            }
-            for (data.rows) |row| {
-                var row_route = route;
-                row_route.repo_roles.user = ui.RoutablePage.Array(evt.User.name_max_len).from(row.name) orelse return error.RouteTooLong;
-                const row_url = try row_route.toUrl(session.page_arena);
+        // the user rows follow the add row in the same box
+        if (data.start > 0) {
+            var previous = try Comment.linkBox(allocator, session, "← previous", ui.RoutablePage.repoRolesRoute(data.identity, data.start -| page_size) orelse return error.RouteTooLong);
+            errdefer previous.deinit(allocator);
+            try box.children.put(allocator, previous.getFocus().id, .{ .widget = .{ .text_box = previous }, .rect = null, .min_size = null });
+        }
+        for (data.rows) |row| {
+            var row_route = route;
+            row_route.repo_roles.user = ui.RoutablePage.Array(evt.User.name_max_len).from(row.name) orelse return error.RouteTooLong;
+            const row_url = try row_route.toUrl(session.page_arena);
 
-                var row_box = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .horiz });
-                errdefer row_box.deinit(allocator);
-                row_box.getFocus().kind = .{ .custom = try aa.print("form:{s}", .{row_url}) };
-                {
-                    const user_route = ui.RoutablePage{ .user_repos = .{ .name = ui.RoutablePage.Array(evt.User.name_max_len).from(row.name) orelse return error.RouteTooLong } };
-                    var name = try Comment.linkBox(allocator, session, row.name, user_route);
-                    errdefer name.deinit(allocator);
-                    name.options.bottom_label.text = if (row.role == .owner) " owner " else " collaborator ";
-                    try row_box.children.put(allocator, name.getFocus().id, .{ .widget = .{ .text_box = name }, .rect = null, .min_size = null });
-                }
-                try addButton(allocator, &row_box, "remove", try aa.print("submit:{s}/revoke", .{row_url}));
-                if (row.role == .owner)
-                    try addButton(allocator, &row_box, "demote to collaborator", try aa.print("submit:{s}/demote", .{row_url}))
-                else
-                    try addButton(allocator, &row_box, "promote to owner", try aa.print("submit:{s}/promote", .{row_url}));
-                row_box.getFocus().child_id = row_box.children.keys()[0];
-                try rows.children.put(allocator, row_box.getFocus().id, .{ .widget = .{ .box = row_box }, .rect = null, .min_size = null });
+            var row_box = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .horiz });
+            errdefer row_box.deinit(allocator);
+            row_box.getFocus().kind = .{ .custom = try aa.print("form:{s}", .{row_url}) };
+            {
+                const user_route = ui.RoutablePage{ .user_repos = .{ .name = ui.RoutablePage.Array(evt.User.name_max_len).from(row.name) orelse return error.RouteTooLong } };
+                var name = try Comment.linkBox(allocator, session, row.name, user_route);
+                errdefer name.deinit(allocator);
+                name.options.bottom_label.text = if (row.role == .owner) " owner " else " collaborator ";
+                try row_box.children.put(allocator, name.getFocus().id, .{ .widget = .{ .text_box = name }, .rect = null, .min_size = null });
             }
-            if (data.next_start) |next_start| {
-                var next = try Comment.linkBox(allocator, session, "next →", ui.RoutablePage.repoRolesRoute(data.identity, next_start) orelse return error.RouteTooLong);
-                errdefer next.deinit(allocator);
-                try rows.children.put(allocator, next.getFocus().id, .{ .widget = .{ .text_box = next }, .rect = null, .min_size = null });
-            }
-            if (rows.children.count() > 0) rows.getFocus().child_id = rows.children.keys()[0];
-            var scroll = try wgt.Scroll(ui.Widget).init(allocator, .{ .box = rows }, .{ .direction = .vert, .web_native = !session.is_terminal, .fill = true });
-            errdefer scroll.deinit(allocator);
-            try box.children.put(allocator, scroll.getFocus().id, .{ .widget = .{ .scroll = scroll }, .rect = null, .min_size = null });
+            try addButton(allocator, &row_box, "remove", try aa.print("submit:{s}/revoke", .{row_url}));
+            if (row.role == .owner)
+                try addButton(allocator, &row_box, "demote to collaborator", try aa.print("submit:{s}/demote", .{row_url}))
+            else
+                try addButton(allocator, &row_box, "promote to owner", try aa.print("submit:{s}/promote", .{row_url}));
+            row_box.getFocus().child_id = row_box.children.keys()[0];
+            try box.children.put(allocator, row_box.getFocus().id, .{ .widget = .{ .box = row_box }, .rect = null, .min_size = null });
+        }
+        if (data.next_start) |next_start| {
+            var next = try Comment.linkBox(allocator, session, "next →", ui.RoutablePage.repoRolesRoute(data.identity, next_start) orelse return error.RouteTooLong);
+            errdefer next.deinit(allocator);
+            try box.children.put(allocator, next.getFocus().id, .{ .widget = .{ .text_box = next }, .rect = null, .min_size = null });
         }
 
         box.getFocus().child_id = box.children.keys()[add_index];
-        return .{ .box = box, .data = data, .session = session };
+        var center = try ui.widget.Center.init(allocator, .{ .box = box });
+        errdefer center.deinit(allocator);
+        return .{
+            .scroll = try wgt.Scroll(ui.Widget).init(allocator, .{ .center = center }, .{ .direction = .vert, .web_native = !session.is_terminal, .fill = true }),
+            .data = data,
+            .session = session,
+        };
     }
 
     fn addButton(allocator: std.mem.Allocator, row: *wgt.Box(ui.Widget), text: []const u8, kind: []const u8) !void {
@@ -203,23 +201,23 @@ pub const View = struct {
     }
 
     pub fn deinit(self: *View, allocator: std.mem.Allocator) void {
-        self.box.deinit(allocator);
+        self.scroll.deinit(allocator);
+    }
+
+    fn contentBox(self: *View) *wgt.Box(ui.Widget) {
+        return &self.scroll.child.center.child.box;
     }
 
     fn addBox(self: *View) *wgt.Box(ui.Widget) {
-        return &self.box.children.values()[add_index].widget.box;
+        return &self.contentBox().children.values()[add_index].widget.box;
     }
 
     fn nameInput(self: *View) *wgt.TextInput {
         return &self.addBox().children.values()[0].widget.text_input;
     }
 
-    fn listScroll(self: *View) *wgt.Scroll(ui.Widget) {
-        return &self.box.children.values()[list_index].widget.scroll;
-    }
-
     fn addActive(self: *View) bool {
-        return self.box.getFocus().child_id == self.addBox().getFocus().id;
+        return self.contentBox().getFocus().child_id == self.addBox().getFocus().id;
     }
 
     pub fn build(self: *View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
@@ -233,47 +231,40 @@ pub const View = struct {
         name.options.bottom_label.text = if (root_focus.grandchild_id == name.getFocus().id) " press enter " else "";
         // the web form handling finds the input by focus id
         try self.session.text_inputs.put(self.session.arena.allocator(), name.getFocus().id, name);
-        try self.box.build(allocator, constraint, root_focus);
+        // the window's height as a minimum centers rows that fit
+        try self.scroll.build(allocator, .{
+            .min_size = .{ .width = constraint.min_size.width, .height = constraint.max_size.height orelse constraint.min_size.height },
+            .max_size = constraint.max_size,
+        }, root_focus);
     }
 
     pub fn input(self: *View, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
-        if (self.addActive()) {
-            switch (inp.vertDirection(key)) {
-                .down => root_focus.setFocus(self.listScroll().getFocus().id),
-                .up => {},
-                .none => if (key == .enter) {
-                    const name = try self.nameInput().text(allocator);
-                    defer allocator.free(name);
-                    try self.act(allocator, .grant, name);
-                } else try self.nameInput().input(allocator, key, root_focus),
-            }
+        // the add row keeps every key but the vertical ones, which move between rows
+        if (self.addActive() and inp.vertDirection(key) == .none) {
+            if (key == .enter) {
+                const name = try self.nameInput().text(allocator);
+                defer allocator.free(name);
+                try self.act(allocator, .grant, name);
+            } else try self.nameInput().input(allocator, key, root_focus);
             return;
         }
 
-        const rows = &self.listScroll().child.box;
+        const rows = self.contentBox();
         const current = rows.children.getIndex(rows.getFocus().child_id orelse return) orelse return;
         if (inp.rowDelta(key, @intCast(rows.children.count()))) |delta| {
-            if (delta < 0 and current == 0)
-                root_focus.setFocus(self.addBox().getFocus().id)
-            else
-                ui.widget.moveRowFocus(rows, self.listScroll(), root_focus, delta);
+            ui.widget.moveRowFocus(rows, &self.scroll, root_focus, delta);
             return;
         }
         switch (key) {
             .arrow_left, .arrow_right => _ = ui.widget.moveInSelectedRow(rows, root_focus, key == .arrow_right),
             else => {
-                // the previous link, when there is one, sits above the rows
-                const offset: usize = @intFromBool(self.data.start > 0);
+                // the add row and the previous link, when there is one, sit above the rows
+                const offset: usize = add_index + 1 + @intFromBool(self.data.start > 0);
                 if (current < offset or current - offset >= self.data.rows.len) return;
                 const row = self.data.rows[current - offset];
                 const row_box = &rows.children.values()[current].widget.box;
                 const button_id = row_box.getFocus().child_id orelse return;
-                const pressed = switch (key) {
-                    .enter => root_focus.grandchild_id == button_id,
-                    .mouse => |mouse| inp.leftClickOn(root_focus, button_id, mouse),
-                    else => false,
-                };
-                if (!pressed) return;
+                if (!inp.activated(root_focus, button_id, key)) return;
                 const action: Action = switch (row_box.children.getIndex(button_id) orelse return) {
                     1 => .revoke,
                     2 => if (row.role == .owner) .demote else .promote,
@@ -305,15 +296,15 @@ pub const View = struct {
     }
 
     pub fn clearGrid(self: *View) void {
-        self.box.clearGrid();
+        self.scroll.clearGrid();
     }
 
     pub fn getGrid(self: View) ?Grid {
-        return self.box.getGrid();
+        return self.scroll.getGrid();
     }
 
     pub fn getFocus(self: *View) *Focus {
-        return self.box.getFocus();
+        return self.scroll.getFocus();
     }
 
     // up leaves the view from the add row
