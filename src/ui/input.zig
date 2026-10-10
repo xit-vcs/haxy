@@ -55,3 +55,12 @@ pub fn moveTab(key: Key, current_tab: usize, tab_count: usize) ?usize {
     }
     return if (new_tab != current_tab) new_tab else null;
 }
+
+/// enter counts only on the focused button; a click counts anywhere on it
+pub fn activated(root_focus: *Focus, button_id: usize, key: Key) bool {
+    return switch (key) {
+        .enter => root_focus.grandchild_id == button_id,
+        .mouse => |mouse| leftClickOn(root_focus, button_id, mouse),
+        else => false,
+    };
+}

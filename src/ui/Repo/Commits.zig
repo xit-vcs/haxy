@@ -713,7 +713,7 @@ pub const View = struct {
         if (self.detailActive()) {
             // the way back to the list, by enter or a click
             if (self.back_id) |id| {
-                if ((key == .enter and root_focus.grandchild_id == id) or (key == .mouse and inp.leftClickOn(root_focus, id, key.mouse))) return self.focusList(root_focus);
+                if (inp.activated(root_focus, id, key)) return self.focusList(root_focus);
             }
             const inner = self.detailInner();
             if (inp.rowDelta(key, @intCast(inner.children.count()))) |delta| {

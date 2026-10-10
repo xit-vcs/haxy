@@ -487,15 +487,6 @@ pub const View = struct {
         box.children.values()[box.children.count() - 1].widget.text_box.options.top_label.text = label;
     }
 
-    // enter counts only on the focused button; a click counts anywhere on it
-    fn activated(root_focus: *Focus, button_id: usize, key: Key) bool {
-        return switch (key) {
-            .enter => root_focus.grandchild_id == button_id,
-            .mouse => |mouse| inp.leftClickOn(root_focus, button_id, mouse),
-            else => false,
-        };
-    }
-
     // the terminal hosts run the action after rendering; the web renderer
     // posts the form instead, and wasm has no repository to act on
     fn requestUndo(self: *View, route: ui.RoutablePage) void {
@@ -609,7 +600,7 @@ pub const View = struct {
         if (self.detailActive()) {
             const details = &self.detailScroll().child.box;
             if (self.selected()) |index| {
-                if (activated(root_focus, details.children.keys()[0], key) and self.data.handle.canUndo() and self.data.items[index].index > 0) {
+                if (inp.activated(root_focus, details.children.keys()[0], key) and self.data.handle.canUndo() and self.data.items[index].index > 0) {
                     self.requestUndo(ui.RoutablePage.repoUndoRoute(self.data.identity, self.data.items[index].index) orelse return error.RouteTooLong);
                     return;
                 }
@@ -633,7 +624,7 @@ pub const View = struct {
     fn clearInput(self: *View, key: Key, root_focus: *Focus) !void {
         const center = &self.box.children.values()[content_index].widget.center;
         const button_id = center.child.box.getFocus().child_id orelse return;
-        if (!activated(root_focus, button_id, key) or !self.data.handle.canUndo()) return;
+        if (!inp.activated(root_focus, button_id, key) or !self.data.handle.canUndo()) return;
         self.requestUndo(ui.RoutablePage.repoUndoClearRoute(self.data.identity) orelse return error.RouteTooLong);
     }
 
