@@ -360,8 +360,13 @@ pub const View = struct {
     box: wgt.Box(ui.Widget), // vert: [header_index] = clone url row, [content_index] = split
     data: *const Self,
     session: *ui.Session,
-    // the commit the pane currently shows (index into data.commits).
-    detailed_index: ?usize,
+    // what the pane was last filled for: the commit (index into data.commits),
+    // and whether the window was too narrow to show the list beside it
+    shown: ?Shown = null,
+    // the detail's way back to a list that isn't shown beside it
+    back_id: ?usize = null,
+
+    const Shown = struct { index: usize, narrow: bool };
 
     // the sub-header leads the box where there is one; local mode has none
     const header_index: usize = 0;
@@ -380,7 +385,7 @@ pub const View = struct {
             errdefer center.deinit(allocator);
             outer.getFocus().child_id = center.getFocus().id;
             try outer.children.put(allocator, center.getFocus().id, .{ .widget = .{ .center = center }, .rect = null, .min_size = null });
-            return .{ .box = outer, .data = data, .session = session, .detailed_index = null };
+            return .{ .box = outer, .data = data, .session = session };
         }
 
         // the search box and the clone url at the top. local mode has neither.
@@ -447,12 +452,7 @@ pub const View = struct {
         // search box so the query can be refined right away.
         outer.getFocus().child_id = outer.children.keys()[if (data.search != null) header_index else outer.children.count() - 1];
 
-        return .{
-            .box = outer,
-            .data = data,
-            .session = session,
-            .detailed_index = null,
-        };
+        return .{ .box = outer, .data = data, .session = session };
     }
 
     fn addRow(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8, link: []const u8, bottom_label: []const u8) !void {
@@ -463,13 +463,14 @@ pub const View = struct {
         try box.children.put(allocator, row.getFocus().id, .{ .widget = .{ .text_box = row }, .rect = null, .min_size = null, .max_size = .{ .width = null, .height = 5 } });
     }
 
-    // a focusable row following the "a:" `link`.
-    fn addLink(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8, link: []const u8) !void {
+    // a focusable row following `link`, returning its focus id
+    fn addLink(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8, link: []const u8) !usize {
         var tb = try wgt.TextBox.init(allocator, label, .{ .border = .single, .round_corners = true, .wrap_kind = .none });
         errdefer tb.deinit(allocator);
         tb.getFocus().mode = .all;
         tb.getFocus().kind = .{ .custom = link };
         try box.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
+        return tb.getFocus().id;
     }
 
     // how much of the message a pane's box holds: a truncated preview links to
@@ -552,8 +553,12 @@ pub const View = struct {
         self.clearGrid();
         if (self.data.no_commits) return self.box.build(allocator, constraint, root_focus);
 
+        // whether the detail pane fits beside the list, which decides the list
+        // cap below and whether the detail carries a way back to the list
+        const both_panes_fit = if (constraint.max_size.width) |w| w >= list_max_width + detail_min_width else true;
+
         // swap the detail pane to the selected commit when it changes.
-        try self.refreshDetail(allocator);
+        try self.refreshDetail(allocator, !both_panes_fit);
 
         // the selected list row shows a border (the focused TextBox upgrades it
         // to a double border itself); the rest stay borderless.
@@ -568,7 +573,6 @@ pub const View = struct {
         // cap the list at list_max_width only while the detail pane fits beside it.
         // the box drops the pane when the width can't hold both minimums, so when
         // it's that narrow we lift the cap and let the list fill the whole width.
-        const both_panes_fit = if (constraint.max_size.width) |w| w >= list_max_width + detail_min_width else true;
         self.contentBox().children.values()[list_index].max_size = if (both_panes_fit) .{ .width = list_max_width, .height = null } else null;
 
         // stretch the detail pane across the rest of the width so it fills the area
@@ -592,23 +596,34 @@ pub const View = struct {
         try self.box.build(allocator, constraint, root_focus);
     }
 
-    fn refreshDetail(self: *View, allocator: std.mem.Allocator) !void {
-        const sel = self.selectedCommitIndex() orelse return;
-        if (self.detailed_index) |d| if (d == sel) return;
-        try self.populateDetail(allocator, sel);
-        self.detailed_index = sel;
+    fn refreshDetail(self: *View, allocator: std.mem.Allocator, narrow: bool) !void {
+        const next: Shown = .{ .index = self.selectedCommitIndex() orelse return, .narrow = narrow };
+        if (self.shown) |shown| if (std.meta.eql(shown, next)) return;
+        try self.populateDetail(allocator, next);
+        self.shown = next;
     }
 
-    fn populateDetail(self: *View, allocator: std.mem.Allocator, sel: usize) !void {
+    fn populateDetail(self: *View, allocator: std.mem.Allocator, next: Shown) !void {
+        const sel = next.index;
         const commit = self.data.commits[sel];
         const inner = self.detailInner();
 
         for (inner.children.values()) |*child| child.widget.deinit(allocator);
         inner.children.clearAndFree(allocator);
         inner.getFocus().child_id = null;
+        self.back_id = null;
+
+        // with the list hidden beside it, the detail leads with the way back.
+        // an in-page link to this very page, so both hosts hand its press and
+        // enter to input instead of navigating.
+        if (next.narrow) {
+            const pa = self.session.page_arena;
+            const link = try pa.allocator().print("ai:{s}", .{try self.session.data.current_page.toUrl(pa)});
+            self.back_id = try addLink(allocator, inner, "← back to commit list", link);
+        }
 
         if (sel == 0 and self.data.message) {
-            try addLink(allocator, inner, "← back to commit", try commitsLink(self.session.page_arena, self.data, commit.oid));
+            _ = try addLink(allocator, inner, "← back to commit", try commitsLink(self.session.page_arena, self.data, commit.oid));
             try self.addMessageBox(allocator, inner, commit, .whole);
         } else {
             const pa = self.session.page_arena;
@@ -616,13 +631,13 @@ pub const View = struct {
                 var row = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .horiz });
                 errdefer row.deinit(allocator);
                 const diff_route = self.data.handle.location.commitDiffRoute(commit.oid, commit.parent_oid) orelse return error.RouteTooLong;
-                try addLink(allocator, &row, "view diff", try pa.allocator().print("a:{s}", .{try diff_route.toUrl(pa)}));
-                try addLink(allocator, &row, "view files at this commit", try filesObjectLink(pa, self.data.handle.location, commit.oid));
+                _ = try addLink(allocator, &row, "view diff", try pa.allocator().print("a:{s}", .{try diff_route.toUrl(pa)}));
+                _ = try addLink(allocator, &row, "view files at this commit", try filesObjectLink(pa, self.data.handle.location, commit.oid));
                 row.getFocus().child_id = row.children.keys()[0];
                 try inner.children.put(allocator, row.getFocus().id, .{ .widget = .{ .box = row }, .rect = null, .min_size = null });
             }
             if (commit.merge) if (self.data.handle.location.commitsMergeRoute(commit.oid)) |route| {
-                try addLink(allocator, inner, "view commits from this merge", try pa.allocator().print("a:{s}", .{try route.toUrl(pa)}));
+                _ = try addLink(allocator, inner, "view commits from this merge", try pa.allocator().print("a:{s}", .{try route.toUrl(pa)}));
             };
             {
                 var row = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .horiz });
@@ -696,6 +711,10 @@ pub const View = struct {
         }
         if (direction == .up and self.contentAtTop() and self.focusHeader(root_focus)) return;
         if (self.detailActive()) {
+            // the way back to the list, by enter or a click
+            if (self.back_id) |id| {
+                if ((key == .enter and root_focus.grandchild_id == id) or (key == .mouse and inp.leftClickOn(root_focus, id, key.mouse))) return self.focusList(root_focus);
+            }
             const inner = self.detailInner();
             if (inp.rowDelta(key, @intCast(inner.children.count()))) |delta| {
                 ui.widget.moveRowFocus(inner, self.detailScroll(), root_focus, delta);
@@ -740,7 +759,7 @@ pub const View = struct {
             // the list, a click on a row opens it like enter. the row was just
             // selected, so the detail is swapped to it ahead of the build.
             .mouse => |mouse| if (self.contentBox().children.values()[detail_index].rect == null and ui.widget.clickOnSelectedRow(self.listBox(), root_focus, mouse)) {
-                try self.refreshDetail(allocator);
+                try self.refreshDetail(allocator, true);
                 self.focusDetail(root_focus);
             },
             else => {},
