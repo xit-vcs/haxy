@@ -47,6 +47,6 @@ A fun test is to push Haxy itself to the server. You can do that by running the 
 GIT_SSH_COMMAND='ssh -p 8022 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -i temp-try/key' git push localhost:admin:haxy HEAD:master
 ```
 
-After that, go to the admin user in the UI and you'll see Haxy's repo page: http://localhost:8080/repo/admin/haxy/files/branch:master
+After that, go to the admin user in the UI and you'll see Haxy's repo page: http://localhost:8080/admin:haxy/files/branch:master
 
 *"C'mon Alex! You always dreamt about going on a big adventure! Let this be our first!" -- Lunar: Silver Star Story*
