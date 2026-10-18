@@ -156,13 +156,19 @@ pub const Item = struct {
         errdefer box.deinit(allocator);
 
         {
-            var bar = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .horiz });
-            errdefer bar.deinit(allocator);
+            var bar_scroll = try ui.widget.HeaderScroll.init(allocator, session);
+            errdefer bar_scroll.deinit(allocator);
+            const bar = bar_scroll.row();
 
             // the author sits on the left and the buttons on the right
             var author = try ui.authorBox(allocator, session.page_arena, entry.author);
             errdefer author.deinit(allocator);
-            try bar.children.put(allocator, author.getFocus().id, .{ .widget = .{ .text_box = author }, .rect = null, .min_size = null, .flex = .shrink });
+            const author_text = switch (entry.author) {
+                .unknown => "",
+                .email, .user_name => |text| text,
+            };
+            const author_width = @max(try xitui.width.displayWidth(author_text), " author ".len) + 2;
+            try bar.children.put(allocator, author.getFocus().id, .{ .widget = .{ .text_box = author }, .rect = null, .min_size = .{ .width = author_width, .height = null } });
 
             var spacer = try ui.widget.Spacer.init(allocator);
             errdefer spacer.deinit(allocator);
@@ -212,7 +218,7 @@ pub const Item = struct {
             }
 
             bar.getFocus().child_id = bar.children.keys()[0];
-            try box.children.put(allocator, bar.getFocus().id, .{ .widget = .{ .box = bar }, .rect = null, .min_size = null });
+            try box.children.put(allocator, bar_scroll.getFocus().id, .{ .widget = .{ .header_scroll = bar_scroll }, .rect = null, .min_size = null });
         }
 
         const body_text = if (entry.comment.removed) "(removed)" else entry.comment.event.body;
@@ -230,7 +236,7 @@ pub const Item = struct {
     }
 
     fn metadata(self: *Item) *wgt.Box(ui.Widget) {
-        return &self.box.children.values()[metadata_index].widget.box;
+        return self.box.children.values()[metadata_index].widget.header_scroll.row();
     }
 
     pub fn body(self: *Item) *Markdown.Frame {
