@@ -1246,7 +1246,7 @@ pub const Radio = struct {
     }
 };
 
-// a sub-header's row, which scrolls sideways once its children's minimum widths
+// a sub-header or tool row, which scrolls sideways once its children's minimum widths
 // outgrow the window, like the page header: natively on the web, following the
 // focused child in the terminal
 pub const HeaderScroll = struct {
@@ -1281,13 +1281,15 @@ pub const HeaderScroll = struct {
     pub fn build(self: *HeaderScroll, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
         self.clearGrid();
         const row_box = self.row();
-        // bring the focused child into view where the last build put it. one
-        // wider than the window shows its start, since chasing both its edges
-        // would scroll back and forth on every build.
-        if (!self.scroll.options.web_native) if (row_box.getFocus().child_id) |id| if (row_box.children.get(id)) |child| if (child.rect) |rect| {
-            var target = rect;
-            if (self.scroll.viewport) |viewport| target.size.width = @min(rect.size.width, viewport.width);
-            self.scroll.scrollToRect(target);
+        // an empty row takes no space
+        if (row_box.children.count() == 0) return;
+        // bring the focused child into view at this build's width, which a parent
+        // scroll narrows for its bar. one wider than the window shows its start,
+        // so it doesn't scroll back and forth.
+        if (!self.scroll.options.web_native) if (constraint.max_size.width) |view_width| if (row_box.getFocus().child_id) |id| if (row_box.children.get(id)) |child| if (child.rect) |rect| {
+            const view: isize = @intCast(view_width);
+            const right = rect.x + @min(@as(isize, @intCast(rect.size.width)), view);
+            self.scroll.x = std.math.clamp(self.scroll.x, right - view, rect.x);
         };
 
         // the window's width, or the children's minimums when they need more.

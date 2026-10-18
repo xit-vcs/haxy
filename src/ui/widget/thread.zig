@@ -809,7 +809,7 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
         }
 
         fn toolRow(self: *This) *wgt.Box(Widget) {
-            return &self.inner().children.values()[tool_row_index].widget.box;
+            return self.inner().children.values()[tool_row_index].widget.header_scroll.row();
         }
 
         fn entryConflicted(entry: Entry) bool {
@@ -891,9 +891,9 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
             self.author_id = null;
 
             {
-                var row = try wgt.Box(Widget).init(allocator, .{ .border = null, .direction = .horiz });
-                errdefer row.deinit(allocator);
-                try inner_box.children.put(allocator, row.getFocus().id, .{ .widget = .{ .box = row }, .rect = null, .min_size = null });
+                var tool_row = try widget.HeaderScroll.init(allocator, self.session);
+                errdefer tool_row.deinit(allocator);
+                try inner_box.children.put(allocator, tool_row.getFocus().id, .{ .widget = .{ .header_scroll = tool_row }, .rect = null, .min_size = null });
             }
             if (!description_page and comment_page == null) tools: {
                 const row = self.toolRow();
@@ -1405,7 +1405,6 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
         fn focusChild(self: *This, child_index: usize, last: bool, down: bool, root_focus: *Focus) void {
             const inner_box = self.inner();
             const child = &inner_box.children.values()[child_index];
-            var target = inner_box.children.keys()[child_index];
             var rect = child.rect orelse return;
             switch (child.widget) {
                 .repo_comment => |*comment| {
@@ -1416,16 +1415,10 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                     }
                     if (last) comment.focusBody(root_focus) else comment.focusMetadata(root_focus);
                 },
-                // a row enters on its first cell from either direction; the tool
-                // row keeps the cell it was on
-                .box => |*box| if (box.children.count() > 0) {
-                    target = if (child_index == tool_row_index)
-                        box.getFocus().child_id orelse return
-                    else
-                        box.children.keys()[0];
-                    root_focus.setFocus(target);
-                },
-                else => root_focus.setFocus(target),
+                // a row enters on its first cell from either direction
+                .box => |*box| if (box.children.count() > 0) root_focus.setFocus(box.children.keys()[0]),
+                // the tool row lands on the cell it was on
+                else => root_focus.setFocus(inner_box.children.keys()[child_index]),
             }
             widget.scrollToEnteredRow(&self.scroll, rect, down);
         }
@@ -1576,16 +1569,18 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
         pub fn focusFirst(self: *This, root_focus: ?*Focus) bool {
             const inner_box = self.inner();
             for (inner_box.children.values(), 0..) |*child, child_index| {
-                switch (child.widget) {
-                    .box => |*box| {
-                        for (box.children.keys(), box.children.values()) |id, *item| {
-                            if (item.widget.getFocus().mode != .all) continue;
-                            box.getFocus().child_id = id;
-                            break;
-                        } else continue;
-                    },
-                    else => if (!self.childFocusable(child_index)) continue,
-                }
+                const row: ?*wgt.Box(Widget) = switch (child.widget) {
+                    .box => |*box| box,
+                    .header_scroll => |*tool_row| tool_row.row(),
+                    else => null,
+                };
+                if (row) |box| {
+                    for (box.children.keys(), box.children.values()) |id, *item| {
+                        if (item.widget.getFocus().mode != .all) continue;
+                        box.getFocus().child_id = id;
+                        break;
+                    } else continue;
+                } else if (!self.childFocusable(child_index)) continue;
                 if (root_focus) |focus|
                     self.focusChild(child_index, false, true, focus)
                 else

@@ -2520,7 +2520,8 @@ fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: 
     // plus their descendants, which the focus tree flattens into this panel's
     // children): the cell hit-test below skips them so this panel doesn't claim
     // cells that are really rendered inside a child scroll's own panel.
-    // (scrolls aren't nested in practice, so every scroll child is direct here.)
+    // a nested scroll follows its parent scroll in the flattened tree, so it
+    // is already excluded and drawn by that scroll's panel.
     var direct: std.ArrayList(usize) = .empty;
     defer direct.deinit(allocator);
     var excluded: std.AutoHashMapUnmanaged(usize, void) = .empty;
@@ -2528,7 +2529,7 @@ fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: 
     {
         var it = focus.children.iterator();
         while (it.next()) |e| {
-            if (e.value_ptr.focus.scroll == null) continue;
+            if (e.value_ptr.focus.scroll == null or excluded.contains(e.key_ptr.*)) continue;
             try direct.append(allocator, e.key_ptr.*);
             try excluded.put(allocator, e.key_ptr.*, {});
             var mit = e.value_ptr.focus.children.iterator();

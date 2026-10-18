@@ -62,7 +62,7 @@ function focusedNativeScroll() {
     if (!id) return null;
     const focused = focusElements(id);
     if (focused.length === 0) return null;
-    const container = focused[0].closest(".scroll");
+    const container = focused[0].closest('.scroll:not([data-scroll-direction="horiz"])');
     return container ? { focused, container } : null;
 }
 
@@ -259,45 +259,45 @@ const importObject = {
         },
         _scrollToFocus: function (id) {
             grid.dataset.focusId = id;
-            // bring the focused widget into view within its own .scroll div. it's
-            // several spans (one per row) sharing this id, in top-to-bottom order,
-            // so the first gives its top/left edge and the last its bottom.
+            // bring the focused widget into view within each .scroll div holding
+            // it, innermost first. it's several spans (one per row) sharing this
+            // id, in top-to-bottom order, so the first gives its top/left edge and
+            // the last its bottom.
             const els = focusElements(id);
             if (els.length === 0) return;
-            const container = els[0].closest(".scroll");
-            if (!container) return;
-
-            const c = container.getBoundingClientRect();
-            const first = els[0].getBoundingClientRect();
-            const last = els[els.length - 1].getBoundingClientRect();
-            const top = first.top - c.top + container.scrollTop;
-            const bottom = last.bottom - c.top + container.scrollTop;
-            const left = first.left - c.left + container.scrollLeft;
-            let right = left;
-            for (const el of els) {
-                right = Math.max(right, el.getBoundingClientRect().right - c.left + container.scrollLeft);
-            }
-
-            // vertical is the priority axis. keep the viewport in place when it
-            // already overlaps a tall widget; otherwise reveal its nearest edge.
-            if (bottom - top > container.clientHeight) {
-                if (bottom <= container.scrollTop) {
-                    container.scrollTop = bottom - container.clientHeight;
-                } else if (top >= container.scrollTop + container.clientHeight) {
-                    container.scrollTop = top;
+            for (let container = els[0].closest(".scroll"); container; container = container.parentElement.closest(".scroll")) {
+                const c = container.getBoundingClientRect();
+                const first = els[0].getBoundingClientRect();
+                const last = els[els.length - 1].getBoundingClientRect();
+                const top = first.top - c.top + container.scrollTop;
+                const bottom = last.bottom - c.top + container.scrollTop;
+                const left = first.left - c.left + container.scrollLeft;
+                let right = left;
+                for (const el of els) {
+                    right = Math.max(right, el.getBoundingClientRect().right - c.left + container.scrollLeft);
                 }
-            } else if (top < container.scrollTop) {
-                container.scrollTop = top;
-            } else if (bottom > container.scrollTop + container.clientHeight) {
-                container.scrollTop = bottom - container.clientHeight;
-            }
-            // reveal a widget that fits the view's width. a wider one keeps the
-            // horizontal position, which only arrow left/right changes.
-            if (right - left <= container.clientWidth) {
-                if (left < container.scrollLeft) {
-                    container.scrollLeft = left;
-                } else if (right > container.scrollLeft + container.clientWidth) {
-                    container.scrollLeft = right - container.clientWidth;
+
+                // vertical is the priority axis. keep the viewport in place when it
+                // already overlaps a tall widget; otherwise reveal its nearest edge.
+                if (bottom - top > container.clientHeight) {
+                    if (bottom <= container.scrollTop) {
+                        container.scrollTop = bottom - container.clientHeight;
+                    } else if (top >= container.scrollTop + container.clientHeight) {
+                        container.scrollTop = top;
+                    }
+                } else if (top < container.scrollTop) {
+                    container.scrollTop = top;
+                } else if (bottom > container.scrollTop + container.clientHeight) {
+                    container.scrollTop = bottom - container.clientHeight;
+                }
+                // reveal a widget that fits the view's width. a wider one keeps the
+                // horizontal position, which only arrow left/right changes.
+                if (right - left <= container.clientWidth) {
+                    if (left < container.scrollLeft) {
+                        container.scrollLeft = left;
+                    } else if (right > container.scrollLeft + container.clientWidth) {
+                        container.scrollLeft = right - container.clientWidth;
+                    }
                 }
             }
         },
