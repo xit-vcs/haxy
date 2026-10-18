@@ -488,6 +488,14 @@ pub const View = struct {
         return tb.getFocus().id;
     }
 
+    // a row of focusable boxes, which wraps rather than cutting off on a narrow window
+    fn addFlow(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), items: []const ui.widget.WordFlow.Item) !void {
+        var flow = try ui.widget.WordFlow.init(allocator);
+        errdefer flow.deinit(allocator);
+        try flow.setItems(allocator, items);
+        try box.children.put(allocator, flow.getFocus().id, .{ .widget = .{ .word_flow = flow }, .rect = null, .min_size = null });
+    }
+
     // how much of the message a pane's box holds: a truncated preview links to
     // the pane holding the whole thing, which is that link's destination.
     const MessageBox = enum { preview, whole };
@@ -643,38 +651,24 @@ pub const View = struct {
         } else {
             const pa = self.session.page_arena;
             {
-                var row = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .horiz });
-                errdefer row.deinit(allocator);
+                var items: std.ArrayList(ui.widget.WordFlow.Item) = .empty;
+                defer items.deinit(allocator);
                 const diff_route = self.data.handle.location.commitDiffRoute(commit.oid, commit.parent_oid) orelse return error.RouteTooLong;
-                _ = try addLink(allocator, &row, "view diff", try pa.allocator().print("a:{s}", .{try diff_route.toUrl(pa)}));
-                _ = try addLink(allocator, &row, "view files at this commit", try filesObjectLink(pa, self.data.handle.location, commit.oid));
-                row.getFocus().child_id = row.children.keys()[0];
-                try inner.children.put(allocator, row.getFocus().id, .{ .widget = .{ .box = row }, .rect = null, .min_size = null });
+                try items.append(allocator, .{ .text = "view diff", .link = try pa.allocator().print("a:{s}", .{try diff_route.toUrl(pa)}) });
+                try items.append(allocator, .{ .text = "view files at this commit", .link = try filesObjectLink(pa, self.data.handle.location, commit.oid) });
+                if (commit.merge) if (self.data.handle.location.commitsMergeRoute(commit.oid)) |route| {
+                    try items.append(allocator, .{ .text = "view commits from this merge", .link = try pa.allocator().print("a:{s}", .{try route.toUrl(pa)}) });
+                };
+                try addFlow(allocator, inner, items.items);
             }
-            if (commit.merge) if (self.data.handle.location.commitsMergeRoute(commit.oid)) |route| {
-                _ = try addLink(allocator, inner, "view commits from this merge", try pa.allocator().print("a:{s}", .{try route.toUrl(pa)}));
-            };
             {
-                var row = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .horiz });
-                errdefer row.deinit(allocator);
-                if (commit.author != .unknown) {
-                    var tb = try ui.authorBox(allocator, pa, commit.author);
-                    errdefer tb.deinit(allocator);
-                    try row.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
-                }
-                if (commit.committer != .unknown) {
-                    var tb = try ui.authorBox(allocator, pa, commit.committer);
-                    errdefer tb.deinit(allocator);
-                    tb.options.top_label.text = " committer ";
-                    try row.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
-                }
+                var items: std.ArrayList(ui.widget.WordFlow.Item) = .empty;
+                defer items.deinit(allocator);
+                if (commit.author != .unknown) try items.append(allocator, try authorItem(pa, commit.author, " author "));
+                if (commit.committer != .unknown) try items.append(allocator, try authorItem(pa, commit.committer, " committer "));
                 const timestamp = try ui.timestamp.format(pa.allocator(), commit.timestamp, try self.session.nowSeconds());
-                var tb = try wgt.TextBox.init(allocator, timestamp.relative, .{ .border = .single, .round_corners = true, .wrap_kind = .none, .bottom_label = .{ .text = timestamp.exact } });
-                errdefer tb.deinit(allocator);
-                tb.getFocus().mode = .all;
-                try row.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
-                row.getFocus().child_id = row.children.keys()[0];
-                try inner.children.put(allocator, row.getFocus().id, .{ .widget = .{ .box = row }, .rect = null, .min_size = null });
+                try items.append(allocator, .{ .text = timestamp.relative, .bottom_label = timestamp.exact });
+                try addFlow(allocator, inner, items.items);
             }
             if (commit.stats) |stats| {
                 var text: std.Io.Writer.Allocating = .init(allocator);
@@ -889,4 +883,13 @@ fn messageLink(page_arena: *std.heap.ArenaAllocator, data: *const Self, oid: []c
     const route = data.handle.location.commitMessageRoute(.object, oid, data.base_oid) orelse return error.RouteTooLong;
     const url = try route.toUrl(page_arena);
     return page_arena.allocator().print("a:{s}", .{url});
+}
+
+// an author or committer box, linking to the user's page when it is a known user
+fn authorItem(page_arena: *std.heap.ArenaAllocator, author: ui.Author, label: []const u8) !ui.widget.WordFlow.Item {
+    return switch (author) {
+        .unknown => .{ .text = "", .top_label = label },
+        .email => |email| .{ .text = email, .top_label = label },
+        .user_name => |name| .{ .text = name, .link = try ui.userLink(page_arena, name), .top_label = label },
+    };
 }

@@ -287,6 +287,7 @@ pub fn moveInSelectedRow(box: *wgt.Box(Widget), root_focus: *Focus, right: bool)
     const selected = box.getFocus().child_id orelse return false;
     return switch ((box.children.getPtr(selected) orelse return false).widget) {
         .box => |*row| moveInRow(row, root_focus, right),
+        .word_flow => |*flow| moveInFlow(flow, root_focus, right),
         else => false,
     };
 }
@@ -321,6 +322,15 @@ pub fn moveInRow(row: *wgt.Box(Widget), root_focus: *Focus, right: bool) bool {
     const target = if (right) index + 1 else index -| 1;
     if (target == index or target >= row.children.count()) return false;
     root_focus.setFocus(row.children.keys()[target]);
+    return true;
+}
+
+// focus the item beside the selected one in `flow`, false when there is none that way.
+fn moveInFlow(flow: *WordFlow, root_focus: *Focus, right: bool) bool {
+    const index = flow.indexOfFocusId(flow.focus.child_id orelse return false) orelse return false;
+    const target = if (right) index + 1 else index -| 1;
+    if (target == index or target >= flow.text_boxes.items.len) return false;
+    root_focus.setFocus(flow.text_boxes.items[target].getFocus().id);
     return true;
 }
 
@@ -691,7 +701,7 @@ pub const WordFlow = struct {
     // backs each link item's `.custom` focus kind.
     arena: std.heap.ArenaAllocator,
 
-    pub const Item = struct { text: []const u8, link: []const u8 = "", top_label: []const u8 = "" };
+    pub const Item = struct { text: []const u8, link: []const u8 = "", top_label: []const u8 = "", bottom_label: []const u8 = "" };
 
     pub fn init(allocator: std.mem.Allocator) !WordFlow {
         return .{
@@ -715,7 +725,7 @@ pub const WordFlow = struct {
         self.arena.deinit();
     }
 
-    // the text box copies the item text; links and top labels are copied into the
+    // the text box copies the item text; links and labels are copied into the
     // arena, so the caller's slices needn't outlive this call.
     pub fn setItems(self: *WordFlow, allocator: std.mem.Allocator, items: []const Item) !void {
         for (self.text_boxes.items) |*tb| tb.deinit(allocator);
@@ -728,7 +738,13 @@ pub const WordFlow = struct {
         self.focus.child_id = null;
 
         for (items) |item| {
-            var text_box = try wgt.TextBox.init(allocator, item.text, .{ .border = .single, .round_corners = true, .wrap_kind = .none, .top_label = .{ .text = try aa.dupe(u8, item.top_label) } });
+            var text_box = try wgt.TextBox.init(allocator, item.text, .{
+                .border = .single,
+                .round_corners = true,
+                .wrap_kind = .none,
+                .top_label = .{ .text = try aa.dupe(u8, item.top_label) },
+                .bottom_label = .{ .text = try aa.dupe(u8, item.bottom_label) },
+            });
             errdefer text_box.deinit(allocator);
             text_box.getFocus().mode = .all;
 
