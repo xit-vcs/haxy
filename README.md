@@ -13,15 +13,17 @@ Keeping project metadata in the repo has a few benefits:
 * You can easily replicate it to different Haxy instances.
 * You can view/edit it locally and push your changes later, just like you do with code.
 
-You will still be able to edit this data via the UI of a Haxy instance just like any other git forge. Additionally, however, you'll be able to run the Haxy binary locally to browse a repo's issues and other metadata offline. If you have commit access to the repo, you'll also be able to make changes that you can push later. See the devlog about [local mode](https://www.youtube.com/watch?v=BZwUNrJ95ng) and [the issue tracker](https://www.youtube.com/watch?v=kkGUARj5Wdw).
+You can still edit this data via the UI of a Haxy instance just like any other git forge. Additionally, however, you can run the Haxy binary locally to browse a repo's issues and other metadata offline. If you have push access to the repo, you can make changes locally and push them later. See the devlog about [local mode](https://www.youtube.com/watch?v=BZwUNrJ95ng) and [the issue tracker](https://www.youtube.com/watch?v=kkGUARj5Wdw).
 
-Haxy repos will have a special branch where events will be stored. Any time project metadata is created or updated, an event will be created. There will be one event per commit and it will be stored as JSON in the commit message itself. The server will consume these events into its database when it receives them -- essentially, a form of event sourcing. See the devlog about [the event system](https://www.youtube.com/watch?v=0kKKWfaYaKE).
+Haxy repos have a special branch called `haxy/events` where events are stored. Any time project metadata is created or updated, an event is created. There's one event per commit, which is stored as JSON in the commit message itself. The server consumes these events into its database when it receives them -- essentially, a form of event sourcing. See the devlog about [the event system](https://www.youtube.com/watch?v=0kKKWfaYaKE).
 
 ### 2. Provide a TUI that is served over SSH, in addition to a web UI
 
-Haxy will provide a text user interface (TUI) over SSH, so you can browse the Haxy instance entirely from your terminal. These are sometimes called SSH apps. One big advantage they have is that you are automatically authenticated with your SSH key, so creating an account on a Haxy instance and associating it with your SSH public key can be done instantly.
+Haxy provides a text user interface (TUI) over SSH, so you can browse the Haxy instance entirely from your terminal. These are sometimes called SSH apps. One big advantage they have is that you are automatically authenticated with your SSH key, so creating an account on a Haxy instance and associating it with your SSH public key can be done instantly.
 
-Additionally, Haxy will provide a web UI for a more typical experience in a web browser. To avoid having separate UI codebases, the web UI will simply render the TUI in your browser. This sounds terrifying, but it can be done in an accessible way that is usable for screen readers and mobile devices. See the devlog about [the repo view](https://www.youtube.com/watch?v=47e0rzLF1oc) which shows how both the terminal and web version will look.
+Additionally, Haxy provides a web UI for a more typical experience in a web browser. The web UI simply renders the TUI in your browser. This sounds terrifying, but the web renderer still uses standard HTML controls. The renderer runs from a small webassembly binary, but pages are also initially server-rendered so content can be viewed even if scripts are disabled.
+
+See [the devlogs](https://www.youtube.com/watch?v=89yAiqYEwKg&list=PLhBlJpTc_51WMi20GmgYBTPy0JjAXV3gM) for more.
 
 ## Why not Radicle?
 
