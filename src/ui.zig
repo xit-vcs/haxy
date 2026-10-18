@@ -1350,8 +1350,9 @@ pub const RoutablePage = union(enum) {
                 if (tab.remove_key) try out.writer.writeAll("/" ++ remove_key_word);
                 break :blk out.written();
             },
+            // the default sub tab, which also shows the login form when logged out
             .notifications => if (tab.start == 0)
-                try arena.allocator().print("{s}/user/notifications", .{prefix})
+                try arena.allocator().print("{s}/user", .{prefix})
             else
                 try arena.allocator().print("{s}/user/notifications/" ++ start_seg ++ "{d}", .{ prefix, tab.start }),
         };
