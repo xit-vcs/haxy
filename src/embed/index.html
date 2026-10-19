@@ -46,7 +46,9 @@
             position: relative;
           }
 
-          body:has(#grid .scroll:not([data-scroll-direction="horiz"])) {
+          /* js sizes the panes to the window; without it the page is as tall
+             as its content and the browser scrolls it */
+          html.js body:has(#grid .scroll:not([data-scroll-direction="horiz"])) {
             height: 100vh;
             overflow: hidden;
           }
@@ -128,6 +130,8 @@
             text-decoration: underline;
           }
         </style>
+        <!-- tells the css that js runs -->
+        <script>document.documentElement.classList.add("js");</script>
     </head>
     <body>
       <div class="page">

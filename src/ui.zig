@@ -3390,8 +3390,10 @@ pub fn initRoot(allocator: std.mem.Allocator, page: *const Page, session: *Sessi
     // registrations here
     session.text_inputs.clearRetainingCapacity();
 
+    // without js the server's html shows this build as is. a min height would
+    // stretch some child to fill it, so the page is only as tall as its content.
     try root.build(allocator, .{
-        .min_size = .{ .width = null, .height = 40 },
+        .min_size = .{ .width = null, .height = null },
         .max_size = .{ .width = 100, .height = null },
     }, root.getFocus());
 
