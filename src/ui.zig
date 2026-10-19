@@ -19,6 +19,7 @@ const ansi_art = if (builtin.target.cpu.arch == .wasm32) struct {
 } else @import("ansi_art");
 const evt = @import("./event.zig");
 const inp = @import("./ui/input.zig");
+const serve_common = @import("./serve_common.zig");
 
 pub const timestamp = @import("./ui/timestamp.zig");
 
@@ -2395,6 +2396,8 @@ pub const Session = struct {
     web_url: ?[]const u8 = null,
     // the authorized_keys line of the key an ssh session connected with
     ssh_key: ?[]const u8 = null,
+    // where an ssh session logs its logins and signups
+    server_log: ?ServerLog = null,
     // a host operation requested by a widget
     host_request: ?HostRequest = null,
     quit_requested: bool = false,
@@ -2664,6 +2667,19 @@ pub const Session = struct {
         self.data.user_email = user.event.email;
     }
 
+    pub const ServerLog = struct {
+        writer: *std.Io.Writer,
+        // the client's address
+        peer: []const u8,
+    };
+
+    // a login or signup in the server log, on hosts that keep one
+    pub fn logServer(self: *const Self, comptime event: []const u8, comptime fmt: []const u8, args: anytype) void {
+        const server_log = self.server_log orelse return;
+        const io = self.io orelse return;
+        serve_common.logError(io, server_log.writer, "ssh tui " ++ event ++ ": ip={s} " ++ fmt ++ "\n", .{server_log.peer} ++ args);
+    }
+
     // forget the logged-in user, on a logout or once their account is removed
     pub fn logOut(self: *Self) void {
         self.data.user_id = null;
@@ -2679,9 +2695,10 @@ pub const Session = struct {
         const moment = self.haxy_moment orelse return;
         const fingerprint = evt.User.fingerprintOfKey(key) orelse return;
         const user_id = (try evt.readLoginKeyUser(try admin_repo.core.latestMoment(), &fingerprint)) orelse return;
-        if (!try evt.User.holdsKey(evt.AdminDB, evt.admin_repo_opts.hash, moment, self.arena, &user_id, &fingerprint)) return;
+        if (!try evt.User.holdsKey(evt.AdminDB, evt.admin_repo_opts.hash, moment, &user_id, &fingerprint)) return;
         self.data.user_id = try self.arena.allocator().dupe(u8, &user_id);
         try self.loadUser();
+        self.logServer("login", "user={s} via=key", .{self.data.user_name orelse "-"});
     }
 
     // add the session's ssh key to the user who just logged in with a

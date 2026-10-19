@@ -220,6 +220,7 @@ pub const View = struct {
 
                 // adopt the user's name and persisted prefs
                 try self.session.loadUser();
+                self.session.logServer("login", "user={s} via=password", .{self.session.data.user_name orelse "-"});
 
                 // wipe the entered credentials so they don't linger if the
                 // user returns to this page after logging out
@@ -234,6 +235,7 @@ pub const View = struct {
     }
 
     fn rememberFailure(self: *View, failure: ui.Session.FormFeedback.LoginFailure, username: []const u8) !void {
+        self.session.logServer("login failed", "user=\"{f}\" reason={s}", .{ std.zig.fmtString(username), @tagName(failure) });
         self.session.data.form_feedback = .{ .login = .{
             .failure = failure,
             .username = try self.session.arena.allocator().dupe(u8, username),

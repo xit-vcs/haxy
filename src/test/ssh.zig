@@ -984,6 +984,7 @@ const ServerTask = struct {
             self.writer,
             self.host_key,
             &idle,
+            .{ .ip4 = .unspecified(0) },
             self,
         ) catch |e| {
             self.result = e;

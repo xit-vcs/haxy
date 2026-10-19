@@ -242,7 +242,7 @@ fn normalizeMethod(method: std.http.Method) std.http.Method {
     return if (method == .HEAD) .GET else method;
 }
 
-fn findHeader(request: *std.http.Server.Request, name: []const u8) ?[]const u8 {
+pub fn findHeader(request: *std.http.Server.Request, name: []const u8) ?[]const u8 {
     var it = request.iterateHeaders();
     while (it.next()) |header| {
         if (std.ascii.eqlIgnoreCase(header.name, name)) return header.value;

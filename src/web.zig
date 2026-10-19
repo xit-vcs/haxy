@@ -138,7 +138,7 @@ pub fn handleConnection(
             .local => {},
         }
 
-        handleRequest(io, &request, allocator, host) catch |request_err| {
+        handleRequest(io, &request, allocator, host, err) catch |request_err| {
             serve_common.logError(io, err, "web ui request failed: {s}\n", .{@errorName(request_err)});
             // best-effort 500. if handleRequest already started writing a
             // response before throwing, this respond may fail too, but at
@@ -156,6 +156,7 @@ fn handleRequest(
     request: *std.http.Server.Request,
     allocator: std.mem.Allocator,
     host: Host,
+    error_writer: *std.Io.Writer,
 ) !void {
     const method = request.head.method;
     const owned_target = if (method == .POST) try allocator.dupe(u8, request.head.target) else null;
@@ -179,7 +180,7 @@ fn handleRequest(
                             .login => handleLogin(io, request, allocator, base, server.admin_repo_path, server.session_store),
                             .logout => handleLogout(request, allocator, base, server.session_store),
                             .@"repo/new" => handleRepoNew(io, request, allocator, path, server.admin_repo_path, server.users_dir, server.session_store),
-                            .@"user/new" => handleUserNew(io, request, allocator, path, server.admin_repo_path, server.users_dir, server.session_store),
+                            .@"user/new" => handleUserNew(io, request, allocator, path, server.admin_repo_path, server.users_dir, server.session_store, error_writer),
                             .user => handleUserSettings(io, request, allocator, base, server.admin_repo_path, server.users_dir, server.session_store),
                             .addkey => handleUserKeyAdd(io, request, allocator, base, server.admin_repo_path, server.users_dir, server.session_store),
                             .removekey => handleUserKeyRemove(io, request, allocator, base, server.admin_repo_path, server.users_dir, server.session_store),
@@ -859,6 +860,7 @@ fn handleUserNew(
     admin_repo_path: []const u8,
     users_dir: []const u8,
     session_store: SessionStore,
+    error_writer: *std.Io.Writer,
 ) !void {
     if (requestUserId(request, session_store) != null) {
         return request.respond("log out to create a user", .{
@@ -868,6 +870,9 @@ fn handleUserNew(
         });
     }
 
+    // copied before the body read, which invalidates the request's headers
+    const client = try allocator.dupe(u8, serve_http.findHeader(request, "x-forwarded-for") orelse "-");
+    defer allocator.free(client);
     const body = try readFormBody(request, allocator);
     defer allocator.free(body);
     const name = (try parseFormField(allocator, body, "name")) orelse try allocator.dupe(u8, "");
@@ -883,6 +888,7 @@ fn handleUserNew(
         var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = admin_repo_path });
         defer admin_repo.deinit(io, allocator);
         break :blk evt.createUser(io, allocator, users_dir, &admin_repo, name, email, password, password_again) catch |err| {
+            serve_common.logError(io, error_writer, "web signup failed: ip={s} name=\"{f}\" error={s}\n", .{ client, std.zig.fmtString(name), @errorName(err) });
             const failure = ui.Session.FormFeedback.UserFailure.fromError(err) orelse return err;
             return respondFormFailure(request, allocator, session_store, form_location, .{ .user = .{ .failure = failure, .fields = .{ .name = name, .email = email } } });
         };

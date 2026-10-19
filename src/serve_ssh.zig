@@ -40,13 +40,37 @@ pub const SessionHandler = struct {
 
     /// returning without an exit leaves the protocol layer to send status 0
     pub fn handleSession(self: *const SessionHandler, sess: *ssh.SessionCtx, request: ssh.Request) !void {
-        serve_common.logError(sess.conn.io, self.err, "ssh session: kind={s} key={s}\n", .{ @tagName(request), sess.fingerprint });
+        const io = sess.conn.io;
+        const start = std.Io.Timestamp.now(io, .awake);
+        switch (request) {
+            .shell => serve_common.logError(io, self.err, "ssh session: ip={f} kind=shell key={s}\n", .{ sess.conn.peer, sess.fingerprint }),
+            .exec => |exec| serve_common.logError(io, self.err, "ssh session: ip={f} kind=exec key={s} cmd=\"{f}\"\n", .{ sess.conn.peer, sess.fingerprint, std.zig.fmtString(exec.command) }),
+        }
+        const result = self.runSession(sess, request);
+        const failure: ?anyerror = if (result) |_| null else |e| sess.underlyingError(e);
+        // haxy only closes a session itself to refuse it
+        const status: u32 = if (failure != null or sess.closed) 1 else 0;
+        serve_common.logError(io, self.err, "ssh session end: ip={f} kind={s} status={d} duration={f} in={d} out={d}{s}{s}\n", .{
+            sess.conn.peer,
+            @tagName(request),
+            status,
+            start.untilNow(io, .awake),
+            sess.bytes_in,
+            sess.bytes_out,
+            if (failure != null) " error=" else "",
+            if (failure) |e| @errorName(e) else "",
+        });
+        return result;
+    }
+
+    fn runSession(self: *const SessionHandler, sess: *ssh.SessionCtx, request: ssh.Request) !void {
         switch (request) {
             .shell => |shell| {
                 const pty = shell.pty orelse {
                     // a shell without a pty has no useful TUI to render; in
                     // openssh client terms this is `ssh -T host`. say so and
                     // exit non-zero.
+                    logRefusal(self, sess, "shell without a pty");
                     try sess.writeBytes("haxy ssh: this server only serves the TUI when a pty is allocated (use a normal `ssh` invocation).\r\n");
                     try sess.exit(1);
                     return;
@@ -83,11 +107,12 @@ pub fn runListener(
     const handle = struct {
         fn h(ctx: Context, stream: std.Io.net.Stream) void {
             defer stream.close(ctx.io);
+            const peer = stream.socket.address;
 
             const prev_count = active_connections.fetchAdd(1, .acq_rel);
             defer _ = active_connections.fetchSub(1, .acq_rel);
             if (prev_count >= max_connections) {
-                serve_common.logError(ctx.io, ctx.err, "ssh: connection limit reached, dropping\n", .{});
+                serve_common.logError(ctx.io, ctx.err, "ssh connection limit reached: ip={f}\n", .{peer});
                 return;
             }
 
@@ -107,9 +132,16 @@ pub fn runListener(
                 &stream_writer.interface,
                 ctx.host_key,
                 &connection.idle_state,
+                peer,
                 ctx.session_handler,
             ) catch |session_err| {
-                serve_common.logError(ctx.io, ctx.err, "ssh session failed: {s}\n", .{@errorName(session_err)});
+                // a session logs its own end, and hanging up before one
+                // starts is mostly scanners
+                if (connection.idle_state.session_started.load(.acquire)) return;
+                switch (session_err) {
+                    error.EndOfStream, error.UnexpectedEof, error.ReadFailed, error.WriteFailed => {},
+                    else => serve_common.logError(ctx.io, ctx.err, "ssh connect failed: ip={f} error={s}\n", .{ peer, @errorName(session_err) }),
+                }
             };
         }
     }.h;
@@ -203,7 +235,7 @@ fn runTuiSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh
     // down and we can surface the failure on the restored screen before exiting.
     runTui(handler, sess, pty, color) catch |tui_err| {
         const err = sess.underlyingError(tui_err);
-        serve_common.logError(sess.conn.io, handler.err, "ssh tui session failed: {s}\n", .{@errorName(err)});
+        serve_common.logError(sess.conn.io, handler.err, "ssh tui session failed: ip={f} error={s}\n", .{ sess.conn.peer, @errorName(err) });
         var buf: [256]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "haxy ssh: {s}\r\n", .{@errorName(err)}) catch "haxy ssh: internal error\r\n";
         sess.writeBytes(msg) catch {};
@@ -241,6 +273,7 @@ fn runTui(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh.PtySiz
     ui_session.io = io;
     ui_session.users_dir = handler.server.users_dir;
     ui_session.ssh_key = try authorizedKeyLine(session_arena.allocator(), sess.public_key);
+    ui_session.server_log = .{ .writer = handler.err, .peer = try session_arena.allocator().print("{f}", .{sess.conn.peer}) };
     try ui_session.logInWithSshKey();
 
     var nav = try ui.Nav.init(allocator, &ui_session);
@@ -377,7 +410,7 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, exec: ss
     var writer = ssh.SessionWriter.init(sess, &writer_buf);
     defer writer.interface.flush() catch {};
 
-    const parsed = parseGitCommand(allocator, exec.command) catch return writeError(sess, "unsupported command (expected git-upload-pack or git-receive-pack)");
+    const parsed = parseGitCommand(allocator, exec.command) catch return writeError(handler, sess, "unsupported command (expected git-upload-pack or git-receive-pack)");
     defer parsed.deinit(allocator);
     const repo_identity = std.mem.trimStart(u8, parsed.dir, "/");
 
@@ -386,7 +419,7 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, exec: ss
         return runForkSession(handler, sess, repo_identity, parsed.service, protocol_version, &reader.interface, &writer.interface);
     }
 
-    const owner_repo = evt.parseOwnerRepoPath(repo_identity) orelse return writeError(sess, "repo path must be <owner>:<repo>");
+    const owner_repo = evt.parseOwnerRepoPath(repo_identity) orelse return writeError(handler, sess, "repo path must be <owner>:<repo>");
     var allowed_arena = std.heap.ArenaAllocator.init(allocator);
     defer allowed_arena.deinit();
     const allowed = switch (try authorizeRepoKey(io, &allowed_arena, handler.admin_repo_path, handler.server.users_dir, owner_repo.owner, owner_repo.name, parsed.service, &sess.fingerprint)) {
@@ -396,13 +429,13 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, exec: ss
             .upload_pack => writeKeyError(handler, sess, "unauthorized: the account with this SSH key cannot read this repo"),
             .receive_pack => writeKeyError(handler, sess, "unauthorized: the account with this SSH key cannot push to this repo"),
         },
-        .not_found => return writeError(sess, "repo not found"),
+        .not_found => return writeError(handler, sess, "repo not found"),
     };
 
     const repo_path = switch (try serve_common.resolveRepoPath(io, allocator, handler.server.users_dir, handler.admin_repo_path, repo_identity)) {
         .ok => |p| p,
         .invalid => unreachable, // parsed above
-        .not_found => return writeError(sess, "repo not found"),
+        .not_found => return writeError(handler, sess, "repo not found"),
     };
     defer allocator.free(repo_path);
 
@@ -439,7 +472,7 @@ fn runCreatingPush(
     const allocator = sess.conn.allocator;
     const io = sess.conn.io;
 
-    evt.Repo.validateName(name) catch return writeError(sess, "invalid repo name");
+    evt.Repo.validateName(name) catch return writeError(handler, sess, "invalid repo name");
 
     try xit.net_server_receive_pack.advertiseUncreated(.xit, writer, .{ .protocol_version = protocol_version });
     try writer.flush();
@@ -447,7 +480,7 @@ fn runCreatingPush(
     const hash_kind = (try xit.net_server_receive_pack.peekObjectFormat(reader)) orelse return;
 
     const location = evt.createRepo(io, allocator, handler.server.users_dir, &creator.owner_id, creator.owner, name, "", .private, hash_kind) catch |err| switch (err) {
-        error.NameTaken => return writeError(sess, "repo was just created by another push, try again"),
+        error.NameTaken => return writeError(handler, sess, "repo was just created by another push, try again"),
         else => |e| return e,
     };
     const repo_path = try evt.repoPath(allocator, handler.server.users_dir, &location.owner_id, &location.repo_id);
@@ -476,9 +509,9 @@ fn runForkSession(
     const allocator = sess.conn.allocator;
     const io = sess.conn.io;
 
-    const route = fork.parseRoute(fork_path) orelse return writeError(sess, "invalid fork path");
+    const route = fork.parseRoute(fork_path) orelse return writeError(handler, sess, "invalid fork path");
     // the route names the forker and the target repo
-    const forker_repo = evt.parseOwnerRepoPath(route.identity) orelse return writeError(sess, "repo path must be <forker>:<repo>");
+    const forker_repo = evt.parseOwnerRepoPath(route.identity) orelse return writeError(handler, sess, "repo path must be <forker>:<repo>");
 
     var admin = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = handler.admin_repo_path });
     defer admin.deinit(io, allocator);
@@ -487,16 +520,16 @@ fn runForkSession(
     const admin_moment = try evt.currentMoment(evt.admin_repo_opts, &admin);
     const fork_id = try evt.parseEventId(&route.id);
     const forker_id = (try evt.User.readIdByName(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, forker_repo.owner)) orelse
-        return writeError(sess, "patch draft not found");
+        return writeError(handler, sess, "patch draft not found");
     const fork_record = (try evt.readForkById(io, allocator, &admin_arena, handler.server.users_dir, &forker_id, &fork_id)) orelse
-        return writeError(sess, "patch draft not found");
-    if (fork_record.removed) return writeError(sess, "patch draft not found");
+        return writeError(handler, sess, "patch draft not found");
+    if (fork_record.removed) return writeError(handler, sess, "patch draft not found");
     // the url keeps the name the fork was made under, even after a rename
-    if (!std.mem.eql(u8, fork_record.event.repo_name, forker_repo.name)) return writeError(sess, "patch draft not found");
+    if (!std.mem.eql(u8, fork_record.event.repo_name, forker_repo.name)) return writeError(handler, sess, "patch draft not found");
     const user = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &admin_arena, &forker_id)) orelse
-        return writeError(sess, "invalid patch draft");
-    if (user.removed) return writeError(sess, "invalid patch draft");
-    if (service == .receive_pack and !try evt.User.holdsKey(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &admin_arena, &forker_id, &sess.fingerprint))
+        return writeError(handler, sess, "invalid patch draft");
+    if (user.removed) return writeError(handler, sess, "invalid patch draft");
+    if (service == .receive_pack and !try evt.User.holdsKey(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &forker_id, &sess.fingerprint))
         return writeKeyError(handler, sess, "unauthorized: this SSH key is not registered to the patch author");
 
     const target_owner_id = try evt.parseEventId(&fork_record.event.repo_user_id);
@@ -505,10 +538,10 @@ fn runForkSession(
     const target = try evt.readRepoById(io, allocator, &admin_arena, handler.server.users_dir, &target_owner_id, &target_id, forker_id);
     if (target) |value| {
         // patches that are off take their drafts with them
-        const patch_role = value.repo.event.patch_role orelse return writeError(sess, "patch draft not found");
+        const patch_role = value.repo.event.patch_role orelse return writeError(handler, sess, "patch draft not found");
         if (service == .receive_pack) {
-            const role = value.role orelse return writeError(sess, "repo not found");
-            if (!role.atLeast(patch_role)) return writeError(sess, "unauthorized: your role in this repo may not write patches");
+            const role = value.role orelse return writeError(handler, sess, "repo not found");
+            if (!role.atLeast(patch_role)) return writeError(handler, sess, "unauthorized: your role in this repo may not write patches");
         }
     }
     if (service == .upload_pack) {
@@ -516,14 +549,14 @@ fn runForkSession(
         const readable = if (target) |value| readable: {
             const owner = (try evt.User.readById(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &admin_arena, &target_owner_id)) orelse unreachable;
             break :readable try authorizeRepoKey(io, &admin_arena, handler.admin_repo_path, handler.server.users_dir, owner.event.name, value.repo.event.name, .upload_pack, &sess.fingerprint) == .allowed;
-        } else try evt.User.holdsKey(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &admin_arena, &forker_id, &sess.fingerprint);
+        } else try evt.User.holdsKey(evt.AdminDB, evt.admin_repo_opts.hash, admin_moment, &forker_id, &sess.fingerprint);
         if (!readable) return writeKeyError(handler, sess, "unauthorized: the account with this SSH key cannot read this patch draft");
     }
 
     const draft_path = try fork.forkPath(allocator, handler.server.users_dir, &forker_id, &fork_id);
     defer allocator.free(draft_path);
     var draft = rp.AnyRepo(.xit, any_repo_opts).open(io, allocator, .{ .path = draft_path }) catch
-        return writeError(sess, "patch draft not found");
+        return writeError(handler, sess, "patch draft not found");
     defer draft.deinit(io, allocator);
     if (service == .upload_pack) {
         var sideband = progress.Sideband{ .writer = writer, .sess = sess };
@@ -531,7 +564,7 @@ fn runForkSession(
             inline else => |*repo| try repo.uploadPack(io, allocator, reader, writer, .{ .protocol_version = protocol_version }, &sideband),
         }
     } else {
-        if (target == null) return writeError(sess, "the repo this patch draft targets was deleted");
+        if (target == null) return writeError(handler, sess, "the repo this patch draft targets was deleted");
         const target_path = try evt.repoPath(allocator, handler.server.users_dir, &target_owner_id, &target_id);
         defer allocator.free(target_path);
         const author: evt.CommitAuthor = .{ .name = user.event.name, .email = user.event.email };
@@ -539,7 +572,7 @@ fn runForkSession(
         switch (draft) {
             inline else => |*repo| {
                 var target_repo = rp.Repo(.xit, repo.self_repo_opts).open(io, allocator, .{ .path = target_path }) catch
-                    return writeError(sess, "repo not found or has the wrong hash");
+                    return writeError(handler, sess, "repo not found or has the wrong hash");
                 defer target_repo.deinit(io, allocator);
                 try push.receiveFork(repo.self_repo_opts, io, allocator, repo, &target_repo, handler.server, &route.id, author, timestamp, reader, writer, handler.max_repo_size, handler.err, sess);
             },
@@ -611,7 +644,7 @@ fn authorizeRepoKey(
     const repo = (try evt.readRepoByOwnerAndName(io, allocator, arena, moment, users_dir, owner_name, repo_name, null)) orelse {
         if (service == .upload_pack) return .not_found;
         const owner_id = (try evt.User.readIdByName(evt.AdminDB, evt.admin_repo_opts.hash, moment, owner_name)) orelse return .not_found;
-        if (!try evt.User.holdsKey(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, &owner_id, fingerprint)) return .denied;
+        if (!try evt.User.holdsKey(evt.AdminDB, evt.admin_repo_opts.hash, moment, &owner_id, fingerprint)) return .denied;
         return .{ .create = .{ .owner_id = owner_id, .owner = try commitAuthor(moment, arena, &owner_id) } };
     };
 
@@ -622,14 +655,17 @@ fn authorizeRepoKey(
     // any key may fetch a public repo; a push always needs a key holder
     if (service == .upload_pack and repo.role != null) return .{ .allowed = .fetch };
 
-    // a key can be shared, so the push acts as the holder with the highest role
+    // a shared key acts as its highest-role holder, and only the owner and
+    // members rise above the base role
     const owner_id = try evt.parseEventId(&repo.repo.event.user_id);
     var best: ?struct { id: [evt.event_id_size]u8, role: evt.Repo.Role } = null;
-    for (try evt.User.readIdsByFingerprint(evt.AdminDB, evt.admin_repo_opts.hash, moment, arena, fingerprint)) |holder_id| {
-        const seen = (try evt.readRepoById(io, allocator, arena, users_dir, &owner_id, &repo.event_id, holder_id)) orelse return .not_found;
-        const role = seen.role orelse continue;
-        if (best) |held| if (held.role.atLeast(role)) continue;
-        best = .{ .id = holder_id, .role = role };
+    if (try evt.User.holdsKey(evt.AdminDB, evt.admin_repo_opts.hash, moment, &owner_id, fingerprint)) {
+        best = .{ .id = owner_id, .role = .owner };
+    } else for (try evt.readRepoGrants(io, allocator, arena, users_dir, &owner_id, &repo.event_id)) |grant| {
+        const member_id = try evt.parseEventId(&grant.user_id);
+        if (!try evt.User.holdsKey(evt.AdminDB, evt.admin_repo_opts.hash, moment, &member_id, fingerprint)) continue;
+        if (best) |held| if (held.role.atLeast(grant.role)) continue;
+        best = .{ .id = member_id, .role = grant.role };
     }
     const holder = best orelse return .denied;
     if (!holder.role.atLeast(min_role)) return .denied;
@@ -674,7 +710,13 @@ fn authorizedKeyLine(allocator: std.mem.Allocator, blob: []const u8) ![]const u8
     return line;
 }
 
-fn writeError(sess: *ssh.SessionCtx, comptime msg: []const u8) !void {
+// the reason a session was turned away, beside its session lines
+fn logRefusal(handler: *const SessionHandler, sess: *ssh.SessionCtx, reason: []const u8) void {
+    serve_common.logError(sess.conn.io, handler.err, "ssh refused: ip={f} key={s} reason=\"{s}\"\n", .{ sess.conn.peer, sess.fingerprint, reason });
+}
+
+fn writeError(handler: *const SessionHandler, sess: *ssh.SessionCtx, comptime msg: []const u8) !void {
+    logRefusal(handler, sess, msg);
     const body = "ERR haxy ssh: " ++ msg;
     var packet: [body.len + 4]u8 = undefined;
     const line = try std.fmt.bufPrint(&packet, "{x:0>4}{s}", .{ packet.len, body });
@@ -685,22 +727,20 @@ fn writeError(sess: *ssh.SessionCtx, comptime msg: []const u8) !void {
 // a refusal naming the key the client presented. a key on no account gets its
 // own message, since clients send whichever key they offer first.
 fn writeKeyError(handler: *const SessionHandler, sess: *ssh.SessionCtx, comptime msg: []const u8) !void {
-    const io = sess.conn.io;
-    const allocator = sess.conn.allocator;
     const known = known: {
-        var arena = std.heap.ArenaAllocator.init(allocator);
-        defer arena.deinit();
+        const io = sess.conn.io;
+        const allocator = sess.conn.allocator;
         var admin = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = handler.admin_repo_path });
         defer admin.deinit(io, allocator);
-        const moment = try evt.currentMoment(evt.admin_repo_opts, &admin);
-        break :known (try evt.User.readIdsByFingerprint(evt.AdminDB, evt.admin_repo_opts.hash, moment, &arena, &sess.fingerprint)).len > 0;
+        break :known try evt.User.keyHeld(evt.AdminDB, evt.admin_repo_opts.hash, try evt.currentMoment(evt.admin_repo_opts, &admin), &sess.fingerprint);
     };
-    if (known) return writeFingerprintError(sess, msg);
-    return writeFingerprintError(sess, "unauthorized: this SSH key isn't added to any haxy account. if you have several keys, your SSH client may be offering a different one first");
+    if (known) return writeFingerprintError(handler, sess, msg);
+    return writeFingerprintError(handler, sess, "unauthorized: this SSH key isn't added to any haxy account. if you have several keys, your SSH client may be offering a different one first");
 }
 
 // an error line ending with the presented key's fingerprint
-fn writeFingerprintError(sess: *ssh.SessionCtx, comptime msg: []const u8) !void {
+fn writeFingerprintError(handler: *const SessionHandler, sess: *ssh.SessionCtx, comptime msg: []const u8) !void {
+    logRefusal(handler, sess, msg);
     const prefix = "ERR haxy ssh: " ++ msg ++ " (key ";
     var packet: [4 + prefix.len + ssh.fingerprint_len + 1]u8 = undefined;
     const line = try std.fmt.bufPrint(&packet, "{x:0>4}" ++ prefix ++ "{s})", .{ packet.len, &sess.fingerprint });

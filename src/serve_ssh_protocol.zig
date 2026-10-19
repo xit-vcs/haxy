@@ -340,6 +340,8 @@ pub const Conn = struct {
     sc_cipher: Cipher,
     rekey: RekeyState,
     idle: *IdleState,
+    // the client's address, for the host's log lines
+    peer: std.Io.net.IpAddress = .{ .ip4 = .unspecified(0) },
     // set only while the TUI waits to resolve a lone escape key
     read_timeout: std.Io.Timeout = .none,
     // teardown ran to the peer's EOF, so nothing more can be said
@@ -413,6 +415,9 @@ pub const SessionCtx = struct {
     eof_reported: bool = false,
     // resize seen by the background pump, returned by the next nextEvent call
     pending_resize: ?PtySize = null,
+    // channel data received and sent
+    bytes_in: u64 = 0,
+    bytes_out: u64 = 0,
 
     pub fn deinit(self: *SessionCtx) void {
         self.incoming_buffer.deinit(self.conn.allocator);
@@ -480,6 +485,7 @@ pub const SessionCtx = struct {
             self.incoming_start = 0;
         }
         try self.incoming_buffer.appendSlice(self.conn.allocator, payload);
+        self.bytes_in += payload.len;
     }
 
     /// interactive sessions idle legitimately; tell the host's idle
@@ -541,6 +547,7 @@ pub const SessionCtx = struct {
 
             std.mem.writeInt(u32, header[5..9], chunk_len, .big);
             try conn.writePacket(&.{ &header, rest[0..chunk_len] });
+            self.bytes_out += chunk_len;
 
             self.channel.remote_window -= chunk_len;
             rest = rest[chunk_len..];
@@ -763,7 +770,7 @@ pub const SessionReader = struct {
 /// invoked once the channel is open and a shell/exec request has arrived.
 ///
 /// `reader` and `writer` are the bidirectional byte stream. `idle` is kept
-/// current for the host's watchdog.
+/// current for the host's watchdog. `peer` is the client's address.
 pub fn handleConnection(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -771,12 +778,14 @@ pub fn handleConnection(
     writer: *std.Io.Writer,
     host_key: *const HostKey,
     idle: *IdleState,
+    peer: std.Io.net.IpAddress,
     handler: anytype,
 ) !void {
     const client_version = try exchangeVersions(allocator, reader, writer);
     defer allocator.free(client_version);
 
     var conn = try runKex(io, allocator, reader, writer, host_key, client_version, idle);
+    conn.peer = peer;
     defer std.crypto.secureZero(u8, std.mem.asBytes(&conn.cs_cipher));
     defer std.crypto.secureZero(u8, std.mem.asBytes(&conn.sc_cipher));
 

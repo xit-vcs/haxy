@@ -268,29 +268,29 @@ pub fn readIdByName(
     return user_id;
 }
 
-// the ids of the active users holding the ssh key with this fingerprint
-pub fn readIdsByFingerprint(
+// the ids of the active users holding the ssh key with this fingerprint, or
+// null when nobody does
+fn holderSet(
     comptime DB: type,
     comptime hash_kind: hash.HashKind,
     haxy_moment: DB.HashMap(.read_only),
-    arena: *std.heap.ArenaAllocator,
     fingerprint: *const [ssh.fingerprint_len]u8,
-) ![]const [evt.event_id_size]u8 {
-    var user_ids: std.ArrayList([evt.event_id_size]u8) = .empty;
-    const index_cursor = (try haxy_moment.getCursor(hash.hashInt(hash_kind, fingerprint_to_user_id_set_key))) orelse return user_ids.items;
+) !?DB.SortedSet(.read_only) {
+    const index_cursor = (try haxy_moment.getCursor(hash.hashInt(hash_kind, fingerprint_to_user_id_set_key))) orelse return null;
     const index = try DB.HashMap(.read_only).init(index_cursor);
-    const user_id_set_cursor = (try index.getCursor(hash.hashInt(hash_kind, fingerprint))) orelse return user_ids.items;
-    const user_id_set = try DB.SortedSet(.read_only).init(user_id_set_cursor);
+    const user_id_set_cursor = (try index.getCursor(hash.hashInt(hash_kind, fingerprint))) orelse return null;
+    return try DB.SortedSet(.read_only).init(user_id_set_cursor);
+}
 
-    var iter = try user_id_set.iterator();
-    while (try iter.next()) |kv_pair_cursor| {
-        var cursor = kv_pair_cursor;
-        const kv_pair = try cursor.readKeyValuePair();
-        var user_id: [evt.event_id_size]u8 = undefined;
-        _ = try kv_pair.key_cursor.readBytes(&user_id);
-        try user_ids.append(arena.allocator(), user_id);
-    }
-    return user_ids.items;
+// whether any active user holds the ssh key with this fingerprint
+pub fn keyHeld(
+    comptime DB: type,
+    comptime hash_kind: hash.HashKind,
+    haxy_moment: DB.HashMap(.read_only),
+    fingerprint: *const [ssh.fingerprint_len]u8,
+) !bool {
+    const user_id_set = (try holderSet(DB, hash_kind, haxy_moment, fingerprint)) orelse return false;
+    return try user_id_set.count() > 0;
 }
 
 // whether the user holds the ssh key with this fingerprint
@@ -298,14 +298,11 @@ pub fn holdsKey(
     comptime DB: type,
     comptime hash_kind: hash.HashKind,
     haxy_moment: DB.HashMap(.read_only),
-    arena: *std.heap.ArenaAllocator,
     user_id: *const [evt.event_id_size]u8,
     fingerprint: *const [ssh.fingerprint_len]u8,
 ) !bool {
-    for (try readIdsByFingerprint(DB, hash_kind, haxy_moment, arena, fingerprint)) |holder_id| {
-        if (std.mem.eql(u8, &holder_id, user_id)) return true;
-    }
-    return false;
+    const user_id_set = (try holderSet(DB, hash_kind, haxy_moment, fingerprint)) orelse return false;
+    return user_id_set.contains(user_id);
 }
 
 // a user's record map via the event-id->user index

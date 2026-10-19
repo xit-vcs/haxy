@@ -144,6 +144,7 @@ pub const View = struct {
         defer allocator.free(password_again);
 
         const id = evt.createUser(io, allocator, users_dir, admin_repo, name, email, password, password_again) catch |err| {
+            self.session.logServer("signup failed", "name=\"{f}\" error={s}", .{ std.zig.fmtString(name), @errorName(err) });
             const aa = self.session.arena.allocator();
             self.session.data.form_feedback = .{ .user = .{
                 .failure = ui.Session.FormFeedback.UserFailure.fromError(err) orelse return err,
@@ -151,6 +152,8 @@ pub const View = struct {
             } };
             return;
         };
+
+        self.session.logServer("signup", "user={s}", .{name});
 
         // log in as the new user, reading them from a moment that has them
         self.session.data.user_id = try self.session.arena.allocator().dupe(u8, &id);
