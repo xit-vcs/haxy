@@ -148,8 +148,14 @@ fn onKeyDown(key_code: u32) !void {
     if (ui.inPageLink(root_focus, focus_id, session.data)) |route| session.data.current_page = route;
 }
 
-fn onMouseClick(focus_id: usize) !void {
+fn onMouseClick(focus_id: usize, x: usize, y: usize) !void {
     const root_ptr = if (root) |*root_value| root_value else return error.NotStarted;
+    // follow a page link in the clicked cell, which the html leaves out
+    if (panelGrid(root_ptr, focus_id)) |grid| if (ui.cellPageLink(grid, x, y, session.data)) |route| {
+        const url = try route.toUrl(&page_arena);
+        _navigate(url.ptr, @intCast(url.len));
+        return;
+    };
     // follow a cross-page link
     if (ui.crossPageLink(root_ptr.getFocus(), focus_id, session.data)) |route| {
         const url = try route.toUrl(&page_arena);
@@ -171,6 +177,18 @@ fn onMouseClick(focus_id: usize) !void {
         const rect = (root_focus.children.get(focus_id) orelse return).rect;
         try root_ptr.input(allocator, .{ .mouse = .{ .x = @intCast(rect.x), .y = @intCast(rect.y), .button = .left } }, root_focus);
     }
+}
+
+// the grid the html draws focus_id in: its innermost scroll's content, else
+// the root's
+fn panelGrid(root_ptr: *ui.Widget, focus_id: usize) ?xitui.grid.Grid {
+    const root_focus = root_ptr.getFocus();
+    var current = focus_id;
+    while (root_focus.children.get(current)) |child| {
+        if (child.focus.scroll) |info| return info.content;
+        current = child.parent_id;
+    }
+    return root_ptr.getGrid();
 }
 
 fn setFocus(focus_id: usize) !void {
@@ -224,8 +242,9 @@ export fn _onKeyDown(key_code: u32) void {
     };
 }
 
-export fn _onMouseClick(focus_id: u32) void {
-    onMouseClick(focus_id) catch |err| {
+// x and y are the clicked cell within the panel the focusable is drawn in
+export fn _onMouseClick(focus_id: u32, x: u32, y: u32) void {
+    onMouseClick(focus_id, x, y) catch |err| {
         var buf: [256]u8 = undefined;
         const str = std.fmt.bufPrint(&buf, "onMouseClick: {}", .{err}) catch unreachable;
         consoleLog(str);

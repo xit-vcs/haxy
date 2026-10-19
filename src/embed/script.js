@@ -464,7 +464,10 @@ WebAssembly.instantiateStreaming(fetch("/haxy.wasm"), importObject).then(async (
         // an in-page link doesn't also trigger a redundant full page load.
         event.preventDefault();
         const focusId = Number(span.dataset.focusId);
-        wasmInstance.exports._onMouseClick(focusId);
+        // the clicked cell within its panel, where wasm finds a page link
+        // (wasm truncates the position to whole cells)
+        const cells = span.closest(".scroll, .grid-content").querySelector(":scope > .grid-cells").getBoundingClientRect();
+        wasmInstance.exports._onMouseClick(focusId, (event.clientX - cells.left) / cellWidth, (event.clientY - cells.top) / cellHeight);
         wasmInstance.exports._tick(minRows(), maxCols());
     });
 

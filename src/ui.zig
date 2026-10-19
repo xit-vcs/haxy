@@ -2928,7 +2928,7 @@ pub fn inputKey(allocator: std.mem.Allocator, root: *Widget, key: Key, session: 
         },
         .mouse => |mouse| {
             if (mouse.button == .left) {
-                if (cellPageLink(root, mouse.x, mouse.y, session.data)) |route| return session.navigate(route);
+                if (root.getGrid()) |grid| if (cellPageLink(grid, mouse.x, mouse.y, session.data)) |route| return session.navigate(route);
                 if (root_focus.hitTest(mouse.x, mouse.y)) |hit| {
                     const focus_id = hit.id;
                     if (hit.kind == .background) {
@@ -3081,8 +3081,7 @@ pub fn crossPageLink(root_focus: *Focus, focus_id: usize, data: Session.Data) ?R
 }
 
 // the page the clicked cell links to, from a link inside a text box's content
-fn cellPageLink(root: *Widget, x: usize, y: usize, data: Session.Data) ?RoutablePage {
-    const grid = root.getGrid() orelse return null;
+pub fn cellPageLink(grid: Grid, x: usize, y: usize, data: Session.Data) ?RoutablePage {
     const cell = grid.cell(x, y) catch return null;
     const link = cell.link orelse return null;
     if (link.len == 0 or link[0] != '/') return null;
