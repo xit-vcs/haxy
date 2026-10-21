@@ -2635,7 +2635,6 @@ fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: 
         var cur_style: Grid.Style = .{};
         var open_tag: ?CellTag = null;
         var open_link: ?[]const u8 = null;
-        var first = true;
         for (0..grid.size.width) |x| {
             const cell = (try grid.cell(x, y)).*;
             // a cell covered by a child scroll's viewport is drawn by that scroll's
@@ -2653,7 +2652,7 @@ fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: 
             const owner = if (covered_by_scroll) 0 else owners[y * grid.size.width + x];
             const style: Grid.Style = if (covered_by_scroll) .{ .bg = cell.style.bg } else cell.style;
 
-            if (first or owner != cur_owner or !style.eql(cur_style)) {
+            if (owner != cur_owner or !style.eql(cur_style)) {
                 if (open_link != null) try output.appendSlice(allocator, "</a>");
                 open_link = null;
                 if (open_tag) |t| try output.appendSlice(allocator, t.closeTag());
@@ -2673,7 +2672,6 @@ fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: 
                 open_tag = new_tag;
                 cur_owner = owner;
                 cur_style = style;
-                first = false;
             }
 
             // an anchor can't nest in another, so a link tag's cells skip theirs
