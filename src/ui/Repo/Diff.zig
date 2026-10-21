@@ -12,6 +12,10 @@ const Focus = xit.xitui.focus.Focus;
 const inp = @import("../input.zig");
 
 pub const page_size = 10;
+
+// the most cells a page's content may take: its line count times its widest line
+const max_page_cells = 1_000_000;
+
 pub const Hunk = struct {
     path: ?[]const u8 = null,
     text: []const u8,
@@ -19,6 +23,7 @@ pub const Hunk = struct {
     prefixes: []const u8,
     status: Status = .changed,
 };
+
 pub const Status = enum {
     added,
     removed,
@@ -41,6 +46,7 @@ pub const Status = enum {
         return .{ .kind = .single, .style = .{ .fg = .ansi(color) } };
     }
 };
+
 pub const Window = struct {
     hunks: []const Hunk = &.{},
     start: usize = 0,
@@ -161,6 +167,9 @@ pub fn render(
     var hunks: std.ArrayList(Hunk) = .empty;
     var index: usize = 0; // running hunk index across all files
     var has_more = false;
+    // the page's content grid is its line count times its widest line
+    var lines: usize = 0;
+    var widest: usize = 0;
 
     file_loop: while (try file_iter.next()) |pair_val| {
         var pair = pair_val;
@@ -174,10 +183,13 @@ pub fn render(
             const i = index;
             index += 1;
             if (i < start) continue;
-            if (hunks.items.len >= page_size) {
+            const page_widest = @max(widest, pair.path.len);
+            if (hunks.items.len >= page_size or (hunks.items.len > 0 and (lines + 1) * page_widest > max_page_cells)) {
                 has_more = true;
                 break :file_loop;
             }
+            lines += 1;
+            widest = page_widest;
             try hunks.append(arena, .{ .path = try arena.dupe(u8, pair.path), .text = "", .prefixes = "", .status = status });
             continue;
         }
@@ -199,6 +211,14 @@ pub fn render(
                 break :file_loop;
             }
             const rendered = try renderHunk(repo_kind, repo_opts, arena, &hunk_iter, &hunk);
+            // the first hunk always goes in, xit's max_hunk_edits bounds it
+            const page_widest = @max(widest, rendered.widest);
+            if (hunks.items.len > 0 and (lines + rendered.prefixes.len) * page_widest > max_page_cells) {
+                has_more = true;
+                break :file_loop;
+            }
+            lines += rendered.prefixes.len;
+            widest = page_widest;
             try hunks.append(arena, .{
                 .path = if (path_attached) null else try arena.dupe(u8, pair.path),
                 .text = rendered.text,
@@ -218,10 +238,11 @@ fn renderHunk(
     arena: std.mem.Allocator,
     hunk_iter: *df.HunkIterator(repo_kind, repo_opts),
     hunk: *df.Hunk(repo_kind, repo_opts),
-) !struct { text: []const u8, prefixes: []const u8 } {
+) !struct { text: []const u8, prefixes: []const u8, widest: usize } {
     var out: std.Io.Writer.Allocating = .init(arena);
     defer out.deinit();
     var prefixes: std.ArrayList(u8) = .empty;
+    var widest_text: usize = 0;
     var max_num: usize = 1;
     for (hunk.edits.items) |edit| {
         const n = editLineNum(edit) + 1;
@@ -244,8 +265,10 @@ fn renderHunk(
         try out.writer.splatByteAll(' ', width - std.fmt.count("{d}", .{num}));
         try out.writer.print("{d} {c}{s}", .{ num, prefix, text });
         try prefixes.append(arena, prefix);
+        widest_text = @max(widest_text, text.len);
     }
-    return .{ .text = try out.toOwnedSlice(), .prefixes = try prefixes.toOwnedSlice(arena) };
+    // each line's number, space and prefix come before its text
+    return .{ .text = try out.toOwnedSlice(), .prefixes = try prefixes.toOwnedSlice(arena), .widest = width + 2 + widest_text };
 }
 
 // the line number to show for an edit: the new-side number for kept and inserted
@@ -273,7 +296,7 @@ fn appendWindow(data: @This(), allocator: std.mem.Allocator, session: *ui.Sessio
         };
         if (hunk.text.len != 0) try addHunk(allocator, box, hunk);
     }
-    if (data.window.has_more) try addLink(allocator, box, "next →", try data.route.link(session.page_arena, data.window.start + page_size, data.path));
+    if (data.window.has_more) try addLink(allocator, box, "next →", try data.route.link(session.page_arena, data.window.start + data.window.hunks.len, data.path));
 }
 
 fn addLink(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), text: []const u8, link: []const u8) !void {
