@@ -16,8 +16,12 @@ const fnd = @import("../../find.zig");
 const md = @import("../../markdown.zig");
 const Markdown = @import("Markdown.zig");
 
-// how many lines of a file's content one window shows before a "next" link.
+// the most lines of a file's content one window shows before a "next" link.
 const file_page = 5000;
+
+// the most cells one window's content may take, as its line count times its
+// longest line, since the content grid is that wide for every line.
+const max_window_cells = 1_000_000;
 
 // a longer markdown file shows as numbered source rather than rendered.
 const max_markdown_lines = 2000;
@@ -290,10 +294,11 @@ const FileContent = struct {
     has_more: bool = false,
 };
 
-// read the window [start, start+file_page) of a committed file's contents at
-// `oid` into `arena`-owned lines, flagging whether more follow. xit's
-// line iterator flags binary files (its source becomes `.binary`), in which case
-// we report no lines and let the view show a placeholder.
+// read the window of a committed file's contents from `start`, capped by
+// file_page and max_window_cells, into `arena`-owned lines, flagging whether
+// more follow. xit's line iterator flags binary files (its source becomes
+// `.binary`), in which case we report no lines and let the view show a
+// placeholder.
 fn readFileContent(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
@@ -316,14 +321,19 @@ fn readFileContent(
     const end = @min(start +| file_page, total);
 
     var lines: std.ArrayList([]const u8) = .empty;
+    var widest: usize = 0;
     var i = start;
     while (i < end) : (i += 1) {
         const line = try line_iter.get(i);
+        // a line's byte length bounds its display width
+        widest = @max(widest, line.len);
+        // the first line always goes in; xit's max_line_size bounds it
+        if (lines.items.len > 0 and (lines.items.len + 1) * widest > max_window_cells) break;
         try lines.append(arena, try arena.dupe(u8, line));
     }
     return .{
         .lines = try lines.toOwnedSlice(arena),
-        .has_more = end < total,
+        .has_more = i < total,
     };
 }
 
@@ -716,7 +726,7 @@ pub const View = struct {
                 // the window links sit above the scroll, so they stay put
                 // while the content scrolls.
                 if (entry.window_start > 0) try self.addNavLink(allocator, nav_box, "scroll to top", entry, 0);
-                if (entry.has_more) try self.addNavLink(allocator, nav_box, "next lines →", entry, lineNumber(entry.window_start + file_page));
+                if (entry.has_more) try self.addNavLink(allocator, nav_box, "next lines →", entry, lineNumber(entry.window_start + entry.lines.len));
                 if (!entry.loaded) {
                     // the placeholder carries the file's "a:" link, so enter
                     // (or a click) here loads the file like on its list row.
