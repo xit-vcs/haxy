@@ -1318,9 +1318,9 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
 
         fn rectVisible(self: *This, rect: layout.IRect) bool {
             const detail_scroll = &self.scroll;
-            const viewport = detail_scroll.grid orelse return false;
+            const viewport = detail_scroll.viewport orelse return false;
             const top = detail_scroll.y;
-            const bottom = top + @as(isize, @intCast(viewport.size.height - detail_scroll.bar_h));
+            const bottom = top + @as(isize, @intCast(viewport.height));
             return rect.y + @as(isize, @intCast(rect.size.height)) > top and rect.y < bottom;
         }
 

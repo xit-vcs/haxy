@@ -88,7 +88,7 @@ pub const View = struct {
         else entry: {
             // the visible rows, in the view's coordinates
             const top = @max(scroll.y, 0) - y;
-            const bottom = if (scroll.grid) |g| top + @as(isize, @intCast(g.size.height - scroll.bar_h)) else std.math.maxInt(isize);
+            const bottom = if (scroll.viewport) |viewport| top + @as(isize, @intCast(viewport.height)) else std.math.maxInt(isize);
             if (forward) {
                 for (stops.items, 0..) |id, i| {
                     if ((children.get(id) orelse unreachable).rect.y >= top) break :entry i;
@@ -266,9 +266,9 @@ const Builder = struct {
             style.bold = style.bold or run.style.bold;
             style.italic = run.style.italic;
             style.strikethrough = run.style.strike;
-            if (run.style.code) style.fg = .{ .ansi = .yellow };
+            if (run.style.code) style.fg = .ansi(.yellow);
             if (link.len > 0) {
-                style.fg = .{ .ansi = .cyan };
+                style.fg = .ansi(.cyan);
                 style.underline = true;
             }
             span.* = .{ .text = run.text, .style = style, .link = link };

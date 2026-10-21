@@ -2685,7 +2685,7 @@ fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: 
 
             // an anchor can't nest in another, so a link tag's cells skip theirs
             const in_anchor = if (open_tag) |t| t == .a else false;
-            const link = if (covered_by_scroll or in_anchor) null else webLink(cell.link);
+            const link = if (covered_by_scroll or in_anchor) null else webLink(grid.cellLink(cell));
             if (!sameLink(link, open_link)) {
                 if (open_link != null) try output.appendSlice(allocator, "</a>");
                 if (link) |url| {
@@ -2700,9 +2700,9 @@ fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: 
                 try appendEscapedHtml(allocator, output, " ");
             } else if (cell.continuation) {
                 // the wide rune to the left was emitted 2ch wide, covering this column
-            } else if (cell.rune) |rune| {
+            } else if (cell.rune != 0) {
                 var encoded: [4]u8 = undefined;
-                const encoded_len = try std.unicode.utf8Encode(rune, &encoded);
+                const encoded_len = try std.unicode.utf8Encode(cell.rune, &encoded);
                 const rune_text = encoded[0..encoded_len];
                 // a double-width rune is pinned inside a 2ch span so the
                 // fallback glyph's advance width can't shift the rest of the row
@@ -2751,7 +2751,8 @@ fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: 
         // scrolling to its selected row on page load) reach the browser.
         var buf: [256]u8 = undefined;
         try output.appendSlice(allocator, try std.fmt.bufPrint(&buf, "<div class=\"scroll\" data-key=\"scroll:{d}\" data-scroll-id=\"{d}-{d}\" data-scroll-direction=\"{s}\" data-scroll-x=\"{d}\" data-scroll-y=\"{d}\" style=\"left:{d}ch;top:{d}em;width:{d}ch;height:{d}em;{s}\">", .{ id, id, child.focus.version, @tagName(info.direction), info.offset_x, info.offset_y, r.x, r.y, r.size.width, r.size.height, overflow }));
-        try renderPanel(allocator, output, child.focus, info.content, session, root_focus);
+        // web-native scrolls always keep their content
+        try renderPanel(allocator, output, child.focus, info.content orelse unreachable, session, root_focus);
         try output.appendSlice(allocator, "</div>");
     }
 }
@@ -2922,10 +2923,12 @@ const ansi_palette = [16]Grid.Color.Rgb{
 // resolve any color to rgb: palette colors through the ansi table and the
 // xterm 256-color layout (16 ansi, a 6x6x6 cube, then 24 grays)
 fn colorRgb(color: Grid.Color) Grid.Color.Rgb {
-    return switch (color) {
-        .rgb => |c| c,
-        .ansi => |a| ansi_palette[@backingInt(a)],
-        .indexed => |n| if (n < 16)
+    const n: u8 = @truncate(color.value);
+    return switch (color.kind) {
+        .none => unreachable,
+        .rgb => color.toRgb(),
+        .ansi => ansi_palette[n],
+        .indexed => if (n < 16)
             ansi_palette[n]
         else if (n < 232) blk: {
             const levels = [6]u8{ 0, 0x5f, 0x87, 0xaf, 0xd7, 0xff };
@@ -2974,9 +2977,9 @@ fn styleAttr(buf: []u8, style: Grid.Style) []const u8 {
 // append `prop:value;` at buf[i..] for the color, or for the fallback when
 // the color is unset (nothing when both are). returns the new end, or null
 // when it doesn't fit.
-fn cssColor(buf: []u8, i: usize, prop: []const u8, color: ?Grid.Color, fallback: ?[]const u8) ?usize {
-    const s = if (color) |c| blk: {
-        const v = colorRgb(c);
+fn cssColor(buf: []u8, i: usize, prop: []const u8, color: Grid.Color, fallback: ?[]const u8) ?usize {
+    const s = if (color.kind != .none) blk: {
+        const v = colorRgb(color);
         break :blk std.fmt.bufPrint(buf[i..], "{s}:#{x:0>2}{x:0>2}{x:0>2};", .{ prop, v.r, v.g, v.b }) catch return null;
     } else if (fallback) |f|
         std.fmt.bufPrint(buf[i..], "{s}:{s};", .{ prop, f }) catch return null

@@ -38,7 +38,7 @@ pub const Status = enum {
             .removed => .red,
             .changed => return .single,
         };
-        return .{ .kind = .single, .style = .{ .fg = .{ .ansi = color } } };
+        return .{ .kind = .single, .style = .{ .fg = .ansi(color) } };
     }
 };
 pub const Window = struct {
@@ -290,8 +290,8 @@ fn addHunk(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), hunk: Hunk) !
         // each span keeps its trailing newline so the text box still breaks there
         const end = if (std.mem.indexOfScalarPos(u8, hunk.text, start, '\n')) |nl| nl + 1 else hunk.text.len;
         const style: wgt.Style = switch (prefix) {
-            '+' => .{ .fg = .{ .ansi = .green } },
-            '-' => .{ .fg = .{ .ansi = .red } },
+            '+' => .{ .fg = .ansi(.green) },
+            '-' => .{ .fg = .ansi(.red) },
             else => .{},
         };
         try spans.append(allocator, .{ .text = hunk.text[start..end], .style = style });

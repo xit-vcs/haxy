@@ -146,7 +146,7 @@ pub const View = struct {
         {
             var submit = try ui.widget.SubmitButton.initLabeled(allocator, try aa.print("permanently delete this {s}", .{@tagName(data.target)}));
             errdefer submit.deinit(allocator);
-            submit.setBorder(.{ .kind = .single, .style = .{ .fg = .{ .ansi = .red } } });
+            submit.setBorder(.{ .kind = .single, .style = .{ .fg = .ansi(.red) } });
             control_ids[submit_index] = submit.buttonId();
             try box.children.put(allocator, submit.getFocus().id, .{ .widget = .{ .submit_button = submit }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
         }

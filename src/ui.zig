@@ -3100,7 +3100,7 @@ pub fn crossPageLink(root_focus: *Focus, focus_id: usize, data: Session.Data) ?R
 // the page the clicked cell links to, from a link inside a text box's content
 pub fn cellPageLink(grid: Grid, x: usize, y: usize, data: Session.Data) ?RoutablePage {
     const cell = grid.cell(x, y) catch return null;
-    const link = cell.link orelse return null;
+    const link = grid.cellLink(cell.*) orelse return null;
     if (link.len == 0 or link[0] != '/') return null;
     return if (data.host_kind == .local) RoutablePage.fromUrlLocal(link) else RoutablePage.fromUrl(link);
 }

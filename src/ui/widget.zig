@@ -271,10 +271,10 @@ pub fn moveRowFocus(box: *wgt.Box(Widget), scroll: *wgt.Scroll(Widget), root_foc
 // edge it was entered from is in it, so the following steps scroll through it,
 // and otherwise shows that edge.
 pub fn scrollToEnteredRow(scroll: *wgt.Scroll(Widget), rect: layout.IRect, down: bool) void {
-    const grid = scroll.grid orelse return;
+    const viewport = scroll.viewport orelse return;
     // a row wider than the view keeps the horizontal position
-    const target: layout.IRect = if (rect.size.width > grid.size.width - scroll.bar_w) .{ .x = scroll.x, .y = rect.y, .size = .{ .width = 0, .height = rect.size.height } } else rect;
-    const h: isize = @intCast(grid.size.height - scroll.bar_h);
+    const target: layout.IRect = if (rect.size.width > viewport.width) .{ .x = scroll.x, .y = rect.y, .size = .{ .width = 0, .height = rect.size.height } } else rect;
+    const h: isize = @intCast(viewport.height);
     if (@as(isize, @intCast(rect.size.height)) <= h) return scroll.scrollToRect(target);
     const edge = if (down) rect.y else rectBottom(rect) - 1;
     if (edge >= scroll.y and edge < scroll.y + h) return;
@@ -307,8 +307,8 @@ pub fn scrollThroughRow(scroll: *wgt.Scroll(Widget), rect: layout.IRect, delta: 
 // the terminal view's height, or null on the web
 fn viewHeight(scroll: *wgt.Scroll(Widget)) ?isize {
     if (scroll.options.web_native) return null;
-    const grid = scroll.grid orelse return null;
-    return @intCast(grid.size.height - scroll.bar_h);
+    const viewport = scroll.viewport orelse return null;
+    return @intCast(viewport.height);
 }
 
 fn rectBottom(rect: layout.IRect) isize {
@@ -634,14 +634,14 @@ pub const FlowBox = struct {
                 .home => index = 0,
                 .end => index = count - 1,
                 .page_up => {
-                    if (self.scroll.grid) |grid| if (slot_height > 0) {
-                        const rows_per_page = grid.size.height / slot_height;
+                    if (self.scroll.viewport) |viewport| if (slot_height > 0) {
+                        const rows_per_page = viewport.height / slot_height;
                         index -|= rows_per_page * cols;
                     };
                 },
                 .page_down => {
-                    if (self.scroll.grid) |grid| if (slot_height > 0) {
-                        const rows_per_page = grid.size.height / slot_height;
+                    if (self.scroll.viewport) |viewport| if (slot_height > 0) {
+                        const rows_per_page = viewport.height / slot_height;
                         index = @min(index + rows_per_page * cols, count - 1);
                     };
                 },
@@ -999,7 +999,7 @@ pub const RichText = struct {
                 const cell = try grid.cell(x, y);
                 cell.style = self.styles[self.span_of[i]];
                 if (link) |l| {
-                    cell.link = terminalLink(self.links[l]);
+                    if (terminalLink(self.links[l])) |url| cell.link = try grid.addLink(url);
                     if (l == focused_link) cell.style.inverted = true;
                     // extend this line's piece of the link, or start one
                     const items = self.pieces.items;
@@ -1513,12 +1513,13 @@ pub const Footer = struct {
         var grid = try Grid.init(allocator, .{ .width = width, .height = 1 });
         errdefer grid.deinit();
         var utf8 = (std.unicode.Utf8View.init(text) catch return).iterator();
+        // a terminal hyperlink to the page
+        const link = try grid.addLink(text);
         var i: usize = 0;
         while (utf8.nextCodepoint()) |ch| {
             const rune_width = xitui.width.cellWidth(ch);
             if (i + rune_width > width) break;
-            // a terminal hyperlink to the page
-            (try grid.cell(i, 0)).link = text;
+            (try grid.cell(i, 0)).link = link;
             try grid.setRune(i, 0, ch);
             i += rune_width;
         }
@@ -1688,10 +1689,9 @@ pub const SubmitButton = struct {
 // keep `rect`, in a centered widget's space, in view within its scroll
 pub fn scrollToCenteredRect(scroll: *wgt.Scroll(Widget), rect: layout.IRect) void {
     const center = &scroll.child.center;
-    const center_grid = center.getGrid() orelse return;
-    const child_grid = center.child.getGrid() orelse return;
-    const offset_y: isize = @intCast((center_grid.size.height -| child_grid.size.height) / 2);
-    scroll.scrollToRect(.{ .x = rect.x, .y = rect.y + offset_y, .size = rect.size });
+    // where the last build placed the child, which outlives the grids
+    const placed = center.focus.children.get(center.child.getFocus().id) orelse return;
+    scroll.scrollToRect(.{ .x = rect.x, .y = rect.y + @as(isize, @intCast(placed.rect.y)), .size = rect.size });
 }
 
 pub const Center = struct {
@@ -1842,13 +1842,13 @@ pub const AnsiArt = struct {
                 // effective background makes it opaque; foreground state often
                 // remains active through the padding at the end of a row.
                 const effective_background = if (style.inverted) style.fg else style.bg;
-                const transparent = end - i == 1 and rune[0] == ' ' and effective_background == null;
+                const transparent = end - i == 1 and rune[0] == ' ' and effective_background.kind == .none;
                 try row.append(allocator, .{
-                    .rune = if (transparent) null else codepoint,
+                    .rune = if (transparent) 0 else codepoint,
                     .style = style,
                 });
                 if (!transparent and xitui.width.cellWidth(codepoint) == 2) {
-                    try row.append(allocator, .{ .rune = null, .style = style, .continuation = true });
+                    try row.append(allocator, .{ .style = style, .continuation = true });
                 }
                 i = end;
             }
@@ -1916,16 +1916,16 @@ pub const AnsiArt = struct {
                 0 => style.* = .{},
                 7 => style.inverted = true,
                 27 => style.inverted = false,
-                39 => style.fg = null,
-                49 => style.bg = null,
+                39 => style.fg = .none,
+                49 => style.bg = .none,
                 38, 48 => {
                     // truecolor form: 38;2;r;g;b — anything else is ignored
                     if (i + 4 < n and nums[i + 1] == 2) {
-                        const c = Grid.Color{ .rgb = .{
+                        const c: Grid.Color = .rgb(.{
                             .r = @truncate(nums[i + 2]),
                             .g = @truncate(nums[i + 3]),
                             .b = @truncate(nums[i + 4]),
-                        } };
+                        });
                         if (nums[i] == 38) style.fg = c else style.bg = c;
                         i += 4;
                     }
@@ -2020,11 +2020,9 @@ pub const AnsiBackground = struct {
     // a foreground cell counts as blank if it's empty or a bare space without styling
     fn cellIsBlank(cell: Grid.Cell) bool {
         if (cell.continuation) return false;
-        if (cell.rune) |rune| {
-            return rune == ' ' and
-                cell.style.fg == null and cell.style.bg == null and !cell.style.inverted;
-        }
-        return true;
+        if (cell.rune == 0) return true;
+        return cell.rune == ' ' and
+            cell.style.fg.kind == .none and cell.style.bg.kind == .none and !cell.style.inverted;
     }
 
     // the art is faded toward the background at this opacity so foreground
@@ -2032,22 +2030,18 @@ pub const AnsiBackground = struct {
     pub const art_opacity = 15; // percent
 
     // the art parser only emits truecolor, so a palette color never occurs
-    fn artRgb(color: ?Grid.Color) ?Grid.Color.Rgb {
-        const c = color orelse return null;
-        return switch (c) {
-            .rgb => |v| v,
-            else => null,
-        };
+    fn artRgb(color: Grid.Color) ?Grid.Color.Rgb {
+        return if (color.kind == .rgb) color.toRgb() else null;
     }
 
-    fn fadeColor(color: ?Grid.Color, backdrop: Grid.Color.Rgb) ?Grid.Color {
+    fn fadeColor(color: Grid.Color, backdrop: Grid.Color.Rgb) Grid.Color {
         const v = artRgb(color) orelse return color;
         const blend = struct {
             fn f(c: u8, b: u8) u8 {
                 return @intCast((@as(u16, c) * art_opacity + @as(u16, b) * (100 - art_opacity)) / 100);
             }
         }.f;
-        return .{ .rgb = .{ .r = blend(v.r, backdrop.r), .g = blend(v.g, backdrop.g), .b = blend(v.b, backdrop.b) } };
+        return .rgb(.{ .r = blend(v.r, backdrop.r), .g = blend(v.g, backdrop.g), .b = blend(v.b, backdrop.b) });
     }
 
     // terminals that don't support truecolor misparse a "38;2;r;g;b"/"48;2;…"
@@ -2056,14 +2050,14 @@ pub const AnsiBackground = struct {
     // snap such channels clear of that range so the backdrop doesn't blink or
     // hide text there; the ≤9/255 shift is imperceptible on terminals that
     // actually render truecolor.
-    fn sgrSafe(color: ?Grid.Color) ?Grid.Color {
+    fn sgrSafe(color: Grid.Color) Grid.Color {
         const v = artRgb(color) orelse return color;
         const snap = struct {
             fn f(c: u8) u8 {
                 return if (c >= 1 and c <= 9) 10 else c;
             }
         }.f;
-        return .{ .rgb = .{ .r = snap(v.r), .g = snap(v.g), .b = snap(v.b) } };
+        return .rgb(.{ .r = snap(v.r), .g = snap(v.g), .b = snap(v.b) });
     }
 
     // composites ANSI art behind a foreground grid
@@ -2075,7 +2069,7 @@ pub const AnsiBackground = struct {
         for (0..art_grid.size.height) |y| {
             for (0..art_grid.size.width) |x| {
                 const src = (try art_grid.cell(x, y)).*;
-                if (src.rune == null) continue;
+                if (src.rune == 0) continue;
                 const dst = try out.cell(anchor_x + x, y);
                 const wide = x + 1 < art_grid.size.width and (try art_grid.cell(x + 1, y)).continuation;
                 const next_dst = if (wide) try out.cell(anchor_x + x + 1, y) else null;
@@ -2086,7 +2080,7 @@ pub const AnsiBackground = struct {
                     dst.style.bg = sgrSafe(dst.style.bg);
                     try out.setRune(anchor_x + x, y, src.rune);
                 } else {
-                    const art_bg = sgrSafe(src.style.bg orelse src.style.fg);
+                    const art_bg = sgrSafe(if (src.style.bg.kind == .none) src.style.fg else src.style.bg);
                     dst.style.bg = art_bg;
                     if (next_dst) |next| next.style.bg = art_bg;
                 }
