@@ -208,12 +208,15 @@ fn eventsButton(arena: *std.heap.ArenaAllocator, identity: []const u8, history_i
 }
 
 // a button per ref the push moved, naming what it did to it: a changed branch
-// links to the commits it added, anything still there to the ref itself
+// links to the commits it added, or dropped when a force push added none,
+// anything still there to the ref itself
 fn pushRefs(arena: *std.heap.ArenaAllocator, identity: []const u8, payload: []const u8, buttons: *std.ArrayList(DetailButton)) !void {
     const head_prefix = "refs/heads/";
     const tag_prefix = "refs/tags/";
     const Payload = struct {
-        const Ref = struct { name: []const u8, old: []const u8, new: []const u8 };
+        // only a forced branch has a base, where the walk from its new tip
+        // stops, or from its old one when the push dropped commits
+        const Ref = struct { name: []const u8, old: []const u8, new: []const u8, forced: bool = false, dropped: bool = false, base: []const u8 = "" };
         refs: []const Ref = &.{},
     };
     const parsed = std.json.parseFromSlice(Payload, arena.child_allocator, payload, .{ .ignore_unknown_fields = true }) catch |err| switch (err) {
@@ -235,16 +238,19 @@ fn pushRefs(arena: *std.heap.ArenaAllocator, identity: []const u8, payload: []co
         // refs did not already reach, which a base cannot express
         const removed = ref.new.len == 0;
         const created = ref.old.len == 0;
+        const changed = head and !removed and !created;
         const route = if (removed)
             null
-        else if (head and !created)
-            ui.RoutablePage.repoCommitsRoute(identity, .object, ref.new, ref.old) orelse continue
+        else if (changed)
+            ui.RoutablePage.repoCommitsRoute(identity, .object, if (ref.dropped) ref.old else ref.new, if (ref.forced) ref.base else ref.old) orelse continue
         else
             ui.RoutablePage.repoFilesRoute(identity, if (head) .branch else .tag, try ui.urlEncodeRef(aa, name), "", 0) orelse continue;
 
-        const action = if (removed) "removed" else if (created) "created" else "changed";
         try buttons.append(aa, .{
-            .label = try aa.print(" {s} {s} ", .{ if (head) "branch" else "tag", action }),
+            .label = if (changed)
+                try aa.print(" {s} branch{s} ", .{ if (ref.dropped) "removed from" else "added to", if (ref.forced) " (force)" else "" })
+            else
+                try aa.print(" {s} {s} ", .{ if (removed) "removed" else if (created) "created" else "moved", if (head) "branch" else "tag" }),
             .text = try aa.dupe(u8, name),
             .link = if (route) |value| try aa.print("a:{s}", .{try value.toUrl(arena)}) else null,
         });

@@ -56,10 +56,13 @@ pub fn writeUndo(
     allocator: std.mem.Allocator,
     author: evt.CommitAuthor,
     updates: []const xit.net_server_receive_pack.AppliedRefUpdate,
+    // the moment before the push, or null when there was none
+    before: ?rp.Repo(.xit, repo_opts).DB.HashMap(.read_only),
 ) !void {
     // what the payload may take up: the record holds a timestamp and the
     // action kind in the same fixed buffer
     const payload_max_len = repo_opts.max_read_size - @sizeOf(i64) - undo_action.len - 1;
+    const hex_len = comptime hash.hexLen(repo_opts.hash);
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -73,11 +76,37 @@ pub fn writeUndo(
     // create and a remove are told apart
     var refs: std.json.Array = .init(aa);
     for (updates) |update| {
-        const entry: std.json.ObjectMap = try .init(aa, &.{ "name", "old", "new" }, &.{
+        var entry: std.json.ObjectMap = try .init(aa, &.{ "name", "old", "new" }, &.{
             .{ .string = update.ref_name },
             .{ .string = if (zeroOid(update.old_oid)) "" else update.old_oid },
             .{ .string = if (zeroOid(update.new_oid)) "" else update.new_oid },
         });
+
+        // a force pushed branch records the range its link shows: the commits
+        // the server did not have, or the ones it dropped when it brought none
+        if (before) |before_moment| if (std.mem.startsWith(u8, update.ref_name, "refs/heads/") and !zeroOid(update.old_oid) and !zeroOid(update.new_oid)) {
+            const old_oid = update.old_oid[0..hex_len];
+            const new_oid = update.new_oid[0..hex_len];
+            const fast_forward = if (mrg.getDescendent(.xit, repo_opts, state.readOnly(), io, allocator, old_oid, new_oid)) |descendent|
+                std.mem.eql(u8, &descendent, new_oid)
+            else |err| switch (err) {
+                error.DescendentNotFound => false,
+                else => |e| return e,
+            };
+            if (!fast_forward) {
+                var moment = before_moment;
+                const before_state = rp.Repo(.xit, repo_opts).State(.read_only){ .core = state.core, .extra = .{ .moment = &moment } };
+                const known = try firstKnownCommit(repo_opts, state.readOnly(), before_state, io, allocator, new_oid);
+                const dropped = if (known) |oid| std.mem.eql(u8, &oid, new_oid) else false;
+                const base = if (!dropped) known else mrg.commonAncestor(.xit, repo_opts, state.readOnly(), io, allocator, old_oid, new_oid) catch |err| switch (err) {
+                    error.NoCommonAncestor, error.MultipleMergeBases => null,
+                    else => |e| return e,
+                };
+                try entry.put(aa, "forced", .{ .bool = true });
+                try entry.put(aa, "dropped", .{ .bool = dropped });
+                try entry.put(aa, "base", .{ .string = if (base) |oid| try aa.dupe(u8, &oid) else "" });
+            }
+        };
         try refs.append(.{ .object = entry });
         try payload.put(aa, "refs", .{ .array = refs });
 
@@ -94,6 +123,34 @@ pub fn writeUndo(
     try payload.put(aa, "refs", .{ .array = refs });
 
     try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(io, .real).toSeconds(), .{ .custom = .{ .action_kind = undo_action, .payload = payload } });
+}
+
+// the first commit on `new_oid`'s first-parent chain that the server held
+// before the push, or null when the push brought every one of them
+fn firstKnownCommit(
+    comptime repo_opts: rp.RepoOpts(.xit),
+    state: rp.Repo(.xit, repo_opts).State(.read_only),
+    before: rp.Repo(.xit, repo_opts).State(.read_only),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    new_oid: *const [hash.hexLen(repo_opts.hash)]u8,
+) !?[hash.hexLen(repo_opts.hash)]u8 {
+    var oid = new_oid.*;
+    while (true) {
+        known: {
+            var reader = obj.ObjectReader(.xit, repo_opts).init(before, io, allocator, &oid) catch |err| switch (err) {
+                error.ObjectNotFound => break :known,
+                else => |e| return e,
+            };
+            reader.deinit();
+            return oid;
+        }
+        var commit = try obj.Object(.xit, repo_opts).initCommit(state, io, allocator, &oid);
+        defer commit.deinit();
+        const parent_oids = commit.content.commit.metadata.parent_oids orelse return null;
+        if (parent_oids.len == 0) return null;
+        oid = parent_oids[0];
+    }
 }
 
 // the oid a ref update sends when it has no side: all zeros
@@ -181,6 +238,7 @@ pub fn receivePackAndConsume(
         error_writer: *std.Io.Writer,
         sideband: *progress.Sideband,
         moment_index: *?u64,
+        before: ?DB.HashMap(.read_only),
 
         pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
             var moment = try DB.HashMap(.read_write).init(cursor.*);
@@ -222,7 +280,7 @@ pub fn receivePackAndConsume(
             for (ctx.updates.items.items) |update| try moves.append(ctx.allocator, .{ .old_oid = update.old_oid, .new_oid = update.new_oid });
             _ = try srch_cmmt.refreshInTransaction(repo_opts, state, &moment, ctx.io, ctx.allocator, moves.items, ctx.sideband);
 
-            try writeUndo(repo_opts, state, ctx.io, ctx.allocator, ctx.author, ctx.updates.items.items);
+            try writeUndo(repo_opts, state, ctx.io, ctx.allocator, ctx.author, ctx.updates.items.items, ctx.before);
             // the indexes count against the limit too
             try ctx.sideband.checkSize(ctx.io);
         }
@@ -232,6 +290,11 @@ pub fn receivePackAndConsume(
         try repo.core.db_file.lock(io, .exclusive);
         defer repo.core.db_file.unlock(io);
 
+        // read under the lock, so no other push lands in between
+        const before = repo.core.latestMoment() catch |err| switch (err) {
+            error.DatabaseIsEmpty => null,
+            else => |e| return e,
+        };
         const history = try DB.ArrayList(.read_write).init(repo.core.db.rootCursor());
         break :blk history.appendContext(
             .{ .slot = try history.getSlot(-1) },
@@ -249,6 +312,7 @@ pub fn receivePackAndConsume(
                 .error_writer = error_writer,
                 .sideband = &sideband,
                 .moment_index = &moment_index,
+                .before = before,
             },
         );
     };
@@ -438,7 +502,7 @@ pub fn receiveFork(
                 _ = try find.refreshInTransaction(repo_opts, state, &moment, ctx.io, ctx.allocator, ctx.sideband);
 
                 // a fork push tracks no ref updates, so it records no ranges
-                try writeUndo(repo_opts, state, ctx.io, ctx.allocator, ctx.author, &.{});
+                try writeUndo(repo_opts, state, ctx.io, ctx.allocator, ctx.author, &.{}, null);
                 // the copied target history and the index count against the limit too
                 try ctx.sideband.checkSize(ctx.io);
             }

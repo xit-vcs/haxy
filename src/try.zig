@@ -1503,6 +1503,7 @@ fn seedPush(io: std.Io, allocator: std.mem.Allocator, repo: *rp.Repo(.xit, .{}),
         users_dir: []const u8,
         author: evt.CommitAuthor,
         timestamp: u64,
+        before: DB.HashMap(.read_only),
 
         pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
             const opts: rp.RepoOpts(.xit) = .{};
@@ -1542,11 +1543,11 @@ fn seedPush(io: std.Io, allocator: std.mem.Allocator, repo: *rp.Repo(.xit, .{}),
             // receive-pack patches the new tips before the branches refresh
             try xit.patch.writePatches(opts, state, ctx.io, ctx.allocator, &.{ feature_new, docs_new }, null);
             _ = try pch.refreshBranchesInTransaction(.{ .server = .{ .users_dir = ctx.users_dir } }, opts, state, &moment, ctx.io, ctx.allocator, &updates, null, null);
-            try push.writeUndo(opts, state, ctx.io, ctx.allocator, ctx.author, &updates);
+            try push.writeUndo(opts, state, ctx.io, ctx.allocator, ctx.author, &updates, ctx.before);
         }
     };
 
-    try transaction(io, repo, Ctx{ .core = &repo.core, .io = io, .allocator = allocator, .users_dir = users_dir, .author = author, .timestamp = timestamp });
+    try transaction(io, repo, Ctx{ .core = &repo.core, .io = io, .allocator = allocator, .users_dir = users_dir, .author = author, .timestamp = timestamp, .before = try repo.core.latestMoment() });
 }
 
 // commit `events` onto `ref`, rooted at `parent`, as one transaction.
