@@ -269,6 +269,7 @@ pub fn receivePackAndConsume(
 
                 // the revisions the pushed branches cause belong to the push
                 _ = try pch.refreshBranchesInTransaction(.{ .server = ctx.server }, repo_opts, state, &moment, ctx.io, ctx.allocator, ctx.updates.items.items, null, ctx.sideband);
+                _ = try pch.updateStaleMergeChecks(repo_opts, state, ctx.io, ctx.allocator, ctx.server.users_dir, ctx.sideband);
             }
 
             if (ctx.sideband.gone) return error.ClientGone;
@@ -333,11 +334,6 @@ pub fn receivePackAndConsume(
     };
     if (moment_index) |index| notify.deliverTransaction(io, allocator, server, repo_opts, repo, index, pusher_id, &sideband);
     evt.bumpRepoActivityAt(io, allocator, server, repo.core.work_path);
-
-    pch.refreshBranches(.{ .server = server }, .xit, repo_opts, io, allocator, repo, updates.items.items, &sideband) catch |err| {
-        serve_common.logError(io, error_writer, "failed to refresh branch patches: {s}\n", .{@errorName(err)});
-        pch.refreshOpenMergeability(repo_opts, io, allocator, repo, server.users_dir, null, &sideband);
-    };
     try response.finish(writer, null);
 }
 

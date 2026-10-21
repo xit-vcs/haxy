@@ -70,30 +70,25 @@ pub fn writeBranchPatch(
                 patch: evt.Patch,
                 expected_patch: ?evt.Patch,
                 author: evt.CommitAuthor,
-                checks: *MergeCheckInputs(repo_opts),
+                host: evt.Host,
                 first_parent: ?[1][hash.hexLen(repo_opts.hash)]u8,
 
                 pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
                     var moment = try DB.HashMap(.read_write).init(cursor.*);
                     const state = rp.Repo(repo_kind, repo_opts).State(.read_write){ .core = &ctx.repo.core, .extra = .{ .moment = &moment } };
 
-                    try writeBranchPatchInTransaction(repo_opts, state, &moment, ctx.io, ctx.arena, ctx.id, ctx.patch, ctx.expected_patch, ctx.author, ctx.first_parent, ctx.checks);
+                    try writeBranchPatchInTransaction(ctx.host, repo_opts, state, &moment, ctx.io, ctx.arena, ctx.id, ctx.patch, ctx.expected_patch, ctx.author, ctx.first_parent);
 
                     // record the user action for undo
                     try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action_kind = evt.undo_action } });
                 }
             };
 
-            // a branch patch has no fork, so this only names the patch to check
-            var checks: MergeCheckInputs(repo_opts) = .{};
-            defer checks.deinit(io, allocator);
-            if (host == .server) try checks.add(io, allocator, &repo.core, host.server.users_dir, try evt.parseEventId(&id), patch);
-
             try repo.core.db_file.lock(io, .exclusive);
             defer repo.core.db_file.unlock(io);
 
             const history = try DB.ArrayList(.read_write).init(repo.core.db.rootCursor());
-            try history.appendContext(.{ .slot = try history.getSlot(-1) }, Ctx{ .repo = repo, .io = io, .arena = &arena, .id = id, .patch = patch, .expected_patch = expected_patch, .author = author, .checks = &checks, .first_parent = first_parent });
+            try history.appendContext(.{ .slot = try history.getSlot(-1) }, Ctx{ .repo = repo, .io = io, .arena = &arena, .id = id, .patch = patch, .expected_patch = expected_patch, .author = author, .host = host, .first_parent = first_parent });
         }
         if (host == .server) {
             notify.subscribeParticipants(io, allocator, host.server, repo.core.work_path, &.{.{ .id = id, .author = author, .event = .{ .patch = patch } }});
@@ -106,6 +101,7 @@ pub fn writeBranchPatch(
 // undo record is the caller's to write, since the transaction may be theirs.
 // git repos never reach here: they write through the local event database
 pub fn writeBranchPatchInTransaction(
+    host: evt.Host,
     comptime repo_opts: rp.RepoOpts(.xit),
     state: rp.Repo(.xit, repo_opts).State(.read_write),
     moment: *evt.EventDB(repo_opts.hash).HashMap(.read_write),
@@ -116,7 +112,6 @@ pub fn writeBranchPatchInTransaction(
     expected_patch: ?evt.Patch,
     author: evt.CommitAuthor,
     first_parent: ?[1][hash.hexLen(repo_opts.hash)]u8,
-    checks: *MergeCheckInputs(repo_opts),
 ) !void {
     const DB = evt.EventDB(repo_opts.hash);
 
@@ -136,7 +131,7 @@ pub fn writeBranchPatchInTransaction(
     }
 
     // save mergeability before finishing the patch transaction
-    _ = try checks.update(state, io, arena.child_allocator);
+    if (host == .server) _ = try updateMergeChecks(repo_opts, state, io, arena.child_allocator, host.server.users_dir, &.{try evt.parseEventId(&id)}, null);
 }
 
 // continue from a remote event history when the local ref is absent, so a
@@ -246,8 +241,7 @@ fn collectOutdatedBranchPatches(
 // refresh the patches their source branch has outrun, inside the caller's
 // transaction, so a push and the revisions it causes land together. reports
 // whether any revision was written, so a caller that owns an otherwise empty
-// transaction can cancel it. mergeability is only saved for branch patches:
-// a fork's lock has to be taken before this transaction opened
+// transaction can cancel it
 pub fn refreshBranchesInTransaction(
     host: evt.Host,
     comptime repo_opts: rp.RepoOpts(.xit),
@@ -280,13 +274,8 @@ pub fn refreshBranchesInTransaction(
     for (patches.keys(), patches.values()) |id, record| {
         defer progress.report(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .writing_patch });
 
-        // a branch patch opens no fork, so its checks need no lock of their own
-        var checks: MergeCheckInputs(repo_opts) = .{};
-        defer checks.deinit(io, allocator);
-        if (host == .server) try checks.add(io, allocator, state.core, host.server.users_dir, id, record.event);
-
         const author = evt.CommitAuthor{ .name = "haxy", .email = record.author_email orelse "user@haxy" };
-        writeBranchPatchInTransaction(repo_opts, state, moment, io, &arena, std.fmt.bytesToHex(id, .lower), record.event, record.event, author, first_parent, &checks) catch |err| {
+        writeBranchPatchInTransaction(host, repo_opts, state, moment, io, &arena, std.fmt.bytesToHex(id, .lower), record.event, record.event, author, first_parent) catch |err| {
             std.log.warn("failed to refresh branch patch: {s}", .{@errorName(err)});
             continue;
         };
@@ -306,7 +295,6 @@ pub fn refreshBranches(
     io: std.Io,
     allocator: std.mem.Allocator,
     repo: *rp.Repo(repo_kind, repo_opts),
-    updates: ?[]const xit.net_server_receive_pack.AppliedRefUpdate,
     progress_ctx_maybe: ?repo_opts.ProgressCtx,
 ) !void {
     if (repo_kind == .xit) {
@@ -321,14 +309,13 @@ pub fn refreshBranches(
                 io: std.Io,
                 allocator: std.mem.Allocator,
                 host: evt.Host,
-                updates: ?[]const xit.net_server_receive_pack.AppliedRefUpdate,
                 first_parent: ?[1][hash.hexLen(repo_opts.hash)]u8,
                 progress_ctx_maybe: ?repo_opts.ProgressCtx,
 
                 pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
                     var moment = try DB.HashMap(.read_write).init(cursor.*);
                     const state = rp.Repo(.xit, repo_opts).State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
-                    if (!try refreshBranchesInTransaction(ctx.host, repo_opts, state, &moment, ctx.io, ctx.allocator, ctx.updates, ctx.first_parent, ctx.progress_ctx_maybe)) return error.CancelTransaction;
+                    if (!try refreshBranchesInTransaction(ctx.host, repo_opts, state, &moment, ctx.io, ctx.allocator, null, ctx.first_parent, ctx.progress_ctx_maybe)) return error.CancelTransaction;
 
                     // record the user action for undo
                     try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action_kind = evt.undo_action } });
@@ -346,7 +333,6 @@ pub fn refreshBranches(
                 .io = io,
                 .allocator = allocator,
                 .host = host,
-                .updates = updates,
                 .first_parent = first_parent,
                 .progress_ctx_maybe = progress_ctx_maybe,
             }) catch |err| switch (err) {
@@ -355,9 +341,8 @@ pub fn refreshBranches(
             };
         }
 
-        // every open patch is checked after the transaction, since a fork's
-        // lock has to be taken before the target's
-        if (host == .server) refreshOpenMergeability(repo_opts, io, allocator, repo, host.server.users_dir, updates, progress_ctx_maybe);
+        // then the open patches whose checks went stale
+        if (host == .server) refreshOpenMergeability(repo_opts, io, allocator, repo, host.server.users_dir, progress_ctx_maybe);
         return;
     }
 
@@ -376,7 +361,7 @@ pub fn refreshBranches(
             error.NotFound => break :collect,
             else => return err,
         };
-        try collectOutdatedBranchPatches(repo_kind, repo_opts, io, allocator, &arena, .{ .core = &repo.core, .extra = .{} }, moment, updates, host, &patches);
+        try collectOutdatedBranchPatches(repo_kind, repo_opts, io, allocator, &arena, .{ .core = &repo.core, .extra = .{} }, moment, null, host, &patches);
     }
 
     for (patches.keys(), patches.values()) |id, record| {
@@ -438,6 +423,11 @@ const MergeCheck = struct {
             std.mem.eql(u8, self.target_branch, patch.target_branch) and
             std.mem.eql(u8, self.target_oid, target_oid);
     }
+
+    // a matching check with both results resolved, which needs no rerun
+    fn settled(self: MergeCheck, patch: evt.Patch, target_oid: []const u8) bool {
+        return self.matches(patch, target_oid) and self.result.source != .unknown and self.result.squash != .unknown;
+    }
 };
 
 fn readMergeCheck(
@@ -492,225 +482,181 @@ pub fn refreshMergeability(
     users_dir: []const u8,
     id: [evt.event_id_size]u8,
 ) void {
-    refreshMergeCheck(repo_opts, io, allocator, target_repo, users_dir, &id) catch |err| {
+    saveMergeChecks(repo_opts, io, allocator, target_repo, users_dir, &.{id}, null) catch |err| {
         std.log.warn("failed to refresh mergeability: {s}", .{@errorName(err)});
     };
 }
 
-// check the open patches a push could have invalidated, reporting progress as
-// each one finishes. `updates` limits them to the branches it moved
+// check every open patch whose saved result is stale, in one transaction
+// after the caller's transaction and locks have finished
 pub fn refreshOpenMergeability(
     comptime repo_opts: rp.RepoOpts(.xit),
     io: std.Io,
     allocator: std.mem.Allocator,
     target_repo: *rp.Repo(.xit, repo_opts),
     users_dir: []const u8,
-    updates: ?[]const xit.net_server_receive_pack.AppliedRefUpdate,
     progress_ctx_maybe: ?repo_opts.ProgressCtx,
 ) void {
-    refreshOpenMergeChecks(repo_opts, io, allocator, target_repo, users_dir, updates, progress_ctx_maybe) catch |err| {
+    saveMergeChecks(repo_opts, io, allocator, target_repo, users_dir, null, progress_ctx_maybe) catch |err| {
         std.log.warn("failed to refresh mergeability: {s}", .{@errorName(err)});
     };
 }
 
-fn refreshOpenMergeChecks(
+// one transaction checking `ids`, or the stale open patches when null,
+// cancelled when no result changed
+fn saveMergeChecks(
     comptime repo_opts: rp.RepoOpts(.xit),
     io: std.Io,
     allocator: std.mem.Allocator,
     target_repo: *rp.Repo(.xit, repo_opts),
     users_dir: []const u8,
-    updates: ?[]const xit.net_server_receive_pack.AppliedRefUpdate,
+    ids: ?[]const [evt.event_id_size]u8,
     progress_ctx_maybe: ?repo_opts.ProgressCtx,
-) !void {
-    // collect open patch ids before any refresh changes the database
-    const DB = evt.EventDB(repo_opts.hash);
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    var ids: std.ArrayList([evt.event_id_size]u8) = .empty;
-    defer ids.deinit(allocator);
-    collect: {
-        const moment = evt.currentMoment(repo_opts, target_repo) catch |err| switch (err) {
-            error.NotFound => break :collect,
-            else => return err,
-        };
-        const statuses_cursor = try moment.getCursor(hash.hashInt(repo_opts.hash, evt.Patch.status_to_id_set_key)) orelse break :collect;
-        const statuses = try DB.SortedMap(.read_only).init(statuses_cursor);
-        const open_cursor = try statuses.getCursor("open") orelse break :collect;
-        const open = try DB.SortedSet(.read_only).init(open_cursor);
-        var iter = try open.iteratorFromIndex(0);
-        while (try iter.next()) |cursor| {
-            const id = try evt.readOrderKeyId(DB, cursor);
-
-            // a saved check only goes stale when the patch's revision or its
-            // target tip moves, so a push can skip the branches it left alone
-            if (updates) |changed| {
-                const record = (try evt.Patch.readById(DB, repo_opts.hash, moment, &arena, &id)) orelse continue;
-                const source_moved = if (record.event.source_branch) |branch| branchUpdated(changed, branch) else false;
-                if (!source_moved and !branchUpdated(changed, record.event.target_branch)) continue;
-            }
-            try ids.append(allocator, id);
-        }
-    }
-
-    // start progress reporting after the patch count is known
-    progress.report(repo_opts, io, progress_ctx_maybe, .{ .text = "Checking mergeability" });
-    progress.report(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .writing_patch, .estimated_total_items = ids.items.len } });
-
-    // refresh each collected patch independently
-    for (ids.items) |id| {
-        refreshMergeability(repo_opts, io, allocator, target_repo, users_dir, id);
-        progress.report(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .writing_patch });
-    }
-
-    // finish progress reporting after all patches have been visited
-    progress.report(repo_opts, io, progress_ctx_maybe, .{ .end = .writing_patch });
-}
-
-fn refreshMergeCheck(
-    comptime repo_opts: rp.RepoOpts(.xit),
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    target_repo: *rp.Repo(.xit, repo_opts),
-    users_dir: []const u8,
-    id: *const [evt.event_id_size]u8,
 ) !void {
     const Repo = rp.Repo(.xit, repo_opts);
     const DB = Repo.DB;
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
+    const Ctx = struct {
+        core: *Repo.Core,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        users_dir: []const u8,
+        ids: ?[]const [evt.event_id_size]u8,
+        progress_ctx_maybe: ?repo_opts.ProgressCtx,
 
-    // skip patches that no longer need mergeability checks
-    const initial = (try evt.readFromRepo(evt.Patch, .xit, repo_opts, io, allocator, &arena, target_repo, id)) orelse return;
-    if (initial.removed or initial.event.status.kind() != .open) return;
+        pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
+            var moment = try DB.HashMap(.read_write).init(cursor.*);
+            const state = Repo.State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
+            const changed = if (ctx.ids) |value|
+                try updateMergeChecks(repo_opts, state, ctx.io, ctx.allocator, ctx.users_dir, value, ctx.progress_ctx_maybe)
+            else
+                try updateStaleMergeChecks(repo_opts, state, ctx.io, ctx.allocator, ctx.users_dir, ctx.progress_ctx_maybe);
+            if (!changed) return error.CancelTransaction;
 
-    // acquire fork locks before the target repository lock
-    var checks: MergeCheckInputs(repo_opts) = .{};
-    defer checks.deinit(io, allocator);
-    try checks.add(io, allocator, &target_repo.core, users_dir, id.*, initial.event);
-
-    // cancel the cache transaction when the result is unchanged
-    {
-        const Ctx = struct {
-            core: *Repo.Core,
-            checks: *MergeCheckInputs(repo_opts),
-            io: std.Io,
-            allocator: std.mem.Allocator,
-
-            pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
-                var moment = try DB.HashMap(.read_write).init(cursor.*);
-                const state = Repo.State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
-                if (!try ctx.checks.update(state, ctx.io, ctx.allocator)) return error.CancelTransaction;
-
-                // name the transaction, which no user action owns
-                try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action_kind = mergeability_undo_action } });
-            }
-        };
-
-        try target_repo.core.db_file.lock(io, .exclusive);
-        defer target_repo.core.db_file.unlock(io);
-
-        const history = try DB.ArrayList(.read_write).init(target_repo.core.db.rootCursor());
-        history.appendContext(.{ .slot = try history.getSlot(-1) }, Ctx{
-            .core = &target_repo.core,
-            .checks = &checks,
-            .io = io,
-            .allocator = allocator,
-        }) catch |err| switch (err) {
-            error.CancelTransaction => {},
-            else => return err,
-        };
-    }
-}
-
-// prepare fork handles before taking the target lock. this preserves the
-// fork-before-target lock order used by publishing and merge operations.
-pub fn MergeCheckInputs(comptime repo_opts: rp.RepoOpts(.xit)) type {
-    const Repo = rp.Repo(.xit, repo_opts);
-    return struct {
-        forks: std.AutoArrayHashMapUnmanaged([evt.event_id_size]u8, ?Repo) = .empty,
-        const Self = @This();
-
-        pub fn prepare(self: *Self, io: std.Io, allocator: std.mem.Allocator, repo: *Repo, users_dir: []const u8, events: []const evt.EventWithId) !void {
-            for (events) |event| {
-                if (event.event != .patch) continue;
-                const patch = event.event.patch orelse continue;
-                try self.add(io, allocator, &repo.core, users_dir, try evt.parseEventId(&event.id), patch);
-            }
+            // name the transaction, which no user action owns
+            try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action_kind = mergeability_undo_action } });
         }
+    };
 
-        fn add(self: *Self, io: std.Io, allocator: std.mem.Allocator, core: *Repo.Core, users_dir: []const u8, id: [evt.event_id_size]u8, patch: evt.Patch) !void {
-            if (patch.source_branch != null) return self.addFork(io, allocator, id, patch, null);
+    try target_repo.core.db_file.lock(io, .exclusive);
+    defer target_repo.core.db_file.unlock(io);
 
-            // find the fork through the forker recorded in the target's config
-            var moment = try core.latestMoment();
-            var config = try xit.config.Config(.xit, repo_opts).init(.{ .core = core, .extra = .{ .moment = &moment } }, io, allocator);
-            defer config.deinit();
-            const forker_id = (try fork.readForkerId(&config.sections, &id)) orelse return self.addFork(io, allocator, id, patch, null);
-
-            const path = try fork.forkPath(allocator, users_dir, &forker_id, &id);
-            defer allocator.free(path);
-            try self.addFork(io, allocator, id, patch, path);
-        }
-
-        // track an open patch once, locking the fork at `fork_path` when it has one
-        fn addFork(self: *Self, io: std.Io, allocator: std.mem.Allocator, id: [evt.event_id_size]u8, patch: evt.Patch, fork_path: ?[]const u8) !void {
-            if (patch.status.kind() != .open) return;
-            const entry = try self.forks.getOrPut(allocator, id);
-            if (entry.found_existing) return;
-            entry.value_ptr.* = null;
-            const path = fork_path orelse return;
-
-            // open the fork before acquiring its shared lock
-            var opened = Repo.open(io, allocator, .{ .path = path, .require_repo_root = true }) catch |err| {
-                std.log.warn("mergeability fork unavailable: {s}", .{@errorName(err)});
-                return;
-            };
-
-            // transfer the locked fork to the collection for cleanup
-            errdefer opened.deinit(io, allocator);
-            try opened.core.db_file.lock(io, .shared);
-            entry.value_ptr.* = opened;
-        }
-
-        pub fn deinit(self: *Self, io: std.Io, allocator: std.mem.Allocator) void {
-            for (self.forks.values()) |*value| if (value.*) |*repo| {
-                repo.core.db_file.unlock(io);
-                repo.deinit(io, allocator);
-            };
-            self.forks.deinit(allocator);
-        }
-
-        // optional checks may fail without rejecting a patch, but a failed
-        // restoration must abort the transaction so trial writes cannot be
-        // committed. reports whether any cached result changed.
-        pub fn update(self: *Self, state: Repo.State(.read_write), io: std.Io, allocator: std.mem.Allocator) !bool {
-            var arena = std.heap.ArenaAllocator.init(allocator);
-            defer arena.deinit();
-            var changed = false;
-            for (self.forks.keys(), self.forks.values()) |id, *repo| {
-                const saved = updateMergeCheck(repo_opts, state, io, &arena, &id, if (repo.*) |*value| value else null) catch |err| switch (err) {
-                    error.MergeCheckRestoreFailed => return err,
-                    else => {
-                        std.log.warn("failed to refresh mergeability: {s}", .{@errorName(err)});
-                        continue;
-                    },
-                };
-                if (saved) changed = true;
-            }
-            return changed;
-        }
+    const history = try DB.ArrayList(.read_write).init(target_repo.core.db.rootCursor());
+    history.appendContext(.{ .slot = try history.getSlot(-1) }, Ctx{
+        .core = &target_repo.core,
+        .io = io,
+        .allocator = allocator,
+        .users_dir = users_dir,
+        .ids = ids,
+        .progress_ctx_maybe = progress_ctx_maybe,
+    }) catch |err| switch (err) {
+        error.CancelTransaction => {},
+        else => return err,
     };
 }
 
-// the caller holds the target's exclusive lock, and any fork's shared lock.
-// this only saves the cache; it never creates a top-level history transaction.
+// check `ids` inside the caller's transaction. a failed restoration aborts
+// it so trial writes can't be committed, while other failures only skip their
+// patch. reports whether any saved result changed
+pub fn updateMergeChecks(
+    comptime repo_opts: rp.RepoOpts(.xit),
+    state: rp.Repo(.xit, repo_opts).State(.read_write),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    users_dir: []const u8,
+    ids: []const [evt.event_id_size]u8,
+    progress_ctx_maybe: ?repo_opts.ProgressCtx,
+) !bool {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    if (ids.len > 0) {
+        progress.report(repo_opts, io, progress_ctx_maybe, .{ .text = "Checking mergeability" });
+        progress.report(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .writing_patch, .estimated_total_items = ids.len } });
+    }
+    defer if (ids.len > 0) progress.report(repo_opts, io, progress_ctx_maybe, .{ .end = .writing_patch });
+    var changed = false;
+    for (ids) |*id| {
+        defer progress.report(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .writing_patch });
+        const saved = updateMergeCheck(repo_opts, state, io, &arena, users_dir, id) catch |err| switch (err) {
+            error.MergeCheckRestoreFailed => return err,
+            else => {
+                std.log.warn("failed to refresh mergeability: {s}", .{@errorName(err)});
+                continue;
+            },
+        };
+        if (saved) changed = true;
+    }
+    return changed;
+}
+
+// check the open patches whose saved result is unresolved or no longer
+// matches their revision and target tip, inside the caller's transaction. a
+// fork moving on is left to the paths that move it
+pub fn updateStaleMergeChecks(
+    comptime repo_opts: rp.RepoOpts(.xit),
+    state: rp.Repo(.xit, repo_opts).State(.read_write),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    users_dir: []const u8,
+    progress_ctx_maybe: ?repo_opts.ProgressCtx,
+) !bool {
+    const DB = evt.EventDB(repo_opts.hash);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const target_events = evt.currentMomentFromRepoMoment(repo_opts.hash, state.extra.moment.readOnly()) catch |err| switch (err) {
+        error.NotFound => return false,
+        else => return err,
+    };
+    const statuses_cursor = try target_events.getCursor(hash.hashInt(repo_opts.hash, evt.Patch.status_to_id_set_key)) orelse return false;
+    const statuses = try DB.SortedMap(.read_only).init(statuses_cursor);
+    const open_cursor = try statuses.getCursor("open") orelse return false;
+    const open = try DB.SortedSet(.read_only).init(open_cursor);
+
+    var stale: std.ArrayList([evt.event_id_size]u8) = .empty;
+    var iter = try open.iteratorFromIndex(0);
+    while (try iter.next()) |cursor| {
+        const id = try evt.readOrderKeyId(DB, cursor);
+        const record = (try evt.Patch.readById(DB, repo_opts.hash, target_events, &arena, &id)) orelse continue;
+        if (record.event.revision == null) continue;
+        const target_oid = try rf.readRecur(.xit, repo_opts, state.readOnly(), io, .{ .ref = .{ .kind = .head, .name = record.event.target_branch } });
+        if (try readMergeCheck(repo_opts, target_events, &arena, &id)) |cached| {
+            if (cached.settled(record.event, if (target_oid) |*oid| oid else "")) continue;
+        }
+        try stale.append(arena.allocator(), id);
+    }
+    return updateMergeChecks(repo_opts, state, io, allocator, users_dir, stale.items, progress_ctx_maybe);
+}
+
+// a fork patch's fork, found through the forker in the target's config, or
+// null when it has none. it is read without a lock, since a committed moment
+// never changes
+fn openFork(
+    comptime repo_opts: rp.RepoOpts(.xit),
+    state: rp.Repo(.xit, repo_opts).State(.read_only),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    users_dir: []const u8,
+    id: *const [evt.event_id_size]u8,
+) !?rp.Repo(.xit, repo_opts) {
+    var config = try xit.config.Config(.xit, repo_opts).init(state, io, allocator);
+    defer config.deinit();
+    const forker_id = (try fork.readForkerId(&config.sections, id)) orelse return null;
+    const path = try fork.forkPath(allocator, users_dir, &forker_id, id);
+    defer allocator.free(path);
+    return rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = path, .require_repo_root = true }) catch |err| {
+        std.log.warn("mergeability fork unavailable: {s}", .{@errorName(err)});
+        return null;
+    };
+}
+
+// the caller holds the target's exclusive lock. this only saves the cache; it
+// never creates a top-level history transaction.
 fn updateMergeCheck(
     comptime repo_opts: rp.RepoOpts(.xit),
     state: rp.Repo(.xit, repo_opts).State(.read_write),
     io: std.Io,
     arena: *std.heap.ArenaAllocator,
+    users_dir: []const u8,
     id: *const [evt.event_id_size]u8,
-    fork_repo: ?*rp.Repo(.xit, repo_opts),
 ) !bool {
     const DB = rp.Repo(.xit, repo_opts).DB;
 
@@ -721,8 +667,13 @@ fn updateMergeCheck(
     };
     const patch_record = (try evt.Patch.readById(DB, repo_opts.hash, target_events, arena, id)) orelse return false;
     if (patch_record.removed or patch_record.event.status.kind() != .open) return false;
+    const patch = patch_record.event;
+    const revision = patch.revision orelse return false;
 
     // find the newest fork revision when the patch uses a fork
+    var fork_repo_maybe = if (patch.source_branch != null) null else try openFork(repo_opts, state.readOnly(), io, arena.child_allocator, users_dir, id);
+    defer if (fork_repo_maybe) |*repo| repo.deinit(io, arena.child_allocator);
+    const fork_repo = if (fork_repo_maybe) |*repo| repo else null;
     var newest: ?evt.PatchRev.WithId = null;
     if (fork_repo) |repo| {
         if (evt.currentMoment(repo_opts, repo)) |events| {
@@ -734,8 +685,6 @@ fn updateMergeCheck(
     }
 
     // compare the selected revision and target against the cache
-    const patch = patch_record.event;
-    const revision = patch.revision orelse return false;
     const target_oid = try rf.readRecur(.xit, repo_opts, state.readOnly(), io, .{ .ref = .{ .kind = .head, .name = patch.target_branch } });
     var check = MergeCheck{ .revision = revision, .target_branch = patch.target_branch, .target_oid = if (target_oid) |*oid| oid else "" };
     const cached = try readMergeCheck(repo_opts, target_events, arena, id);
@@ -748,7 +697,7 @@ fn updateMergeCheck(
 
     // run trial merges only for a current revision with an unresolved check
     if (current and target_oid != null) {
-        if (cached) |value| if (value.matches(patch, check.target_oid) and value.result.source != .unknown and value.result.squash != .unknown) return false;
+        if (cached) |value| if (value.settled(patch, check.target_oid)) return false;
         check.result = try trialMergeCheck(repo_opts, state, io, arena.child_allocator, &check, fork_repo);
     }
 
@@ -984,9 +933,6 @@ pub fn publish(
             .event = .{ .patch = patch },
         }};
         {
-            var checks: MergeCheckInputs(repo_opts) = .{};
-            defer checks.deinit(io, allocator);
-            try checks.addFork(io, allocator, patch_id, patch, fork_path);
             const first_parent = try eventsFirstParent(.xit, repo_opts, io, allocator, target_repo);
 
             const DB = rp.Repo(.xit, repo_opts).DB;
@@ -998,7 +944,7 @@ pub fn publish(
                 events: []const evt.EventWithId,
                 patch_id: [evt.event_id_size]u8,
                 forker_id: [evt.event_id_size * 2]u8,
-                checks: *MergeCheckInputs(repo_opts),
+                users_dir: []const u8,
                 first_parent: ?[1][hash.hexLen(repo_opts.hash)]u8,
 
                 pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
@@ -1013,7 +959,7 @@ pub fn publish(
                     const parent = if (try rf.readRecur(.xit, repo_opts, state.readOnly(), ctx.io, .{ .ref = evt.events_ref }) == null) ctx.first_parent else null;
                     try evt.commitEvents(.xit, repo_opts, state, ctx.io, ctx.allocator, evt.events_ref, ctx.events, parent);
                     _ = try evt.consumeInTransaction(.repo, .xit, repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, evt.events_ref);
-                    _ = try ctx.checks.update(state, ctx.io, ctx.allocator);
+                    _ = try updateMergeChecks(repo_opts, state, ctx.io, ctx.allocator, ctx.users_dir, &.{ctx.patch_id}, null);
                     try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action_kind = evt.undo_action } });
                 }
             };
@@ -1029,7 +975,7 @@ pub fn publish(
                 .events = events,
                 .patch_id = patch_id,
                 .forker_id = std.fmt.bytesToHex(input.user_id, .lower),
-                .checks = &checks,
+                .users_dir = server.users_dir,
                 .first_parent = first_parent,
             }) catch |err| switch (err) {
                 error.CancelTransaction => {},
@@ -1193,6 +1139,7 @@ fn mergeInner(
             identity: []const u8,
             author: evt.CommitAuthor,
             timestamp: u64,
+            users_dir: []const u8,
 
             pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
                 var moment = try DB.HashMap(.read_write).init(cursor.*);
@@ -1201,7 +1148,7 @@ fn mergeInner(
                 var check_arena = std.heap.ArenaAllocator.init(ctx.allocator);
                 defer check_arena.deinit();
 
-                // require the fork's newest revision while both repos are locked
+                // require the fork's newest revision, read without a lock
                 const selected_revision = ctx.expected_patch.revision orelse unreachable;
                 const revision_id = try evt.parseEventId(&selected_revision.id);
                 if (ctx.fork_repo) |repo| {
@@ -1254,6 +1201,9 @@ fn mergeInner(
 
                 // retain the submitted revision and snapshot the merge result
                 if (!try importMergedRevision(repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, ctx.fork_repo, &ctx.patch_id, .{ .revision = ctx.revision, .before_oid = &before_oid, .after_oid = &after_oid }, ctx.expected_patch, ctx.author, ctx.timestamp)) return error.PatchOutOfDate;
+                // the merge moved the target branch, so the other open patches'
+                // checks are redone with it
+                _ = try updateStaleMergeChecks(repo_opts, state, ctx.io, ctx.allocator, ctx.users_dir, null);
 
                 // the merge moved the target branch, so its indexes follow,
                 // the commit index deriving from the old tip's version
@@ -1265,9 +1215,6 @@ fn mergeInner(
             }
         };
 
-        // lock the fork before the target for the full merge transaction.
-        if (fork_repo_maybe) |*repo| try repo.core.db_file.lock(io, .shared);
-        defer if (fork_repo_maybe) |*repo| repo.core.db_file.unlock(io);
         try target_repo.core.db_file.lock(io, .exclusive);
         defer target_repo.core.db_file.unlock(io);
 
@@ -1285,12 +1232,10 @@ fn mergeInner(
             .identity = identity,
             .author = input.author,
             .timestamp = input.timestamp,
+            .users_dir = server.users_dir,
         });
     }
     evt.bumpRepoActivityAt(io, allocator, server, target_repo.core.work_path);
-
-    // refresh other patches affected by the updated target branch.
-    refreshOpenMergeability(repo_opts, io, allocator, target_repo, server.users_dir, null, null);
 }
 
 // merge a published patch and remove its fork

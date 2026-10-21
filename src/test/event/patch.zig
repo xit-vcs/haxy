@@ -65,7 +65,7 @@ fn testBranchPatch(comptime kind: rp.RepoKind, comptime hash_kind: hash.HashKind
 
     // an unchanged refresh does not add events
     const event_tip = (try repo.readRef(io, evt.events_ref)) orelse return error.NotFound;
-    try pch.refreshBranches(.local, kind, opts, io, allocator, &repo, null, null);
+    try pch.refreshBranches(.local, kind, opts, io, allocator, &repo, null);
     try std.testing.expectEqualStrings(&event_tip, &(try repo.readRef(io, evt.events_ref) orelse return error.NotFound));
 
     // retargeting to the source leaves the patch and revision unchanged
@@ -79,7 +79,7 @@ fn testBranchPatch(comptime kind: rp.RepoKind, comptime hash_kind: hash.HashKind
 
     // a source update replaces the revision, not the patch metadata
     const next = try repo.commitAtRef(io, allocator, .{ .message = "next feature" }, null, .{ .kind = .head, .name = "feature" });
-    try pch.refreshBranches(.local, kind, opts, io, allocator, &repo, null, null);
+    try pch.refreshBranches(.local, kind, opts, io, allocator, &repo, null);
     const updated = (try evt.readFromRepo(evt.Patch, kind, opts, io, allocator, &arena, &repo, &id)) orelse return error.NotFound;
     const revision = updated.event.revision orelse return error.NotFound;
     try std.testing.expectEqualStrings(&next, revision.source_oid);
@@ -135,7 +135,7 @@ fn testBranchPatch(comptime kind: rp.RepoKind, comptime hash_kind: hash.HashKind
 
     // removing the patch leaves its branch intact
     try evt.remove(.local, .repo, kind, opts, io, allocator, &repo, &id, .patch, author);
-    try pch.refreshBranches(.local, kind, opts, io, allocator, &repo, null, null);
+    try pch.refreshBranches(.local, kind, opts, io, allocator, &repo, null);
     const removed = (try evt.readFromRepo(evt.Patch, kind, opts, io, allocator, &arena, &repo, &id)) orelse return error.NotFound;
     try std.testing.expect(removed.removed);
     try std.testing.expectEqualStrings(&next, &(try repo.readRef(io, .{ .kind = .head, .name = "feature" }) orelse return error.NotFound));
@@ -194,7 +194,7 @@ fn testBranchMerge(selection: evt.Patch.MergeRevision) !void {
     }, null, author);
     try std.testing.expectEqual(before_new + 1, try repo.core.db.rootCursor().count());
 
-    // updating a branch and checking its mergeability counts as one patch
+    // updating a branch checks its mergeability with it, as one patch
     _ = try repo.commitAtRef(io, allocator, .{ .message = "revise feature" }, null, .{ .kind = .head, .name = "feature" });
     var response = xit.net_server_receive_pack.Response.init(allocator);
     defer response.deinit();
@@ -203,16 +203,17 @@ fn testBranchMerge(selection: evt.Patch.MergeRevision) !void {
     defer output.deinit();
     var sideband = progress.Sideband{ .response = &response, .writer = &output.writer };
     const before_refresh = try repo.core.db.rootCursor().count();
-    try pch.refreshBranches(.{ .server = .{ .users_dir = path } }, .xit, opts, io, allocator, &repo, null, &sideband);
+    try pch.refreshBranches(.{ .server = .{ .users_dir = path } }, .xit, opts, io, allocator, &repo, &sideband);
     try std.testing.expectEqual(before_refresh + 1, try repo.core.db.rootCursor().count());
-    try std.testing.expect(std.mem.indexOf(u8, output.written(), "Checking mergeability: 100% (1/1)\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "Updating patches: 100% (1/1)\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "Checking mergeability") == null);
 
     // closed patches skip source updates and contribute no progress
     try evt.Patch.update(.{ .server = .{ .users_dir = path } }, .xit, opts, io, allocator, &repo, &id, .{ .status = .closed }, author);
     const next = try repo.commitAtRef(io, allocator, .{ .message = "revise while closed" }, null, .{ .kind = .head, .name = "feature" });
     const closed_tip = (try repo.readRef(io, evt.events_ref)) orelse return error.NotFound;
     const closed_progress_len = output.written().len;
-    try pch.refreshBranches(.{ .server = .{ .users_dir = path } }, .xit, opts, io, allocator, &repo, null, &sideband);
+    try pch.refreshBranches(.{ .server = .{ .users_dir = path } }, .xit, opts, io, allocator, &repo, &sideband);
     try std.testing.expectEqualStrings(&closed_tip, &(try repo.readRef(io, evt.events_ref) orelse return error.NotFound));
     try std.testing.expectEqual(closed_progress_len, output.written().len);
 
@@ -271,7 +272,7 @@ fn testBranchMerge(selection: evt.Patch.MergeRevision) !void {
     _ = try repo.commitAtRef(io, allocator, .{ .message = "later" }, null, .{ .kind = .head, .name = "feature" });
     const tip = (try repo.readRef(io, evt.events_ref)) orelse return error.NotFound;
     const progress_len = output.written().len;
-    try pch.refreshBranches(.{ .server = .{ .users_dir = path } }, .xit, opts, io, allocator, &repo, null, &sideband);
+    try pch.refreshBranches(.{ .server = .{ .users_dir = path } }, .xit, opts, io, allocator, &repo, &sideband);
     try std.testing.expectEqual(progress_len, output.written().len);
     try std.testing.expectEqualStrings(&tip, &(try repo.readRef(io, evt.events_ref) orelse return error.NotFound));
 
@@ -1258,7 +1259,7 @@ fn testMergeability(
         defer detached.deinit();
     }
     try target.removeBranch(io, .{ .name = "master" });
-    pch.refreshOpenMergeability(repo_opts, io, allocator, target, users_dir, null, null);
+    pch.refreshOpenMergeability(repo_opts, io, allocator, target, users_dir, null);
     try std.testing.expectEqualDeep(pch.Mergeability{}, try readMergeability(target, io, allocator, id, patch));
     try expectMergeabilityShortBytes(try target.core.latestMoment(), id);
     try target.addBranch(io, .{ .name = "master" });
@@ -1266,7 +1267,7 @@ fn testMergeability(
         var restored = try target.switchDir(io, allocator, .{ .target = .{ .ref = .{ .kind = .head, .name = "master" } } });
         defer restored.deinit();
     }
-    pch.refreshOpenMergeability(repo_opts, io, allocator, target, users_dir, null, null);
+    pch.refreshOpenMergeability(repo_opts, io, allocator, target, users_dir, null);
     try std.testing.expectEqualDeep(clean, try readMergeability(target, io, allocator, id, patch));
 
     // a missing fork disables merging without changing the accepted events

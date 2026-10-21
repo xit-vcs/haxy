@@ -313,7 +313,7 @@ pub fn init(
                             // local mode: bring the event db up to date with the events branch
                             if (session.local != null) {
                                 try evt.consume(.local, .repo, repo_kind, opened.self_repo_opts, io, gpa, opened, evt.events_ref, &.{});
-                                try pch.refreshBranches(.local, repo_kind, opened.self_repo_opts, io, gpa, opened, null, null);
+                                try pch.refreshBranches(.local, repo_kind, opened.self_repo_opts, io, gpa, opened, null);
                             }
                             if (session.data.host_kind == .server and handle.canUndo()) {
                                 // a server page always resolved its repo id

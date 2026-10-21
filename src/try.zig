@@ -1486,7 +1486,7 @@ fn seedPatches(
     // a push onto the branch that patch tracks, so the undo tab shows the
     // action and the patch refresh it sets off
     try seedPush(io, allocator, target_repo, users_dir, patch_author, now - 15);
-    try pch.refreshBranches(.{ .server = .{ .users_dir = users_dir } }, .xit, .{}, io, allocator, target_repo, null, null);
+    try pch.refreshBranches(.{ .server = .{ .users_dir = users_dir } }, .xit, .{}, io, allocator, target_repo, null);
     return patch_ids[patch_ids.len - 1];
 }
 

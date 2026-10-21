@@ -728,13 +728,12 @@ pub fn consume(
         .xit => {
             const DB = rp.Repo(.xit, repo_opts).DB;
             const State = rp.Repo(.xit, repo_opts).State;
-            var checks: pch.MergeCheckInputs(repo_opts) = .{};
-            defer checks.deinit(io, allocator);
-            if (role == .repo and host == .server) {
-                checks.prepare(io, allocator, repo, host.server.users_dir, events) catch |err| {
-                    std.log.warn("failed to prepare mergeability: {s}", .{@errorName(err)});
-                };
-            }
+            // the patches these events write are checked in their transaction
+            var patch_ids: std.ArrayList([event_id_size]u8) = .empty;
+            defer patch_ids.deinit(allocator);
+            if (role == .repo and host == .server) for (events) |event| {
+                if (event.event == .patch and event.event.patch != null) try patch_ids.append(allocator, try parseEventId(&event.id));
+            };
 
             const Ctx = struct {
                 core: *rp.Repo(.xit, repo_opts).Core,
@@ -742,7 +741,8 @@ pub fn consume(
                 allocator: std.mem.Allocator,
                 ref: rf.Ref,
                 events: []const EventWithId,
-                checks: *pch.MergeCheckInputs(repo_opts),
+                users_dir: []const u8,
+                patch_ids: []const [event_id_size]u8,
                 first_parent_oids: ?[1][hash.hexLen(repo_opts.hash)]u8,
                 moment_index: *?u64,
 
@@ -752,7 +752,7 @@ pub fn consume(
 
                     try commitEvents(.xit, repo_opts, state, ctx.io, ctx.allocator, ctx.ref, ctx.events, ctx.first_parent_oids);
                     ctx.moment_index.* = try consumeInTransaction(role, .xit, repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, ctx.ref);
-                    _ = try ctx.checks.update(state, ctx.io, ctx.allocator);
+                    _ = try pch.updateMergeChecks(repo_opts, state, ctx.io, ctx.allocator, ctx.users_dir, ctx.patch_ids, null);
                     try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action_kind = undo_action } });
                 }
             };
@@ -767,7 +767,8 @@ pub fn consume(
                 .allocator = allocator,
                 .ref = resolved_ref,
                 .events = events,
-                .checks = &checks,
+                .users_dir = if (host == .server) host.server.users_dir else "",
+                .patch_ids = patch_ids.items,
                 .first_parent_oids = first_parent_oids,
                 .moment_index = &moment_index,
             }) catch |err| switch (err) {
@@ -775,12 +776,6 @@ pub fn consume(
                 else => |e| return e,
             };
         },
-    }
-
-    // consuming an existing ref does not provide the set of changed patches
-    // explicit patch writes already saved their checks in the event transaction
-    if (role == .repo and repo_kind == .xit and host == .server and events.len == 0) {
-        pch.refreshOpenMergeability(repo_opts, io, allocator, repo, host.server.users_dir, null, null);
     }
 
     if (role == .repo and host == .server and events.len > 0) {
