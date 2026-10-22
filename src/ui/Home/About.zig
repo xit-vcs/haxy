@@ -34,9 +34,12 @@ pub fn init(arena: *std.heap.ArenaAllocator, session: *ui.Session) !Self {
 }
 
 pub const View = struct {
-    // the scroll wrapped in a border that turns double while the page has focus
-    frame: wgt.Box(ui.Widget),
+    // the scroll wrapped in a border that turns double while the page has focus,
+    // centered at a readable width
+    center: ui.widget.Center,
     session: *ui.Session,
+
+    const max_width = 80;
 
     pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !View {
         const doc = try md.parseText(session.page_arena.allocator(), data.text);
@@ -51,17 +54,19 @@ pub const View = struct {
         errdefer frame.deinit(allocator);
         frame.getFocus().child_id = scroll.getFocus().id;
         try frame.children.put(allocator, scroll.getFocus().id, .{ .widget = .{ .scroll = scroll }, .rect = null, .min_size = null, .flex = .grow });
-        return .{ .frame = frame, .session = session };
+        var center = try ui.widget.Center.init(allocator, .{ .box = frame });
+        center.max_width = max_width;
+        return .{ .center = center, .session = session };
     }
 
     pub fn deinit(self: *View, allocator: std.mem.Allocator) void {
-        self.frame.deinit(allocator);
+        self.center.deinit(allocator);
     }
 
     pub fn build(self: *View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
         const focused = if (root_focus.grandchild_id) |id| self.markdownView().owns(id) else false;
-        self.frame.options.border = if (focused) .double else .single;
-        try self.frame.build(allocator, constraint, root_focus);
+        self.frameBox().options.border = if (focused) .double else .single;
+        try self.center.build(allocator, constraint, root_focus);
     }
 
     pub fn input(self: *View, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
@@ -84,23 +89,27 @@ pub const View = struct {
     }
 
     pub fn clearGrid(self: *View) void {
-        self.frame.clearGrid();
+        self.center.clearGrid();
     }
 
     pub fn getGrid(self: View) ?Grid {
-        return self.frame.getGrid();
+        return self.center.getGrid();
     }
 
     pub fn getFocus(self: *View) *Focus {
-        return self.frame.getFocus();
+        return self.center.getFocus();
     }
 
     pub fn atTop(self: View) bool {
-        return self.frame.children.values()[0].widget.scroll.y <= 0;
+        return self.center.child.box.children.values()[0].widget.scroll.y <= 0;
+    }
+
+    fn frameBox(self: *View) *wgt.Box(ui.Widget) {
+        return &self.center.child.box;
     }
 
     fn contentScroll(self: *View) *wgt.Scroll(ui.Widget) {
-        return &self.frame.children.values()[0].widget.scroll;
+        return &self.frameBox().children.values()[0].widget.scroll;
     }
 
     fn markdownView(self: *View) *Markdown.View {

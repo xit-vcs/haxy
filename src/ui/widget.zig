@@ -1703,6 +1703,8 @@ pub const Center = struct {
     focus: *Focus,
     grid: ?Grid,
     child: *Widget,
+    // caps the child's width, so a wider window centers it
+    max_width: ?usize = null,
 
     pub fn init(allocator: std.mem.Allocator, child_widget: Widget) !Center {
         const child = try allocator.create(Widget);
@@ -1731,9 +1733,10 @@ pub const Center = struct {
 
         // build the child without forcing it to fill min_size; it sizes
         // itself to its content within the available max.
+        const max_width = if (self.max_width) |cap| @min(cap, constraint.max_size.width orelse cap) else constraint.max_size.width;
         try self.child.build(allocator, .{
             .min_size = .{ .width = null, .height = null },
-            .max_size = constraint.max_size,
+            .max_size = .{ .width = max_width, .height = constraint.max_size.height },
         }, root_focus);
 
         const child_grid = self.child.getGrid() orelse return;
