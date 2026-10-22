@@ -432,11 +432,13 @@ pub const FlowBox = struct {
     // column count from the last build — FlowBox.Scroll.input uses it so arrow
     // up/down can step by a row's worth of items.
     last_cols: usize,
-    // cell width from the last build, narrower than the option in a narrow window
-    last_cell_width: usize,
+    // cell size from the last build: narrower than the options in a narrow
+    // window, and as tall as the tallest item
+    last_cell: layout.Size,
     options: Options,
 
-    const border_rows: usize = 2;
+    // the hidden border around each cell
+    const border_size: usize = 2;
 
     pub const Options = struct {
         cell_width: usize = 40,
@@ -450,7 +452,7 @@ pub const FlowBox = struct {
             .text_boxes = .empty,
             .arena = std.heap.ArenaAllocator.init(allocator),
             .last_cols = 1,
-            .last_cell_width = options.cell_width,
+            .last_cell = .{ .width = options.cell_width, .height = options.cell_height + border_size },
             .options = options,
         };
     }
@@ -511,22 +513,25 @@ pub const FlowBox = struct {
         // a window narrower than one cell narrows the cells to fit
         const cell_width = @min(self.options.cell_width, max_width);
         const cols = if (cell_width == 0) 1 else @max(1, max_width / cell_width);
+        // narrower cells may grow lines to keep the text area, rounding up
+        const inner_width = cell_width -| border_size;
+        const max_lines = if (inner_width == 0) self.options.cell_height else (self.options.cell_height * (self.options.cell_width -| border_size) + inner_width - 1) / inner_width;
         self.last_cols = cols;
-        self.last_cell_width = cell_width;
 
         const count = self.text_boxes.items.len;
         if (count == 0) return;
-        const slot_height = self.options.cell_height + border_rows;
-        if (slot_height == 0) return;
 
-        // build at the slot size so every text box fits a single grid cell
+        // every row is as tall as the tallest text box, but no shorter than the options
+        var slot_height = self.options.cell_height + border_size;
         for (self.text_boxes.items) |*tb| {
             tb.options.border = if (root_focus.grandchild_id == tb.getFocus().id) .double else .hidden;
             try tb.build(allocator, .{
                 .min_size = .{ .width = cell_width, .height = null },
-                .max_size = .{ .width = cell_width, .height = slot_height },
+                .max_size = .{ .width = cell_width, .height = max_lines + border_size },
             }, root_focus);
+            if (tb.getGrid()) |tb_grid| slot_height = @max(slot_height, tb_grid.size.height);
         }
+        self.last_cell = .{ .width = cell_width, .height = slot_height };
 
         const rows = (count + cols - 1) / cols;
         const content_height = rows * slot_height;
@@ -574,13 +579,12 @@ pub const FlowBox = struct {
 
     pub fn cellRect(self: FlowBox, index: usize) ?layout.IRect {
         if (self.last_cols == 0 or index >= self.text_boxes.items.len) return null;
-        const slot_height = self.options.cell_height + border_rows;
         const col = index % self.last_cols;
         const row = index / self.last_cols;
         return .{
-            .x = @intCast(col * self.last_cell_width),
-            .y = @intCast(row * slot_height),
-            .size = .{ .width = self.last_cell_width, .height = slot_height },
+            .x = @intCast(col * self.last_cell.width),
+            .y = @intCast(row * self.last_cell.height),
+            .size = self.last_cell,
         };
     }
 
@@ -624,7 +628,7 @@ pub const FlowBox = struct {
             const count = in.text_boxes.items.len;
             if (count == 0) return;
             const cols = in.last_cols;
-            const slot_height = in.options.cell_height + FlowBox.border_rows;
+            const slot_height = in.last_cell.height;
 
             var index = current_index;
             switch (key) {
