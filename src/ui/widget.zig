@@ -432,6 +432,8 @@ pub const FlowBox = struct {
     // column count from the last build — FlowBox.Scroll.input uses it so arrow
     // up/down can step by a row's worth of items.
     last_cols: usize,
+    // cell width from the last build, narrower than the option in a narrow window
+    last_cell_width: usize,
     options: Options,
 
     const border_rows: usize = 2;
@@ -448,6 +450,7 @@ pub const FlowBox = struct {
             .text_boxes = .empty,
             .arena = std.heap.ArenaAllocator.init(allocator),
             .last_cols = 1,
+            .last_cell_width = options.cell_width,
             .options = options,
         };
     }
@@ -504,10 +507,12 @@ pub const FlowBox = struct {
         self.clearGrid();
         self.focus.clear();
 
-        const cell_width = self.options.cell_width;
-        const max_width = constraint.max_size.width orelse cell_width;
+        const max_width = constraint.max_size.width orelse self.options.cell_width;
+        // a window narrower than one cell narrows the cells to fit
+        const cell_width = @min(self.options.cell_width, max_width);
         const cols = if (cell_width == 0) 1 else @max(1, max_width / cell_width);
         self.last_cols = cols;
+        self.last_cell_width = cell_width;
 
         const count = self.text_boxes.items.len;
         if (count == 0) return;
@@ -573,9 +578,9 @@ pub const FlowBox = struct {
         const col = index % self.last_cols;
         const row = index / self.last_cols;
         return .{
-            .x = @intCast(col * self.options.cell_width),
+            .x = @intCast(col * self.last_cell_width),
             .y = @intCast(row * slot_height),
-            .size = .{ .width = self.options.cell_width, .height = slot_height },
+            .size = .{ .width = self.last_cell_width, .height = slot_height },
         };
     }
 
