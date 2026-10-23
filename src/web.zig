@@ -2811,6 +2811,7 @@ fn renderPanelControls(
                     var id_buf: [128]u8 = undefined;
                     try output.appendSlice(allocator, try std.fmt.bufPrint(&id_buf, "<textarea data-key=\"control:{d}\" data-focus-id=\"{d}\"", .{ id, id }));
                     if (preserve) try output.appendSlice(allocator, " data-preserve-value") else try output.appendSlice(allocator, " readonly");
+                    if (!ti.options.wrap) try output.appendSlice(allocator, " wrap=\"off\"");
                     try appendFormAttribute(allocator, output, root_focus, id);
                     if (ti.options.name.len > 0) {
                         try output.appendSlice(allocator, " name=\"");

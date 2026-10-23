@@ -2160,6 +2160,7 @@ pub const CopyableText = struct {
             .render_content = session.is_terminal,
             .visible_width = null,
             .multiline = std.mem.indexOfScalar(u8, choices[initial].text, '\n') != null,
+            .wrap = false,
         });
         errdefer text_input.deinit(allocator);
         text_input.getFocus().mode = .all;

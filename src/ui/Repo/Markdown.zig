@@ -236,7 +236,13 @@ const Builder = struct {
             },
             .code => |lines| {
                 const text = try std.mem.join(b.page_arena.allocator(), "\n", lines);
-                try put(allocator, box, .{ .copyable_text = try CopyableText.init(allocator, b.session, &.{.{ .text = text }}, 0) });
+                // as wide as the longest line, up to the width it's given
+                var width: usize = 1;
+                for (lines) |line| width = @max(width, try xitui.width.displayWidth(line));
+                var code = try CopyableText.init(allocator, b.session, &.{.{ .text = text }}, 0);
+                code.textInput().options.visible_width = width;
+                code.textInput().options.dashed = false;
+                try put(allocator, box, .{ .copyable_text = code });
             },
             .quote => |blocks| {
                 const gutter = gutter: {
