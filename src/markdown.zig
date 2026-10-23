@@ -1,7 +1,8 @@
 const std = @import("std");
 
-// a GFM subset: tables are shown verbatim as raw blocks, and html is reduced
-// to its text, with a few tags kept as line breaks, links and preformatted text.
+// a GFM subset: tables are shown verbatim as raw blocks, and html blocks are
+// reduced to their text, with a few tags kept as line breaks, links and
+// preformatted text. tags inside paragraphs show as written.
 
 pub const Style = struct {
     bold: bool = false,
@@ -324,8 +325,7 @@ const InlineScanner = struct {
     // whether code keeps a line break, so the text must keep its spaces
     pre: bool = false,
     anchors: std.ArrayList(Anchor) = .empty,
-    // whether a comment or `<code>` was found with no closer left
-    unclosed_comment: bool = false,
+    // whether a `<code>` was found with no closer left
     unclosed_code: bool = false,
 
     fn run(s: *InlineScanner) ![]const Inline {
@@ -364,7 +364,7 @@ const InlineScanner = struct {
                     try s.push(i, .{ .text = url, .link = url });
                     return i + url.len + 2;
                 }
-                return s.tag(i);
+                return if (s.html) s.tag(i) else null;
             },
             '&' => if (entity(src[i..])) |e| {
                 try s.push(i, .{ .text = e[1] });
@@ -441,24 +441,19 @@ const InlineScanner = struct {
         return null;
     }
 
-    // a comment or tag at the `<` at `i`: a few tags act and the rest are
-    // dropped. returns null when the `<` is text.
+    // a comment or tag at the `<` at `i` in an html block: a few tags act
+    // and the rest are dropped. returns null when the `<` is text.
     fn tag(s: *InlineScanner, i: usize) !?usize {
         const src = s.src;
         const arena = s.arena;
         if (std.mem.startsWith(u8, src[i..], "<!--")) {
-            const close = if (s.unclosed_comment) null else std.mem.indexOfPos(u8, src, i + 4, "-->");
-            // an unclosed comment hides the rest of an html block, but is paragraph text
-            if (close == null) {
-                s.unclosed_comment = true;
-                if (!s.html) return null;
-            }
             try s.flush(i);
-            return if (close) |c| c + 3 else src.len;
+            // an unclosed comment hides the rest of the block
+            return if (std.mem.indexOfPos(u8, src, i + 4, "-->")) |close| close + 3 else src.len;
         }
         const t = parseTag(src, i) orelse return null;
         try s.flush(i);
-        if (s.html and isBlockTag(t.name)) try s.nodes.append(arena, .{ .text = "", .ws = .block });
+        if (isBlockTag(t.name)) try s.nodes.append(arena, .{ .text = "", .ws = .block });
         if (t.closing) {
             if (std.ascii.eqlIgnoreCase(t.name, "a")) if (s.anchors.pop()) |anchor| if (anchor.dest) |dest| {
                 for (s.nodes.items[anchor.node..]) |*node| node.link = dest;
@@ -480,7 +475,7 @@ const InlineScanner = struct {
                 const text = if (alt.len > 0) alt else name;
                 try s.nodes.append(arena, .{ .text = text, .style = .{ .italic = true }, .link = dest });
             }
-        } else if (s.html and (std.ascii.eqlIgnoreCase(t.name, "td") or std.ascii.eqlIgnoreCase(t.name, "th"))) {
+        } else if (std.ascii.eqlIgnoreCase(t.name, "td") or std.ascii.eqlIgnoreCase(t.name, "th")) {
             try s.nodes.append(arena, .{ .text = " ", .ws = .space });
         } else if (std.ascii.eqlIgnoreCase(t.name, "code") and !s.unclosed_code) {
             // code is kept as written
@@ -859,15 +854,15 @@ fn isTableStart(lines: []const []const u8, i: usize) bool {
     return true;
 }
 
-// whether `line` starts an html block: a comment or block tag, or any other
-// tag alone on its line, which can't interrupt a paragraph
+// whether `line` starts an html block: a comment or tag, though only a
+// comment or block tag can interrupt a paragraph
 fn isHtmlStart(line: []const u8, in_paragraph: bool) bool {
     const indent = indentOf(line);
     if (indent >= 4) return false;
     const rest = line[indent..];
     if (std.mem.startsWith(u8, rest, "<!--")) return true;
     const tag = parseTag(rest, 0) orelse return false;
-    return isBlockTag(tag.name) or (!in_paragraph and isBlank(rest[tag.end..]));
+    return !in_paragraph or isBlockTag(tag.name);
 }
 
 // an html block runs to a blank line, except a comment runs to its closer
