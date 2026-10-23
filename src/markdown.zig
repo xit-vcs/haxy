@@ -854,15 +854,22 @@ fn isTableStart(lines: []const []const u8, i: usize) bool {
     return true;
 }
 
-// whether `line` starts an html block: a comment or tag, though only a
-// comment or block tag can interrupt a paragraph
+// whether `line` starts an html block: a comment or block tag, or a line of
+// only other tags, which can't interrupt a paragraph
 fn isHtmlStart(line: []const u8, in_paragraph: bool) bool {
     const indent = indentOf(line);
     if (indent >= 4) return false;
     const rest = line[indent..];
     if (std.mem.startsWith(u8, rest, "<!--")) return true;
     const tag = parseTag(rest, 0) orelse return false;
-    return !in_paragraph or isBlockTag(tag.name);
+    if (isBlockTag(tag.name)) return true;
+    if (in_paragraph) return false;
+    var j = tag.end;
+    while (true) {
+        while (j < rest.len and rest[j] == ' ') j += 1;
+        if (j == rest.len) return true;
+        j = (parseTag(rest, j) orelse return false).end;
+    }
 }
 
 // an html block runs to a blank line, except a comment runs to its closer
