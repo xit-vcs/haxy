@@ -1,6 +1,17 @@
+<p align="center">
+<code>                                             
+░██    ░██     ░████    ░██    ░██ ░██    ░██
+░██    ░██    ░██ ░██    ░██  ░██   ░██  ░██ 
+░██    ░██   ░██   ░██    ░█████     ░█████  
+░█████████  ░█████████     ░███       ░███   
+░██    ░██ ░██      ░██    ░████      ░██    
+░██    ░██ ░██      ░██   ░██ ░██     ░██    
+░██    ░██ ░██      ░██  ░██   ░██    ░██    
+                                             </code></p>
+
 **Haxy is now in preview! Try it now: https://try.haxy.net/**
 
-You're looking at Haxy, a new git forge. We're about to do for git forges what Bill Hicks did for comedy, Earth Crisis did for hardcore music, and Marvin Heemeyer did for exterior remodeling. I'm not sure what any of that means but it sounded cool. The point is, strap yourselves in...we're gonna Leeroy Jenkins our way through this!
+You're looking at Haxy, a git forge that is local-first and text-based. Haxy has a text user interface (TUI) that you can view in your terminal or on the web. Get local control of your data and hop on the TUI train!
 
 ## Why another git forge?
 
