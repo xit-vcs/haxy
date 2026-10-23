@@ -332,7 +332,10 @@ fn runTui(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh.PtySiz
                 .show_copyable_text => |copyable_text| {
                     if (terminal_maybe) |*terminal| terminal.deinit();
                     terminal_maybe = null;
-                    try session_writer.interface.print("\x1b[2J\x1b[Hcopy the following text and then press enter to go back:\r\n\r\n{s}\r\n", .{copyable_text});
+                    try session_writer.interface.writeAll("\x1b[2J\x1b[Hcopy the following text and then press enter to go back:\r\n\r\n");
+                    // the channel has no line discipline, so each line break needs its carriage return
+                    var lines = std.mem.splitScalar(u8, copyable_text, '\n');
+                    while (lines.next()) |line| try session_writer.interface.print("{s}\r\n", .{line});
                     try session_writer.interface.flush();
                     continue;
                 },
