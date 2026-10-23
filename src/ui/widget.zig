@@ -894,7 +894,7 @@ pub const RichText = struct {
     pieces: std.ArrayList(Piece),
     // center each line in the width
     center: bool = false,
-    // keep spaces and wrap anywhere, for preformatted text
+    // keep spaces and clip long lines instead of wrapping, for preformatted text
     pre: bool = false,
 
     pub const Span = struct {
@@ -987,7 +987,7 @@ pub const RichText = struct {
         if (max_width == 0 or constraint.max_size.height == 0) return;
         const focused_link = self.linkOf(root_focus.grandchild_id);
 
-        try wgt.wrapLines(allocator, &self.lines, self.runes, if (self.pre) .char else .word, max_width);
+        try wgt.wrapLines(allocator, &self.lines, self.runes, if (self.pre) .none else .word, max_width);
         // trailing spaces are dropped so a wrapped link doesn't highlight them
         if (!self.pre) for (self.lines.items) |*line| {
             while (line.end > line.start and self.runes[line.end - 1] == ' ') {
