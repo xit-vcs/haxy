@@ -1,6 +1,7 @@
 const std = @import("std");
 
-// a GFM subset: html and tables are shown verbatim as raw blocks.
+// a GFM subset: tables are shown verbatim as raw blocks, and html is reduced
+// to its text, with a few tags kept as line breaks, links and preformatted text.
 
 pub const Style = struct {
     bold: bool = false,
@@ -24,14 +25,19 @@ pub const Item = struct {
 };
 
 pub const Block = union(enum) {
-    heading: struct { level: u3, inlines: []const Inline },
-    paragraph: []const Inline,
+    heading: struct { level: u3, inlines: []const Inline, center: bool = false },
+    paragraph: struct {
+        inlines: []const Inline,
+        center: bool = false,
+        // keeps its spaces and line breaks, for code inside html
+        pre: bool = false,
+    },
     // fenced or indented
     code: []const []const u8,
     quote: []const Block,
     list: struct { ordered: bool, start: usize, items: []const Item },
     rule,
-    // table lines and html blocks, shown verbatim
+    // table lines, shown verbatim
     raw: []const []const u8,
 };
 
@@ -64,6 +70,8 @@ const Parser = struct {
     arena: std.mem.Allocator,
     // how many quotes and lists enclose the blocks being parsed
     depth: usize = 0,
+    // whether a centered div is open around the blocks being parsed
+    center: bool = false,
 
     fn parseBlocks(p: *Parser, lines: []const []const u8) anyerror![]const Block {
         var blocks: std.ArrayList(Block) = .empty;
@@ -97,7 +105,7 @@ const Parser = struct {
                 continue;
             }
             if (atxHeading(line)) |heading| {
-                try blocks.append(p.arena, .{ .heading = .{ .level = heading.level, .inlines = try parseInlines(p.arena, heading.text) } });
+                try blocks.append(p.arena, .{ .heading = .{ .level = heading.level, .inlines = try parseInlines(p.arena, heading.text), .center = p.center } });
                 i += 1;
                 continue;
             }
@@ -123,11 +131,10 @@ const Parser = struct {
                 i = j;
                 continue;
             }
-            if (isHtmlStart(line)) {
-                var j = i;
-                while (j < lines.len and !isBlank(lines[j])) : (j += 1) {}
-                try blocks.append(p.arena, .{ .raw = lines[i..j] });
-                i = j;
+            if (isHtmlStart(line, false)) {
+                const end = htmlBlockEnd(lines, i);
+                try p.parseHtml(lines[i..end], &blocks);
+                i = end;
                 continue;
             }
             i = try p.parseParagraph(lines, i, &blocks);
@@ -207,7 +214,33 @@ const Parser = struct {
     fn nested(p: *Parser, lines: []const []const u8) ![]const Block {
         p.depth += 1;
         defer p.depth -= 1;
+        // quotes and lists stay left-aligned in a centered div
+        const center = p.center;
+        p.center = false;
+        defer p.center = center;
         return p.parseBlocks(lines);
+    }
+
+    // an html block becomes a heading when it opens with one, else a
+    // paragraph, centered by an `align` on its first tag
+    fn parseHtml(p: *Parser, lines: []const []const u8, blocks: *std.ArrayList(Block)) !void {
+        const src = try std.mem.join(p.arena, "\n", lines);
+        const first: ?Tag = if (parseTag(src, indentOf(src))) |tag| (if (tag.closing) null else tag) else null;
+        const center = p.center or (if (first) |tag| isCentered(tag) else false);
+
+        // a centered div left open centers the blocks after it, until one closes it
+        const opens_div = if (first) |tag| std.ascii.eqlIgnoreCase(tag.name, "div") and isCentered(tag) else false;
+        const closes_div = std.ascii.findIgnoreCase(src, "</div") != null;
+        if (opens_div != closes_div) p.center = opens_div;
+
+        var scanner: InlineScanner = .{ .arena = p.arena, .src = src, .html = true };
+        const inlines_ = try scanner.run();
+        if (inlines_.len == 0) return;
+        if (if (first) |tag| headingLevel(tag.name) else null) |level| {
+            try blocks.append(p.arena, .{ .heading = .{ .level = level, .inlines = inlines_, .center = center } });
+        } else {
+            try blocks.append(p.arena, .{ .paragraph = .{ .inlines = inlines_, .center = center, .pre = scanner.pre } });
+        }
     }
 
     fn parseParagraph(p: *Parser, lines: []const []const u8, start: usize, blocks: *std.ArrayList(Block)) !usize {
@@ -225,10 +258,10 @@ const Parser = struct {
         }
         const inlines_ = try parseInlines(p.arena, try joinLines(p.arena, lines[i..j]));
         if (setext) |level| {
-            try blocks.append(p.arena, .{ .heading = .{ .level = level, .inlines = inlines_ } });
+            try blocks.append(p.arena, .{ .heading = .{ .level = level, .inlines = inlines_, .center = p.center } });
             return j + 1;
         }
-        try blocks.append(p.arena, .{ .paragraph = inlines_ });
+        try blocks.append(p.arena, .{ .paragraph = .{ .inlines = inlines_, .center = p.center } });
         return j;
     }
 };
@@ -251,6 +284,8 @@ const Node = struct {
     orig: usize = 0,
     can_open: bool = false,
     can_close: bool = false,
+    // html whitespace, collapsed after scanning
+    ws: enum { none, space, block } = .none,
 
     // drop the delimiter state, keeping its unmatched chars as text
     fn literal(self: *Node) void {
@@ -263,6 +298,12 @@ const Node = struct {
 const Bracket = struct {
     node: usize,
     image: bool,
+};
+
+// an open `<a>`, linking the nodes from `node` on when it closes
+const Anchor = struct {
+    node: usize,
+    dest: ?[]const u8,
 };
 
 const InlineScanner = struct {
@@ -278,6 +319,14 @@ const InlineScanner = struct {
     unclosed_runs: std.AutoHashMapUnmanaged(usize, void) = .empty,
     // the index of a `)` for link titles to end at, see inlineLink
     next_close: usize = 0,
+    // an html block's content, where only tags, entities and whitespace are special
+    html: bool = false,
+    // whether code keeps a line break, so the text must keep its spaces
+    pre: bool = false,
+    anchors: std.ArrayList(Anchor) = .empty,
+    // whether a comment or `<code>` was found with no closer left
+    unclosed_comment: bool = false,
+    unclosed_code: bool = false,
 
     fn run(s: *InlineScanner) ![]const Inline {
         const src = s.src;
@@ -291,7 +340,7 @@ const InlineScanner = struct {
         }
         try s.flush(src.len);
         processEmphasis(s.nodes.items, 0);
-        return merge(s.arena, s.nodes.items);
+        return merge(s.arena, if (s.html) try collapseHtml(s.arena, s.nodes.items) else s.nodes.items);
     }
 
     fn flush(s: *InlineScanner, end: usize) !void {
@@ -309,6 +358,27 @@ const InlineScanner = struct {
     fn special(s: *InlineScanner, i: usize) !?usize {
         const src = s.src;
         const arena = s.arena;
+        switch (src[i]) {
+            '<' => {
+                if (autolink(src[i..])) |url| {
+                    try s.push(i, .{ .text = url, .link = url });
+                    return i + url.len + 2;
+                }
+                return s.tag(i);
+            },
+            '&' => if (entity(src[i..])) |e| {
+                try s.push(i, .{ .text = e[1] });
+                return i + e[0].len;
+            },
+            else => {},
+        }
+        if (s.html) {
+            if (!isSpace(src[i])) return null;
+            var n: usize = 1;
+            while (i + n < src.len and isSpace(src[i + n])) n += 1;
+            try s.push(i, .{ .text = " ", .ws = .space });
+            return i + n;
+        }
         switch (src[i]) {
             '\\' => if (i + 1 < src.len and isPunct(src[i + 1])) {
                 try s.push(i, .{ .text = src[i + 1 .. i + 2] });
@@ -360,10 +430,6 @@ const InlineScanner = struct {
                 try s.push(i, .{ .text = src[i .. i + 1] });
                 return i + 1;
             },
-            '<' => if (autolink(src[i..])) |url| {
-                try s.push(i, .{ .text = url, .link = url });
-                return i + url.len + 2;
-            },
             'h', 'H' => if (i == 0 or isAutolinkBoundary(src[i - 1])) {
                 if (bareAutolink(src[i..])) |len| {
                     try s.push(i, .{ .text = src[i .. i + len], .link = src[i .. i + len] });
@@ -373,6 +439,60 @@ const InlineScanner = struct {
             else => {},
         }
         return null;
+    }
+
+    // a comment or tag at the `<` at `i`: a few tags act and the rest are
+    // dropped. returns null when the `<` is text.
+    fn tag(s: *InlineScanner, i: usize) !?usize {
+        const src = s.src;
+        const arena = s.arena;
+        if (std.mem.startsWith(u8, src[i..], "<!--")) {
+            const close = if (s.unclosed_comment) null else std.mem.indexOfPos(u8, src, i + 4, "-->");
+            // an unclosed comment hides the rest of an html block, but is paragraph text
+            if (close == null) {
+                s.unclosed_comment = true;
+                if (!s.html) return null;
+            }
+            try s.flush(i);
+            return if (close) |c| c + 3 else src.len;
+        }
+        const t = parseTag(src, i) orelse return null;
+        try s.flush(i);
+        if (s.html and isBlockTag(t.name)) try s.nodes.append(arena, .{ .text = "", .ws = .block });
+        if (t.closing) {
+            if (std.ascii.eqlIgnoreCase(t.name, "a")) if (s.anchors.pop()) |anchor| if (anchor.dest) |dest| {
+                for (s.nodes.items[anchor.node..]) |*node| node.link = dest;
+            };
+            return t.end;
+        }
+
+        if (std.ascii.eqlIgnoreCase(t.name, "br")) {
+            try s.nodes.append(arena, .{ .text = "\n" });
+        } else if (std.ascii.eqlIgnoreCase(t.name, "a")) {
+            const dest = if (attr(t, "href")) |href| try decodeEntities(arena, href) else null;
+            try s.anchors.append(arena, .{ .node = s.nodes.items.len, .dest = dest });
+        } else if (std.ascii.eqlIgnoreCase(t.name, "img")) {
+            // an image shows its alt text, or else its file name, as an italic link
+            if (attr(t, "src")) |raw_src| {
+                const dest = try decodeEntities(arena, raw_src);
+                const alt = try decodeEntities(arena, attr(t, "alt") orelse "");
+                const name = std.fs.path.basenamePosix(dest[0 .. std.mem.indexOfAny(u8, dest, "?#") orelse dest.len]);
+                const text = if (alt.len > 0) alt else name;
+                try s.nodes.append(arena, .{ .text = text, .style = .{ .italic = true }, .link = dest });
+            }
+        } else if (s.html and (std.ascii.eqlIgnoreCase(t.name, "td") or std.ascii.eqlIgnoreCase(t.name, "th"))) {
+            try s.nodes.append(arena, .{ .text = " ", .ws = .space });
+        } else if (std.ascii.eqlIgnoreCase(t.name, "code") and !s.unclosed_code) {
+            // code is kept as written
+            if (std.ascii.findIgnoreCasePos(src, t.end, "</code")) |close| {
+                const text = try decodeEntities(arena, src[t.end..close]);
+                if (std.mem.indexOfScalar(u8, text, '\n') != null) s.pre = true;
+                try s.nodes.append(arena, .{ .text = text });
+                return if (std.mem.indexOfScalarPos(u8, src, close, '>')) |gt| gt + 1 else src.len;
+            }
+            s.unclosed_code = true;
+        }
+        return t.end;
     }
 
     fn pushBracket(s: *InlineScanner, image: bool) !void {
@@ -468,6 +588,30 @@ fn processEmphasis(nodes: []Node, bottom: usize) void {
     for (nodes[bottom..]) |*node| node.literal();
 }
 
+// collapse an html block's whitespace: each run is one space, and block tags
+// break the line once between content, dropping the spaces around the break.
+fn collapseHtml(arena: std.mem.Allocator, nodes: []const Node) ![]const Node {
+    var out: std.ArrayList(Node) = .empty;
+    // a space or break waiting for content after it
+    var pending: ?Node = null;
+    for (nodes) |node| {
+        const after_break = out.items.len == 0 or std.mem.endsWith(u8, out.items[out.items.len - 1].text, "\n");
+        switch (node.ws) {
+            .space => if (pending == null and !after_break) {
+                pending = node;
+            },
+            .block => pending = if (after_break) null else .{ .text = "\n" },
+            .none => {
+                if (node.text.len == 0) continue;
+                if (pending) |p| if (node.text[0] != '\n') try out.append(arena, p);
+                pending = null;
+                try out.append(arena, node);
+            },
+        }
+    }
+    return out.items;
+}
+
 // join adjacent nodes that share a style and link into runs.
 fn merge(arena: std.mem.Allocator, nodes: []const Node) ![]const Inline {
     var runs: std.ArrayList(Inline) = .empty;
@@ -556,7 +700,7 @@ fn isPunct(c: u8) bool {
 fn interruptsParagraph(line: []const u8) bool {
     if (isBlank(line)) return true;
     if (indentOf(line) >= 4) return false;
-    if (atxHeading(line) != null or fenceStart(line) != null or quoteContent(line) != null or isThematicBreak(line)) return true;
+    if (atxHeading(line) != null or fenceStart(line) != null or quoteContent(line) != null or isThematicBreak(line) or isHtmlStart(line, true)) return true;
     const marker = listMarker(line) orelse return false;
     return !marker.empty and (!marker.ordered or marker.start == 1);
 }
@@ -715,12 +859,146 @@ fn isTableStart(lines: []const []const u8, i: usize) bool {
     return true;
 }
 
-fn isHtmlStart(line: []const u8) bool {
+// whether `line` starts an html block: a comment or block tag, or any other
+// tag alone on its line, which can't interrupt a paragraph
+fn isHtmlStart(line: []const u8, in_paragraph: bool) bool {
     const indent = indentOf(line);
-    if (indent >= 4 or indent + 1 >= line.len or line[indent] != '<') return false;
-    const c = line[indent + 1];
-    if (!std.ascii.isAlphabetic(c) and c != '/' and c != '!' and c != '?') return false;
-    return autolink(line[indent..]) == null;
+    if (indent >= 4) return false;
+    const rest = line[indent..];
+    if (std.mem.startsWith(u8, rest, "<!--")) return true;
+    const tag = parseTag(rest, 0) orelse return false;
+    return isBlockTag(tag.name) or (!in_paragraph and isBlank(rest[tag.end..]));
+}
+
+// an html block runs to a blank line, except a comment runs to its closer
+fn htmlBlockEnd(lines: []const []const u8, start: usize) usize {
+    const comment = std.mem.startsWith(u8, std.mem.trimStart(u8, lines[start], " "), "<!--");
+    for (lines[start..], start..) |line, j| {
+        if (comment and std.mem.indexOf(u8, line, "-->") != null) return j + 1;
+        if (!comment and isBlank(line)) return j;
+    }
+    return lines.len;
+}
+
+// tags that start an html block and break its lines
+const block_tags = [_][]const u8{ "p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "ul", "ol", "li", "table", "tr", "blockquote", "details", "summary", "hr", "pre", "dl", "dt", "dd", "center" };
+
+fn isBlockTag(name: []const u8) bool {
+    for (block_tags) |block_tag| {
+        if (std.ascii.eqlIgnoreCase(name, block_tag)) return true;
+    }
+    return false;
+}
+
+fn headingLevel(name: []const u8) ?u3 {
+    if (name.len != 2 or (name[0] != 'h' and name[0] != 'H') or name[1] < '1' or name[1] > '6') return null;
+    return @intCast(name[1] - '0');
+}
+
+const Tag = struct {
+    name: []const u8,
+    closing: bool,
+    // the text between the name and the `>`
+    attrs: []const u8,
+    end: usize,
+};
+
+// the tag at `i`, its attributes as CommonMark allows them. only a quoted
+// value scans past a `<`, so tags barely rescan.
+fn parseTag(src: []const u8, i: usize) ?Tag {
+    if (i >= src.len or src[i] != '<') return null;
+    var j = i + 1;
+    const closing = j < src.len and src[j] == '/';
+    if (closing) j += 1;
+    const name_start = j;
+    if (j >= src.len or !std.ascii.isAlphabetic(src[j])) return null;
+    while (j < src.len and (std.ascii.isAlphanumeric(src[j]) or src[j] == '-')) j += 1;
+    const name_end = j;
+    if (!closing) {
+        while (nextAttr(src, &j)) |_| {}
+    }
+    while (j < src.len and isSpace(src[j])) j += 1;
+    if (!closing and j < src.len and src[j] == '/') j += 1;
+    if (j >= src.len or src[j] != '>') return null;
+    return .{ .name = src[name_start..name_end], .closing = closing, .attrs = src[name_end..j], .end = j + 1 };
+}
+
+const Attr = struct {
+    key: []const u8,
+    value: []const u8,
+};
+
+// the attribute after the whitespace at `j`, moving `j` past it
+fn nextAttr(s: []const u8, j: *usize) ?Attr {
+    var k = j.*;
+    while (k < s.len and isSpace(s[k])) k += 1;
+    if (k == j.* or k >= s.len or !(std.ascii.isAlphabetic(s[k]) or s[k] == '_' or s[k] == ':')) return null;
+    const key_start = k;
+    while (k < s.len and (std.ascii.isAlphanumeric(s[k]) or std.mem.indexOfScalar(u8, "_.:-", s[k]) != null)) k += 1;
+    const key = s[key_start..k];
+
+    var v = k;
+    while (v < s.len and isSpace(s[v])) v += 1;
+    if (v >= s.len or s[v] != '=') {
+        j.* = k;
+        return .{ .key = key, .value = "" };
+    }
+    v += 1;
+    while (v < s.len and isSpace(s[v])) v += 1;
+    if (v < s.len and (s[v] == '"' or s[v] == '\'')) {
+        const close = std.mem.indexOfScalarPos(u8, s, v + 1, s[v]) orelse return null;
+        j.* = close + 1;
+        return .{ .key = key, .value = s[v + 1 .. close] };
+    }
+    const value_start = v;
+    while (v < s.len and !isSpace(s[v]) and std.mem.indexOfScalar(u8, "\"'=<>`", s[v]) == null) v += 1;
+    if (v == value_start) return null;
+    j.* = v;
+    return .{ .key = key, .value = s[value_start..v] };
+}
+
+// the value of attribute `name` in `tag`, or null when it's absent
+fn attr(tag: Tag, name: []const u8) ?[]const u8 {
+    var j: usize = 0;
+    while (nextAttr(tag.attrs, &j)) |a| {
+        if (std.ascii.eqlIgnoreCase(a.key, name)) return a.value;
+    }
+    return null;
+}
+
+fn isCentered(tag: Tag) bool {
+    return std.ascii.eqlIgnoreCase(attr(tag, "align") orelse return false, "center");
+}
+
+const entities = [_]struct { []const u8, []const u8 }{
+    .{ "&amp;", "&" },
+    .{ "&lt;", "<" },
+    .{ "&gt;", ">" },
+    .{ "&quot;", "\"" },
+    .{ "&nbsp;", "\u{a0}" },
+};
+
+// the entity at the start of `s` and the text it stands for
+fn entity(s: []const u8) ?struct { []const u8, []const u8 } {
+    for (entities) |e| {
+        if (std.mem.startsWith(u8, s, e[0])) return e;
+    }
+    return null;
+}
+
+fn decodeEntities(arena: std.mem.Allocator, s: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var i: usize = 0;
+    while (i < s.len) {
+        if (entity(s[i..])) |e| {
+            try out.appendSlice(arena, e[1]);
+            i += e[0].len;
+        } else {
+            try out.append(arena, s[i]);
+            i += 1;
+        }
+    }
+    return out.items;
 }
 
 // `s` with its backslash escapes resolved

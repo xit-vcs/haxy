@@ -212,9 +212,14 @@ const Builder = struct {
         switch (block) {
             .heading => |heading| {
                 const spans = try b.runSpans(heading.inlines, .{ .bold = true });
-                try put(allocator, box, .{ .markdown_heading = try Heading.init(allocator, b.page_arena, heading.level, spans, b.fonts) });
+                try put(allocator, box, .{ .markdown_heading = try Heading.init(allocator, b.page_arena, heading.level, spans, b.fonts, heading.center) });
             },
-            .paragraph => |inlines| try put(allocator, box, .{ .rich_text = try RichText.init(allocator, try b.runSpans(inlines, .{})) }),
+            .paragraph => |paragraph| {
+                var text = try RichText.init(allocator, try b.runSpans(paragraph.inlines, .{}));
+                text.center = paragraph.center;
+                text.pre = paragraph.pre;
+                try put(allocator, box, .{ .rich_text = text });
+            },
             .code => |lines| {
                 const text = try std.mem.join(b.page_arena.allocator(), "\n", lines);
                 try put(allocator, box, .{ .text_box = try wgt.TextBox.init(allocator, text, .{ .border = .single, .round_corners = true, .wrap_kind = .char }) });
@@ -357,7 +362,7 @@ pub const Heading = struct {
     plain: []const u8 = "",
     font_box: wgt.TextBox,
 
-    fn init(allocator: std.mem.Allocator, page_arena: *std.heap.ArenaAllocator, level: u3, spans: []const RichText.Span, fonts: bool) !Heading {
+    fn init(allocator: std.mem.Allocator, page_arena: *std.heap.ArenaAllocator, level: u3, spans: []const RichText.Span, fonts: bool, center: bool) !Heading {
         const focus = try Focus.create(allocator, .container);
         errdefer focus.destroy(allocator);
 
@@ -367,6 +372,7 @@ pub const Heading = struct {
         @memcpy(marked[1..], spans);
         var text = try RichText.init(allocator, marked);
         errdefer text.deinit(allocator);
+        text.center = center;
 
         var font_box = try wgt.TextBox.init(allocator, "", .{ .border = null, .wrap_kind = .none });
         errdefer font_box.deinit(allocator);
@@ -421,10 +427,17 @@ pub const Heading = struct {
         for (lines.items, 0..) |line, i| {
             if (i > 0) try out.appendSlice(aa, "\n\n");
             const text = std.mem.trimEnd(u8, self.plain[line.start..line.end], " ");
-            try out.appendSlice(aa, switch (font) {
+            const content = switch (font) {
                 .title => (try ui.Title.init(&arena, text, .solid)).content,
                 .sub_title => (try ui.SubTitle.init(&arena, text)).content,
-            });
+            };
+            // centering pads each row of the glyphs
+            const pad = if (self.text.center) ((max_width orelse 0) -| (text.len * char_width -| 1)) / 2 else 0;
+            try out.appendNTimes(aa, ' ', pad);
+            for (content) |c| {
+                try out.append(aa, c);
+                if (c == '\n') try out.appendNTimes(aa, ' ', pad);
+            }
         }
         try self.font_box.setContent(allocator, out.items);
         return true;

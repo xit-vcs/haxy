@@ -892,6 +892,10 @@ pub const RichText = struct {
     lines: std.ArrayList(wgt.Line),
     // scratch for each build's link pieces
     pieces: std.ArrayList(Piece),
+    // center each line in the width
+    center: bool = false,
+    // keep spaces and wrap anywhere, for preformatted text
+    pre: bool = false,
 
     pub const Span = struct {
         text: []const u8,
@@ -983,24 +987,24 @@ pub const RichText = struct {
         if (max_width == 0 or constraint.max_size.height == 0) return;
         const focused_link = self.linkOf(root_focus.grandchild_id);
 
-        try wgt.wrapLines(allocator, &self.lines, self.runes, .word, max_width);
+        try wgt.wrapLines(allocator, &self.lines, self.runes, if (self.pre) .char else .word, max_width);
         // trailing spaces are dropped so a wrapped link doesn't highlight them
-        for (self.lines.items) |*line| {
+        if (!self.pre) for (self.lines.items) |*line| {
             while (line.end > line.start and self.runes[line.end - 1] == ' ') {
                 line.end -= 1;
                 line.width -= 1;
             }
-        }
+        };
         const visible = @min(self.lines.items.len, constraint.max_size.height orelse self.lines.items.len);
         var width: usize = 1;
         for (self.lines.items[0..visible]) |line| width = @max(width, line.width);
-        if (max_width) |w| width = @min(width, w);
+        if (max_width) |w| width = if (self.center) w else @min(width, w);
 
         var grid = try Grid.init(allocator, .{ .width = width, .height = visible });
         errdefer grid.deinit();
         self.pieces.clearRetainingCapacity();
         for (self.lines.items[0..visible], 0..) |line, y| {
-            var x: usize = 0;
+            var x: usize = if (self.center) (width -| line.width) / 2 else 0;
             for (self.runes[line.start..line.end], line.start..) |rune, i| {
                 const rune_width = xitui.width.cellWidth(rune);
                 if (x + rune_width > width) break;
