@@ -673,14 +673,24 @@ pub const View = struct {
             if (commit.stats) |stats| {
                 var text: std.Io.Writer.Allocating = .init(allocator);
                 defer text.deinit();
-                try text.writer.print("lines changed: {d}", .{stats.lines_added + stats.lines_changed});
-                if (stats.lines_removed != 0) try text.writer.print("\nlines removed: {d}", .{stats.lines_removed});
                 const bytes_added = stats.bytes_added >= stats.bytes_removed;
                 const bytes = if (bytes_added) stats.bytes_added - stats.bytes_removed else stats.bytes_removed - stats.bytes_added;
-                try text.writer.print("\nbytes {s}: {d}\nfiles changed: {d}", .{
-                    if (bytes_added) "added" else "removed", bytes, stats.files_added + stats.files_changed,
-                });
-                if (stats.files_removed != 0) try text.writer.print("\nfiles removed: {d}", .{stats.files_removed});
+                // the counts show only when nonzero, the byte delta always
+                const rows = [_]struct { []const u8, u64, bool }{
+                    .{ "lines added", stats.lines_added, false },
+                    .{ "lines changed", stats.lines_changed, false },
+                    .{ "lines removed", stats.lines_removed, false },
+                    .{ if (bytes_added) "bytes added" else "bytes removed", bytes, true },
+                    .{ "files added", stats.files_added, false },
+                    .{ "files changed", stats.files_changed, false },
+                    .{ "files removed", stats.files_removed, false },
+                };
+                for (rows) |row| {
+                    const label, const count, const always = row;
+                    if (count == 0 and !always) continue;
+                    if (text.written().len != 0) try text.writer.writeByte('\n');
+                    try text.writer.print("{s}: {d}", .{ label, count });
+                }
                 var tb = try wgt.TextBox.init(allocator, text.written(), .{ .border = .single, .round_corners = true, .wrap_kind = .none, .top_label = .{ .text = " stats " } });
                 errdefer tb.deinit(allocator);
                 tb.getFocus().mode = .all;
