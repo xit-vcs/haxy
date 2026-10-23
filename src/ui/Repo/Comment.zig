@@ -222,7 +222,7 @@ pub const Item = struct {
         }
 
         const body_text = if (entry.comment.removed) "(removed)" else entry.comment.event.body;
-        var body_frame = try Markdown.Frame.init(allocator, body_text, "", "", session.page_arena);
+        var body_frame = try Markdown.Frame.init(allocator, session, body_text, "", "");
         errdefer body_frame.deinit(allocator);
         try box.children.put(allocator, body_frame.getFocus().id, .{ .widget = .{ .markdown_frame = body_frame }, .rect = null, .min_size = null });
 

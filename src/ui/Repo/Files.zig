@@ -737,7 +737,7 @@ pub const View = struct {
                 } else if (isMarkdown(entry.name) and entry.window_start == 0 and !entry.has_more and entry.lines.len <= max_markdown_lines) {
                     const page_arena = self.session.page_arena;
                     const doc = try md.parse(page_arena.allocator(), entry.lines);
-                    var view = try Markdown.View.init(allocator, doc, self.data, path, page_arena);
+                    var view = try Markdown.View.init(allocator, self.session, doc, self.data, path);
                     errdefer view.deinit(allocator);
                     try inner.children.put(allocator, view.getFocus().id, .{ .widget = .{ .markdown = view }, .rect = null, .min_size = null });
                     markdown = true;
@@ -869,6 +869,7 @@ pub const View = struct {
         }
         const sc = self.detailScroll();
         const on_content = self.focusOnContent(root_focus);
+        if (on_content) if (self.markdownView()) |view| try view.input(allocator, key, root_focus);
         // the "next" link sits above the content scroll. on the link, left returns
         // to the file list and down drops into the content. in the content, the
         // terminal scrolls by offset (the wheel five rows at a time) and reaching

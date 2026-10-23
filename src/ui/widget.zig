@@ -2159,6 +2159,7 @@ pub const CopyableText = struct {
             .read_only = true,
             .render_content = session.is_terminal,
             .visible_width = null,
+            .multiline = std.mem.indexOfScalar(u8, choices[initial].text, '\n') != null,
         });
         errdefer text_input.deinit(allocator);
         text_input.getFocus().mode = .all;
@@ -2293,7 +2294,7 @@ pub const CopyableText = struct {
         self.session.host_request = .{ .show_copyable_text = choice.copyable_text orelse choice.text };
     }
 
-    fn textInput(self: *CopyableText) *wgt.TextInput {
+    pub fn textInput(self: *CopyableText) *wgt.TextInput {
         return &self.box.children.values()[if (self.choices.len > 1) self.choices.len else 0].widget.text_input;
     }
 

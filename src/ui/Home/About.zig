@@ -45,7 +45,7 @@ pub const View = struct {
         const doc = try md.parseText(session.page_arena.allocator(), data.text);
 
         var scroll = blk: {
-            var markdown = try Markdown.View.init(allocator, doc, null, evt.admin_about_path, session.page_arena);
+            var markdown = try Markdown.View.init(allocator, session, doc, null, evt.admin_about_path);
             errdefer markdown.deinit(allocator);
             break :blk try wgt.Scroll(ui.Widget).init(allocator, .{ .markdown = markdown }, .{ .direction = .vert, .web_native = !session.is_terminal, .fill = true });
         };
@@ -72,6 +72,7 @@ pub const View = struct {
     pub fn input(self: *View, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
         // the web scrolls natively and leaves tab to the browser
         if (!self.session.is_terminal) return;
+        try self.markdownView().input(allocator, key, root_focus);
         const sc = self.contentScroll();
         switch (key) {
             .arrow_up => sc.y -= 1,

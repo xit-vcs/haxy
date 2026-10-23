@@ -10,6 +10,7 @@ const Key = xitui.input.Key;
 const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
 const RichText = ui.widget.RichText;
+const CopyableText = ui.widget.CopyableText;
 
 // a rendered markdown file: one child per block, word-wrapped to the width.
 // without `data` (a file outside any repo), repo-relative links aren't clickable.
@@ -19,12 +20,13 @@ pub const View = struct {
     // registered after the links so they win hit-testing
     body: *Focus,
 
-    pub fn init(allocator: std.mem.Allocator, doc: md.Document, data: ?*const Files, file_path: []const u8, page_arena: *std.heap.ArenaAllocator) !View {
+    pub fn init(allocator: std.mem.Allocator, session: *ui.Session, doc: md.Document, data: ?*const Files, file_path: []const u8) !View {
         const builder: Builder = .{
             .allocator = allocator,
+            .session = session,
             .data = data,
             .dir = if (std.mem.lastIndexOfScalar(u8, file_path, '/')) |slash| file_path[0..slash] else "",
-            .page_arena = page_arena,
+            .page_arena = session.page_arena,
             .fonts = !hasUncoveredHeading(doc.blocks),
         };
         var box = try builder.blocksBox(doc.blocks, true);
@@ -48,11 +50,9 @@ pub const View = struct {
         try self.box.getFocus().addChild(allocator, self.body, grid.size, 0, 0);
     }
 
+    // a focused code block takes enter and clicks
     pub fn input(self: *View, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
-        _ = self;
-        _ = allocator;
-        _ = key;
-        _ = root_focus;
+        try codeInput(allocator, &self.box, key, root_focus);
     }
 
     pub fn clearGrid(self: *View) void {
@@ -114,12 +114,12 @@ pub const View = struct {
 pub const Frame = struct {
     box: wgt.Box(ui.Widget),
 
-    pub fn init(allocator: std.mem.Allocator, text: []const u8, label: []const u8, bottom_label: []const u8, page_arena: *std.heap.ArenaAllocator) !Frame {
-        const doc = try md.parseText(page_arena.allocator(), text);
+    pub fn init(allocator: std.mem.Allocator, session: *ui.Session, text: []const u8, label: []const u8, bottom_label: []const u8) !Frame {
+        const doc = try md.parseText(session.page_arena.allocator(), text);
 
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border = .single, .round_corners = true, .direction = .vert, .top_label = .{ .text = label }, .bottom_label = .{ .text = bottom_label } });
         errdefer box.deinit(allocator);
-        var markdown = try View.init(allocator, doc, null, "", page_arena);
+        var markdown = try View.init(allocator, session, doc, null, "");
         errdefer markdown.deinit(allocator);
         try box.children.put(allocator, markdown.getFocus().id, .{ .widget = .{ .markdown = markdown }, .rect = null, .min_size = null });
         box.getFocus().child_id = markdown.getFocus().id;
@@ -137,10 +137,7 @@ pub const Frame = struct {
     }
 
     pub fn input(self: *Frame, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
-        _ = self;
-        _ = allocator;
-        _ = key;
-        _ = root_focus;
+        try self.markdownView().input(allocator, key, root_focus);
     }
 
     pub fn clearGrid(self: *Frame) void {
@@ -171,13 +168,29 @@ pub const Frame = struct {
     }
 };
 
-// the focus ids of the laid-out links under `box`, in document order
+// the focus ids of the laid-out links and code blocks under `box`, in document order
 fn collectStops(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), view_focus: *Focus, stops: *std.ArrayList(usize)) !void {
     for (box.children.values()) |*child| switch (child.widget) {
+        .copyable_text => |*code| {
+            const id = code.textInput().getFocus().id;
+            if (view_focus.children.contains(id)) try stops.append(allocator, id);
+        },
         .rich_text => |*rich_text| try addStops(allocator, rich_text, view_focus, stops),
         .markdown_heading => |*heading| try addStops(allocator, &heading.text, view_focus, stops),
         .markdown_gutter => |*gutter| try collectStops(allocator, &gutter.child, view_focus, stops),
         .box => |*inner| try collectStops(allocator, inner, view_focus, stops),
+        else => {},
+    };
+}
+
+// pass the key to the focused code block under `box`, which a click focuses first
+fn codeInput(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), key: Key, root_focus: *Focus) !void {
+    for (box.children.values()) |*child| switch (child.widget) {
+        .copyable_text => |*code| if (root_focus.grandchild_id == code.textInput().getFocus().id) {
+            try code.input(allocator, key, root_focus);
+        },
+        .markdown_gutter => |*gutter| try codeInput(allocator, &gutter.child, key, root_focus),
+        .box => |*inner| try codeInput(allocator, inner, key, root_focus),
         else => {},
     };
 }
@@ -192,6 +205,7 @@ fn addStops(allocator: std.mem.Allocator, rich_text: *RichText, view_focus: *Foc
 // turns blocks into widgets, resolving links against the viewed file.
 const Builder = struct {
     allocator: std.mem.Allocator,
+    session: *ui.Session,
     data: ?*const Files,
     // the viewed file's directory, which relative links resolve against
     dir: []const u8,
@@ -222,7 +236,7 @@ const Builder = struct {
             },
             .code => |lines| {
                 const text = try std.mem.join(b.page_arena.allocator(), "\n", lines);
-                try put(allocator, box, .{ .text_box = try wgt.TextBox.init(allocator, text, .{ .border = .single, .round_corners = true, .wrap_kind = .char }) });
+                try put(allocator, box, .{ .copyable_text = try CopyableText.init(allocator, b.session, &.{.{ .text = text }}, 0) });
             },
             .quote => |blocks| {
                 const gutter = gutter: {

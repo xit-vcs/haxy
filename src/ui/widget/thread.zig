@@ -1073,7 +1073,7 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                 "(no description)"
             else
                 whole;
-            var description = try Markdown.Frame.init(allocator, shown, " description ", if (preview_end != null) " click or press enter to see more " else "", self.session.page_arena);
+            var description = try Markdown.Frame.init(allocator, self.session, shown, " description ", if (preview_end != null) " click or press enter to see more " else "");
             errdefer description.deinit(allocator);
             if (preview_end != null) {
                 const route = ui.RoutablePage.repoThreadDescriptionRoute(kind, self.data.identity, entry.id) orelse return error.RouteTooLong;
@@ -1193,6 +1193,8 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
                 }
                 return;
             }
+            // a code block in a description or comment body takes enter and clicks
+            if (self.focusedFrame(child_index)) |frame| try frame.frame.input(allocator, key, root_focus);
             if (child_id == self.description_id) {
                 self.descriptionInput(key, root_focus);
                 return;
