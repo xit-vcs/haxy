@@ -229,6 +229,21 @@ pub fn addBackButton(allocator: std.mem.Allocator, box: *wgt.Box(Widget), sessio
     });
 }
 
+pub fn addHomeButton(allocator: std.mem.Allocator, box: *wgt.Box(Widget), session: *ui.Session) !usize {
+    if (session.data.host_kind != .server) return 0;
+    var home = try wgt.TextBox.init(allocator, "⌂", .{ .border = .hidden, .wrap_kind = .none });
+    errdefer home.deinit(allocator);
+    home.getFocus().kind = .{ .custom = "a:/" };
+    home.getFocus().mode = .all;
+    try box.children.put(allocator, home.getFocus().id, .{
+        .widget = .{ .text_box = home },
+        .rect = null,
+        .min_size = .{ .width = back_button_width, .height = back_button_height },
+        .max_size = .{ .width = back_button_width, .height = back_button_height },
+    });
+    return back_button_width;
+}
+
 pub fn setBackButtonVisible(box: *wgt.Box(Widget), visible: bool) void {
     for (box.children.values()) |*child| {
         if (isBackButton(child.widget.getFocus())) {

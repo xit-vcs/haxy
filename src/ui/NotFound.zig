@@ -23,6 +23,7 @@ pub const View = struct {
             var header = try wgt.Box(ui.Widget).init(allocator, .{ .border = .hidden, .direction = .horiz });
             errdefer header.deinit(allocator);
             try ui.widget.addBackButton(allocator, &header, session);
+            _ = try ui.widget.addHomeButton(allocator, &header, session);
             try box.children.put(allocator, header.getFocus().id, .{ .widget = .{ .box = header }, .rect = null, .min_size = null });
         }
 

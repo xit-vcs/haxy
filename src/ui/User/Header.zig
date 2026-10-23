@@ -52,9 +52,10 @@ pub const View = struct {
         errdefer tab_ids.deinit(allocator);
 
         // the leading space plus the title
-        const first_group_width = 1 + try data.title.width();
+        var first_group_width = 1 + try data.title.width();
 
         try ui.widget.addBackButton(allocator, &title_box, session);
+        first_group_width += try ui.widget.addHomeButton(allocator, &title_box, session);
 
         {
             var text = try wgt.Text.init(allocator, " ");

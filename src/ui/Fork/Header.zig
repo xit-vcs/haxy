@@ -67,6 +67,7 @@ pub const View = struct {
         var first_group_width = try data.title.width();
 
         try ui.widget.addBackButton(allocator, &title_box, session);
+        first_group_width += try ui.widget.addHomeButton(allocator, &title_box, session);
 
         // the forker's name links to their page.
         {
