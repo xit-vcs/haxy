@@ -2380,6 +2380,9 @@ pub const Session = struct {
     // focus id -> the live TextInput, refreshed each frame by the views that own
     // inputs. web/wasm form handling looks widgets up here by focus id.
     text_inputs: std.AutoHashMapUnmanaged(usize, *wgt.TextInput) = .empty,
+    // a narrow list-detail view's way back to its list, set by its build. the
+    // web presses it on the browser's back button.
+    list_back: ?usize = null,
     back: enum { unavailable, available, requested } = .unavailable,
     refresh_requested: bool = false, // set by input (ctrl+r)
     // a requested forward navigation. set this (via navigate) to move to a new

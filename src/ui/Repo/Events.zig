@@ -533,6 +533,7 @@ pub const View = struct {
 
         const both_fit = if (constraint.max_size.width) |width| width >= list_max_width + detail_min_width else true;
         ui.widget.showListBack(self.detailFrame(), !both_fit);
+        if (ui.widget.listBackId(self.detailFrame())) |id| self.session.list_back = id;
         self.content().children.values()[list_index].max_size = if (both_fit) .{ .width = list_max_width, .height = null } else null;
         const detail_width = if (constraint.max_size.width) |width| if (both_fit) width - list_max_width else width else detail_min_width;
         self.content().children.values()[detail_index].min_size = .{ .width = detail_width, .height = null };

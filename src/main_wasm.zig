@@ -14,12 +14,16 @@ var snapshot: ui.Snapshot = undefined;
 var session: ui.Session = undefined;
 var last_pushed_page_maybe: ?ui.RoutablePage = null; // last current_page we told JS about
 var last_scrolled_focus_id: ?usize = null; // last focused widget we asked JS to scroll into view
+// whether a narrow list-detail view showed its detail on the last tick, null
+// before the first tick so a page that loads on its detail adds no history entry
+var last_detail_open: ?bool = null;
 
 fn init(json: []const u8, min_height: u32, max_width: u32) !void {
     _ = page_arena.reset(.free_all);
     // drop the last-pushed page so the next tick pushes the freshly-loaded
     // page's url.
     last_pushed_page_maybe = null;
+    last_detail_open = null;
 
     // alloc_always so the parsed strings live entirely inside the arena
     // and don't borrow from the caller's json buffer.
@@ -63,6 +67,7 @@ fn tick(min_height: u32, max_width: u32) !void {
     // a full-height page instead grows to its content and the browser scrolls
     // the whole page.
     const max_height: ?u32 = if (session.data.current_page.fullHeight()) null else min_height;
+    session.list_back = null;
     try root_ptr.build(allocator, .{
         .min_size = .{ .width = null, .height = min_height },
         .max_size = .{ .width = max_width, .height = max_height },
@@ -78,6 +83,15 @@ fn tick(min_height: u32, max_width: u32) !void {
         const url = try current_page.toUrl(&page_arena);
         _replaceState(url.ptr, @intCast(url.len));
     }
+
+    // opening a narrow detail adds a history entry, so the browser's back
+    // button returns to the list. leaving it another way drops the entry.
+    const detail_open = if (session.list_back) |id| root_ptr.getFocus().children.contains(id) else false;
+    if (last_detail_open) |was_open| {
+        if (!was_open and detail_open) _pushState();
+        if (was_open and !detail_open) _popState();
+    }
+    last_detail_open = detail_open;
 
     const html = try web.generateHtml(allocator, root_ptr, &session);
     defer allocator.free(html);
@@ -168,15 +182,31 @@ fn onMouseClick(focus_id: usize, x: usize, y: usize) !void {
         return;
     }
     if (ui.currentPageLink(root_ptr.getFocus(), focus_id, session.data)) return;
+    try press(root_ptr, focus_id);
+}
+
+// focus focus_id. an in-page link selects within the page, and a list row's
+// view may open its detail on the press. other clickables only focus: a form
+// control's border reaches here too, and the press must not fire its form.
+fn press(root_ptr: *ui.Widget, focus_id: usize) !void {
     try setFocus(focus_id);
-    // an in-page link selects within the page, and a list row's view may open
-    // its detail on the press. other clickables only focus: a form control's
-    // border reaches here too, and the press must not fire its form.
     const root_focus = root_ptr.getFocus();
     if (ui.inPageLink(root_focus, focus_id, session.data) != null) {
         const rect = (root_focus.children.get(focus_id) orelse return).rect;
         try root_ptr.input(allocator, .{ .mouse = .{ .x = @intCast(rect.x), .y = @intCast(rect.y), .button = .left } }, root_focus);
     }
+}
+
+// the browser's back or forward button moved to a list or narrow detail history
+// entry. back presses the way back to the list, and forward presses the list row
+// focus returned to.
+fn onPopState(detail: bool) !void {
+    const root_ptr = if (root) |*root_value| root_value else return error.NotStarted;
+    // the next tick puts the shown page's url on the entry
+    last_pushed_page_maybe = null;
+    const list_back = session.list_back orelse return;
+    if (last_detail_open == detail) return;
+    try press(root_ptr, if (detail) root_ptr.getFocus().grandchild_id orelse return else list_back);
 }
 
 // the grid the html draws focus_id in: its innermost scroll's content, else
@@ -205,6 +235,8 @@ fn consoleLog(arg: []const u8) void {
 extern fn _consoleLog(arg: [*]const u8, len: u32) void;
 extern fn _setHtml(arg: [*]const u8, len: u32) void;
 extern fn _replaceState(arg: [*]const u8, len: u32) void;
+extern fn _pushState() void;
+extern fn _popState() void;
 extern fn _focusInput(focus_id: u32) void;
 extern fn _navigate(arg: [*]const u8, len: u32) void;
 extern fn _scrollToFocus(focus_id: u32) void;
@@ -247,6 +279,14 @@ export fn _onMouseClick(focus_id: u32, x: u32, y: u32) void {
     onMouseClick(focus_id, x, y) catch |err| {
         var buf: [256]u8 = undefined;
         const str = std.fmt.bufPrint(&buf, "onMouseClick: {}", .{err}) catch unreachable;
+        consoleLog(str);
+    };
+}
+
+export fn _onPopState(detail: bool) void {
+    onPopState(detail) catch |err| {
+        var buf: [256]u8 = undefined;
+        const str = std.fmt.bufPrint(&buf, "onPopState: {}", .{err}) catch unreachable;
         consoleLog(str);
     };
 }

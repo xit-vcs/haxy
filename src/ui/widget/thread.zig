@@ -2639,6 +2639,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
                 const both_panes_fit = if (constraint.max_size.width) |w| w >= list_max_width + detail_min_width else true;
                 try self.refreshDetail(allocator, i);
                 widget.showListBack(self.detailFrame(i), !both_panes_fit);
+                if (widget.listBackId(self.detailFrame(i))) |id| self.session.list_back = id;
 
                 // the selected list row shows a border (the focused TextBox
                 // upgrades it to a double border itself); the rest stay borderless.

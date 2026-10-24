@@ -243,8 +243,17 @@ const importObject = {
             // without adding a history entry, so the back button isn't
             // cluttered with unnecessary entries.
             if (window.location.pathname !== url) {
-                history.replaceState({}, "", url);
+                // keep a narrow detail's entry marked
+                history.replaceState(history.state, "", url);
             }
+        },
+        _pushState: function () {
+            // the forward button already landed on one
+            if (history.state && history.state.listDetail) return;
+            history.pushState({ listDetail: true }, "", window.location.pathname);
+        },
+        _popState: function () {
+            if (history.state && history.state.listDetail) history.back();
         },
         _focusInput: function (id) {
             const target = grid.querySelector(`[data-key="control:${id}"]`);
@@ -427,6 +436,12 @@ WebAssembly.instantiateStreaming(fetch("/haxy.wasm"), importObject).then(async (
             event.preventDefault();
         }
         wasmInstance.exports._onKeyDown(event.keyCode);
+        wasmInstance.exports._tick(minRows(), maxCols());
+    });
+
+    // a popstate from _popState finds the detail already closed and only fixes the url
+    window.addEventListener("popstate", (event) => {
+        wasmInstance.exports._onPopState(Boolean(event.state && event.state.listDetail));
         wasmInstance.exports._tick(minRows(), maxCols());
     });
 

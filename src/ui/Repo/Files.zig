@@ -635,6 +635,7 @@ pub const View = struct {
 
         // swap the detail pane to the selected entry when the selection changes.
         try self.refreshDetail(allocator, !both_panes_fit);
+        if (self.back_id) |id| self.session.list_back = id;
 
         // the selected list row shows a border (the focused TextBox upgrades it
         // to a double border itself); the rest stay borderless.
