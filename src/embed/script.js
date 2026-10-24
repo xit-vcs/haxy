@@ -445,6 +445,15 @@ WebAssembly.instantiateStreaming(fetch("/haxy.wasm"), importObject).then(async (
         wasmInstance.exports._tick(minRows(), maxCols());
     });
 
+    // grid rows are padded to their width, so drop each copied line's trailing blanks
+    document.addEventListener("copy", (event) => {
+        const text = window.getSelection().toString();
+        const trimmed = text.replace(/[ \t]+$/gm, "");
+        if (trimmed === text) return;
+        event.clipboardData.setData("text/plain", trimmed);
+        event.preventDefault();
+    });
+
     // delegated listeners survive cell-layer replacement. the controls
     // themselves are retained inside #grid.
     document.addEventListener("input", (event) => {
