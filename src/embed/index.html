@@ -66,6 +66,13 @@
           .scroll::-webkit-scrollbar {
             display: none;
           }
+          /* code blocks hide theirs too */
+          .page textarea[readonly] {
+            scrollbar-width: none;
+          }
+          .page textarea[readonly]::-webkit-scrollbar {
+            display: none;
+          }
 
           /* render each colored cell-run as an inline-block to prevent
              horizontal seams between rows of the block art. */
