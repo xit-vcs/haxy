@@ -2635,6 +2635,9 @@ fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: 
         var cur_style: Grid.Style = .{};
         var open_tag: ?CellTag = null;
         var open_link: ?[]const u8 = null;
+        // a run of border runes, left out of text selection so copying framed
+        // text skips its border. it nests inside the tag and link.
+        var open_border = false;
         for (0..grid.size.width) |x| {
             const cell = (try grid.cell(x, y)).*;
             // a cell covered by a child scroll's viewport is drawn by that scroll's
@@ -2651,6 +2654,12 @@ fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: 
             // the focusable owning the cell at (x, y); none for a covered cell.
             const owner = if (covered_by_scroll) 0 else owners[y * grid.size.width + x];
             const style: Grid.Style = if (covered_by_scroll) .{ .bg = cell.style.bg } else cell.style;
+            const border = !covered_by_scroll and cell.rune >= 0x2500 and cell.rune <= 0x257f; // box drawing
+
+            if (open_border and (!border or owner != cur_owner or !style.eql(cur_style))) {
+                try output.appendSlice(allocator, "</span>");
+                open_border = false;
+            }
 
             if (owner != cur_owner or !style.eql(cur_style)) {
                 if (open_link != null) try output.appendSlice(allocator, "</a>");
@@ -2678,6 +2687,10 @@ fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: 
             const in_anchor = if (open_tag) |t| t == .a else false;
             const link = if (covered_by_scroll or in_anchor) null else webLink(grid.cellLink(cell));
             if (!sameLink(link, open_link)) {
+                if (open_border) {
+                    try output.appendSlice(allocator, "</span>");
+                    open_border = false;
+                }
                 if (open_link != null) try output.appendSlice(allocator, "</a>");
                 if (link) |url| {
                     try output.appendSlice(allocator, "<a class=\"cell-link\" tabindex=\"-1\" target=\"_blank\" rel=\"noopener noreferrer\" href=\"");
@@ -2685,6 +2698,10 @@ fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: 
                     try output.appendSlice(allocator, "\">");
                 }
                 open_link = link;
+            }
+            if (border and !open_border) {
+                try output.appendSlice(allocator, "<span class=\"b\">");
+                open_border = true;
             }
 
             if (covered_by_scroll) {
@@ -2709,6 +2726,7 @@ fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: 
                 try appendEscapedHtml(allocator, output, " ");
             }
         }
+        if (open_border) try output.appendSlice(allocator, "</span>");
         if (open_link != null) try output.appendSlice(allocator, "</a>");
         if (open_tag) |t| try output.appendSlice(allocator, t.closeTag());
         try output.append(allocator, '\n');

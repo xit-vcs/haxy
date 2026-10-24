@@ -88,6 +88,13 @@
             overflow: hidden;
           }
 
+          /* box-drawing runs, left out of a selection so copied text skips
+             the borders around it */
+          #grid .b {
+            user-select: none;
+            -webkit-user-select: none;
+          }
+
           /* native controls are positioned over the matching TUI cells. */
           .page input,
           .page textarea,
