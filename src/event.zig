@@ -1097,9 +1097,11 @@ pub fn consumeInTransaction(
         db_file.close(io);
         state.core.repo_dir.deleteFile(io, db_name) catch {};
     }
+    var buffer = std.Io.Writer.Allocating.init(allocator);
+    defer buffer.deinit();
     // the db is scratch state that gets deleted after iteration, so
     // there is nothing worth fsyncing
-    var temp_db = try TempDB.init(io, .{ .file = db_file, .fsync = false });
+    var temp_db = try TempDB.init(io, .{ .file = db_file, .buffer = &buffer, .fsync = false });
 
     var result: ?u64 = null;
     const Ctx = struct {
@@ -2964,7 +2966,7 @@ pub fn CommitIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Re
     return struct {
         const DB = EventDB(repo_opts.hash);
         // the scratch db (see consumeInTransaction)
-        const TempDB = xit.xitdb.Database(.file, hash.HashInt(repo_opts.hash));
+        const TempDB = xit.xitdb.Database(.buffered_file, hash.HashInt(repo_opts.hash));
         const db_name = "haxy-repo-events.db";
 
         // map of each object id to its children
