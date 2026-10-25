@@ -17,8 +17,9 @@ const Grid = xitui.grid.Grid;
 
 const cookie_name = "haxy_session";
 // the session cookie a login or a claimed auto-login sets; both must scope
-// it the same way.
-const session_cookie_fmt = cookie_name ++ "={s}; Path=/; HttpOnly; SameSite=Strict";
+// it the same way. lax so links from other sites arrive logged in, and a
+// max-age (chrome's 400 day cap) so it outlives the browser.
+const session_cookie_fmt = cookie_name ++ "={s}; Path=/; HttpOnly; SameSite=Lax; Max-Age=34560000";
 const form_flash_cookie = "haxy_form_flash";
 const local_flash_cookie = "haxy_local_flash";
 const local_required_title_prefix = "required_title:";
@@ -530,7 +531,7 @@ fn handleLogout(request: *std.http.Server.Request, allocator: std.mem.Allocator,
         .keep_alive = false,
         .extra_headers = &.{
             .{ .name = "location", .value = location },
-            .{ .name = "set-cookie", .value = cookie_name ++ "=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0" },
+            .{ .name = "set-cookie", .value = cookie_name ++ "=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0" },
         },
     });
 }
@@ -1063,7 +1064,7 @@ fn handleDelete(io: std.Io, request: *std.http.Server.Request, allocator: std.me
                 .keep_alive = false,
                 .extra_headers = &.{
                     .{ .name = "location", .value = "/" },
-                    .{ .name = "set-cookie", .value = cookie_name ++ "=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0" },
+                    .{ .name = "set-cookie", .value = cookie_name ++ "=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0" },
                 },
             });
         },
