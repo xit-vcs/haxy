@@ -321,6 +321,8 @@ pub fn receivePackAndConsume(
         // a refused push has already written the report saying why
         error.CancelTransaction => return response.finish(writer, null),
         error.ClearUndoHistory => {
+            // gc only shrinks the repo, so it may run on one over the size limit
+            sideband.size_limit = null;
             clearUndoHistory(repo_opts, io, allocator, repo, &sideband) catch |clear_err| {
                 response.finish(writer, @errorName(clear_err)) catch {};
                 return clear_err;
