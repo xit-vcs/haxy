@@ -961,9 +961,9 @@ fn patchLifecycle(merge_revision: evt.Patch.MergeRevision) !void {
     try std.testing.expectError(error.NotFound, evt.currentMoment(repo_opts, &target));
 
     // draft mergeability checks leave the target repo untouched
-    const before_draft_check = (try target.core.latestMoment()).cursor.slot();
+    const before_draft_check = try (try target.core.latestMoment()).cursor.slot();
     pch.refreshMergeability(repo_opts, io, allocator, &target, users_dir, patch_id);
-    try std.testing.expectEqualDeep(before_draft_check, (try target.core.latestMoment()).cursor.slot());
+    try std.testing.expectEqualDeep(before_draft_check, try (try target.core.latestMoment()).cursor.slot());
 
     //
     // publish another draft before its first push
@@ -1179,7 +1179,7 @@ fn expectMergeabilityShortBytes(moment: Repo.DB.HashMap(.read_only), id: *const 
     const result = try Repo.DB.HashMap(.read_only).init((try entry.getCursor(hash.hashInt(repo_opts.hash, "result"))) orelse return error.NotFound);
     for ([_][]const u8{ "source", "squash" }) |field| {
         const cursor = (try result.getCursor(hash.hashInt(repo_opts.hash, field))) orelse return error.NotFound;
-        try std.testing.expectEqual(.short_bytes, cursor.slot().tag);
+        try std.testing.expectEqual(.short_bytes, (try cursor.slot()).tag);
     }
 }
 
@@ -1203,9 +1203,9 @@ fn testMergeability(
     const clean = pch.Mergeability{ .source = .clean, .squash = .clean };
     try std.testing.expectEqualDeep(clean, try readMergeability(target, io, allocator, id, patch));
     try expectMergeabilityShortBytes(try target.core.latestMoment(), id);
-    const before = (try target.core.latestMoment()).cursor.slot();
+    const before = try (try target.core.latestMoment()).cursor.slot();
     pch.refreshMergeability(repo_opts, io, allocator, target, users_dir, id.*);
-    try std.testing.expectEqualDeep(before, (try target.core.latestMoment()).cursor.slot());
+    try std.testing.expectEqualDeep(before, try (try target.core.latestMoment()).cursor.slot());
     {
         var moment = try target.core.latestMoment();
         const state = Repo.State(.read_only){ .core = &target.core, .extra = .{ .moment = &moment } };

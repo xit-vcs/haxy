@@ -1015,7 +1015,7 @@ pub fn LocalEventDB(comptime hash_kind: hash.HashKind) type {
 
             const db = try allocator.create(EventDB(hash_kind));
             errdefer allocator.destroy(db);
-            db.* = try EventDB(hash_kind).init(.{ .io = io, .file = file, .buffer = buffer });
+            db.* = try EventDB(hash_kind).init(io, .{ .file = file, .buffer = buffer });
 
             return .{ .file = file, .buffer = buffer, .db = db };
         }
@@ -1087,6 +1087,59 @@ pub fn consumeInTransaction(
     allocator: std.mem.Allocator,
     ref: rf.Ref,
 ) !?u64 {
+    const TempDB = CommitIterator(repo_kind, repo_opts).TempDB;
+    const db_name = CommitIterator(repo_kind, repo_opts).db_name;
+
+    // the commit iterator keeps its state in a scratch db, which is
+    // written in one transaction so its writes aren't each committed
+    const db_file = try state.core.repo_dir.createFile(io, db_name, .{ .truncate = true, .lock = .exclusive, .read = true });
+    defer {
+        db_file.close(io);
+        state.core.repo_dir.deleteFile(io, db_name) catch {};
+    }
+    // the db is scratch state that gets deleted after iteration, so
+    // there is nothing worth fsyncing
+    var temp_db = try TempDB.init(io, .{ .file = db_file, .fsync = false });
+
+    var result: ?u64 = null;
+    const Ctx = struct {
+        state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+        db: *EventDB(repo_opts.hash),
+        moment: *EventDB(repo_opts.hash).HashMap(.read_write),
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        ref: rf.Ref,
+        result: *?u64,
+
+        pub fn run(ctx: @This(), cursor: *TempDB.Cursor(.read_write)) !void {
+            ctx.result.* = try consumeWithScratch(role, repo_kind, repo_opts, ctx.state, ctx.db, ctx.moment, ctx.io, ctx.allocator, ctx.ref, cursor.*);
+        }
+    };
+    try temp_db.runContext(Ctx{
+        .state = state,
+        .db = db,
+        .moment = moment,
+        .io = io,
+        .allocator = allocator,
+        .ref = ref,
+        .result = &result,
+    });
+    return result;
+}
+
+// the rest of consumeInTransaction, with the root of the commit iterator's scratch db
+fn consumeWithScratch(
+    comptime role: RepoRole,
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+    db: *EventDB(repo_opts.hash),
+    moment: *EventDB(repo_opts.hash).HashMap(.read_write),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    ref: rf.Ref,
+    scratch_cursor: CommitIterator(repo_kind, repo_opts).TempDB.Cursor(.read_write),
+) !?u64 {
     const DB = EventDB(repo_opts.hash);
     const read_state = state.readOnly();
 
@@ -1120,12 +1173,11 @@ pub fn consumeInTransaction(
     var haxy_moments_cursor = try haxy_history.appendCursor();
     // use the previous haxy_moments as the basis for this one if it exists
     if (try haxy_history.getCursor(-2)) |last_haxy_moments_cursor| {
-        try haxy_moments_cursor.write(.{ .slot = last_haxy_moments_cursor.slot() });
+        try haxy_moments_cursor.write(.{ .slot = try last_haxy_moments_cursor.slot() });
     }
     var haxy_moments = try DB.HashMap(.read_write).init(haxy_moments_cursor);
 
-    var commit_iter = try CommitIterator(repo_kind, repo_opts).init(read_state, io, allocator, haxy_moments.readOnly(), ref);
-    defer commit_iter.deinit(io, allocator);
+    var commit_iter = try CommitIterator(repo_kind, repo_opts).init(read_state, io, allocator, scratch_cursor, haxy_moments.readOnly(), ref);
 
     // if there are no events to process, look at the oid at HEAD and update
     // the last_object_id to point to it. this is important in situations
@@ -1206,7 +1258,7 @@ pub fn consumeInTransaction(
                     // make a new haxy moment and set its initial value to the last haxy moment
                     haxy_moments_cursor = try haxy_history.appendCursor();
                     const old_haxy_moments_cursor = try haxy_history.getCursor(old_moment_index) orelse return error.CursorNotFound;
-                    try haxy_moments_cursor.write(.{ .slot = old_haxy_moments_cursor.slot() });
+                    try haxy_moments_cursor.write(.{ .slot = try old_haxy_moments_cursor.slot() });
                     haxy_moments = try DB.HashMap(.read_write).init(haxy_moments_cursor);
 
                     last_object_id_maybe = oid;
@@ -1232,7 +1284,7 @@ pub fn consumeInTransaction(
             _ = try std.fmt.hexToBytes(&first_parent_oid, &parent_oids[0]);
 
             const first_parent_haxy_moment_cursor = try haxy_moments.getCursor(hash.bytesToInt(repo_opts.hash, &first_parent_oid)) orelse return error.CursorNotFound;
-            try haxy_moment_cursor.write(.{ .slot = first_parent_haxy_moment_cursor.slot() });
+            try haxy_moment_cursor.write(.{ .slot = try first_parent_haxy_moment_cursor.slot() });
         }
 
         const haxy_moment = try DB.HashMap(.read_write).init(haxy_moment_cursor);
@@ -1609,7 +1661,7 @@ pub fn merge(
         _ = arena.reset(.retain_capacity);
 
         const parent_record_cursor = try parent_records.getCursor(record_key) orelse continue;
-        const parent_slot = parent_record_cursor.slot();
+        const parent_slot = try parent_record_cursor.slot();
         const baseline_slot = if (baseline_records) |map| try map.getSlot(record_key) else null;
 
         // the parent left this record alone
@@ -1630,7 +1682,7 @@ pub fn merge(
 
         if (try target_records.getCursor(record_key)) |target_record_cursor| {
             // both sides share the change
-            if (target_record_cursor.slot().eql(parent_slot)) continue;
+            if ((try target_record_cursor.slot()).eql(parent_slot)) continue;
 
             const target_record = try read(T.Record, DB, hash_kind, &arena, try DB.HashMap(.read_only).init(target_record_cursor));
 
@@ -1668,7 +1720,7 @@ pub fn merge(
                     // changed the record, the target wins as a whole, except that
                     // an edit or restoration wins over a removal.
                     const target_changed = if (baseline_slot) |slot|
-                        !target_record_cursor.slot().eql(slot)
+                        !(try target_record_cursor.slot()).eql(slot)
                     else
                         true;
                     merged = if (!target_changed)
@@ -1740,7 +1792,7 @@ pub fn merge(
                     const map = field_oids orelse unreachable;
                     const parent_oid = if (parent_field_oids) |parent_map| try parent_map.getCursor(field_name) else null;
                     if (parent_oid) |oid_cursor| {
-                        try map.put(field_name, .{ .slot = oid_cursor.slot() });
+                        try map.put(field_name, .{ .slot = try oid_cursor.slot() });
                     } else {
                         _ = try map.remove(field_name);
                     }
@@ -1765,7 +1817,7 @@ pub fn merge(
             try conflict.put(hash.hashInt(hash_kind, base_record_key), .{ .slot = baseline_slot });
             try conflict.put(hash.hashInt(hash_kind, their_record_key), .{ .slot = parent_slot });
             if (parent_field_oids) |map| {
-                try conflict.put(hash.hashInt(hash_kind, their_field_to_oid_key), .{ .slot = map.slot() });
+                try conflict.put(hash.hashInt(hash_kind, their_field_to_oid_key), .{ .slot = try map.slot() });
             }
             continue;
         }
@@ -2611,7 +2663,7 @@ fn readField(
     if (@typeInfo(Field) == .optional) {
         // a missing key or a null union payload is null
         const cursor = cursor_maybe orelse return null;
-        if (cursor.slot().tag == .none) return null;
+        if ((try cursor.slot()).tag == .none) return null;
         return try readField(@typeInfo(Field).optional.child, DB, hash_kind, arena, cursor);
     }
     const cursor = cursor_maybe orelse return error.NotFound;
@@ -2644,7 +2696,7 @@ fn readField(
         .@"enum" => return std.meta.stringToEnum(Field, try cursor.readBytesAlloc(arena.allocator(), null)) orelse error.InvalidEnumTag,
         .@"union" => |union_info| {
             if (union_info.tag_type == null) @compileError("unsupported read field type: " ++ @typeName(Field));
-            switch (cursor.slot().tag) {
+            switch ((try cursor.slot()).tag) {
                 .bytes, .short_bytes => {
                     const name = try cursor.readBytesAlloc(arena.allocator(), null);
                     inline for (union_info.field_names, union_info.field_types) |variant_name, variant_type| {
@@ -2813,7 +2865,7 @@ fn upsertField(
                 } else {
                     const tag_key = hash.hashInt(hash_kind, @tagName(tag));
                     if (try map.getCursor(key)) |cursor| {
-                        switch (cursor.slot().tag) {
+                        switch ((try cursor.slot()).tag) {
                             .hash_map => {
                                 const variants = try DB.HashMap(.read_only).init(cursor);
                                 if (try variants.getCursor(tag_key) == null) try map.put(key, .{ .slot = null });
@@ -2827,7 +2879,7 @@ fn upsertField(
                         if (payload == null) return try variants.put(tag_key, .{ .slot = null });
                     }
                     if (try variants.getCursor(tag_key)) |cursor| {
-                        if (cursor.slot().tag == .none) _ = try variants.remove(tag_key);
+                        if ((try cursor.slot()).tag == .none) _ = try variants.remove(tag_key);
                     }
                     try upsertField(DB, hash_kind, variants, @tagName(tag), @TypeOf(payload), payload);
                 }
@@ -2874,7 +2926,7 @@ fn bytesEqual(
     cursor: *DB.Cursor(.read_only),
     value: []const u8,
 ) !bool {
-    switch (cursor.slot().tag) {
+    switch ((try cursor.slot()).tag) {
         .bytes, .short_bytes => {},
         else => return false,
     }
@@ -2911,14 +2963,10 @@ fn bytesEqual(
 pub fn CommitIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
     return struct {
         const DB = EventDB(repo_opts.hash);
-        // a plain file is used for the scratch db because each write outside
-        // a transaction is synced anyway, so buffering would gain nothing
+        // the scratch db (see consumeInTransaction)
         const TempDB = xit.xitdb.Database(.file, hash.HashInt(repo_opts.hash));
         const db_name = "haxy-repo-events.db";
 
-        repo_dir: std.Io.Dir,
-        db_file: std.Io.File,
-        db: *TempDB,
         // map of each object id to its children
         parent_to_children: TempDB.HashMap(.read_write),
         // tracking pending parents is necessary because a child can only
@@ -2936,23 +2984,12 @@ pub fn CommitIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Re
             state: rp.Repo(repo_kind, repo_opts).State(.read_only),
             io: std.Io,
             allocator: std.mem.Allocator,
+            // the root of the scratch db
+            scratch_cursor: TempDB.Cursor(.read_write),
             consumed_object_ids: DB.HashMap(.read_only),
             ref: rf.Ref,
         ) !CommitIterator(repo_kind, repo_opts) {
-            const db_file = try state.core.repo_dir.createFile(io, db_name, .{ .truncate = true, .lock = .exclusive, .read = true });
-            errdefer {
-                db_file.close(io);
-                state.core.repo_dir.deleteFile(io, db_name) catch {};
-            }
-
-            // cursors point at the db, so it needs a stable address
-            const db_ptr = try allocator.create(TempDB);
-            errdefer allocator.destroy(db_ptr);
-            // the db is scratch state that gets deleted after iteration, so
-            // there is nothing worth fsyncing
-            db_ptr.* = try TempDB.init(.{ .io = io, .file = db_file, .fsync = false });
-
-            const map = try TempDB.HashMap(.read_write).init(db_ptr.rootCursor());
+            const map = try TempDB.HashMap(.read_write).init(scratch_cursor);
 
             const parent_to_children_cursor = try map.putCursor(hash.hashInt(repo_opts.hash, "parent->children"));
             const parent_to_children = try TempDB.HashMap(.read_write).init(parent_to_children_cursor);
@@ -2964,9 +3001,6 @@ pub fn CommitIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Re
             const ready_queue = try TempDB.ArrayList(.read_write).init(ready_queue_cursor);
 
             var self = CommitIterator(repo_kind, repo_opts){
-                .repo_dir = state.core.repo_dir,
-                .db_file = db_file,
-                .db = db_ptr,
                 .parent_to_children = parent_to_children,
                 .child_to_pending_parents = child_to_pending_parents,
                 .ready_queue = ready_queue,
@@ -2974,17 +3008,9 @@ pub fn CommitIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Re
                 .newest_object_id = null,
                 .oldest_object_id = null,
             };
-            errdefer self.deinit(io, allocator);
-
-            try self.collect(state, io, allocator, consumed_object_ids, ref);
+            try self.collect(state, io, allocator, map, consumed_object_ids, ref);
 
             return self;
-        }
-
-        pub fn deinit(self: *CommitIterator(repo_kind, repo_opts), io: std.Io, allocator: std.mem.Allocator) void {
-            self.db_file.close(io);
-            self.repo_dir.deleteFile(io, db_name) catch {};
-            allocator.destroy(self.db);
         }
 
         pub fn next(self: *CommitIterator(repo_kind, repo_opts)) !?[hash.byteLen(repo_opts.hash)]u8 {
@@ -3002,11 +3028,10 @@ pub fn CommitIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Re
             state: rp.Repo(repo_kind, repo_opts).State(.read_only),
             io: std.Io,
             allocator: std.mem.Allocator,
+            map: TempDB.HashMap(.read_write),
             consumed_object_ids: DB.HashMap(.read_only),
             ref: rf.Ref,
         ) !void {
-            const map = try TempDB.HashMap(.read_write).init(self.db.rootCursor());
-
             const walk_queue_cursor = try map.putCursor(hash.hashInt(repo_opts.hash, "walk-queue"));
             const walk_queue = try TempDB.ArrayList(.read_write).init(walk_queue_cursor);
             var walk_queue_index: u64 = 0;

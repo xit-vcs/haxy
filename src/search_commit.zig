@@ -194,7 +194,7 @@ pub fn refreshInTransaction(
             var version_cursor = try index.putCursor(oid_int);
             if (base) |base_oid| {
                 const base_cursor = (try index.getCursor(try hash.hexToInt(repo_opts.hash, &base_oid))) orelse return error.InvalidCommitIndex;
-                try version_cursor.write(.{ .slot = base_cursor.slot() });
+                try version_cursor.write(.{ .slot = try base_cursor.slot() });
             }
             const version = try DB.SortedMap(.read_write).init(version_cursor);
 

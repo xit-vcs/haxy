@@ -717,7 +717,7 @@ fn trialMergeCheck(
 ) !Mergeability {
     // freeze the parent state so trial writes copy its nodes
     const moment = state.extra.moment;
-    const snapshot = moment.slot();
+    const snapshot = try moment.slot();
     // TODO: use an xitdb savepoint to also reclaim trial bytes on rollback.
     // restoring the root leaves the appended data unused until gc.
     try state.core.db.freeze();

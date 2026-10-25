@@ -131,7 +131,7 @@ pub fn refreshInTransaction(
         files: xit.xitdb.Slot,
 
         fn init(pair: DB.KeyValuePairCursor(.read_only)) !@This() {
-            return .{ .oid = try readOid(repo_opts, pair.key_cursor), .files = pair.value_cursor.slot() };
+            return .{ .oid = try readOid(repo_opts, pair.key_cursor), .files = try pair.value_cursor.slot() };
         }
     };
     // what one branch needs written

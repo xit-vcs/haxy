@@ -9,54 +9,62 @@ const author = evt.CommitAuthor{ .name = "haxy", .email = "user@haxy" };
 
 test "union field storage" {
     const allocator = std.testing.allocator;
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
 
     const DB = xit.xitdb.Database(.memory, hash.HashInt(.sha1));
     var buffer = std.Io.Writer.Allocating.init(allocator);
     defer buffer.deinit();
-    var db = try DB.init(.{ .buffer = &buffer, .max_size = 1_000_000 });
-    const map = try DB.HashMap(.read_write).init(db.rootCursor());
+    var db = try DB.init(std.testing.io, .{ .buffer = &buffer, .max_size = 1_000_000 });
 
-    const Value = union(enum) {
-        empty,
-        finished,
-        data: struct { message: []const u8, note: ?[]const u8 = null },
-        number: ?u64,
-    };
-    const Data = struct { value: ?Value };
-    const key = hash.hashInt(.sha1, "value");
+    // writes into a hash map root must run in a transaction
+    const Ctx = struct {
+        pub fn run(_: @This(), root_cursor: *DB.Cursor(.read_write)) !void {
+            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena.deinit();
 
-    // changing variants must replace the old tag and payload
-    for ([_]?Value{
-        null,
-        .empty,
-        .{ .data = .{ .message = "first", .note = "note" } },
-        .{ .data = .{ .message = "second" } },
-        .{ .number = 42 },
-        .{ .number = null },
-        .{ .number = 7 },
-        .finished,
-        .{ .data = .{ .message = "third" } },
-        null,
-    }) |value| {
-        try evt.upsert(Data, DB, .sha1, map, .{ .value = value });
-        const stored = try evt.read(Data, DB, .sha1, &arena, map.readOnly());
-        try std.testing.expectEqualDeep(value, stored.value);
-        if (value) |active| {
-            const cursor = (try map.getCursor(key)) orelse return error.NotFound;
-            switch (active) {
-                .empty, .finished => try std.testing.expectEqualStrings(@tagName(active), try cursor.readBytesAlloc(arena.allocator(), null)),
-                else => try std.testing.expectEqual(.hash_map, cursor.slot().tag),
+            const map = try DB.HashMap(.read_write).init(root_cursor.*);
+
+            const Value = union(enum) {
+                empty,
+                finished,
+                data: struct { message: []const u8, note: ?[]const u8 = null },
+                number: ?u64,
+            };
+            const Data = struct { value: ?Value };
+            const key = hash.hashInt(.sha1, "value");
+
+            // changing variants must replace the old tag and payload
+            for ([_]?Value{
+                null,
+                .empty,
+                .{ .data = .{ .message = "first", .note = "note" } },
+                .{ .data = .{ .message = "second" } },
+                .{ .number = 42 },
+                .{ .number = null },
+                .{ .number = 7 },
+                .finished,
+                .{ .data = .{ .message = "third" } },
+                null,
+            }) |value| {
+                try evt.upsert(Data, DB, .sha1, map, .{ .value = value });
+                const stored = try evt.read(Data, DB, .sha1, &arena, map.readOnly());
+                try std.testing.expectEqualDeep(value, stored.value);
+                if (value) |active| {
+                    const cursor = (try map.getCursor(key)) orelse return error.NotFound;
+                    switch (active) {
+                        .empty, .finished => try std.testing.expectEqualStrings(@tagName(active), try cursor.readBytesAlloc(arena.allocator(), null)),
+                        else => try std.testing.expectEqual(.hash_map, (try cursor.slot()).tag),
+                    }
+                } else {
+                    try std.testing.expectEqual(null, try map.getCursor(key));
+                }
             }
-        } else {
-            try std.testing.expectEqual(null, try map.getCursor(key));
-        }
-    }
 
-    // a payload-bearing variant cannot be stored as just its name
-    try map.put(key, .{ .bytes = "data" });
-    try std.testing.expectError(error.InvalidUnion, evt.read(Data, DB, .sha1, &arena, map.readOnly()));
+            // a payload-bearing variant cannot be stored as just its name
+            try map.put(key, .{ .bytes = "data" });
+            try std.testing.expectError(error.InvalidUnion, evt.read(Data, DB, .sha1, &arena, map.readOnly()));
+        }
+    };
+    try db.runContext(Ctx{});
 }
 
 test "rebase" {
