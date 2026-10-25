@@ -29,6 +29,8 @@ pub const Sideband = struct {
     total: usize = 0,
     // the last reported step, so a line is sent only when it changes
     step: usize = 0,
+    // the phase counts bytes, and its total is only an upper bound
+    bytes: bool = false,
 
     // how many items a phase with no total advances between reports
     const report_every = 1000;
@@ -79,10 +81,15 @@ pub const Sideband = struct {
                 self.total = start.estimated_total_items;
                 self.count = 0;
                 self.step = 0;
+                self.bytes = start.kind == .compacting_database;
             },
             .complete_one => |kind| {
                 if (!reported(kind)) return;
                 self.count += 1;
+            },
+            .complete_total => |complete_total| {
+                if (!reported(complete_total.kind)) return;
+                self.count = complete_total.count;
             },
             .end => |kind| {
                 if (!reported(kind)) return;
@@ -101,7 +108,7 @@ pub const Sideband = struct {
         // every report flushes, so one is sent per percent, or per block of
         // items when there is no total to turn into one
         const step: usize = if (self.total > 0) @intCast(@as(u128, self.count) * 100 / self.total) else self.count / report_every;
-        if (event == .complete_one and step == self.step) return;
+        if ((event == .complete_one or event == .complete_total) and step == self.step) return;
         self.step = step;
 
         // reporting is the only moment a transaction looks up from its work
@@ -112,7 +119,9 @@ pub const Sideband = struct {
 
         var buffer: [128]u8 = undefined;
         const suffix = if (event == .end) "\n" else "\r";
-        const text = if (self.total > 0)
+        const text = if (self.bytes)
+            try std.fmt.bufPrint(&buffer, "{s}: {Bi:.1} of at most {Bi:.1}{s}", .{ self.label, self.count, self.total, suffix })
+        else if (self.total > 0)
             try std.fmt.bufPrint(&buffer, "{s}: {d}% ({d}/{d}){s}", .{ self.label, step, self.count, self.total, suffix })
         else
             try std.fmt.bufPrint(&buffer, "{s}: {d}{s}", .{ self.label, self.count, suffix });
