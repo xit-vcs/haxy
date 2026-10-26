@@ -751,7 +751,7 @@ pub fn consume(
                     const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
 
                     try commitEvents(.xit, repo_opts, state, ctx.io, ctx.allocator, ctx.ref, ctx.events, ctx.first_parent_oids);
-                    ctx.moment_index.* = try consumeInTransaction(role, .xit, repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, ctx.ref);
+                    ctx.moment_index.* = try consumeInTransaction(role, .xit, repo_opts, state, &moment, ctx.io, ctx.allocator, ctx.ref);
                     _ = try pch.updateMergeChecks(repo_opts, state, ctx.io, ctx.allocator, ctx.users_dir, ctx.patch_ids, null);
                     try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action_kind = undo_action } });
                 }
@@ -1052,7 +1052,7 @@ pub fn LocalEventDB(comptime hash_kind: hash.HashKind) type {
                 pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
                     var moment = try DB.HashMap(.read_write).init(cursor.*);
                     const state = rp.Repo(repo_kind, repo_opts).State(.read_write){ .core = &ctx.repo.core, .extra = .{} };
-                    _ = try consumeInTransaction(.repo, repo_kind, repo_opts, state, ctx.db, &moment, ctx.io, ctx.allocator, ctx.ref);
+                    _ = try consumeInTransaction(.repo, repo_kind, repo_opts, state, &moment, ctx.io, ctx.allocator, ctx.ref);
                 }
             };
 
@@ -1081,7 +1081,6 @@ pub fn consumeInTransaction(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     state: rp.Repo(repo_kind, repo_opts).State(.read_write),
-    db: *EventDB(repo_opts.hash),
     moment: *EventDB(repo_opts.hash).HashMap(.read_write),
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -1106,7 +1105,6 @@ pub fn consumeInTransaction(
     var result: ?u64 = null;
     const Ctx = struct {
         state: rp.Repo(repo_kind, repo_opts).State(.read_write),
-        db: *EventDB(repo_opts.hash),
         moment: *EventDB(repo_opts.hash).HashMap(.read_write),
         io: std.Io,
         allocator: std.mem.Allocator,
@@ -1114,12 +1112,11 @@ pub fn consumeInTransaction(
         result: *?u64,
 
         pub fn run(ctx: @This(), cursor: *TempDB.Cursor(.read_write)) !void {
-            ctx.result.* = try consumeWithScratch(role, repo_kind, repo_opts, ctx.state, ctx.db, ctx.moment, ctx.io, ctx.allocator, ctx.ref, cursor.*);
+            ctx.result.* = try consumeWithScratch(role, repo_kind, repo_opts, ctx.state, ctx.moment, ctx.io, ctx.allocator, ctx.ref, cursor.*);
         }
     };
     try temp_db.runContext(Ctx{
         .state = state,
-        .db = db,
         .moment = moment,
         .io = io,
         .allocator = allocator,
@@ -1135,7 +1132,6 @@ fn consumeWithScratch(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     state: rp.Repo(repo_kind, repo_opts).State(.read_write),
-    db: *EventDB(repo_opts.hash),
     moment: *EventDB(repo_opts.hash).HashMap(.read_write),
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -1176,6 +1172,8 @@ fn consumeWithScratch(
     // use the previous haxy_moments as the basis for this one if it exists
     if (try haxy_history.getCursor(-2)) |last_haxy_moments_cursor| {
         try haxy_moments_cursor.write(.{ .slot = try last_haxy_moments_cursor.slot() });
+        // freeze so changes copy the previous haxy_moments instead of mutating it
+        try haxy_moments_cursor.freeze();
     }
     var haxy_moments = try DB.HashMap(.read_write).init(haxy_moments_cursor);
 
@@ -1261,6 +1259,8 @@ fn consumeWithScratch(
                     haxy_moments_cursor = try haxy_history.appendCursor();
                     const old_haxy_moments_cursor = try haxy_history.getCursor(old_moment_index) orelse return error.CursorNotFound;
                     try haxy_moments_cursor.write(.{ .slot = try old_haxy_moments_cursor.slot() });
+                    // freeze so changes copy the old haxy_moments instead of mutating it
+                    try haxy_moments_cursor.freeze();
                     haxy_moments = try DB.HashMap(.read_write).init(haxy_moments_cursor);
 
                     last_object_id_maybe = oid;
@@ -1287,6 +1287,8 @@ fn consumeWithScratch(
 
             const first_parent_haxy_moment_cursor = try haxy_moments.getCursor(hash.bytesToInt(repo_opts.hash, &first_parent_oid)) orelse return error.CursorNotFound;
             try haxy_moment_cursor.write(.{ .slot = try first_parent_haxy_moment_cursor.slot() });
+            // freeze so changes copy the parent's haxy moment instead of mutating it
+            try haxy_moment_cursor.freeze();
         }
 
         const haxy_moment = try DB.HashMap(.read_write).init(haxy_moment_cursor);
@@ -1493,10 +1495,12 @@ fn consumeWithScratch(
 
         // the current object id is now the last one
         last_object_id_maybe = repo_event_oid;
-
-        // prevent any of the data created above from being mutated by future iterations of this loop
-        try db.freeze();
     }
+
+    // the moments share data with earlier ones, and later writes in this
+    // transaction, such as saved merge checks, reach them through cursors
+    // that aren't frozen
+    try moment.cursor.db.freeze();
 
     if (last_object_id_maybe) |*last_object_id| {
         try moment.put(hash.hashInt(repo_opts.hash, last_object_id_key), .{ .bytes = last_object_id });

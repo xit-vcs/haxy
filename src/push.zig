@@ -261,11 +261,11 @@ pub fn receivePackAndConsume(
             // no-op consume must not cancel here, since the push shares the
             // transaction and must commit regardless.
             if (null != try rf.readRecur(.xit, repo_opts, state.readOnly(), ctx.io, .{ .ref = evt.events_ref })) {
-                ctx.moment_index.* = evt.consumeInTransaction(.repo, .xit, repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, evt.events_ref) catch |err| switch (err) {
+                ctx.moment_index.* = evt.consumeInTransaction(.repo, .xit, repo_opts, state, &moment, ctx.io, ctx.allocator, evt.events_ref) catch |err| switch (err) {
                     error.CancelTransaction => null,
                     else => |e| return e,
                 };
-                try pch.detectMerged(repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, ctx.server.users_dir, ctx.updates.items.items, ctx.error_writer);
+                try pch.detectMerged(repo_opts, state, &moment, ctx.io, ctx.allocator, ctx.server.users_dir, ctx.updates.items.items, ctx.error_writer);
 
                 // the revisions the pushed branches cause belong to the push
                 _ = try pch.refreshBranchesInTransaction(.{ .server = ctx.server }, repo_opts, state, &moment, ctx.io, ctx.allocator, ctx.updates.items.items, null, ctx.sideband);
@@ -494,7 +494,7 @@ pub fn receiveFork(
                 // commit and index any new events
                 if (event_count > 0) {
                     try evt.commitEvents(.xit, repo_opts, state, ctx.io, ctx.allocator, evt.events_ref, events[0..event_count], null);
-                    _ = try evt.consumeInTransaction(.fork, .xit, repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, evt.events_ref);
+                    _ = try evt.consumeInTransaction(.fork, .xit, repo_opts, state, &moment, ctx.io, ctx.allocator, evt.events_ref);
                 }
                 // the patch branch's file index lands with the push
                 _ = try find.refreshInTransaction(repo_opts, state, &moment, ctx.io, ctx.allocator, ctx.sideband);

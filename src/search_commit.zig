@@ -180,10 +180,9 @@ pub fn refreshInTransaction(
     if (work.items.len == 0 and gone.items.len == 0) return false;
 
     {
-        const index_hash = hash.hashInt(repo_opts.hash, index_key);
+        const index = try DB.HashMap(.read_write).init(try moment.putCursor(hash.hashInt(repo_opts.hash, index_key)));
 
         for (work.items) |item| {
-            const index = try DB.HashMap(.read_write).init(try moment.putCursor(index_hash));
             const base = item.base orelse nearestVersion(repo_opts.hash, versions, default_tip, item.timestamp);
 
             var entry: Entry = undefined;
@@ -195,6 +194,9 @@ pub fn refreshInTransaction(
             if (base) |base_oid| {
                 const base_cursor = (try index.getCursor(try hash.hexToInt(repo_opts.hash, &base_oid))) orelse return error.InvalidCommitIndex;
                 try version_cursor.write(.{ .slot = try base_cursor.slot() });
+                // this version shares the base's data, so freeze it to make
+                // changes copy that data instead of mutating the base
+                try version_cursor.freeze();
             }
             const version = try DB.SortedMap(.read_write).init(version_cursor);
 
@@ -205,13 +207,9 @@ pub fn refreshInTransaction(
             }
 
             try versions.put(aa, item.oid, item.timestamp);
-            // the next version copies this one's slot, so everything
-            // written so far has to be shared rather than mutated
-            try state.core.db.freeze();
         }
 
         // removing last keeps a tip that is going away available as a base
-        const index = try DB.HashMap(.read_write).init(try moment.putCursor(index_hash));
         for (gone.items) |oid| _ = try index.remove(try hash.hexToInt(repo_opts.hash, &oid));
     }
     return true;

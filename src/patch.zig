@@ -127,7 +127,7 @@ pub fn writeBranchPatchInTransaction(
     {
         const parent = if (try rf.readRecur(.xit, repo_opts, state.readOnly(), io, .{ .ref = evt.events_ref }) == null) first_parent else null;
         try evt.commitEvents(.xit, repo_opts, state, io, arena.child_allocator, evt.events_ref, &events, parent);
-        _ = try evt.consumeInTransaction(.repo, .xit, repo_opts, state, &state.core.db, moment, io, arena.child_allocator, evt.events_ref);
+        _ = try evt.consumeInTransaction(.repo, .xit, repo_opts, state, moment, io, arena.child_allocator, evt.events_ref);
     }
 
     // save mergeability before finishing the patch transaction
@@ -715,20 +715,22 @@ fn trialMergeCheck(
     check: *const MergeCheck,
     fork_repo: ?*rp.Repo(.xit, repo_opts),
 ) !Mergeability {
-    // freeze the parent state so trial writes copy its nodes
+    // trial writes go through a frozen copy of the moment's cursor, so they
+    // copy the parent state instead of mutating it
     const moment = state.extra.moment;
+    var parent_cursor = moment.cursor;
     const snapshot = try moment.slot();
     // TODO: use an xitdb savepoint to also reclaim trial bytes on rollback.
     // restoring the root leaves the appended data unused until gc.
-    try state.core.db.freeze();
+    try moment.cursor.freeze();
     moment.* = rp.Repo(.xit, repo_opts).DB.HashMap(.read_write).init(moment.cursor) catch return error.MergeCheckRestoreFailed;
 
     // keep the trial result in memory while discarding its state changes
     const result = calculateMergeCheck(repo_opts, state, io, allocator, check, fork_repo);
 
-    // restore the parent state before handling any trial error
-    moment.cursor.write(.{ .slot = snapshot }) catch return error.MergeCheckRestoreFailed;
-    moment.* = rp.Repo(.xit, repo_opts).DB.HashMap(.read_write).init(moment.cursor) catch return error.MergeCheckRestoreFailed;
+    // restore the parent state, and the unfrozen cursor, before handling any trial error
+    parent_cursor.write(.{ .slot = snapshot }) catch return error.MergeCheckRestoreFailed;
+    moment.* = rp.Repo(.xit, repo_opts).DB.HashMap(.read_write).init(parent_cursor) catch return error.MergeCheckRestoreFailed;
 
     // report failed trials as unknown after the parent state is restored
     return result catch |err| {
@@ -958,7 +960,7 @@ pub fn publish(
 
                     const parent = if (try rf.readRecur(.xit, repo_opts, state.readOnly(), ctx.io, .{ .ref = evt.events_ref }) == null) ctx.first_parent else null;
                     try evt.commitEvents(.xit, repo_opts, state, ctx.io, ctx.allocator, evt.events_ref, ctx.events, parent);
-                    _ = try evt.consumeInTransaction(.repo, .xit, repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, evt.events_ref);
+                    _ = try evt.consumeInTransaction(.repo, .xit, repo_opts, state, &moment, ctx.io, ctx.allocator, evt.events_ref);
                     _ = try updateMergeChecks(repo_opts, state, ctx.io, ctx.allocator, ctx.users_dir, &.{ctx.patch_id}, null);
                     try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action_kind = evt.undo_action } });
                 }
@@ -1200,7 +1202,7 @@ fn mergeInner(
                 const after_oid = (try rf.readRecur(.xit, repo_opts, state.readOnly(), ctx.io, .{ .ref = ctx.target_ref })) orelse return error.InvalidTargetBranch;
 
                 // retain the submitted revision and snapshot the merge result
-                if (!try importMergedRevision(repo_opts, state, &ctx.core.db, &moment, ctx.io, ctx.allocator, ctx.fork_repo, &ctx.patch_id, .{ .revision = ctx.revision, .before_oid = &before_oid, .after_oid = &after_oid }, ctx.expected_patch, ctx.author, ctx.timestamp)) return error.PatchOutOfDate;
+                if (!try importMergedRevision(repo_opts, state, &moment, ctx.io, ctx.allocator, ctx.fork_repo, &ctx.patch_id, .{ .revision = ctx.revision, .before_oid = &before_oid, .after_oid = &after_oid }, ctx.expected_patch, ctx.author, ctx.timestamp)) return error.PatchOutOfDate;
                 // the merge moved the target branch, so the other open patches'
                 // checks are redone with it
                 _ = try updateStaleMergeChecks(repo_opts, state, ctx.io, ctx.allocator, ctx.users_dir, null);
@@ -1276,7 +1278,6 @@ fn commitAuthor(line: []const u8) !evt.CommitAuthor {
 fn importMerged(
     comptime repo_opts: rp.RepoOpts(.xit),
     state: rp.Repo(.xit, repo_opts).State(.read_write),
-    db: *evt.EventDB(repo_opts.hash),
     moment: *evt.EventDB(repo_opts.hash).HashMap(.read_write),
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -1306,14 +1307,13 @@ fn importMerged(
     defer if (fork_repo_maybe) |*repo| repo.deinit(io, allocator);
 
     // import the revision and record the client-side merge.
-    _ = try importMergedRevision(repo_opts, state, db, moment, io, allocator, if (fork_repo_maybe) |*repo| repo else null, patch_id, .{ .revision = revision, .before_oid = before_oid, .after_oid = after_oid }, null, null, 0);
+    _ = try importMergedRevision(repo_opts, state, moment, io, allocator, if (fork_repo_maybe) |*repo| repo else null, patch_id, .{ .revision = revision, .before_oid = before_oid, .after_oid = after_oid }, null, null, 0);
 }
 
 // import the revision and mark its patch merged in the current transaction
 fn importMergedRevision(
     comptime repo_opts: rp.RepoOpts(.xit),
     state: rp.Repo(.xit, repo_opts).State(.read_write),
-    db: *evt.EventDB(repo_opts.hash),
     moment: *evt.EventDB(repo_opts.hash).HashMap(.read_write),
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -1404,7 +1404,7 @@ fn importMergedRevision(
 
     // commit and consume the revision and patch events together.
     try evt.commitEvents(.xit, repo_opts, state, io, allocator, evt.events_ref, events.items, null);
-    _ = try evt.consumeInTransaction(.repo, .xit, repo_opts, state, db, moment, io, allocator, evt.events_ref);
+    _ = try evt.consumeInTransaction(.repo, .xit, repo_opts, state, moment, io, allocator, evt.events_ref);
     return true;
 }
 
@@ -1412,7 +1412,6 @@ fn importMergedRevision(
 pub fn detectMerged(
     comptime repo_opts: rp.RepoOpts(.xit),
     state: rp.Repo(.xit, repo_opts).State(.read_write),
-    db: *evt.EventDB(repo_opts.hash),
     moment: *evt.EventDB(repo_opts.hash).HashMap(.read_write),
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -1492,7 +1491,7 @@ pub fn detectMerged(
 
                     // a fast-forward has no recorded merge boundary; use the old ref tip
                     const before_oid = if (std.mem.eql(u8, &commit.oid, &target.after_oid)) &old_oid else &target.before_oid;
-                    importMerged(repo_opts, state, db, moment, io, allocator, users_dir, &patch_id, &commit.oid, before_oid, &target.after_oid) catch |err| {
+                    importMerged(repo_opts, state, moment, io, allocator, users_dir, &patch_id, &commit.oid, before_oid, &target.after_oid) catch |err| {
                         serve_common.logError(io, error_writer, "failed to mark patch {s} as merged: {s}\n", .{ &patch_hex, @errorName(err) });
                         continue;
                     };

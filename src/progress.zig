@@ -54,7 +54,7 @@ pub const Sideband = struct {
     // fights with the client's own upload bar over the same row.
     fn reported(kind: rp.ProgressKind) bool {
         return switch (kind) {
-            .writing_object, .checking_object, .walking_commit, .walking_patch, .enumerating_object, .compressing_object, .writing_patch, .pruning_database, .compacting_database => true,
+            .writing_object, .checking_object, .walking_commit, .preparing_patch_walk, .walking_patch, .enumerating_object, .compressing_object, .writing_patch, .pruning_database, .compacting_database => true,
             .writing_object_from_pack, .sending_bytes, .receiving_bytes => false,
         };
     }
@@ -71,6 +71,7 @@ pub const Sideband = struct {
                     .writing_object => self.label = "Copying objects",
                     .checking_object => self.label = "Checking connectivity",
                     .walking_commit => self.label = "Walking commits",
+                    .preparing_patch_walk => self.label = "Preparing patch walk",
                     .walking_patch => self.label = "Walking patches",
                     .enumerating_object => self.label = "Enumerating objects",
                     .compressing_object => self.label = "Compressing objects",

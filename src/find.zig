@@ -193,7 +193,7 @@ pub fn refreshInTransaction(
     if (work.items.len == 0) return false;
 
     {
-        const index_hash = hash.hashInt(repo_opts.hash, index_key);
+        const index = try DB.HashMap(.read_write).init(try moment.putCursor(hash.hashInt(repo_opts.hash, index_key)));
         var new_branch_base = base;
         progress.report(repo_opts, io, progress_ctx_maybe, .{ .text = "Indexing files" });
 
@@ -202,7 +202,6 @@ pub fn refreshInTransaction(
 
         for (work.items) |item| {
             if (progress.cancelled(repo_opts, progress_ctx_maybe)) return error.ClientGone;
-            const index = try DB.HashMap(.read_write).init(try moment.putCursor(index_hash));
             const tip = item.oid orelse {
                 _ = try index.remove(item.branch_hash);
                 continue;
@@ -217,7 +216,12 @@ pub fn refreshInTransaction(
             var tip_cursor = try index.putKeyCursor(item.branch_hash);
             try tip_cursor.write(.{ .bytes = &tip_bytes });
             var files_cursor = try index.putCursor(item.branch_hash);
-            if (from) |entry| try files_cursor.write(.{ .slot = entry.files });
+            if (from) |entry| {
+                try files_cursor.write(.{ .slot = entry.files });
+                // this entry shares its base's files, so freeze it to make
+                // changes copy them instead of mutating the base
+                try files_cursor.freeze();
+            }
             const files = try DB.SortedMap(.read_write).init(files_cursor);
 
             const tree = try rootTreeOid(repo_opts, state.readOnly(), io, allocator, &tip);
@@ -250,9 +254,6 @@ pub fn refreshInTransaction(
             // the first entry ever written becomes the base for the next
             // new branch, so only one branch walks a whole tree.
             if (new_branch_base == null) new_branch_base = .{ .oid = tip, .files = (try index.getSlot(item.branch_hash)) orelse unreachable };
-            // a later entry copies an earlier one's slot, so everything
-            // written so far has to be shared rather than mutated
-            try state.core.db.freeze();
         }
     }
     return true;
