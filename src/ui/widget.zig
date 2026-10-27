@@ -35,7 +35,6 @@ pub const Widget = union(enum) {
     unauthorized: ui.Unauthorized.View,
     not_found: ui.NotFound.View,
     title: ui.Title.View,
-    sub_title: ui.SubTitle.View,
     home_header: ui.Home.Header.View,
     user_header: ui.User.Header.View,
     user_repos: ui.User.ReposView,

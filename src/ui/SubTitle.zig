@@ -1,12 +1,4 @@
 const std = @import("std");
-const ui = @import("../ui.zig");
-const xit = @import("xit");
-const xitui = xit.xitui;
-const wgt = xitui.widget;
-const layout = xitui.layout;
-const Key = xitui.input.Key;
-const Grid = xitui.grid.Grid;
-const Focus = xitui.focus.Focus;
 
 content: []const u8,
 
@@ -17,43 +9,6 @@ pub fn init(arena: *std.heap.ArenaAllocator, orig_content: []const u8) !Self {
         .content = try renderSubTitle(arena.allocator(), orig_content),
     };
 }
-
-pub const View = struct {
-    text_box: wgt.TextBox,
-
-    pub fn init(allocator: std.mem.Allocator, data: *const Self) !View {
-        var text_box = try wgt.TextBox.init(allocator, data.content, .{ .border = null, .wrap_kind = .none });
-        errdefer text_box.deinit(allocator);
-        return .{ .text_box = text_box };
-    }
-
-    pub fn deinit(self: *View, allocator: std.mem.Allocator) void {
-        self.text_box.deinit(allocator);
-    }
-
-    pub fn build(self: *View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
-        try self.text_box.build(allocator, constraint, root_focus);
-    }
-
-    pub fn input(self: *View, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
-        _ = self;
-        _ = allocator;
-        _ = key;
-        _ = root_focus;
-    }
-
-    pub fn clearGrid(self: *View) void {
-        self.text_box.clearGrid();
-    }
-
-    pub fn getGrid(self: View) ?Grid {
-        return self.text_box.getGrid();
-    }
-
-    pub fn getFocus(self: *View) *Focus {
-        return self.text_box.getFocus();
-    }
-};
 
 // 2-row sextant subtitle font, a half-height companion to Title.
 //

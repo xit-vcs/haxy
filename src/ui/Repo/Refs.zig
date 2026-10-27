@@ -27,14 +27,13 @@ tags: Column,
 
 const Self = @This();
 
-// one ref column: the current window of names, the raw ref names its
+// one ref column: the current window of names, and the raw ref names its
 // "← previous" / "next →" rows window from (null = no row; a "" prev means
-// the first window), and the header label.
+// the first window).
 pub const Column = struct {
     names: []const []const u8 = &.{},
     prev: ?[]const u8 = null,
     next: ?[]const u8 = null,
-    label: ui.SubTitle,
 };
 
 // empty columns, for the wasm / no-repo paths.
@@ -45,8 +44,8 @@ pub fn emptyResult(arena: *std.heap.ArenaAllocator, identity: []const u8, kind: 
         .kind = kind,
         .from = try aa.dupe(u8, from),
         .search = if (search.len == 0) null else std.Uri.percentDecodeInPlace(try aa.dupe(u8, search)),
-        .branches = .{ .label = try ui.SubTitle.init(arena, "branches") },
-        .tags = .{ .label = try ui.SubTitle.init(arena, "tags") },
+        .branches = .{},
+        .tags = .{},
     };
 }
 
@@ -145,10 +144,10 @@ fn prevRoot(aa: std.mem.Allocator, iter: anytype, prefix: []const u8, from: []co
 
 pub const View = struct {
     // a vertical box: the search sub-header above a horizontal box of two
-    // columns. each column is a fixed label above a
-    // Scroll of a WordFlow, so the names wrap across the column and scroll
-    // beneath the label. focus points at the header or the active column and,
-    // in its flow, the selected name.
+    // columns. each column is a labeled border around a Scroll of a WordFlow,
+    // so the names wrap across the column and scroll inside the border. focus
+    // points at the header or the active column and, in its flow, the
+    // selected name.
     box: wgt.Box(ui.Widget),
     data: *const Self,
     session: *ui.Session,
@@ -179,8 +178,7 @@ pub const View = struct {
                 errdefer spacer.deinit(allocator);
                 try header.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null });
             }
-            // a row taller than the box, leaving a blank line above the columns
-            try outer.children.put(allocator, header_scroll.getFocus().id, .{ .widget = .{ .header_scroll = header_scroll }, .rect = null, .min_size = .{ .width = null, .height = 4 } });
+            try outer.children.put(allocator, header_scroll.getFocus().id, .{ .widget = .{ .header_scroll = header_scroll }, .rect = null, .min_size = .{ .width = null, .height = ui.widget.SearchBox.min_size.height } });
         }
 
         // with both columns empty, the empty message stands in for them
@@ -189,7 +187,7 @@ pub const View = struct {
             errdefer center.deinit(allocator);
             try outer.children.put(allocator, center.getFocus().id, .{ .widget = .{ .center = center }, .rect = null, .min_size = null });
         } else {
-            var split = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .horiz });
+            var split = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .horiz, .stretch = true });
             errdefer split.deinit(allocator);
 
             const search = data.search orelse "";
@@ -220,27 +218,12 @@ pub const View = struct {
         kind: ui.RoutablePage.RefKind,
         data: *const Column,
     ) !void {
-        var column = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .vert });
+        const label = switch (kind) {
+            .branch => " branches ",
+            .tag => " tags ",
+        };
+        var column = try wgt.Box(ui.Widget).init(allocator, .{ .border = .single, .round_corners = true, .direction = .vert, .top_label = .{ .text = label } });
         errdefer column.deinit(allocator);
-
-        // a fixed, non-focusable header in the SubTitle font, nudged off the
-        // left edge by a one-column space. it declares its height (2 rows plus
-        // a blank one beneath) as a min so the (fill) scroll reserves room for it.
-        {
-            var header_box = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .horiz });
-            errdefer header_box.deinit(allocator);
-            {
-                var space = try wgt.Text.init(allocator, " ");
-                errdefer space.deinit(allocator);
-                try header_box.children.put(allocator, space.getFocus().id, .{ .widget = .{ .text = space }, .rect = null, .min_size = null });
-            }
-            {
-                var header = try ui.SubTitle.View.init(allocator, &data.label);
-                errdefer header.deinit(allocator);
-                try header_box.children.put(allocator, header.getFocus().id, .{ .widget = .{ .sub_title = header }, .rect = null, .min_size = null });
-            }
-            try column.children.put(allocator, header_box.getFocus().id, .{ .widget = .{ .box = header_box }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
-        }
 
         // each name links to the files tab at that ref's root. window
         // navigation brackets them: "← previous" off the first window, "next →"
@@ -260,7 +243,6 @@ pub const View = struct {
             };
             errdefer scroll.deinit(allocator);
 
-            // the column's focus path skips the label and points at the flow
             if (scroll.getFocus().child_id != null) column.getFocus().child_id = scroll.getFocus().id;
             try column.children.put(allocator, scroll.getFocus().id, .{ .widget = .{ .scroll = scroll }, .rect = null, .min_size = null });
         }
@@ -376,9 +358,8 @@ pub const View = struct {
         return cols.children.getIndex(id);
     }
 
-    // [0] = the fixed label, [1] = the scrolling flow
     fn scrollAt(self: *View, index: usize) *wgt.Scroll(ui.Widget) {
-        return &self.columns().children.values()[index].widget.box.children.values()[1].widget.scroll;
+        return &self.columns().children.values()[index].widget.box.children.values()[0].widget.scroll;
     }
 
     fn flowAt(self: *View, index: usize) *ui.widget.WordFlow {
