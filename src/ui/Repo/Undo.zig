@@ -5,6 +5,7 @@ const evt = @import("../../event.zig");
 const pch = @import("../../patch.zig");
 const push = @import("../../push.zig");
 const fork = @import("../../fork.zig");
+const copy = @import("../../copy.zig");
 const inp = @import("../input.zig");
 const xit = @import("xit");
 const rp = xit.repo;
@@ -56,7 +57,8 @@ pub fn init(comptime opts: rp.RepoOpts(.xit), arena: *std.heap.ArenaAllocator, r
     const DB = rp.Repo(.xit, opts).DB;
     const history = try DB.ArrayList(.read_only).init(repo.core.db.rootCursor().readOnly());
     const count = try history.count();
-    if (selected) |index| if (index >= count) return error.NotFound;
+    const floor = try copy.undoFloor(opts, &repo.core) orelse 0;
+    if (selected) |index| if (index >= count or index < floor) return error.NotFound;
     var items: std.ArrayList(Item) = .empty;
     var remaining = if (selected) |index| index + 1 else count;
     var buffer: [opts.max_read_size]u8 = undefined;
@@ -78,7 +80,7 @@ pub fn init(comptime opts: rp.RepoOpts(.xit), arena: *std.heap.ArenaAllocator, r
         if (try undoneFrom(arena, record)) |from| undone_from = from;
     }
 
-    while (remaining > 0 and items.items.len < page_size) {
+    while (remaining > floor and items.items.len < page_size) {
         remaining -= 1;
         const moment = try repo.core.momentAt(remaining);
         const record = try xit.undo.read(opts, moment, &buffer);
@@ -104,7 +106,7 @@ pub fn init(comptime opts: rp.RepoOpts(.xit), arena: *std.heap.ArenaAllocator, r
             .undone = row_undone,
         });
     }
-    return .{ .identity = try aa.dupe(u8, identity), .handle = handle, .count = count, .items = items.items, .next = if (remaining > 0) remaining - 1 else null };
+    return .{ .identity = try aa.dupe(u8, identity), .handle = handle, .count = count, .items = items.items, .next = if (remaining > floor) remaining - 1 else null };
 }
 
 const Detail = struct {
@@ -140,6 +142,7 @@ fn eventDetail(
     if (std.mem.eql(u8, record.action_kind, evt.merge_undo_action)) return .{ .action = "merge events", .description = "merged the events ref from a remote" };
     if (std.mem.eql(u8, record.action_kind, pch.merge_undo_action)) return .{ .action = "merge patch", .description = "merged a patch into its target branch" };
     if (std.mem.eql(u8, record.action_kind, fork.undo_action)) return .{ .action = "fork", .description = "created a fork to draft a patch in" };
+    if (std.mem.eql(u8, record.action_kind, copy.undo_action)) return .{ .action = "copy", .description = "created the repo as a copy of another" };
     if (std.mem.eql(u8, record.action_kind, pch.mergeability_undo_action)) return .{ .action = "mergeability", .description = "rechecked whether the open patches still merge cleanly" };
     if (std.mem.eql(u8, record.action_kind, push.undo_action)) {
         // a push consumes the events it carried in its own transaction
@@ -320,7 +323,10 @@ pub fn execute(io: std.Io, allocator: std.mem.Allocator, source: ui.RepoSource, 
     var any_repo = try rp.AnyRepo(.xit, .{}).open(io, allocator, source.localInitOpts());
     defer any_repo.deinit(io, allocator);
     switch (any_repo) {
-        inline else => |*repo| try repo.undo(io, index),
+        inline else => |*repo| {
+            if (try copy.undoFloor(repo.self_repo_opts, &repo.core)) |floor| if (index <= floor) return error.InvalidHistoryIndex;
+            try repo.undo(io, index);
+        },
     }
 }
 

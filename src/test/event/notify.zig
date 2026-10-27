@@ -57,7 +57,7 @@ test "notifs" {
     const owner_id = evt.EventWithId.randomId(prng.random());
     const recipient_id = evt.EventWithId.randomId(prng.random());
     for ([_]*const [evt.event_id_size]u8{ &owner_id, &recipient_id }) |user_id| try initUserRepo(io, allocator, users_dir, user_id);
-    const location = try evt.createRepo(io, allocator, users_dir, &owner_id, author, "repo", "", .private, repo_opts.hash);
+    const location = try evt.createRepo(io, allocator, users_dir, &owner_id, author, "repo", "", .private, repo_opts.hash, null);
 
     //
     // notifs

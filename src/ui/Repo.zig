@@ -350,7 +350,8 @@ pub fn init(
                             // tabs switch in-page, so every tab's data is read here
                             if (repo_kind == .xit and session.data.host_kind == .server and handle.canWrite()) {
                                 undo_data = Undo.init(opened.self_repo_opts, arena, opened, session.haxy_moment, repo_identity.identity, undo_index, handle) catch |err| switch (err) {
-                                    error.OutOfMemory => return err,
+                                    // a transaction the page can't show
+                                    error.OutOfMemory, error.NotFound => return err,
                                     else => .{ .identity = try arena.allocator().dupe(u8, repo_identity.identity), .handle = handle, .failure = @errorName(err) },
                                 };
                             }

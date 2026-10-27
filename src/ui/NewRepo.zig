@@ -58,6 +58,14 @@ pub const View = struct {
         }
 
         {
+            var copy = try wgt.TextInput.init(allocator, .{ .top_label = .{ .text = " copy repo (optional) " }, .bottom_label = .{ .text = " put any `user:repo` here " }, .name = "copy", .visible_width = 30, .round_corners = true, .render_content = session.is_terminal });
+            errdefer copy.deinit(allocator);
+            copy.getFocus().mode = .all;
+            if (saved_fields) |saved| try copy.setContent(allocator, saved.copy);
+            try box.children.put(allocator, copy.getFocus().id, .{ .widget = .{ .text_input = copy }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
+        }
+
+        {
             var submit = try ui.widget.SubmitButton.initLabeled(allocator, "submit");
             errdefer submit.deinit(allocator);
             try box.children.put(allocator, submit.getFocus().id, .{ .widget = .{ .submit_button = submit }, .rect = null, .min_size = .{ .width = null, .height = 3 } });
@@ -77,7 +85,9 @@ pub const View = struct {
             .required_name => " name (required) ",
             .invalid_name => " name (invalid) ",
             .name_taken => " name (taken) ",
+            .invalid_copy => " name ",
         } else " name ";
+        (try formField(self.formBox(), "copy")).options.top_label.text = if (failure == .invalid_copy) " copy repo (invalid) " else " copy repo (optional) ";
         // the web form handling finds the inputs by focus id
         const inputs_arena = self.session.arena.allocator();
         for (self.formBox().children.values()) |*child| switch (child.widget) {
@@ -135,14 +145,17 @@ pub const View = struct {
 
         const name_input = try formField(self.formBox(), "name");
         const description_input = try formField(self.formBox(), "description");
+        const copy_input = try formField(self.formBox(), "copy");
         const name = try name_input.text(allocator);
         defer allocator.free(name);
         const description = try description_input.text(allocator);
         defer allocator.free(description);
+        const copy = try copy_input.text(allocator);
+        defer allocator.free(copy);
         const hash_kind = std.meta.stringToEnum(hash.HashKind, (try formRadio(self.formBox(), "hash")).selected()) orelse unreachable;
         const access = std.meta.stringToEnum(evt.Repo.Access, (try formRadio(self.formBox(), "access")).selected()) orelse unreachable;
 
-        _ = evt.createRepo(io, allocator, users_dir, &user_id, .{ .name = user.event.name, .email = user.event.email }, name, description, access, hash_kind) catch |err| {
+        _ = evt.createRepo(io, allocator, users_dir, &user_id, .{ .name = user.event.name, .email = user.event.email }, name, description, access, hash_kind, if (copy.len == 0) null else .{ .admin_moment = moment, .path = copy }) catch |err| {
             const failure = ui.Session.FormFeedback.RepoFailure.fromError(err) orelse return err;
             const aa = self.session.arena.allocator();
             self.session.data.form_feedback = .{ .repo = .{ .failure = failure, .fields = .{
@@ -150,6 +163,7 @@ pub const View = struct {
                 .description = try aa.dupe(u8, description),
                 .hash = hash_kind,
                 .access = access,
+                .copy = try aa.dupe(u8, copy),
             } } };
             return;
         };
@@ -157,6 +171,7 @@ pub const View = struct {
         // wipe the form so a return visit starts fresh
         name_input.clear(allocator);
         description_input.clear(allocator);
+        copy_input.clear(allocator);
 
         const identity = try self.session.page_arena.allocator().print("{s}:{s}", .{ user.event.name, name });
         try self.session.navigate(ui.RoutablePage.repoFilesRoute(identity, null, "", "", 0) orelse return);

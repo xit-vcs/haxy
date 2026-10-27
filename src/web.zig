@@ -676,12 +676,10 @@ fn handleRepoNew(
     const user_id = requestUserId(request, session_store) orelse return respondLoginRequired(request);
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    const user = blk: {
-        var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = admin_repo_path });
-        defer admin_repo.deinit(io, allocator);
-        const moment = try evt.currentMoment(evt.admin_repo_opts, &admin_repo);
-        break :blk (try ui.activeUser(moment, &arena, user_id)) orelse return respondLoginRequired(request);
-    };
+    var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = admin_repo_path });
+    defer admin_repo.deinit(io, allocator);
+    const moment = try evt.currentMoment(evt.admin_repo_opts, &admin_repo);
+    const user = (try ui.activeUser(moment, &arena, user_id)) orelse return respondLoginRequired(request);
 
     const body = try readFormBody(request, allocator);
     defer allocator.free(body);
@@ -693,17 +691,20 @@ fn handleRepoNew(
     defer allocator.free(hash_value);
     const access_value = (try parseFormField(allocator, body, "access")) orelse try allocator.dupe(u8, "");
     defer allocator.free(access_value);
+    const copy = (try parseFormField(allocator, body, "copy")) orelse try allocator.dupe(u8, "");
+    defer allocator.free(copy);
     const bad_request: std.http.Server.Request.RespondOptions = .{ .status = .bad_request, .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }} };
     const hash_kind = std.meta.stringToEnum(hash.HashKind, hash_value) orelse return request.respond("invalid hash", bad_request);
     const access = std.meta.stringToEnum(evt.Repo.Access, access_value) orelse return request.respond("invalid access", bad_request);
 
-    _ = evt.createRepo(io, allocator, users_dir, &user_id, .{ .name = user.event.name, .email = user.event.email }, name, description, access, hash_kind) catch |err| {
+    _ = evt.createRepo(io, allocator, users_dir, &user_id, .{ .name = user.event.name, .email = user.event.email }, name, description, access, hash_kind, if (copy.len == 0) null else .{ .admin_moment = moment, .path = copy }) catch |err| {
         const failure = ui.Session.FormFeedback.RepoFailure.fromError(err) orelse return err;
         return respondFormFailure(request, allocator, session_store, form_location, .{ .repo = .{ .failure = failure, .fields = .{
             .name = name,
             .description = description,
             .hash = hash_kind,
             .access = access,
+            .copy = copy,
         } } });
     };
 

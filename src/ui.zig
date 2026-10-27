@@ -2436,12 +2436,14 @@ pub const Session = struct {
             required_name,
             invalid_name,
             name_taken,
+            invalid_copy,
 
             pub fn fromError(err: anyerror) ?RepoFailure {
                 return switch (err) {
                     error.NameEmpty => .required_name,
                     error.NameTooLong, error.InvalidName => .invalid_name,
                     error.NameTaken => .name_taken,
+                    error.InvalidCopySource => .invalid_copy,
                     else => null,
                 };
             }
@@ -2538,6 +2540,7 @@ pub const Session = struct {
                 description: []const u8,
                 hash: hash.HashKind,
                 access: evt.Repo.Access,
+                copy: []const u8,
             },
         },
         repo_settings: struct {

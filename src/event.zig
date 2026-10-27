@@ -6,6 +6,7 @@ const mrg = xit.merge;
 const obj = xit.object;
 const rf = xit.ref;
 const pch = @import("patch.zig");
+const copy = @import("copy.zig");
 const notify = @import("notify.zig");
 
 pub const User = @import("event/User.zig");
@@ -2190,7 +2191,24 @@ pub fn resolveOrCreateRepo(
     return .{ .owner_id = owner_user_id, .repo_id = id_bytes };
 }
 
-// create a bare repo with `hash_kind` and register it in its owner's user repo
+// the `<owner>:<repo>` path of a repo a new repo copies
+pub const CopySource = struct {
+    admin_moment: AdminDB.HashMap(.read_only),
+    path: []const u8,
+};
+
+// the on-disk path of the repo `source` names, which `viewer_id` must be able to read
+fn copySourcePath(io: std.Io, allocator: std.mem.Allocator, users_dir: []const u8, source: CopySource, viewer_id: *const [event_id_size]u8) ![]u8 {
+    const parsed = parseOwnerRepoPath(source.path) orelse return error.InvalidCopySource;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const found = (try readRepoByOwnerAndName(io, allocator, &arena, source.admin_moment, users_dir, parsed.owner, parsed.name, viewer_id.*)) orelse return error.InvalidCopySource;
+    if (found.role == null) return error.InvalidCopySource;
+    return try repoPath(allocator, users_dir, &try parseEventId(&found.repo.event.user_id), &found.event_id);
+}
+
+// create a bare repo with `hash_kind`, or a copy of `copy_from` with its hash
+// kind, and register it in its owner's user repo
 pub fn createRepo(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -2201,6 +2219,7 @@ pub fn createRepo(
     description: []const u8,
     read_access: Repo.Access,
     hash_kind: hash.HashKind,
+    copy_from: ?CopySource,
 ) !RepoLocation {
     try Repo.validateName(name);
     var user_repo = (try openUserRepo(io, allocator, users_dir, owner_id)) orelse return error.NotFound;
@@ -2210,6 +2229,8 @@ pub fn createRepo(
         defer arena.deinit();
         if (try Repo.readByName(UserDB, user_repo_opts.hash, moment, &arena, name) != null) return error.NameTaken;
     }
+    const source_path = if (copy_from) |source| try copySourcePath(io, allocator, users_dir, source, owner_id) else null;
+    defer if (source_path) |path| allocator.free(path);
 
     var id_bytes: [event_id_size]u8 = undefined;
     io.random(&id_bytes);
@@ -2218,7 +2239,7 @@ pub fn createRepo(
     {
         const path = try repoPath(allocator, users_dir, owner_id, &id_bytes);
         defer allocator.free(path);
-        switch (hash_kind) {
+        if (source_path) |source| try copy.create(io, allocator, source, path) else switch (hash_kind) {
             inline else => |kind| {
                 var repo = try rp.Repo(.xit, .{ .hash = kind }).init(io, allocator, .{ .path = path, .bare = true });
                 defer repo.deinit(io, allocator);

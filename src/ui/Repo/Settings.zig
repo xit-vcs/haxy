@@ -285,6 +285,8 @@ pub const Form = struct {
             .required_name => " name (required) ",
             .invalid_name => " name (invalid) ",
             .name_taken => " name (taken) ",
+            // only the new repo form copies
+            .invalid_copy => unreachable,
         } else " name ";
         // the web form handling finds the inputs by focus id
         const inputs_arena = self.session.arena.allocator();

@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const evt = @import("../../event.zig");
+const copy = @import("../../copy.zig");
 const ui = @import("../../ui.zig");
 const inp = @import("../input.zig");
 const xit = @import("xit");
@@ -88,7 +89,8 @@ pub fn init(
         return result
     else
         evt.currentMoment(repo_opts, repo)) catch {
-        if (require_selected_event) return error.NotFound;
+        // a moment page names a transaction it can't show
+        if (require_selected_event or moment_index != null) return error.NotFound;
         return result;
     };
 
@@ -164,6 +166,7 @@ fn transactionMoment(
     index: u64,
 ) !evt.EventDB(repo_opts.hash).HashMap(.read_only) {
     if (repo_kind == .git) return error.NotFound;
+    if (try copy.undoFloor(repo_opts, &repo.core)) |floor| if (index < floor) return error.NotFound;
     return try evt.currentMomentFromRepoMoment(repo_opts.hash, try repo.core.momentAt(index));
 }
 

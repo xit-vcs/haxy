@@ -1,5 +1,6 @@
 const std = @import("std");
 const evt = @import("event.zig");
+const copy = @import("copy.zig");
 const find = @import("find.zig");
 const srch_cmmt = @import("search_commit.zig");
 const xit = @import("xit");
@@ -46,6 +47,25 @@ pub fn readForkerId(sections: *const xit.config.Sections, patch_id: *const [evt.
     const section = sections.get(forker_section) orelse return null;
     const name = forkerConfigName(patch_id);
     return try evt.parseEventId(section.get(name[forker_section.len + 1 ..]) orelse return null);
+}
+
+// remove the forker entries a copied db carries from the target's config
+pub fn clearForkers(
+    comptime repo_opts: rp.RepoOpts(.xit),
+    state: rp.Repo(.xit, repo_opts).State(.read_write),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    config: *xit.config.Config(.xit, repo_opts),
+) !void {
+    const section = config.local_sections.get(forker_section) orelse return;
+    var names_arena = std.heap.ArenaAllocator.init(allocator);
+    defer names_arena.deinit();
+    const na = names_arena.allocator();
+    var names: std.ArrayList([]const u8) = .empty;
+    for (section.keys()) |key| {
+        if (std.mem.startsWith(u8, key, forker_prefix)) try names.append(na, try na.print(forker_section ++ ".{s}", .{key}));
+    }
+    for (names.items) |name| try config.remove(state, io, .{ .name = name });
 }
 
 pub const CreateInput = struct {
@@ -127,22 +147,7 @@ fn copyTarget(
     var fork_repo_dir = try fork_dir.createDirPathOpen(io, ".xit", .{});
     defer fork_repo_dir.close(io);
 
-    // copy the target repo into the fork repo dir
-    {
-        try target_repo.core.db_file.lock(io, .shared);
-        defer target_repo.core.db_file.unlock(io);
-
-        // file to file streaming uses copy_file_range, which reflinks where the filesystem can
-        const destination = try fork_repo_dir.createFile(io, "db", .{ .exclusive = true, .read = true });
-        defer destination.close(io);
-        var read_buffer: [64 * 1024]u8 = undefined;
-        var write_buffer: [64 * 1024]u8 = undefined;
-        var reader = target_repo.core.db_file.reader(io, &read_buffer);
-        var writer = destination.writer(io, &write_buffer);
-        _ = try reader.interface.streamRemaining(&writer.interface);
-        try writer.interface.flush();
-        try destination.sync(io);
-    }
+    try copy.copyDb(io, target_repo.core.db_file, fork_repo_dir);
 
     var fork_repo = try rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = fork_path, .require_repo_root = true });
     defer fork_repo.deinit(io, allocator);
@@ -161,20 +166,14 @@ fn copyTarget(
                 const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
                 const head_oid_maybe = try rf.readHeadRecurMaybe(.xit, repo_opts, state.readOnly(), ctx.io);
 
+                try copy.clearEvents(repo_opts, state, ctx.io);
                 var path_buffer: [rf.MAX_REF_CONTENT_SIZE]u8 = undefined;
-                const events_path = try evt.events_ref.toPath(&path_buffer);
-                rf.remove(.xit, repo_opts, state, ctx.io, events_path) catch |err| switch (err) {
-                    error.RefNotFound => {},
-                    else => |other| return other,
-                };
                 const patch_path = try ref.toPath(&path_buffer);
                 rf.remove(.xit, repo_opts, state, ctx.io, patch_path) catch |err| switch (err) {
                     error.RefNotFound => {},
                     else => |other| return other,
                 };
 
-                _ = try moment.remove(hash.hashInt(repo_opts.hash, evt.history_key));
-                _ = try moment.remove(hash.hashInt(repo_opts.hash, evt.last_object_id_key));
                 // forks aren't searched, so the copied versions would linger
                 // with nothing to prune them
                 _ = try moment.remove(hash.hashInt(repo_opts.hash, srch_cmmt.index_key));
@@ -190,17 +189,7 @@ fn copyTarget(
                 defer config.deinit();
                 try config.add(state, ctx.io, .{ .name = "receive.denydeletes", .value = "true" });
 
-                // the copied db carries the target's forker entries
-                if (config.local_sections.get(forker_section)) |section| {
-                    var names_arena = std.heap.ArenaAllocator.init(ctx.allocator);
-                    defer names_arena.deinit();
-                    const na = names_arena.allocator();
-                    var names: std.ArrayList([]const u8) = .empty;
-                    for (section.keys()) |key| {
-                        if (std.mem.startsWith(u8, key, forker_prefix)) try names.append(na, try na.print(forker_section ++ ".{s}", .{key}));
-                    }
-                    for (names.items) |name| try config.remove(state, ctx.io, .{ .name = name });
-                }
+                try clearForkers(repo_opts, state, ctx.io, ctx.allocator, &config);
 
                 // the copied db carries the target's file index, so the patch
                 // branch's entry starts from one of those rather than walking

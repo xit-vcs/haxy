@@ -482,7 +482,7 @@ fn runCreatingPush(
     // a client with nothing to push creates nothing
     const hash_kind = (try xit.net_server_receive_pack.peekObjectFormat(reader)) orelse return;
 
-    const location = evt.createRepo(io, allocator, handler.server.users_dir, &creator.owner_id, creator.owner, name, "", .private, hash_kind) catch |err| switch (err) {
+    const location = evt.createRepo(io, allocator, handler.server.users_dir, &creator.owner_id, creator.owner, name, "", .private, hash_kind, null) catch |err| switch (err) {
         error.NameTaken => return writeError(handler, sess, "repo was just created by another push, try again"),
         else => |e| return e,
     };
