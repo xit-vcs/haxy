@@ -246,6 +246,13 @@ fn handleRequest(
         return;
     }
 
+    // go asks for an import path's source with go-get=1. module paths can't
+    // hold the colon in repo urls, so owner/name stands for owner:name
+    if (uri.query) |query| if (std.mem.eql(u8, query.percent_encoded, "go-get=1")) switch (host) {
+        .server => |server| return serveGoImport(request, allocator, server.web_url, path),
+        .local => {},
+    };
+
     if (std.mem.eql(u8, path, "/favicon.ico")) {
         try request.respond("", .{
             .status = .no_content,
@@ -3055,6 +3062,35 @@ fn parseFormField(allocator: std.mem.Allocator, body: []const u8, key: []const u
         }
     }
     return null;
+}
+
+// the go-import tag pointing an import path under owner/name at that repo's
+// http clone url. it answers whether or not the repo exists, so a private
+// repo's existence stays hidden.
+fn serveGoImport(request: *std.http.Server.Request, allocator: std.mem.Allocator, web_url: []const u8, path: []const u8) !void {
+    var segments = std.mem.tokenizeScalar(u8, path, '/');
+    const owner = segments.next() orelse "";
+    const name = segments.next() orelse "";
+    const valid = blk: {
+        evt.User.validateName(owner) catch break :blk false;
+        evt.Repo.validateName(name) catch break :blk false;
+        break :blk true;
+    };
+    if (!valid) {
+        try request.respond("not found", .{
+            .status = .not_found,
+            .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+        });
+        return;
+    }
+
+    // an import path starts with the host, without the scheme
+    const import_host = if (std.mem.indexOf(u8, web_url, "://")) |i| web_url[i + 3 ..] else web_url;
+    const body = try std.fmt.allocPrint(allocator, "<!doctype html><meta name=\"go-import\" content=\"{s}/{s}/{s} git {s}/{s}:{s}\">\n", .{ import_host, owner, name, web_url, owner, name });
+    defer allocator.free(body);
+    try request.respond(body, .{
+        .extra_headers = &.{.{ .name = "content-type", .value = "text/html; charset=utf-8" }},
+    });
 }
 
 fn readFormBody(request: *std.http.Server.Request, allocator: std.mem.Allocator) ![]u8 {
