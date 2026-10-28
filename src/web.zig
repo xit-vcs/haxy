@@ -3064,13 +3064,17 @@ fn parseFormField(allocator: std.mem.Allocator, body: []const u8, key: []const u
     return null;
 }
 
-// the go-import tag pointing an import path under owner/name at that repo's
-// http clone url. it answers whether or not the repo exists, so a private
-// repo's existence stays hidden.
+// the go-import tag pointing an import path under owner/name or owner:name at
+// that repo's http clone url. it answers whether or not the repo exists, so a
+// private repo's existence stays hidden.
 fn serveGoImport(request: *std.http.Server.Request, allocator: std.mem.Allocator, web_url: []const u8, path: []const u8) !void {
     var segments = std.mem.tokenizeScalar(u8, path, '/');
-    const owner = segments.next() orelse "";
-    const name = segments.next() orelse "";
+    const first = segments.next() orelse "";
+    // go rejects the colon form today, but answer it in case that changes
+    const colon = std.mem.indexOfScalar(u8, first, ':');
+    const owner = if (colon) |i| first[0..i] else first;
+    const name = if (colon) |i| first[i + 1 ..] else segments.next() orelse "";
+    const separator: u8 = if (colon != null) ':' else '/';
     const valid = blk: {
         evt.User.validateName(owner) catch break :blk false;
         evt.Repo.validateName(name) catch break :blk false;
@@ -3086,7 +3090,7 @@ fn serveGoImport(request: *std.http.Server.Request, allocator: std.mem.Allocator
 
     // an import path starts with the host, without the scheme
     const import_host = if (std.mem.indexOf(u8, web_url, "://")) |i| web_url[i + 3 ..] else web_url;
-    const body = try std.fmt.allocPrint(allocator, "<!doctype html><meta name=\"go-import\" content=\"{s}/{s}/{s} git {s}/{s}:{s}\">\n", .{ import_host, owner, name, web_url, owner, name });
+    const body = try std.fmt.allocPrint(allocator, "<!doctype html><meta name=\"go-import\" content=\"{s}/{s}{c}{s} git {s}/{s}:{s}\">\n", .{ import_host, owner, separator, name, web_url, owner, name });
     defer allocator.free(body);
     try request.respond(body, .{
         .extra_headers = &.{.{ .name = "content-type", .value = "text/html; charset=utf-8" }},
