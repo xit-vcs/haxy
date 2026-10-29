@@ -48,6 +48,12 @@ pub const SessionHandler = struct {
         }
         const result = self.runSession(sess, request);
         const failure: ?anyerror = if (result) |_| null else |e| sess.underlyingError(e);
+        // git otherwise only sees the connection drop. stderr is safe however far its protocol got
+        if (failure) |e| if (request == .exec) {
+            var buf: [256]u8 = undefined;
+            const line = std.fmt.bufPrint(&buf, "haxy ssh: {s}\n", .{@errorName(e)}) catch "haxy ssh: internal error\n";
+            sess.writeStderr(line) catch {};
+        };
         // haxy only closes a session itself to refuse it
         const status: u32 = if (failure != null or sess.closed) 1 else 0;
         serve_common.logError(io, self.err, "ssh session end: ip={f} kind={s} status={d} duration={f} in={d} out={d}{s}{s}\n", .{
