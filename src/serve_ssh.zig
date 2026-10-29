@@ -413,7 +413,10 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, exec: ss
     var writer = ssh.SessionWriter.init(sess, &writer_buf);
     defer writer.interface.flush() catch {};
 
-    const parsed = parseGitCommand(allocator, exec.command) catch return writeError(handler, sess, "unsupported command (expected git-upload-pack or git-receive-pack)");
+    const parsed = parseGitCommand(allocator, exec.command) catch |err| switch (err) {
+        error.LfsCommand => return writeLfsError(handler, sess),
+        else => return writeError(handler, sess, "unsupported command (expected git-upload-pack or git-receive-pack)"),
+    };
     defer parsed.deinit(allocator);
     const repo_identity = std.mem.trimStart(u8, parsed.dir, "/");
 
@@ -595,6 +598,8 @@ fn parseGitCommand(allocator: std.mem.Allocator, command: []const u8) !ParsedGit
             .upload_pack
         else if (std.mem.eql(u8, service_token, "git-receive-pack") or std.mem.eql(u8, service_token, "receive-pack"))
             .receive_pack
+        else if (std.mem.startsWith(u8, service_token, "git-lfs-"))
+            return error.LfsCommand
         else
             return error.UnsupportedService;
 
@@ -724,6 +729,14 @@ fn writeError(handler: *const SessionHandler, sess: *ssh.SessionCtx, comptime ms
     var packet: [body.len + 4]u8 = undefined;
     const line = try std.fmt.bufPrint(&packet, "{x:0>4}{s}", .{ packet.len, body });
     try sess.writeBytes(line);
+    try sess.exit(1);
+}
+
+// git-lfs shows the command's stderr, not git's ERR packet
+fn writeLfsError(handler: *const SessionHandler, sess: *ssh.SessionCtx) !void {
+    const msg = "Git LFS isn't supported";
+    logRefusal(handler, sess, msg);
+    try sess.writeStderr("haxy ssh: " ++ msg ++ "\n");
     try sess.exit(1);
 }
 

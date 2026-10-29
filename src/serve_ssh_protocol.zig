@@ -527,12 +527,24 @@ pub const SessionCtx = struct {
     /// (background packets are processed for their side effects — incoming
     /// CHANNEL_DATA goes into incoming_buffer for a future SessionReader).
     pub fn writeBytes(self: *SessionCtx, bytes: []const u8) !void {
+        return self.writeChannel(bytes, false);
+    }
+
+    /// like writeBytes, but on the channel's stderr
+    pub fn writeStderr(self: *SessionCtx, bytes: []const u8) !void {
+        return self.writeChannel(bytes, true);
+    }
+
+    fn writeChannel(self: *SessionCtx, bytes: []const u8, stderr: bool) !void {
         const conn = self.conn;
 
-        // byte SSH_MSG_CHANNEL_DATA, uint32 recipient_channel, uint32 data length
-        var header: [9]u8 = undefined;
-        header[0] = SSH_MSG_CHANNEL_DATA;
-        std.mem.writeInt(u32, header[1..5], self.channel.remote_id, .big);
+        // byte SSH_MSG_CHANNEL_DATA or EXTENDED_DATA, uint32 recipient_channel,
+        // uint32 data_type (extended only), uint32 data length
+        var header_buf: [13]u8 = undefined;
+        header_buf[0] = if (stderr) SSH_MSG_CHANNEL_EXTENDED_DATA else SSH_MSG_CHANNEL_DATA;
+        std.mem.writeInt(u32, header_buf[1..5], self.channel.remote_id, .big);
+        if (stderr) std.mem.writeInt(u32, header_buf[5..9], SSH_EXTENDED_DATA_STDERR, .big);
+        const header = header_buf[0..if (stderr) 13 else 9];
 
         var rest = bytes;
         while (rest.len > 0) {
@@ -545,8 +557,8 @@ pub const SessionCtx = struct {
             const cap = @min(rest.len, self.channel.max_packet, self.channel.remote_window, max_packet_size);
             const chunk_len: u32 = @intCast(cap);
 
-            std.mem.writeInt(u32, header[5..9], chunk_len, .big);
-            try conn.writePacket(&.{ &header, rest[0..chunk_len] });
+            std.mem.writeInt(u32, header[header.len - 4 ..][0..4], chunk_len, .big);
+            try conn.writePacket(&.{ header, rest[0..chunk_len] });
             self.bytes_out += chunk_len;
 
             self.channel.remote_window -= chunk_len;
