@@ -438,7 +438,7 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, exec: ss
         .allowed => |value| value,
         .create => |creator| return runCreatingPush(handler, sess, &creator, owner_repo.name, protocol_version, &reader.interface, &writer.interface),
         .denied => return switch (parsed.service) {
-            .upload_pack => writeKeyError(handler, sess, "unauthorized: the account with this SSH key cannot read this repo"),
+            .upload_pack => writeFingerprintError(handler, sess, "repo not found, or this SSH key can't read it"),
             .receive_pack => writeKeyError(handler, sess, "unauthorized: the account with this SSH key cannot push to this repo"),
         },
         .not_found => return writeError(handler, sess, "repo not found"),
@@ -656,7 +656,8 @@ fn authorizeRepoKey(
     const moment = try evt.currentMoment(evt.admin_repo_opts, &admin);
     // no viewer yet, so this carries the base role
     const repo = (try evt.readRepoByOwnerAndName(io, allocator, arena, moment, users_dir, owner_name, repo_name, null)) orelse {
-        if (service == .upload_pack) return .not_found;
+        // answered like an unreadable repo, so a private repo's name stays hidden
+        if (service == .upload_pack) return .denied;
         const owner_id = (try evt.User.readIdByName(evt.AdminDB, evt.admin_repo_opts.hash, moment, owner_name)) orelse return .not_found;
         if (!try evt.User.holdsKey(evt.AdminDB, evt.admin_repo_opts.hash, moment, &owner_id, fingerprint)) return .denied;
         return .{ .create = .{ .owner_id = owner_id, .owner = try commitAuthor(moment, arena, &owner_id) } };

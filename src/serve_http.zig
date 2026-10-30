@@ -97,14 +97,10 @@ fn handleGitRequest(
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
         const moment = try evt.currentMoment(evt.admin_repo_opts, &admin);
-        const repo = (try evt.readRepoByOwnerAndName(io, allocator, &arena, moment, users_dir, owner_repo.owner, owner_repo.name, null)) orelse {
-            try writeSimpleResponse(http_server, 404, "Not Found", "text/plain", "repo not found");
-            return;
-        };
-        if (repo.repo.event.read_access == .private) {
-            try writeSimpleResponse(http_server, 403, "Forbidden", "text/plain", "private repos cannot be fetched over HTTP");
-            return;
-        }
+        const repo = (try evt.readRepoByOwnerAndName(io, allocator, &arena, moment, users_dir, owner_repo.owner, owner_repo.name, null)) orelse
+            return writeSimpleResponse(http_server, 404, "Not Found", "text/plain", "repo not found");
+        // private repos aren't served over HTTP, and answer like missing ones so their names stay hidden
+        if (repo.repo.event.read_access == .private) return writeSimpleResponse(http_server, 404, "Not Found", "text/plain", "repo not found");
         break :blk try evt.repoPath(allocator, users_dir, &try evt.parseEventId(&repo.repo.event.user_id), &repo.event_id);
     };
     defer allocator.free(repo_path);
