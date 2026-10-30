@@ -39,9 +39,6 @@ pub fn gitHandler(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.An
         ) anyerror!void {
             handleGitRequest(repo_kind, any_repo_opts, io, allocator, users_dir, admin_repo_path, http_server, request) catch |request_err| {
                 serve_common.logError(io, err, "request failed: {s}\n", .{@errorName(request_err)});
-                if (http_server.reader.state == .received_head) {
-                    http_server.reader.state = .ready;
-                }
                 try writeSimpleResponse(http_server, 500, "Internal Server Error", "text/plain", @errorName(request_err));
             };
             try http_server.out.flush();
@@ -67,9 +64,6 @@ fn handleGitRequest(
     }
 
     const handler, const suffix = findRoute(path) orelse {
-        if (http_server.reader.state == .received_head) {
-            http_server.reader.state = .ready;
-        }
         try writeSimpleResponse(http_server, 404, "Not Found", "text/plain", "not found");
         return;
     };
@@ -86,15 +80,11 @@ fn handleGitRequest(
 
     // pushing over HTTP is not supported; pushes go over SSH
     if (isReceivePack(handler, suffix, uri.query)) {
-        if (http_server.reader.state == .received_head) {
-            http_server.reader.state = .ready;
-        }
         try writeSimpleResponse(http_server, 403, "Forbidden", "text/plain", "push over HTTP is not supported");
         return;
     }
 
     const owner_repo = evt.parseOwnerRepoPath(repo_rel) orelse {
-        if (http_server.reader.state == .received_head) http_server.reader.state = .ready;
         try writeSimpleResponse(http_server, 400, "Bad Request", "text/plain", "repo path must be <owner>:<repo>");
         return;
     };
@@ -107,10 +97,11 @@ fn handleGitRequest(
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
         const moment = try evt.currentMoment(evt.admin_repo_opts, &admin);
-        const repo = (try evt.readRepoByOwnerAndName(io, allocator, &arena, moment, users_dir, owner_repo.owner, owner_repo.name, null)) orelse
-            return error.RepoNotFound;
+        const repo = (try evt.readRepoByOwnerAndName(io, allocator, &arena, moment, users_dir, owner_repo.owner, owner_repo.name, null)) orelse {
+            try writeSimpleResponse(http_server, 404, "Not Found", "text/plain", "repo not found");
+            return;
+        };
         if (repo.repo.event.read_access == .private) {
-            if (http_server.reader.state == .received_head) http_server.reader.state = .ready;
             try writeSimpleResponse(http_server, 403, "Forbidden", "text/plain", "private repos cannot be fetched over HTTP");
             return;
         }
@@ -145,7 +136,7 @@ fn handleGitRequest(
         .body_reader = &body_reader,
         .writer = http_server.out,
         .options = http_backend_options,
-    })) return error.RepoNotFound;
+    })) try writeSimpleResponse(http_server, 404, "Not Found", "text/plain", "repo not found");
 }
 
 fn findRoute(path: []const u8) ?struct { xit.net_server_http_backend.HandlerKind, []const u8 } {
@@ -257,6 +248,7 @@ fn writeSimpleResponse(
     content_type: []const u8,
     body: []const u8,
 ) !void {
+    if (http_server.reader.state == .received_head) http_server.reader.state = .ready;
     try http_server.out.print(
         "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\n\r\n{s}",
         .{ code, message, content_type, body.len, body },
