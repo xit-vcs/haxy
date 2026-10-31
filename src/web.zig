@@ -268,14 +268,22 @@ fn handleRequest(
     // embeds are matched before the pages so an embed's name never reads as a user
     if (findEmbed(path)) |embed| {
         // the embeds change with every build, so the browser must revalidate
-        // rather than heuristically cache them across server restarts
-        try request.respond(embed.body, .{
-            .extra_headers = &.{
-                .{ .name = "content-type", .value = embed.content_type },
-                .{ .name = "cache-control", .value = "no-cache" },
-            },
-        });
-        return;
+        // rather than heuristically cache them across server restarts. the tag
+        // lets an unchanged embed answer with a 304 instead of its body.
+        const tag = std.fmt.hex(std.hash.Wyhash.hash(0, embed.body));
+        const etag = "\"".* ++ tag ++ "\"".*;
+        const headers: []const std.http.Header = &.{
+            .{ .name = "content-type", .value = embed.content_type },
+            .{ .name = "cache-control", .value = "no-cache" },
+            .{ .name = "etag", .value = &etag },
+        };
+        // a proxy that compresses may weaken the tag, so the hash is matched anywhere in the header
+        var iter = request.iterateHeaders();
+        while (iter.next()) |header| {
+            if (std.ascii.eqlIgnoreCase(header.name, "if-none-match") and std.mem.indexOf(u8, header.value, &tag) != null)
+                return request.respond("", .{ .status = .not_modified, .extra_headers = headers });
+        }
+        return request.respond(embed.body, .{ .extra_headers = headers });
     }
     {
         // a path that's neither a page nor an embed gets the not-found page
