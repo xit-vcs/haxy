@@ -35,7 +35,8 @@ const Embed = struct {
 const embeds = [_]Embed{
     .{ .path = "index.html", .content_type = "text/html; charset=utf-8", .body = @embedFile("embed/index.html") },
     .{ .path = "script.js", .content_type = "text/javascript; charset=utf-8", .body = @embedFile("embed/script.js") },
-    .{ .path = "term.ttf", .content_type = "font/ttf", .body = @embedFile("embed/term.ttf") },
+    .{ .path = "HaxyMono-Core.woff2", .content_type = "font/woff2", .body = @embedFile("embed/HaxyMono-Core.woff2") },
+    .{ .path = "HaxyMono-Full.woff2", .content_type = "font/woff2", .body = @embedFile("embed/HaxyMono-Full.woff2") },
     .{ .path = "haxy.wasm", .content_type = "application/wasm", .body = @embedFile("haxy.wasm") },
 };
 
@@ -2775,8 +2776,8 @@ fn renderPanel(allocator: std.mem.Allocator, output: *std.ArrayList(u8), focus: 
         // scroll offset (in cells) rides along so JS can apply it when it has no
         // preserved position, letting a wasm-side scrollToRect (the files list
         // scrolling to its selected row on page load) reach the browser.
-        var buf: [256]u8 = undefined;
-        try output.appendSlice(allocator, try std.fmt.bufPrint(&buf, "<div class=\"scroll\" data-key=\"scroll:{d}\" data-scroll-id=\"{d}-{d}\" data-scroll-direction=\"{s}\" data-scroll-x=\"{d}\" data-scroll-y=\"{d}\" style=\"left:{d}ch;top:{d}em;width:{d}ch;height:{d}em;{s}\">", .{ id, id, child.focus.version, @tagName(info.direction), info.offset_x, info.offset_y, r.x, r.y, r.size.width, r.size.height, overflow }));
+        var buf: [384]u8 = undefined;
+        try output.appendSlice(allocator, try std.fmt.bufPrint(&buf, "<div class=\"scroll\" data-key=\"scroll:{d}\" data-scroll-id=\"{d}-{d}\" data-scroll-direction=\"{s}\" data-scroll-x=\"{d}\" data-scroll-y=\"{d}\" style=\"left:{d}ch;top:calc({d}*var(--row));width:{d}ch;height:calc({d}*var(--row));{s}\">", .{ id, id, child.focus.version, @tagName(info.direction), info.offset_x, info.offset_y, r.x, r.y, r.size.width, r.size.height, overflow }));
         // web-native scrolls always keep their content
         try renderPanel(allocator, output, child.focus, info.content orelse unreachable, session, root_focus);
         try output.appendSlice(allocator, "</div>");
@@ -2854,8 +2855,8 @@ fn renderPanelControls(
                         try output.append(allocator, '"');
                     }
                     const inner_height = if (r.size.height > 2) r.size.height - 2 else 0;
-                    var pos_buf: [128]u8 = undefined;
-                    try output.appendSlice(allocator, try std.fmt.bufPrint(&pos_buf, " style=\"left:{d}ch;top:{d}em;width:{d}ch;height:{d}em\">\n", .{ inner_left, inner_top, inner_width, inner_height }));
+                    var pos_buf: [192]u8 = undefined;
+                    try output.appendSlice(allocator, try std.fmt.bufPrint(&pos_buf, " style=\"left:{d}ch;top:calc({d}*var(--row));width:{d}ch;height:calc({d}*var(--row))\">\n", .{ inner_left, inner_top, inner_width, inner_height }));
                     try appendEscapedHtml(allocator, output, value);
                     try output.appendSlice(allocator, "</textarea>");
                     continue;
@@ -2877,8 +2878,8 @@ fn renderPanelControls(
                     try appendEscapedHtml(allocator, output, value);
                     try output.append(allocator, '"');
                 }
-                var pos_buf: [96]u8 = undefined;
-                try output.appendSlice(allocator, try std.fmt.bufPrint(&pos_buf, " style=\"left:{d}ch;top:{d}em;width:{d}ch;height:1em\">", .{ inner_left, inner_top, inner_width }));
+                var pos_buf: [128]u8 = undefined;
+                try output.appendSlice(allocator, try std.fmt.bufPrint(&pos_buf, " style=\"left:{d}ch;top:calc({d}*var(--row));width:{d}ch;height:var(--row)\">", .{ inner_left, inner_top, inner_width }));
             },
             .custom => |custom| {
                 if (std.mem.eql(u8, custom, "submit") or std.mem.startsWith(u8, custom, ui.submit_action_prefix)) {
@@ -2891,8 +2892,8 @@ fn renderPanelControls(
                         try appendEscapedHtml(allocator, output, custom[ui.submit_action_prefix.len..]);
                         try output.append(allocator, '"');
                     }
-                    var pos_buf: [128]u8 = undefined;
-                    try output.appendSlice(allocator, try std.fmt.bufPrint(&pos_buf, " style=\"left:{d}ch;top:{d}em;width:{d}ch;height:{d}em\"></button>", .{ r.x, r.y, r.size.width, r.size.height }));
+                    var pos_buf: [192]u8 = undefined;
+                    try output.appendSlice(allocator, try std.fmt.bufPrint(&pos_buf, " style=\"left:{d}ch;top:calc({d}*var(--row));width:{d}ch;height:calc({d}*var(--row))\"></button>", .{ r.x, r.y, r.size.width, r.size.height }));
                 } else if (std.mem.startsWith(u8, custom, ui.radio_prefix)) {
                     // an invisible native radio over the option, checked when the option is its row's selection
                     const field = custom[ui.radio_prefix.len..];
@@ -2907,13 +2908,13 @@ fn renderPanelControls(
                     try appendEscapedHtml(allocator, output, field[separator + 1 ..]);
                     try output.append(allocator, '"');
                     if (row.focus.child_id == id) try output.appendSlice(allocator, " checked");
-                    var pos_buf: [128]u8 = undefined;
-                    try output.appendSlice(allocator, try std.fmt.bufPrint(&pos_buf, " style=\"opacity:0;left:{d}ch;top:{d}em;width:{d}ch;height:{d}em\">", .{ r.x, r.y, r.size.width, r.size.height }));
+                    var pos_buf: [192]u8 = undefined;
+                    try output.appendSlice(allocator, try std.fmt.bufPrint(&pos_buf, " style=\"opacity:0;left:{d}ch;top:calc({d}*var(--row));width:{d}ch;height:calc({d}*var(--row))\">", .{ r.x, r.y, r.size.width, r.size.height }));
                 } else if (std.mem.startsWith(u8, custom, ui.file_input_prefix)) {
                     try output.appendSlice(allocator, "<input type=\"file\" data-preserve-value data-action=\"");
                     try appendEscapedHtml(allocator, output, custom[ui.file_input_prefix.len..]);
-                    var id_buf: [128]u8 = undefined;
-                    try output.appendSlice(allocator, try std.fmt.bufPrint(&id_buf, "\" data-key=\"control:{d}\" data-focus-id=\"{d}\" style=\"opacity:0;left:{d}ch;top:{d}em;width:{d}ch;height:{d}em\">", .{ id, id, r.x, r.y, r.size.width, r.size.height }));
+                    var id_buf: [224]u8 = undefined;
+                    try output.appendSlice(allocator, try std.fmt.bufPrint(&id_buf, "\" data-key=\"control:{d}\" data-focus-id=\"{d}\" style=\"opacity:0;left:{d}ch;top:calc({d}*var(--row));width:{d}ch;height:calc({d}*var(--row))\">", .{ id, id, r.x, r.y, r.size.width, r.size.height }));
                 }
             },
             else => {},

@@ -8,6 +8,8 @@
           html {
             --bg: rgba(0, 50, 70, 1.0);
             --fg: rgba(200, 200, 200, 1.0);
+            /* the height of the font's box-drawing characters */
+            --row: 19px;
             background-color: var(--bg);
             color: var(--fg);
           }
@@ -18,15 +20,26 @@
             margin: 0;
           }
 
+          /* pages only download the full file if they need a character outside the core */
           @font-face {
-            font-family: '3270';
-            src: url('/term.ttf') format('truetype');
+            font-family: 'Haxy Mono';
+            src: url('/HaxyMono-Core.woff2') format('woff2');
+            unicode-range: U+0-FF, U+2010-202F, U+2190-2193, U+2260, U+2264-2265, U+2302, U+2500-259F, U+2610-2611, U+263C, U+2715, U+FFFD, U+1FB00-1FB3B;
+          }
+
+          @font-face {
+            font-family: 'Haxy Mono';
+            src: url('/HaxyMono-Full.woff2') format('woff2');
+            unicode-range: U+100-200F, U+2030-218F, U+2194-225F, U+2261-2263, U+2266-2301, U+2303-24FF, U+25A0-260F, U+2612-263B, U+263D-2714, U+2716-FFFC, U+FFFE-1FAFF, U+1FB3C-10FFFF;
           }
 
           .page {
-            font-family: '3270', monospace;
-            font-size: 20px;
-            line-height: 20px;
+            font-family: 'Haxy Mono', monospace;
+            /* 10px columns */
+            font-size: 16.6667px;
+            line-height: var(--row);
+            /* keep -> and != as typed */
+            font-variant-ligatures: none;
             position: relative;
           }
 
@@ -76,7 +89,8 @@
 
           /* render each colored cell-run as an inline-block to prevent
              horizontal seams between rows of the block art. */
-          #grid span {
+          #grid span,
+          #grid a {
             display: inline-block;
             vertical-align: top;
           }
