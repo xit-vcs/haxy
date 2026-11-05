@@ -26,7 +26,7 @@ pub const Public = struct {
 
 const Self = @This();
 
-pub const name_min_len = 4;
+pub const name_min_len = 3;
 pub const name_max_len = 32;
 // how many ssh keys a user may hold, so the keys tab stays one short page
 pub const ssh_key_max_count = 50;
@@ -50,8 +50,7 @@ pub fn validateName(name: []const u8) !void {
     if (name.len < name_min_len) return error.NameTooShort;
     if (name.len > name_max_len) return error.NameTooLong;
     if (name[0] == '-' or name[name.len - 1] == '-') return error.InvalidName;
-    // reserved for the top-level pages' url segment
-    if (std.ascii.eqlIgnoreCase(name, "home")) return error.InvalidName;
+    if (std.ascii.eqlIgnoreCase(name, "home") or std.ascii.eqlIgnoreCase(name, "user")) return error.InvalidName;
 
     var previous_was_hyphen = false;
     for (name) |c| {
