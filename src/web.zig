@@ -90,6 +90,17 @@ fn routeFromUrl(host: Host, path: []const u8) ?ui.RoutablePage {
     };
 }
 
+const json_route = "/json";
+
+// the page a json route url names. local mode has no such route, since cors
+// would let any website read the local repo.
+fn jsonPagePath(host: Host, path: []const u8) ?[]const u8 {
+    if (host != .server) return null;
+    if (std.mem.eql(u8, path, json_route)) return "/";
+    if (!std.mem.startsWith(u8, path, json_route ++ "/")) return null;
+    return path[json_route.len..];
+}
+
 fn requestRepoSource(io: std.Io, allocator: std.mem.Allocator, host: Host, repo_base: []const u8) !?RequestRepoSource {
     return switch (host) {
         .server => |server| blk: {
@@ -170,6 +181,7 @@ fn handleRequest(
     // the base of the URL. this allows logging in to keep you on the page
     // you were on. local mode has no accounts, so only the repo routes.
     if (method == .POST) {
+        if (!isSameOrigin(request)) return respondForbidden(request);
         switch (host) {
             .server => |server| {
                 // "repo/new" and "user/new" come before "new", which would claim them
@@ -279,19 +291,18 @@ fn handleRequest(
             .{ .name = "etag", .value = &etag },
         };
         // a proxy that compresses may weaken the tag, so the hash is matched anywhere in the header
-        var iter = request.iterateHeaders();
-        while (iter.next()) |header| {
-            if (std.ascii.eqlIgnoreCase(header.name, "if-none-match") and std.mem.indexOf(u8, header.value, &tag) != null)
-                return request.respond("", .{ .status = .not_modified, .extra_headers = headers });
-        }
+        if (getHeader(request, "if-none-match")) |value| if (std.mem.indexOf(u8, value, &tag) != null)
+            return request.respond("", .{ .status = .not_modified, .extra_headers = headers });
         return request.respond(embed.body, .{ .extra_headers = headers });
     }
     {
+        // serves a page's snapshot to third-party UIs
+        const json_page = jsonPagePath(host, path);
         // a path that's neither a page nor an embed gets the not-found page
-        const current_page = routeFromUrl(host, path) orelse .not_found;
+        const current_page = routeFromUrl(host, json_page orelse path) orelse .not_found;
         // resolve the haxy_session cookie's token to a user_id via the
         // store. user_id_buf lives on the stack for the rest of handleRequest,
-        // which is plenty for renderIndexHtml to consume. local mode has no
+        // which is plenty for renderPage to consume. local mode has no
         // accounts, so it is always logged out.
         var user_id_buf: [evt.event_id_size]u8 = undefined;
         var user_id: ?[]const u8 = null;
@@ -317,17 +328,19 @@ fn handleRequest(
                     session_token = token;
                     break :blk user_id_buf[0..evt.event_id_size];
                 };
-                // whoever seeded the store may have left a session to claim
-                if (user_id == null) {
-                    if (server.session_store.autoLogin(&token_buf) and server.session_store.lookup(&token_buf, &user_id_buf)) {
-                        session_cookie = try std.fmt.bufPrint(&cookie_buf, session_cookie_fmt, .{token_buf});
-                        session_token = &token_buf;
-                        user_id = user_id_buf[0..evt.event_id_size];
+                if (json_page == null) {
+                    // whoever seeded the store may have left a session to claim
+                    if (user_id == null) {
+                        if (server.session_store.autoLogin(&token_buf) and server.session_store.lookup(&token_buf, &user_id_buf)) {
+                            session_cookie = try std.fmt.bufPrint(&cookie_buf, session_cookie_fmt, .{token_buf});
+                            session_token = &token_buf;
+                            user_id = user_id_buf[0..evt.event_id_size];
+                        }
                     }
-                }
-                if (getCookieValue(request, form_flash_cookie)) |token| {
-                    form_cookie_seen = true;
-                    form_feedback = server.session_store.takeFlash(form_arena.allocator(), token);
+                    if (getCookieValue(request, form_flash_cookie)) |token| {
+                        form_cookie_seen = true;
+                        form_feedback = server.session_store.takeFlash(form_arena.allocator(), token);
+                    }
                 }
             },
             .local => {
@@ -373,27 +386,32 @@ fn handleRequest(
             .git_ssh_prefix = git_ssh_prefix,
         };
         // a page that can't be built shows the not-found page instead
-        const html = renderIndexHtml(io, allocator, host, session_token, session_data) catch |err| switch (err) {
+        const body = renderPage(io, allocator, host, session_token, session_data, json_page != null) catch |err| switch (err) {
             error.NotFound => blk: {
                 session_data.current_page = .not_found;
-                break :blk try renderIndexHtml(io, allocator, host, session_token, session_data);
+                break :blk try renderPage(io, allocator, host, session_token, session_data, json_page != null);
             },
             else => |e| return e,
         };
-        defer allocator.free(html);
+        defer allocator.free(body);
 
         const expired_form_cookie = if (form_cookie_seen)
             try allocator.print(form_flash_cookie ++ "=; Path={s}; Max-Age=0", .{path})
         else
             null;
         defer if (expired_form_cookie) |cookie| allocator.free(cookie);
-        var header_buf: [4]std.http.Header = undefined;
+        var header_buf: [6]std.http.Header = undefined;
         var headers: std.ArrayList(std.http.Header) = .initBuffer(&header_buf);
-        headers.appendAssumeCapacity(.{ .name = "content-type", .value = "text/html; charset=utf-8" });
+        headers.appendAssumeCapacity(.{ .name = "content-type", .value = if (json_page != null) "application/json" else "text/html; charset=utf-8" });
+        if (json_page != null) {
+            headers.appendAssumeCapacity(.{ .name = "cache-control", .value = "no-store" });
+            // only a logged-out snapshot may be read from other origins
+            if (user_id == null) headers.appendAssumeCapacity(.{ .name = "access-control-allow-origin", .value = "*" });
+        }
         if (expired_form_cookie) |cookie| headers.appendAssumeCapacity(.{ .name = "set-cookie", .value = cookie });
         if (local_flash_seen) headers.appendAssumeCapacity(.{ .name = "set-cookie", .value = local_flash_cookie ++ "=; Path=/; Max-Age=0" });
         if (session_cookie) |cookie| headers.appendAssumeCapacity(.{ .name = "set-cookie", .value = cookie });
-        try request.respond(html, .{
+        try request.respond(body, .{
             .status = if (session_data.current_page == .not_found) .not_found else .ok,
             .extra_headers = headers.items,
         });
@@ -1760,12 +1778,8 @@ fn handleNotify(
 // the name the upload declares for its file, percent-encoded so it survives a
 // header
 fn attachmentName(allocator: std.mem.Allocator, request: *std.http.Server.Request) !?[]u8 {
-    var iter = request.iterateHeaders();
-    while (iter.next()) |header| {
-        if (!std.ascii.eqlIgnoreCase(header.name, attachment_name_header)) continue;
-        return try decodeFormValue(allocator, header.value);
-    }
-    return null;
+    const value = getHeader(request, attachment_name_header) orelse return null;
+    return try decodeFormValue(allocator, value);
 }
 
 // an upload that failed leaves the body partly read, so the connection closes
@@ -2403,12 +2417,13 @@ fn handleSync(
     });
 }
 
-fn renderIndexHtml(
+fn renderPage(
     io: std.Io,
     allocator: std.mem.Allocator,
     host: Host,
     session_token: ?[]const u8,
     session_data: ui.Session.Data,
+    json_only: bool,
 ) ![]const u8 {
     const template = (findEmbed("/index.html") orelse return error.MissingIndexAsset).body;
 
@@ -2453,9 +2468,6 @@ fn renderIndexHtml(
 
     const snapshot: ui.Snapshot = .{ .page = page, .session = session.data };
 
-    const content = try generateHtml(allocator, &root, &session);
-    defer allocator.free(content);
-
     // serialize the snapshot so the wasm side can parse it back without making
     // a second request. it's embedded raw in a <script type="application/json">
     // block, whose content is raw text terminated only by "</script". in json,
@@ -2465,6 +2477,10 @@ fn renderIndexHtml(
     var json: std.Io.Writer.Allocating = .init(allocator);
     defer json.deinit();
     try std.json.Stringify.value(snapshot, .{}, &json.writer);
+    if (json_only) return try json.toOwnedSlice();
+
+    const content = try generateHtml(allocator, &root, &session);
+    defer allocator.free(content);
 
     var json_escaped: std.ArrayList(u8) = .empty;
     defer json_escaped.deinit(allocator);
@@ -3045,6 +3061,23 @@ fn appendEscapedHtml(allocator: std.mem.Allocator, out: *std.ArrayList(u8), inpu
 }
 
 // --- helpers --------------------------------------------------------------
+
+fn getHeader(request: *std.http.Server.Request, name: []const u8) ?[]const u8 {
+    var iter = request.iterateHeaders();
+    while (iter.next()) |header| {
+        if (std.ascii.eqlIgnoreCase(header.name, name)) return header.value;
+    }
+    return null;
+}
+
+// any website can post a form here, and local mode has no cookies to stop it.
+// only browsers send an origin, which never holds a default port or a path.
+fn isSameOrigin(request: *std.http.Server.Request) bool {
+    const origin = getHeader(request, "origin") orelse return true;
+    const host = getHeader(request, "host") orelse return false;
+    const scheme_end = std.mem.indexOf(u8, origin, "://") orelse return false;
+    return std.ascii.eqlIgnoreCase(origin[scheme_end + "://".len ..], host);
+}
 
 fn getCookieValue(request: *std.http.Server.Request, name: []const u8) ?[]const u8 {
     var iter = request.iterateHeaders();
