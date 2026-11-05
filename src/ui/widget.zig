@@ -2211,9 +2211,7 @@ pub const CopyableText = struct {
             },
         }
         if (count == 0) return null;
-        // a viewer who can push starts on the ssh url
-        const initial = if (handle.canWrite()) ssh_index orelse 0 else 0;
-        return @as(?CopyableText, try init(allocator, session, choices[0..count], initial));
+        return @as(?CopyableText, try init(allocator, session, choices[0..count], ssh_index orelse 0));
     }
 
     pub fn minWidth(self: *const CopyableText) usize {
