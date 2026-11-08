@@ -90,17 +90,6 @@ fn routeFromUrl(host: Host, path: []const u8) ?ui.RoutablePage {
     };
 }
 
-const json_route = "/json";
-
-// the page a json route url names. local mode has no such route, since cors
-// would let any website read the local repo.
-fn jsonPagePath(host: Host, path: []const u8) ?[]const u8 {
-    if (host != .server) return null;
-    if (std.mem.eql(u8, path, json_route)) return "/";
-    if (!std.mem.startsWith(u8, path, json_route ++ "/")) return null;
-    return path[json_route.len..];
-}
-
 fn requestRepoSource(io: std.Io, allocator: std.mem.Allocator, host: Host, repo_base: []const u8) !?RequestRepoSource {
     return switch (host) {
         .server => |server| blk: {
@@ -296,10 +285,11 @@ fn handleRequest(
         return request.respond(embed.body, .{ .extra_headers = headers });
     }
     {
-        // serves a page's snapshot to third-party UIs
-        const json_page = jsonPagePath(host, path);
+        // a page's snapshot for third-party UIs. a fetch keeps the accept header
+        // when it follows a form's redirect, so form posts answer with json too.
+        const wants_json = if (getHeader(request, "accept")) |accept| std.mem.indexOf(u8, accept, "application/json") != null else false;
         // a path that's neither a page nor an embed gets the not-found page
-        const current_page = routeFromUrl(host, json_page orelse path) orelse .not_found;
+        const current_page = routeFromUrl(host, path) orelse .not_found;
         // resolve the haxy_session cookie's token to a user_id via the
         // store. user_id_buf lives on the stack for the rest of handleRequest,
         // which is plenty for renderPage to consume. local mode has no
@@ -328,19 +318,17 @@ fn handleRequest(
                     session_token = token;
                     break :blk user_id_buf[0..evt.event_id_size];
                 };
-                if (json_page == null) {
-                    // whoever seeded the store may have left a session to claim
-                    if (user_id == null) {
-                        if (server.session_store.autoLogin(&token_buf) and server.session_store.lookup(&token_buf, &user_id_buf)) {
-                            session_cookie = try std.fmt.bufPrint(&cookie_buf, session_cookie_fmt, .{token_buf});
-                            session_token = &token_buf;
-                            user_id = user_id_buf[0..evt.event_id_size];
-                        }
+                // whoever seeded the store may have left a session to claim
+                if (user_id == null and !wants_json) {
+                    if (server.session_store.autoLogin(&token_buf) and server.session_store.lookup(&token_buf, &user_id_buf)) {
+                        session_cookie = try std.fmt.bufPrint(&cookie_buf, session_cookie_fmt, .{token_buf});
+                        session_token = &token_buf;
+                        user_id = user_id_buf[0..evt.event_id_size];
                     }
-                    if (getCookieValue(request, form_flash_cookie)) |token| {
-                        form_cookie_seen = true;
-                        form_feedback = server.session_store.takeFlash(form_arena.allocator(), token);
-                    }
+                }
+                if (getCookieValue(request, form_flash_cookie)) |token| {
+                    form_cookie_seen = true;
+                    form_feedback = server.session_store.takeFlash(form_arena.allocator(), token);
                 }
             },
             .local => {
@@ -386,10 +374,10 @@ fn handleRequest(
             .git_ssh_prefix = git_ssh_prefix,
         };
         // a page that can't be built shows the not-found page instead
-        const body = renderPage(io, allocator, host, session_token, session_data, json_page != null) catch |err| switch (err) {
+        const body = renderPage(io, allocator, host, session_token, session_data, wants_json) catch |err| switch (err) {
             error.NotFound => blk: {
                 session_data.current_page = .not_found;
-                break :blk try renderPage(io, allocator, host, session_token, session_data, json_page != null);
+                break :blk try renderPage(io, allocator, host, session_token, session_data, wants_json);
             },
             else => |e| return e,
         };
@@ -402,11 +390,11 @@ fn handleRequest(
         defer if (expired_form_cookie) |cookie| allocator.free(cookie);
         var header_buf: [6]std.http.Header = undefined;
         var headers: std.ArrayList(std.http.Header) = .initBuffer(&header_buf);
-        headers.appendAssumeCapacity(.{ .name = "content-type", .value = if (json_page != null) "application/json" else "text/html; charset=utf-8" });
-        if (json_page != null) {
+        headers.appendAssumeCapacity(.{ .name = "content-type", .value = if (wants_json) "application/json" else "text/html; charset=utf-8" });
+        if (wants_json) {
             headers.appendAssumeCapacity(.{ .name = "cache-control", .value = "no-store" });
-            // only a logged-out snapshot may be read from other origins
-            if (user_id == null) headers.appendAssumeCapacity(.{ .name = "access-control-allow-origin", .value = "*" });
+            // only a logged-out server snapshot may be read from other origins
+            if (host == .server and user_id == null) headers.appendAssumeCapacity(.{ .name = "access-control-allow-origin", .value = "*" });
         }
         if (expired_form_cookie) |cookie| headers.appendAssumeCapacity(.{ .name = "set-cookie", .value = cookie });
         if (local_flash_seen) headers.appendAssumeCapacity(.{ .name = "set-cookie", .value = local_flash_cookie ++ "=; Path=/; Max-Age=0" });

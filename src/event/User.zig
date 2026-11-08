@@ -50,7 +50,7 @@ pub fn validateName(name: []const u8) !void {
     if (name.len < name_min_len) return error.NameTooShort;
     if (name.len > name_max_len) return error.NameTooLong;
     if (name[0] == '-' or name[name.len - 1] == '-') return error.InvalidName;
-    for ([_][]const u8{ "home", "user", "json", "api" }) |reserved| {
+    for ([_][]const u8{ "home", "user" }) |reserved| {
         if (std.ascii.eqlIgnoreCase(name, reserved)) return error.InvalidName;
     }
 
