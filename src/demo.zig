@@ -4,7 +4,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const hx = @import("haxy");
+const hx = @import("./lib.zig");
 const srv = hx.serve;
 const evt = hx.event;
 const xit = hx.xit;

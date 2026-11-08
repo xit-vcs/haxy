@@ -103,7 +103,7 @@ pub fn build(b: *std.Build) void {
         const exe = b.addExecutable(.{
             .name = "try",
             .root_module = b.createModule(.{
-                .root_source_file = b.path("src/try.zig"),
+                .root_source_file = b.path("src/main_demo.zig"),
                 .target = target,
                 .optimize = optimize,
             }),

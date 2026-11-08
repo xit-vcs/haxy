@@ -14,3 +14,4 @@ pub const serve_ssh = @import("./serve_ssh.zig");
 pub const serve_ssh_protocol = @import("./serve_ssh_protocol.zig");
 pub const ui = @import("./ui.zig");
 pub const web = @import("./web.zig");
+pub const demo = @import("./demo.zig");
