@@ -28,12 +28,15 @@ pub const Status = enum {
     added,
     removed,
     changed,
+    // changed, but its lines can't be shown
+    binary,
 
     fn label(self: Status) []const u8 {
         return switch (self) {
             .added => " added ",
             .removed => " removed ",
             .changed => " changed ",
+            .binary => " binary ",
         };
     }
 
@@ -41,7 +44,7 @@ pub const Status = enum {
         const color: Grid.Color.Ansi = switch (self) {
             .added => .green,
             .removed => .red,
-            .changed => return .single,
+            .changed, .binary => return .single,
         };
         return .{ .kind = .single, .style = .{ .fg = .ansi(color) } };
     }
@@ -51,6 +54,8 @@ pub const Window = struct {
     hunks: []const Hunk = &.{},
     start: usize = 0,
     has_more: bool = false,
+    // the rest of the diff is too large to render
+    truncated: bool = false,
 };
 
 route: Route,
@@ -167,18 +172,32 @@ pub fn render(
     var hunks: std.ArrayList(Hunk) = .empty;
     var index: usize = 0; // running hunk index across all files
     var has_more = false;
+    var truncated = false;
     // the page's content grid is its line count times its widest line
     var lines: usize = 0;
     var widest: usize = 0;
 
-    file_loop: while (try file_iter.next()) |pair_val| {
-        var pair = pair_val;
+    file_loop: while (true) {
+        var pair = (file_iter.next() catch |err| switch (err) {
+            error.DiffTooLarge => {
+                truncated = true;
+                break;
+            },
+            else => |e| return e,
+        }) orelse break;
         defer pair.deinit();
 
         if (path.len != 0 and !std.mem.eql(u8, pair.path, path)) continue;
 
-        // an added or removed file shows only its path
-        const status: Status = if (pair.a.source == .nothing) .added else if (pair.b.source == .nothing) .removed else .changed;
+        // a file whose lines aren't shown gets only its path
+        const status: Status = if (pair.a.source == .nothing)
+            .added
+        else if (pair.b.source == .nothing)
+            .removed
+        else if (pair.a.source == .binary or pair.b.source == .binary)
+            .binary
+        else
+            .changed;
         if (status != .changed) {
             const i = index;
             index += 1;
@@ -199,8 +218,14 @@ pub fn render(
 
         // the path label rides on the first of this file's hunks we actually show.
         var path_attached = false;
-        while (try hunk_iter.next(gpa)) |hunk_val| {
-            var hunk = hunk_val;
+        while (true) {
+            var hunk = (hunk_iter.next(gpa) catch |err| switch (err) {
+                error.DiffTooLarge => {
+                    truncated = true;
+                    break :file_loop;
+                },
+                else => |e| return e,
+            }) orelse break;
             defer hunk.deinit(gpa);
 
             const i = index;
@@ -228,7 +253,7 @@ pub fn render(
         }
     }
 
-    return .{ .hunks = try hunks.toOwnedSlice(arena), .start = start, .has_more = has_more };
+    return .{ .hunks = try hunks.toOwnedSlice(arena), .start = start, .has_more = has_more, .truncated = truncated };
 }
 
 // render edits with right-aligned line numbers, alongside each line's prefix
@@ -296,6 +321,7 @@ fn appendWindow(data: @This(), allocator: std.mem.Allocator, session: *ui.Sessio
         };
         if (hunk.text.len != 0) try addHunk(allocator, box, hunk);
     }
+    if (data.window.truncated) try addLink(allocator, box, "the rest of the diff is too large to show", "");
     if (data.window.has_more) try addLink(allocator, box, "next →", try data.route.link(session.page_arena, data.window.start + data.window.hunks.len, data.path));
 }
 
