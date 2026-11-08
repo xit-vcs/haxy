@@ -8,6 +8,7 @@ pub const find = @import("./find.zig");
 pub const search = @import("./search.zig");
 pub const search_commit = @import("./search_commit.zig");
 pub const fork = @import("./fork.zig");
+pub const markdown = @import("./markdown.zig");
 pub const pch = @import("./patch.zig");
 pub const serve = @import("./serve.zig");
 pub const serve_ssh = @import("./serve_ssh.zig");
