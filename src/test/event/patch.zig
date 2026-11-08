@@ -637,7 +637,7 @@ test "patch event conflicts, stacking, and gc" {
     //
 
     {
-        try evt.mergeEvents(.xit, repo_opts, io, allocator, &target, side_events_ref);
+        try evt.mergeEvents(.xit, repo_opts, io, allocator, &target, side_events_ref, null);
         try evt.consume(.local, .repo, .xit, repo_opts, io, allocator, &target, evt.events_ref, &.{});
     }
 
@@ -744,7 +744,7 @@ test "patch event conflicts, stacking, and gc" {
         .author = author,
         .event = .{ .patch = merged_child },
     }});
-    try evt.mergeEvents(.xit, repo_opts, io, allocator, &target, status_side_ref);
+    try evt.mergeEvents(.xit, repo_opts, io, allocator, &target, status_side_ref, null);
     try evt.consume(.local, .repo, .xit, repo_opts, io, allocator, &target, evt.events_ref, &.{});
 
     _ = arena.reset(.retain_capacity);

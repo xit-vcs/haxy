@@ -788,7 +788,9 @@ pub fn consume(
 }
 
 // merge the remote events ref into the local events ref without touching head,
-// the index, or the worktree
+// the index, or the worktree, and consume the result. with `fetch_opts` the
+// remote ref is fetched first. events that can't be consumed leave both refs
+// where they were, since reads fall back to the remote ref without a local one.
 pub fn mergeEvents(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
@@ -796,9 +798,27 @@ pub fn mergeEvents(
     allocator: std.mem.Allocator,
     repo: *rp.Repo(repo_kind, repo_opts),
     remote_ref: rf.Ref,
+    fetch_opts: ?xit.net.Opts(repo_opts.ProgressCtx),
 ) !void {
     switch (repo_kind) {
-        .git => _ = try mergeEventsInTransaction(.git, repo_opts, .{ .core = &repo.core, .extra = .{} }, io, allocator, remote_ref),
+        .git => {
+            const state: rp.Repo(.git, repo_opts).State(.read_write) = .{ .core = &repo.core, .extra = .{} };
+            const fetched_before = try rf.readRecur(.git, repo_opts, state.readOnly(), io, .{ .ref = remote_ref });
+            if (fetch_opts) |opts| try fetchEvents(.git, repo_opts, state, io, allocator, remote_ref, opts);
+
+            // its exclusive lock keeps readers out until the refs are consumed or moved back
+            var event_db = try LocalEventDB(repo_opts.hash).open(io, allocator, repo.core.repo_dir);
+            defer event_db.deinit(io, allocator);
+
+            const before = try rf.readRecur(.git, repo_opts, state.readOnly(), io, .{ .ref = events_ref });
+            if (!try mergeEventsInTransaction(.git, repo_opts, state, io, allocator, remote_ref)) return;
+            event_db.consume(.git, repo_opts, io, allocator, repo, events_ref) catch |err| {
+                // git has no transactions, so the refs are put back by hand
+                try setRef(.git, repo_opts, state, io, events_ref, if (before) |*oid| oid else null);
+                try setRef(.git, repo_opts, state, io, remote_ref, if (fetched_before) |*oid| oid else null);
+                return err;
+            };
+        },
         .xit => {
             const DB = rp.Repo(.xit, repo_opts).DB;
             const State = rp.Repo(.xit, repo_opts).State;
@@ -808,11 +828,19 @@ pub fn mergeEvents(
                 io: std.Io,
                 allocator: std.mem.Allocator,
                 remote_ref: rf.Ref,
+                fetch_opts: ?xit.net.Opts(repo_opts.ProgressCtx),
 
                 pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
                     var moment = try DB.HashMap(.read_write).init(cursor.*);
                     const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
+                    if (ctx.fetch_opts) |opts| try fetchEvents(.xit, repo_opts, state, ctx.io, ctx.allocator, ctx.remote_ref, opts);
+                    // with nothing to merge, the local ref already has whatever was fetched
                     if (!try mergeEventsInTransaction(.xit, repo_opts, state, ctx.io, ctx.allocator, ctx.remote_ref)) return error.CancelTransaction;
+                    // a tip that was consumed before cancels only the consume
+                    _ = consumeInTransaction(.repo, .xit, repo_opts, state, &moment, ctx.io, ctx.allocator, events_ref) catch |err| switch (err) {
+                        error.CancelTransaction => {},
+                        else => |e| return e,
+                    };
                     try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action_kind = merge_undo_action } });
                 }
             };
@@ -826,12 +854,48 @@ pub fn mergeEvents(
                 .io = io,
                 .allocator = allocator,
                 .remote_ref = remote_ref,
+                .fetch_opts = fetch_opts,
             }) catch |err| switch (err) {
                 error.CancelTransaction => {},
                 else => |e| return e,
             };
         },
     }
+}
+
+fn fetchEvents(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    remote_ref: rf.Ref,
+    opts: xit.net.Opts(repo_opts.ProgressCtx),
+) !void {
+    const remote_name = switch (remote_ref.kind) {
+        .remote => |name| name,
+        else => unreachable,
+    };
+    var remote = try xit.net.Remote(repo_kind, repo_opts).open(state.readOnly(), io, allocator, remote_name);
+    defer remote.deinit(io, allocator);
+    try xit.net.fetch(repo_kind, repo_opts, state, io, allocator, &remote, opts);
+}
+
+fn setRef(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+    io: std.Io,
+    ref: rf.Ref,
+    oid: ?*const [hash.hexLen(repo_opts.hash)]u8,
+) !void {
+    var ref_path_buffer: [rf.MAX_REF_CONTENT_SIZE]u8 = undefined;
+    const ref_path = try ref.toPath(&ref_path_buffer);
+    if (oid) |value| return rf.write(repo_kind, repo_opts, state, io, ref_path, .{ .oid = value });
+    rf.remove(repo_kind, repo_opts, state, io, ref_path) catch |err| switch (err) {
+        error.RefNotFound => {},
+        else => |e| return e,
+    };
 }
 
 fn mergeEventsInTransaction(

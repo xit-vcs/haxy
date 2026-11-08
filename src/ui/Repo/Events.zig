@@ -925,24 +925,23 @@ pub fn sync(io: std.Io, allocator: std.mem.Allocator, source: ui.RepoSource) !?[
                     const fetch_transport_opts: xit.net.Opts(repo_opts.ProgressCtx) = .{ .progress_ctx = .{ .message = &message }, .wire = .{ .ssh = .{ .command = fetch_ssh_command } } };
                     const push_transport_opts: xit.net.Opts(repo_opts.ProgressCtx) = .{ .progress_ctx = .{ .message = &message }, .wire = .{ .ssh = .{ .command = push_ssh_command } } };
 
+                    const remote_ref: rf.Ref = .{ .kind = .{ .remote = remote_name }, .name = evt.events_ref.name };
                     const fetch_refspec = try allocator.print("+refs/heads/{s}:refs/remotes/{s}/{s}", .{ evt.events_ref.name, remote_name, evt.events_ref.name });
                     defer allocator.free(fetch_refspec);
                     var fetch_opts = fetch_transport_opts;
                     fetch_opts.refspecs = &.{fetch_refspec};
                     message.clearRetainingCapacity();
-                    repo.fetch(io, allocator, remote_name, fetch_opts) catch |err| {
+                    evt.mergeEvents(repo_kind, repo_opts, io, allocator, repo, remote_ref, fetch_opts) catch |err| {
                         if (err == error.ServerReportedError and message.written().len != 0) return try allocator.dupe(u8, message.written());
                         return err;
                     };
 
-                    const remote_ref: rf.Ref = .{ .kind = .{ .remote = remote_name }, .name = evt.events_ref.name };
                     const local_oid = try repo.readRef(io, evt.events_ref);
                     const remote_oid = try repo.readRef(io, remote_ref);
                     if (local_oid == null and remote_oid == null) {
                         try evt.consume(.local, .repo, repo_kind, repo_opts, io, allocator, repo, evt.events_ref, &.{});
                         return null;
                     }
-                    if (remote_oid != null) try evt.mergeEvents(repo_kind, repo_opts, io, allocator, repo, remote_ref);
                     try evt.consume(.local, .repo, repo_kind, repo_opts, io, allocator, repo, evt.events_ref, &.{});
 
                     const push_refspec = try allocator.print("refs/heads/{s}:refs/heads/{s}", .{ evt.events_ref.name, evt.events_ref.name });
