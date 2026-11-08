@@ -26,11 +26,23 @@ const local_required_title_prefix = "required_title:";
 const local_sync_failure_prefix = "sync:";
 const local_assignment_prefix = "assignment:";
 
-const Embed = struct {
+pub const Embed = struct {
     path: []const u8,
     content_type: []const u8,
     body: []const u8,
 };
+
+// what a program built on haxy as a library swaps in for haxy's own web UI,
+// by declaring it as `pub const haxy_frontend` in its root file
+pub const Frontend = struct {
+    // served ahead of haxy's own files, so one with the same path replaces it.
+    // "index.html" is the page template.
+    files: []const Embed = &.{},
+    // writes the html for the template's HAXY_HTML token in place of haxy's
+    render_html: ?*const fn (allocator: std.mem.Allocator, page: *const ui.Page, session: *const ui.Session.Data, writer: *std.Io.Writer) anyerror!void = null,
+};
+
+const frontend: Frontend = if (@hasDecl(@import("root"), "haxy_frontend")) @import("root").haxy_frontend else .{};
 
 const embeds = [_]Embed{
     .{ .path = "index.html", .content_type = "text/html; charset=utf-8", .body = @embedFile("embed/index.html") },
@@ -2467,7 +2479,16 @@ fn renderPage(
     try std.json.Stringify.value(snapshot, .{}, &json.writer);
     if (json_only) return try json.toOwnedSlice();
 
-    const content = try generateHtml(allocator, &root, &session);
+    // a frontend's template may leave out the html
+    const html_token = "{{{ HAXY_HTML }}}";
+    const content = if (std.mem.indexOf(u8, template, html_token) == null)
+        ""
+    else if (frontend.render_html) |render| blk: {
+        var html: std.Io.Writer.Allocating = .init(allocator);
+        errdefer html.deinit();
+        try render(allocator, &snapshot.page, &snapshot.session, &html.writer);
+        break :blk try html.toOwnedSlice();
+    } else try generateHtml(allocator, &root, &session);
     defer allocator.free(content);
 
     var json_escaped: std.ArrayList(u8) = .empty;
@@ -2483,10 +2504,10 @@ fn renderPage(
     {
         var cursor: usize = 0;
         for (&[_]struct { needle: []const u8, replacement: []const u8 }{
-            .{ .needle = "{{{ HAXY_HTML }}}", .replacement = content },
+            .{ .needle = html_token, .replacement = content },
             .{ .needle = "{{{ HAXY_JSON }}}", .replacement = json_escaped.items },
         }) |sub| {
-            const idx = std.mem.indexOfPos(u8, template, cursor, sub.needle) orelse return error.MissingTemplateToken;
+            const idx = std.mem.indexOfPos(u8, template, cursor, sub.needle) orelse continue;
             try out.appendSlice(allocator, template[cursor..idx]);
             try out.appendSlice(allocator, sub.replacement);
             cursor = idx + sub.needle.len;
@@ -2498,12 +2519,15 @@ fn renderPage(
 
 fn findEmbed(request_path: []const u8) ?Embed {
     // embeds are matched before pages, so a dot keeps them from claiming a username or tab
-    comptime for (embeds) |embed| {
+    comptime for (frontend.files ++ embeds) |embed| {
         if (std.mem.indexOfScalar(u8, embed.path, '.') == null) @compileError("embed path needs a '.' so it can't shadow a page: " ++ embed.path);
     };
     if (request_path.len < 2 or request_path[0] != '/') return null;
     const path = request_path[1..];
 
+    for (frontend.files) |file| {
+        if (std.mem.eql(u8, path, file.path)) return file;
+    }
     for (embeds) |embed| {
         if (std.mem.eql(u8, path, embed.path)) return embed;
     }
