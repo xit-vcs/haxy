@@ -173,6 +173,8 @@ pub const RoutablePage = union(enum) {
         comment: Array(evt.event_id_size * 2) = .{},
         // the attachment a remove view confirms (empty = the issue or comment).
         attachment: Array(evt.event_id_size * 2) = .{},
+        // whether `selected` only roots the list window, leaving that issue closed
+        start: bool = false,
     },
     repo_patches: struct {
         name: Array(repo_route_max_len),
@@ -183,6 +185,7 @@ pub const RoutablePage = union(enum) {
         comments_start: usize = 0,
         comment: Array(evt.event_id_size * 2) = .{},
         attachment: Array(evt.event_id_size * 2) = .{},
+        start: bool = false,
     },
     repo_discussions: struct {
         name: Array(repo_route_max_len),
@@ -192,6 +195,7 @@ pub const RoutablePage = union(enum) {
         comments_start: usize = 0,
         comment: Array(evt.event_id_size * 2) = .{},
         attachment: Array(evt.event_id_size * 2) = .{},
+        start: bool = false,
     },
     repo_events: RepoEventsRoute,
     repo_undo: RepoUndoRoute,
@@ -887,6 +891,20 @@ pub const RoutablePage = union(enum) {
         } };
     }
 
+    // a thread list route's window starting at thread `id`, without opening that thread
+    pub fn startingAt(self: RoutablePage, id: []const u8) ?RoutablePage {
+        const selected = Array(evt.event_id_size * 2).from(id) orelse return null;
+        var route = self;
+        switch (route) {
+            inline .repo_issues, .repo_patches, .repo_discussions => |*list| {
+                list.selected = selected;
+                list.start = id.len != 0;
+            },
+            else => unreachable,
+        }
+        return route;
+    }
+
     // build the default list route for a thread event kind.
     pub fn repoThreadRoute(kind: evt.EventKind, identity: []const u8, selected: []const u8) ?RoutablePage {
         return switch (kind) {
@@ -1199,13 +1217,15 @@ pub const RoutablePage = union(enum) {
                 var out: std.Io.Writer.Allocating = .init(arena.allocator());
                 // the list the thread is selected in stays filtered, so paging
                 // and reloading keep the query
-                if (i.selected.len != 0) {
+                if (i.selected.len != 0 and !i.start) {
                     try out.writer.print("{s}/" ++ issue_seg ++ "{s}", .{ prefix, i.selected.slice() });
                     if (i.search.len != 0) try out.writer.print("/" ++ search_seg ++ "{s}", .{i.search.slice()});
                     if (i.comments_start != 0) try out.writer.print("/" ++ start_seg ++ "{d}", .{i.comments_start});
                     break :blk out.written();
                 }
-                try out.writer.print("{s}/issues/{s}", .{ prefix, @tagName(i.view) });
+                try out.writer.print("{s}/issues", .{prefix});
+                if (i.start) try out.writer.print("/" ++ start_seg ++ "{s}", .{i.selected.slice()});
+                try out.writer.print("/{s}", .{@tagName(i.view)});
                 if (i.search.len != 0) try out.writer.print("/" ++ search_seg ++ "{s}", .{i.search.slice()});
                 break :blk out.written();
             },
@@ -1236,13 +1256,15 @@ pub const RoutablePage = union(enum) {
                 var out: std.Io.Writer.Allocating = .init(arena.allocator());
                 // the list the thread is selected in stays filtered, so paging
                 // and reloading keep the query
-                if (p.selected.len != 0) {
+                if (p.selected.len != 0 and !p.start) {
                     try out.writer.print("{s}/" ++ patch_seg ++ "{s}", .{ prefix, p.selected.slice() });
                     if (p.search.len != 0) try out.writer.print("/" ++ search_seg ++ "{s}", .{p.search.slice()});
                     if (p.comments_start != 0) try out.writer.print("/" ++ start_seg ++ "{d}", .{p.comments_start});
                     break :blk out.written();
                 }
-                try out.writer.print("{s}/patches/{s}", .{ prefix, @tagName(p.view) });
+                try out.writer.print("{s}/patches", .{prefix});
+                if (p.start) try out.writer.print("/" ++ start_seg ++ "{s}", .{p.selected.slice()});
+                try out.writer.print("/{s}", .{@tagName(p.view)});
                 if (p.search.len != 0) try out.writer.print("/" ++ search_seg ++ "{s}", .{p.search.slice()});
                 break :blk out.written();
             },
@@ -1263,13 +1285,15 @@ pub const RoutablePage = union(enum) {
                 var out: std.Io.Writer.Allocating = .init(arena.allocator());
                 // the list the thread is selected in stays filtered, so paging
                 // and reloading keep the query
-                if (t.selected.len != 0) {
+                if (t.selected.len != 0 and !t.start) {
                     try out.writer.print("{s}/" ++ discuss_seg ++ "{s}", .{ prefix, t.selected.slice() });
                     if (t.search.len != 0) try out.writer.print("/" ++ search_seg ++ "{s}", .{t.search.slice()});
                     if (t.comments_start != 0) try out.writer.print("/" ++ start_seg ++ "{d}", .{t.comments_start});
                     break :blk out.written();
                 }
-                try out.writer.print("{s}/discussions/{s}", .{ prefix, @tagName(t.view) });
+                try out.writer.print("{s}/discussions", .{prefix});
+                if (t.start) try out.writer.print("/" ++ start_seg ++ "{s}", .{t.selected.slice()});
+                try out.writer.print("/{s}", .{@tagName(t.view)});
                 if (t.search.len != 0) try out.writer.print("/" ++ search_seg ++ "{s}", .{t.search.slice()});
                 break :blk out.written();
             },
@@ -1786,9 +1810,11 @@ pub const RoutablePage = union(enum) {
                 if (!params.only(&.{.start})) return null;
                 return repoIssuesConflictsRoute(pair, params.values.get(.start) orelse "");
             }
-            if (!params.only(&.{.search})) return null;
+            if (!params.only(&.{ .search, .start })) return null;
             const search_value = params.values.get(.search) orelse "";
-            if (std.meta.stringToEnum(evt.Issue.Status, w)) |status| return withEncodedSearch(repoIssuesRoute(pair, status, ""), search_value);
+            const start = params.values.get(.start) orelse "";
+            if (std.meta.stringToEnum(evt.Issue.Status, w)) |status| return withEncodedSearch((repoIssuesRoute(pair, status, "") orelse return null).startingAt(start), search_value);
+            if (start.len != 0) return null;
             if (std.mem.eql(u8, w, "labels")) return withEncodedSearch(repoThreadLabelsRoute(.issue, pair), search_value);
             if (std.mem.eql(u8, w, "new")) return if (search_value.len == 0) repoThreadNewRoute(.issue, pair) else null;
             return null;
@@ -1800,20 +1826,24 @@ pub const RoutablePage = union(enum) {
                 if (!params.only(&.{.start})) return null;
                 return repoPatchesConflictsRoute(pair, params.values.get(.start) orelse "");
             }
-            if (!params.only(&.{.search})) return null;
+            if (!params.only(&.{ .search, .start })) return null;
             const search_value = params.values.get(.search) orelse "";
-            if (std.meta.stringToEnum(evt.Patch.StatusKind, view)) |status| return withEncodedSearch(repoPatchesRoute(pair, status, ""), search_value);
+            const start = params.values.get(.start) orelse "";
+            if (std.meta.stringToEnum(evt.Patch.StatusKind, view)) |status| return withEncodedSearch((repoPatchesRoute(pair, status, "") orelse return null).startingAt(start), search_value);
+            if (std.mem.eql(u8, view, "drafts")) return if (search_value.len == 0) (repoPatchesDraftsRoute(pair) orelse return null).startingAt(start) else null;
+            if (start.len != 0) return null;
             if (std.mem.eql(u8, view, "labels")) return withEncodedSearch(repoThreadLabelsRoute(.patch, pair), search_value);
             if (std.mem.eql(u8, view, "new")) return if (search_value.len == 0) repoThreadNewRoute(.patch, pair) else null;
-            if (std.mem.eql(u8, view, "drafts")) return if (search_value.len == 0) repoPatchesDraftsRoute(pair) else null;
             return null;
         }
         if (std.mem.eql(u8, tab, "discussions")) {
             const word = params.scanTail(&segments) catch return null;
             const view = word orelse return if (params.only(&.{})) repoDiscussionsRoute(pair, "") else null;
-            if (!params.only(&.{.search})) return null;
+            if (!params.only(&.{ .search, .start })) return null;
             const search_value = params.values.get(.search) orelse "";
-            if (std.mem.eql(u8, view, "recent")) return withEncodedSearch(repoDiscussionsRoute(pair, ""), search_value);
+            const start = params.values.get(.start) orelse "";
+            if (std.mem.eql(u8, view, "recent")) return withEncodedSearch((repoDiscussionsRoute(pair, "") orelse return null).startingAt(start), search_value);
+            if (start.len != 0) return null;
             if (std.mem.eql(u8, view, "labels")) return withEncodedSearch(repoThreadLabelsRoute(.discuss, pair), search_value);
             if (std.mem.eql(u8, view, "new")) return if (search_value.len == 0) repoThreadNewRoute(.discuss, pair) else null;
             return null;
@@ -1946,20 +1976,23 @@ pub const RoutablePage = union(enum) {
                 std.mem.eql(u8, a_i.theirs.slice(), b.repo_issues.theirs.slice()) and
                 a_i.view == b.repo_issues.view and
                 a_i.comments_start == b.repo_issues.comments_start and
-                std.mem.eql(u8, a_i.comment.slice(), b.repo_issues.comment.slice()),
+                std.mem.eql(u8, a_i.comment.slice(), b.repo_issues.comment.slice()) and
+                a_i.start == b.repo_issues.start,
             .repo_discussions => |a_t| std.mem.eql(u8, a_t.name.slice(), b.repo_discussions.name.slice()) and
                 std.mem.eql(u8, a_t.search.slice(), b.repo_discussions.search.slice()) and
                 std.mem.eql(u8, a_t.selected.slice(), b.repo_discussions.selected.slice()) and
                 a_t.view == b.repo_discussions.view and
                 a_t.comments_start == b.repo_discussions.comments_start and
-                std.mem.eql(u8, a_t.comment.slice(), b.repo_discussions.comment.slice()),
+                std.mem.eql(u8, a_t.comment.slice(), b.repo_discussions.comment.slice()) and
+                a_t.start == b.repo_discussions.start,
             .repo_patches => |a_p| std.mem.eql(u8, a_p.name.slice(), b.repo_patches.name.slice()) and
                 std.mem.eql(u8, a_p.search.slice(), b.repo_patches.search.slice()) and
                 std.mem.eql(u8, a_p.selected.slice(), b.repo_patches.selected.slice()) and
                 std.mem.eql(u8, a_p.theirs.slice(), b.repo_patches.theirs.slice()) and
                 a_p.view == b.repo_patches.view and
                 a_p.comments_start == b.repo_patches.comments_start and
-                std.mem.eql(u8, a_p.comment.slice(), b.repo_patches.comment.slice()),
+                std.mem.eql(u8, a_p.comment.slice(), b.repo_patches.comment.slice()) and
+                a_p.start == b.repo_patches.start,
             .repo_undo => |a_u| std.mem.eql(u8, a_u.name.slice(), b.repo_undo.name.slice()) and
                 a_u.index == b.repo_undo.index,
             .repo_events => |a_e| std.mem.eql(u8, a_e.name.slice(), b.repo_events.name.slice()) and
