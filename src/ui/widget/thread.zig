@@ -2281,7 +2281,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             var box = try wgt.Box(Widget).init(allocator, .{ .border = null, .direction = .vert });
             errdefer box.deinit(allocator);
             const route = resolveRoute(data.identity, data.selected_id, data.theirs_picks) orelse return error.RouteTooLong;
-            box.getFocus().kind = .{ .custom = try aa.print("form:{s}", .{try route.toUrl(session.page_arena)}) };
+            box.getFocus().kind = .{ .custom = try aa.print("form:{s}/resolve", .{try route.toUrl(session.page_arena)}) };
 
             if (conflict.title) |*fc| {
                 try addLabel(allocator, &box, "title conflict:");
