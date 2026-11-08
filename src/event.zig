@@ -1321,11 +1321,18 @@ fn consumeWithScratch(
                 const parent_haxy_moment_cursor = try haxy_moments.getCursor(hash.bytesToInt(repo_opts.hash, &oid)) orelse return error.CursorNotFound;
                 const parent_haxy_moment = try DB.HashMap(.read_only).init(parent_haxy_moment_cursor);
 
-                const baseline_oid_hex = try mrg.commonAncestor(repo_kind, repo_opts, read_state, io, allocator, &parent_oids[0], parent_oid);
-                var baseline_oid: [hash.byteLen(repo_opts.hash)]u8 = undefined;
-                _ = try std.fmt.hexToBytes(&baseline_oid, &baseline_oid_hex);
-                const baseline_haxy_moment_cursor = try haxy_moments.getCursor(hash.bytesToInt(repo_opts.hash, &baseline_oid)) orelse return error.CursorNotFound;
-                const baseline_haxy_moment = try DB.HashMap(.read_only).init(baseline_haxy_moment_cursor);
+                // histories that began on two hosts before they first synced share no baseline
+                const baseline_oid_hex_maybe: ?[hash.hexLen(repo_opts.hash)]u8 = mrg.commonAncestor(repo_kind, repo_opts, read_state, io, allocator, &parent_oids[0], parent_oid) catch |err| switch (err) {
+                    error.NoCommonAncestor => null,
+                    else => |e| return e,
+                };
+                var baseline_haxy_moment: ?DB.HashMap(.read_only) = null;
+                if (baseline_oid_hex_maybe) |baseline_oid_hex| {
+                    var baseline_oid: [hash.byteLen(repo_opts.hash)]u8 = undefined;
+                    _ = try std.fmt.hexToBytes(&baseline_oid, &baseline_oid_hex);
+                    const baseline_haxy_moment_cursor = try haxy_moments.getCursor(hash.bytesToInt(repo_opts.hash, &baseline_oid)) orelse return error.CursorNotFound;
+                    baseline_haxy_moment = try DB.HashMap(.read_only).init(baseline_haxy_moment_cursor);
+                }
 
                 inline for (@typeInfo(Event).@"union".field_types) |field_type| {
                     const T = @typeInfo(field_type).optional.child;
@@ -1626,7 +1633,8 @@ pub fn merge(
     allocator: std.mem.Allocator,
     haxy_moment: DB.HashMap(.read_write),
     parent_moment: DB.HashMap(.read_only),
-    baseline_moment: DB.HashMap(.read_only),
+    // null when the histories share no merge base
+    baseline_moment_maybe: ?DB.HashMap(.read_only),
 ) !void {
     const parent_set_cursor = try parent_moment.getCursor(hash.hashInt(hash_kind, T.all_id_set_key)) orelse return;
     const parent_set = try DB.SortedSet(.read_only).init(parent_set_cursor);
@@ -1635,9 +1643,9 @@ pub fn merge(
     const parent_records = try DB.HashMap(.read_only).init(parent_records_cursor);
 
     var baseline_records: ?DB.HashMap(.read_only) = null;
-    if (try baseline_moment.getCursor(hash.hashInt(hash_kind, T.record_map_key))) |cursor| {
+    if (baseline_moment_maybe) |baseline_moment| if (try baseline_moment.getCursor(hash.hashInt(hash_kind, T.record_map_key))) |cursor| {
         baseline_records = try DB.HashMap(.read_only).init(cursor);
-    }
+    };
 
     var parent_conflicts: ?DB.SortedMap(.read_only) = null;
     var baseline_conflicts: ?DB.SortedMap(.read_only) = null;
@@ -1647,9 +1655,9 @@ pub fn merge(
             if (try parent_moment.getCursor(hash.hashInt(hash_kind, T.conflicts_key))) |cursor| {
                 parent_conflicts = try DB.SortedMap(.read_only).init(cursor);
             }
-            if (try baseline_moment.getCursor(hash.hashInt(hash_kind, T.conflicts_key))) |cursor| {
+            if (baseline_moment_maybe) |baseline_moment| if (try baseline_moment.getCursor(hash.hashInt(hash_kind, T.conflicts_key))) |cursor| {
                 baseline_conflicts = try DB.SortedMap(.read_only).init(cursor);
-            }
+            };
             if (try parent_moment.getCursor(hash.hashInt(hash_kind, T.id_to_field_to_oid_key))) |cursor| {
                 parent_id_to_field_to_oid = try DB.HashMap(.read_only).init(cursor);
             }
