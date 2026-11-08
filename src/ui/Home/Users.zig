@@ -83,7 +83,7 @@ pub const View = struct {
             errdefer header_scroll.deinit(allocator);
             const header = header_scroll.row();
             {
-                var search_box = try ui.widget.SearchBox.init(allocator, session, " search ", "search", data.search);
+                var search_box = try ui.widget.SearchBox.init(allocator, session, " search ", data.search, .{ .home_users = .{} });
                 errdefer search_box.deinit(allocator);
                 header.getFocus().child_id = search_box.getFocus().id;
                 try header.children.put(allocator, search_box.getFocus().id, .{ .widget = .{ .search_box = search_box }, .rect = null, .min_size = ui.widget.SearchBox.min_size });

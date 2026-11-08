@@ -298,6 +298,13 @@ fn isEmpty(self: *const Self) bool {
     return self.commits.len == 0;
 }
 
+// the list a search narrows. an object view or a base-bounded list searches the
+// default branch, so the url says so.
+fn searchRoute(self: *const Self) ?ui.RoutablePage {
+    if (self.default_branch.len != 0) return self.handle.location.commitsRoute(.branch, self.default_branch, "");
+    return self.handle.location.commitsRoute(self.ref_or_oid, self.ref_or_oid_value, self.base_oid);
+}
+
 // the commit message, trimmed and read into `aa`, plus whether its preview was
 // cut short.
 fn readMessage(
@@ -395,7 +402,7 @@ pub const View = struct {
 
         // the search box and the clone url at the top. local mode has neither.
         if (session.data.host_kind == .server) {
-            var header_view = try ui.widget.SearchHeader.init(allocator, session, data.handle, " search ", "search", data.search, data.search_available);
+            var header_view = try ui.widget.SearchHeader.init(allocator, session, data.handle, " search ", data.search, data.search_available, data.searchRoute() orelse return error.RouteTooLong);
             errdefer header_view.deinit(allocator);
             // a row taller than the header, leaving a blank line beneath it
             try outer.children.put(allocator, header_view.getFocus().id, .{ .widget = .{ .search_header = header_view }, .rect = null, .min_size = .{ .width = null, .height = 4 } });
@@ -753,12 +760,7 @@ pub const View = struct {
     // empty query leaves the results for the plain log.
     fn submit(self: *View, text: []const u8) !void {
         if (text.len == 0 and self.data.search == null) return;
-        // an object view or a base-bounded list searches the default branch, so the url says so
-        const route = if (self.data.default_branch.len != 0)
-            self.data.handle.location.commitsRoute(.branch, self.data.default_branch, "")
-        else
-            self.data.handle.location.commitsRoute(self.data.ref_or_oid, self.data.ref_or_oid_value, self.data.base_oid);
-        try self.session.navigate((route orelse return).withSearch(text) orelse return);
+        try self.session.navigate((self.data.searchRoute() orelse return).withSearch(text) orelse return);
     }
 
     fn listInput(self: *View, allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {

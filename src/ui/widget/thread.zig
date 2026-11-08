@@ -500,13 +500,13 @@ pub const Header = struct {
     // the search box's place in the box, ahead of the tabs
     const search_index: usize = 0;
 
-    pub fn init(allocator: std.mem.Allocator, session: *ui.Session, search: ?[]const u8, search_label: []const u8) !Header {
+    pub fn init(allocator: std.mem.Allocator, session: *ui.Session, search: ?[]const u8, search_label: []const u8, action: ui.RoutablePage) !Header {
         var scroll = try widget.HeaderScroll.init(allocator, session);
         errdefer scroll.deinit(allocator);
         const box = scroll.row();
 
         {
-            var search_box = try widget.SearchBox.init(allocator, session, search_label, "search", search);
+            var search_box = try widget.SearchBox.init(allocator, session, search_label, search, action);
             errdefer search_box.deinit(allocator);
             box.getFocus().child_id = search_box.getFocus().id;
             try box.children.put(allocator, search_box.getFocus().id, .{ .widget = .{ .search_box = search_box }, .rect = null, .min_size = widget.SearchBox.min_size });
@@ -1832,6 +1832,12 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
             return @fromBackingInt(@intCast(index));
         }
 
+        // the list a search narrows: the status split at `index`, or the first one
+        pub fn searchListRoute(identity: []const u8, index: usize) ?ui.RoutablePage {
+            const status: Status = if (index < status_count) splitStatus(index) else @fromBackingInt(@intCast(0));
+            return listRoute(identity, status, "");
+        }
+
         fn entryConflicted(entry: Entry) bool {
             return if (supports_conflicts) entry.conflicted else false;
         }
@@ -2772,9 +2778,7 @@ pub fn View(comptime kind: evt.EventKind, comptime Data: type) type {
         // any other one.
         fn submitSearch(self: *This, text: []const u8) !void {
             if (text.len == 0 and self.data.search == null) return;
-            const selected = self.header().getSelectedIndex() orelse 0;
-            const status: Status = if (selected < status_count) splitStatus(selected) else @fromBackingInt(@intCast(0));
-            const route = listRoute(self.data.identity, status, "") orelse return;
+            const route = searchListRoute(self.data.identity, self.header().getSelectedIndex() orelse 0) orelse return;
             try self.session.navigate(route.withSearch(text) orelse return);
         }
 

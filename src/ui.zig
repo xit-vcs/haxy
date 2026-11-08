@@ -2385,6 +2385,8 @@ pub const Session = struct {
     // focus id -> the live TextInput, refreshed each frame by the views that own
     // inputs. web/wasm form handling looks widgets up here by focus id.
     text_inputs: std.AutoHashMapUnmanaged(usize, *wgt.TextInput) = .empty,
+    // focus id -> the url a search box's form posts to, so browsers without js can search
+    search_actions: std.AutoHashMapUnmanaged(usize, []const u8) = .empty,
     // a narrow list-detail view's way back to its list, set by its build. the
     // web presses it on the browser's back button.
     list_back: ?usize = null,
@@ -3416,6 +3418,7 @@ pub fn initRoot(allocator: std.mem.Allocator, page: *const Page, session: *Sessi
     // input-owning views build their TextInputs in init, so reset their
     // registrations here
     session.text_inputs.clearRetainingCapacity();
+    session.search_actions.clearRetainingCapacity();
 
     // without js the server's html shows this build as is. a min height would
     // stretch some child to fill it, so the page is only as tall as its content.

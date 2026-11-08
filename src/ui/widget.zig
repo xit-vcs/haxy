@@ -1148,6 +1148,9 @@ pub const Spacer = struct {
 pub const SearchBox = struct {
     text_input: wgt.TextInput,
     session: *ui.Session,
+    // where a browser without js posts the text. a url, since a route is too big
+    // to keep in a widget on the wasm stack.
+    action: []const u8,
 
     // the text width, narrowed toward the minimum when the row is tight
     const min_width = 18;
@@ -1156,12 +1159,13 @@ pub const SearchBox = struct {
     // the room the box asks its row for
     pub const min_size: layout.MaybeSize = .{ .width = min_width + 2, .height = 3 };
 
-    pub fn init(allocator: std.mem.Allocator, session: *ui.Session, label: []const u8, name: []const u8, text_value: ?[]const u8) !SearchBox {
-        var text_input = try wgt.TextInput.init(allocator, .{ .top_label = .{ .text = label }, .name = name, .round_corners = true, .visible_width = max_width, .render_content = session.is_terminal });
+    pub fn init(allocator: std.mem.Allocator, session: *ui.Session, label: []const u8, text_value: ?[]const u8, route: ui.RoutablePage) !SearchBox {
+        var text_input = try wgt.TextInput.init(allocator, .{ .top_label = .{ .text = label }, .name = "search", .round_corners = true, .visible_width = max_width, .render_content = session.is_terminal });
         errdefer text_input.deinit(allocator);
         text_input.getFocus().mode = .all;
         if (text_value) |value| try text_input.setContent(allocator, value);
-        return .{ .text_input = text_input, .session = session };
+        const action = if (session.is_terminal) "" else try route.toUrl(session.page_arena);
+        return .{ .text_input = text_input, .session = session, .action = action };
     }
 
     pub fn deinit(self: *SearchBox, allocator: std.mem.Allocator) void {
@@ -1176,6 +1180,7 @@ pub const SearchBox = struct {
         try self.text_input.build(allocator, constraint, root_focus);
         if (!self.session.is_terminal) {
             try self.session.text_inputs.put(self.session.arena.allocator(), self.getFocus().id, &self.text_input);
+            try self.session.search_actions.put(self.session.arena.allocator(), self.getFocus().id, self.action);
         }
     }
 
@@ -1377,9 +1382,9 @@ pub const SearchHeader = struct {
         session: *ui.Session,
         handle: ui.RepoHandle,
         label: []const u8,
-        name: []const u8,
         text: ?[]const u8,
         show_input: bool,
+        action: ui.RoutablePage,
     ) !SearchHeader {
         var scroll = try HeaderScroll.init(allocator, session);
         errdefer scroll.deinit(allocator);
@@ -1387,7 +1392,7 @@ pub const SearchHeader = struct {
 
         // the search box only appears where an index can serve it.
         if (show_input) {
-            var search_box = try SearchBox.init(allocator, session, label, name, text);
+            var search_box = try SearchBox.init(allocator, session, label, text, action);
             errdefer search_box.deinit(allocator);
             box.getFocus().child_id = search_box.getFocus().id;
             try box.children.put(allocator, search_box.getFocus().id, .{ .widget = .{ .search_box = search_box }, .rect = null, .min_size = SearchBox.min_size });

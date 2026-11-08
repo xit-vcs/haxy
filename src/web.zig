@@ -186,7 +186,7 @@ fn handleRequest(
         switch (host) {
             .server => |server| {
                 // "repo/new" and "user/new" come before "new", which would claim them
-                const PostRoute = enum { login, logout, @"repo/new", @"user/new", user, addkey, removekey, delete, settings, grant, revoke, promote, demote, protect, unprotect, default, new, edit, remove, open, close, resolve, publish, merge, squash, attach, assign, unassign, subscribe, mute, undo };
+                const PostRoute = enum { login, logout, @"repo/new", @"user/new", user, addkey, removekey, delete, settings, grant, revoke, promote, demote, protect, unprotect, default, new, edit, remove, open, close, resolve, publish, merge, squash, attach, assign, unassign, subscribe, mute, undo, search };
                 inline for (@typeInfo(PostRoute).@"enum".field_names) |name| {
                     const suffix = "/" ++ name;
                     if (std.mem.endsWith(u8, path, suffix)) {
@@ -223,12 +223,13 @@ fn handleRequest(
                             .unassign => handleUnassign(io, request, allocator, base, host),
                             .subscribe => handleNotify(io, request, allocator, base, host, server.users_dir, .subscribe),
                             .mute => handleNotify(io, request, allocator, base, host, server.users_dir, .mute),
+                            .search => handleSearch(request, allocator, base, host),
                         };
                     }
                 }
             },
             .local => |local| {
-                const PostRoute = enum { new, edit, remove, open, close, resolve, sync, attach, assign, unassign };
+                const PostRoute = enum { new, edit, remove, open, close, resolve, sync, attach, assign, unassign, search };
                 inline for (@typeInfo(PostRoute).@"enum".field_names) |name| {
                     const suffix = "/" ++ name;
                     if (std.mem.endsWith(u8, path, suffix)) {
@@ -244,6 +245,7 @@ fn handleRequest(
                             .attach => handleAttach(io, request, allocator, base, host),
                             .assign => handleAssign(io, request, allocator, base, host),
                             .unassign => handleUnassign(io, request, allocator, base, host),
+                            .search => handleSearch(request, allocator, base, host),
                         };
                     }
                 }
@@ -658,6 +660,24 @@ fn respondForbidden(request: *std.http.Server.Request) !void {
         .status = .forbidden,
         .keep_alive = false,
         .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+    });
+}
+
+// a search box's form, for browsers without js. its text joins the url the
+// form posts to, which names the list it searches or the files it finds in.
+fn handleSearch(request: *std.http.Server.Request, allocator: std.mem.Allocator, base: []const u8, host: Host) !void {
+    const body = try readFormBody(request, allocator);
+    defer allocator.free(body);
+    const text = try parseFormField(allocator, body, "search");
+    defer if (text) |value| allocator.free(value);
+
+    const route = routeFromUrl(host, base) orelse return request.respond("not found", .{ .status = .not_found });
+    const searched = route.withSearch(text orelse "") orelse route.withFind(text orelse "") orelse return request.respond("not found", .{ .status = .not_found });
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    try request.respond("", .{
+        .status = .see_other,
+        .extra_headers = &.{.{ .name = "location", .value = try searched.toUrl(&arena) }},
     });
 }
 
@@ -2558,7 +2578,7 @@ pub fn generateHtml(allocator: std.mem.Allocator, root: *ui.Widget, session: *ui
     try out.appendSlice(allocator, "<div class=\"grid-content\" data-key=\"panel:root\">");
     try renderPanel(allocator, &out, root_focus, grid, session, root_focus);
     try out.appendSlice(allocator, "</div>");
-    try renderForms(allocator, &out, root_focus);
+    try renderForms(allocator, &out, root_focus, session);
     return try out.toOwnedSlice(allocator);
 }
 
@@ -2894,7 +2914,10 @@ fn renderPanelControls(
                 var id_buf: [160]u8 = undefined;
                 try output.appendSlice(allocator, try std.fmt.bufPrint(&id_buf, "<input type=\"{s}\" data-key=\"control:{d}\" data-focus-id=\"{d}\"", .{ if (child.focus.kind == .text_input_password) "password" else "text", id, id }));
                 if (preserve) try output.appendSlice(allocator, " data-preserve-value") else try output.appendSlice(allocator, " readonly");
-                try appendFormAttribute(allocator, output, root_focus, id);
+                if (session.search_actions.contains(id)) {
+                    var form_buf: [64]u8 = undefined;
+                    try output.appendSlice(allocator, try std.fmt.bufPrint(&form_buf, " form=\"" ++ form_id_prefix ++ "{d}\"", .{id}));
+                } else try appendFormAttribute(allocator, output, root_focus, id);
                 if (ti.options.name.len > 0) {
                     try output.appendSlice(allocator, " name=\"");
                     try appendEscapedHtml(allocator, output, ti.options.name);
@@ -2953,7 +2976,7 @@ fn renderPanelControls(
 
 // emit hidden form owners beside the rendered panels. their controls point
 // back here with the standard HTML `form` attribute.
-fn renderForms(allocator: std.mem.Allocator, output: *std.ArrayList(u8), root_focus: *Focus) !void {
+fn renderForms(allocator: std.mem.Allocator, output: *std.ArrayList(u8), root_focus: *Focus, session: *ui.Session) !void {
     // the focus child map preserves insertion order, which matches the order
     // widgets were added in code
     var iter = root_focus.children.iterator();
@@ -2966,6 +2989,16 @@ fn renderForms(allocator: std.mem.Allocator, output: *std.ArrayList(u8), root_fo
         try output.appendSlice(allocator, try std.fmt.bufPrint(&id_buf, "{d}\" id=\"" ++ form_id_prefix ++ "{d}\" action=\"", .{ entry.key_ptr.*, entry.key_ptr.* }));
         try appendEscapedHtml(allocator, output, action_url);
         try output.appendSlice(allocator, "\" method=\"post\"></form>");
+    }
+    // a search box's own form, which posts its text to the page it searches.
+    // only browsers without js parse noscript, so with js the box has no form
+    // and the TUI handles its keys.
+    var search_iter = session.search_actions.iterator();
+    while (search_iter.next()) |entry| {
+        var id_buf: [96]u8 = undefined;
+        try output.appendSlice(allocator, try std.fmt.bufPrint(&id_buf, "<noscript data-key=\"search:{d}\"><form id=\"" ++ form_id_prefix ++ "{d}\" action=\"", .{ entry.key_ptr.*, entry.key_ptr.* }));
+        try appendEscapedHtml(allocator, output, entry.value_ptr.*);
+        try output.appendSlice(allocator, "/search\" method=\"post\"></form></noscript>");
     }
 }
 

@@ -993,9 +993,10 @@ pub fn appendDetails(_: *const Self, allocator: std.mem.Allocator, box: *wgt.Box
 
 // tabs switching between the patches page's views
 pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *const Self) !Header {
-    var header = try Header.init(allocator, session, data.search, " search ");
-    errdefer header.deinit(allocator);
     const selected_index = View.viewIndex(data.view);
+    const action = View.searchListRoute(data.identity, selected_index) orelse return error.RouteTooLong;
+    var header = try Header.init(allocator, session, data.search, " search ", action);
+    errdefer header.deinit(allocator);
     const page_selected = std.meta.activeTag(session.data.current_page) == .repo_patches;
 
     // a list tab per status, labeled with its listing's patch count

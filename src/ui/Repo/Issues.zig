@@ -388,9 +388,10 @@ const conflicts_tab_label = "conflicts";
 
 // tabs switching between the issues page's views
 pub fn initHeader(allocator: std.mem.Allocator, session: *ui.Session, data: *const Self) !Header {
-    var header = try Header.init(allocator, session, data.search, if (data.assignee_unknown) " search (assignee not found) " else " search ");
-    errdefer header.deinit(allocator);
     const selected_index = View.viewIndex(data.view);
+    const action = View.searchListRoute(data.identity, selected_index) orelse return error.RouteTooLong;
+    var header = try Header.init(allocator, session, data.search, if (data.assignee_unknown) " search (assignee not found) " else " search ", action);
+    errdefer header.deinit(allocator);
     const page_selected = std.meta.activeTag(session.data.current_page) == .repo_issues;
 
     // a list tab per status, labeled with its listing's issue count

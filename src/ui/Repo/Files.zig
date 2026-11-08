@@ -390,7 +390,7 @@ pub const View = struct {
 
         // the search box and the clone url at the top. local mode has neither.
         if (session.data.host_kind == .server) {
-            var header_view = try ui.widget.SearchHeader.init(allocator, session, data.handle, " find file ", "find", data.find, data.find_available);
+            var header_view = try ui.widget.SearchHeader.init(allocator, session, data.handle, " find file ", data.find, data.find_available, data.filesRoute("", 0) orelse return error.RouteTooLong);
             errdefer header_view.deinit(allocator);
             // a row taller than the header, leaving a blank line beneath it
             try outer.children.put(allocator, header_view.getFocus().id, .{ .widget = .{ .search_header = header_view }, .rect = null, .min_size = .{ .width = null, .height = 4 } });
