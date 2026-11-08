@@ -560,6 +560,8 @@ fn deliverEach(
         const thread_id = try evt.parseEventId(&created.thread_id);
         const Titled = struct { event: struct { title: []const u8 } };
         const thread_kind = (try evt.readEventKind(repo_opts.hash, kinds, &thread_id)) orelse continue;
+        // nobody can open a thread in a hidden tab
+        if (repo_record.event.threadRole(thread_kind) == null) continue;
         const thread = (switch (thread_kind) {
             .issue => try evt.readRecordSubset(evt.Issue, Titled, DB, repo_opts.hash, haxy_moment, &arena, &thread_id),
             .patch => try evt.readRecordSubset(evt.Patch, Titled, DB, repo_opts.hash, haxy_moment, &arena, &thread_id),
