@@ -2473,10 +2473,11 @@ fn renderPage(
     // block, whose content is raw text terminated only by "</script". in json,
     // '<' appears solely inside string values, so escaping every '<' (and '>'
     // for good measure) to its \uXXXX form yields equivalent json that can't
-    // break out of the tag.
+    // break out of the tag. a frontend's template may leave it out.
+    const json_token = "{{{ HAXY_JSON }}}";
     var json: std.Io.Writer.Allocating = .init(allocator);
     defer json.deinit();
-    try std.json.Stringify.value(snapshot, .{}, &json.writer);
+    if (json_only or std.mem.indexOf(u8, template, json_token) != null) try std.json.Stringify.value(snapshot, .{}, &json.writer);
     if (json_only) return try json.toOwnedSlice();
 
     // a frontend's template may leave out the html
@@ -2505,7 +2506,7 @@ fn renderPage(
         var cursor: usize = 0;
         for (&[_]struct { needle: []const u8, replacement: []const u8 }{
             .{ .needle = html_token, .replacement = content },
-            .{ .needle = "{{{ HAXY_JSON }}}", .replacement = json_escaped.items },
+            .{ .needle = json_token, .replacement = json_escaped.items },
         }) |sub| {
             const idx = std.mem.indexOfPos(u8, template, cursor, sub.needle) orelse continue;
             try out.appendSlice(allocator, template[cursor..idx]);
