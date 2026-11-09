@@ -684,6 +684,16 @@ fn drainConnection(conn: *Conn) void {
     // push even though the ref updated. draining to EOF leaves nothing
     // unread, so we send a clean FIN. the bytes don't matter, and the host's
     // watchdog bounds how long a peer can keep this going.
+    while (true) {
+        const packet = readSessionPacket(conn) catch break;
+        defer conn.allocator.free(packet);
+        // a multiplexing client is reusing the connection. hang up so it
+        // reconnects instead of waiting on a channel that never opens.
+        if (packet[0] == SSH_MSG_CHANNEL_OPEN) {
+            disconnect(conn, SSH_DISCONNECT_BY_APPLICATION, "one session per connection") catch {};
+            break;
+        }
+    }
     _ = conn.reader.discardRemaining() catch {};
     conn.drained = true;
 }
