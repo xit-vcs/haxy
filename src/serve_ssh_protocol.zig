@@ -431,7 +431,8 @@ pub const SessionCtx = struct {
         self.conn.read_timeout = probe_timeout.toDeadline(self.conn.io);
         defer self.conn.read_timeout = .none;
         self.processOneBackgroundPacket() catch |err| switch (err) {
-            error.Timeout => return false,
+            // a probe that couldn't run says nothing about the peer
+            error.Timeout, error.ConcurrencyUnavailable => return false,
             else => {
                 // the session reports this cause rather than the cancellation
                 self.read_err = err;
@@ -1779,7 +1780,11 @@ fn runAuth(conn: *Conn) !ClientKey {
         const algo = try takeString(&req_reader, 64);
         const pubkey_blob = try takeString(&req_reader, 4096);
 
-        if (firstCommonName(algo, &our_userauth_algos) == null) {
+        // a single name, not a name-list
+        const supported = for (our_userauth_algos) |ours| {
+            if (std.mem.eql(u8, algo, ours)) break true;
+        } else false;
+        if (!supported) {
             try sendUserauthFailure(conn);
             continue;
         }
@@ -1938,6 +1943,8 @@ fn verifyEcdsa(comptime Ecdsa: type, comptime curve: []const u8, pubkey_blob: []
     const point = try takeString(&pubkey_reader, 256);
     // the fingerprint hashes the whole blob, so it must hold nothing else
     if (pubkey_reader.bufferedLen() != 0) return false;
+    // uncompressed only, so one key has one encoding
+    if (point.len == 0 or point[0] != 4) return false;
 
     // parse signature_blob: string algo || string (mpint r || mpint s)
     var sig_reader = std.Io.Reader.fixed(signature_blob);
