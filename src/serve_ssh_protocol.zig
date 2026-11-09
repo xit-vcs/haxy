@@ -1,10 +1,11 @@
 //! In-process SSH server: full server side of SSH-2 for haxy's use case.
 //!
 //! handles, per connection: version exchange, KEXINIT, curve25519 key
-//! exchange, NEWKEYS, key derivation, chacha20-poly1305 packet codec,
+//! exchange (optionally hybrid with mlkem768), NEWKEYS, key derivation,
+//! chacha20-poly1305 packet codec,
 //! strict kex (Terrapin mitigation), client-initiated rekeying,
-//! ssh-userauth service request, publickey authentication (ed25519 and
-//! rsa-sha2; captures the SHA256 fingerprint of the verified key), channel-layer
+//! ssh-userauth service request, publickey authentication (ed25519, rsa-sha2
+//! and ecdsa; captures the SHA256 fingerprint of the verified key), channel-layer
 //! requests (pty-req, env, window-change, shell, exec), CHANNEL_DATA
 //! flow with sender/receiver windows, and clean teardown
 //! (exit-status / EOF / CLOSE).
@@ -21,7 +22,7 @@
 //!   HostKey          — generated or loaded once at startup.
 //!
 //! hardcoded choices to keep the implementation small:
-//!   KEX:       curve25519-sha256 (RFC 8731)
+//!   KEX:       mlkem768x25519-sha256, curve25519-sha256 (RFC 8731)
 //!   host key:  ssh-ed25519       (RFC 8709)
 //!   cipher:    chacha20-poly1305@openssh.com (RFC 4253 + openssh extension)
 //!   MAC:       none (implicit in AEAD)
@@ -938,6 +939,11 @@ pub const KexTransport = union(enum) {
                 },
                 .encrypted => |ciphers| try ciphers.cs.readPacket(allocator, reader),
             };
+            // the peer is hanging up, same as a transport close
+            if (packet[0] == SSH_MSG_DISCONNECT) {
+                allocator.free(packet);
+                return error.EndOfStream;
+            }
             if (isIgnorableMsg(packet[0])) {
                 allocator.free(packet);
                 if (strict) return error.StrictKexViolation;
@@ -1922,12 +1928,15 @@ fn verifyRsa(comptime Hash: type, algo: []const u8, pubkey_blob: []const u8, sig
     var sig_reader = std.Io.Reader.fixed(signature_blob);
     if (!std.mem.eql(u8, try takeString(&sig_reader, 64), algo)) return false;
     const sig = try takeString(&sig_reader, 1024);
-    if (sig.len != n.len) return false;
+    if (sig.len > n.len) return false;
 
     const pk = rsa.PublicKey.fromBytes(e, n) catch return false;
     switch (n.len) {
         inline 256, 384, 512 => |len| {
-            rsa.PKCS1v1_5Signature.verify(len, sig[0..len], signed, pk, Hash) catch return false;
+            // some clients strip leading zero bytes (RFC 8332 §3)
+            var padded: [len]u8 = @splat(0);
+            @memcpy(padded[len - sig.len ..], sig);
+            rsa.PKCS1v1_5Signature.verify(len, &padded, signed, pk, Hash) catch return false;
             return true;
         },
         else => return false,
