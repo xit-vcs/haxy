@@ -28,7 +28,8 @@
 //!   MAC:       none (implicit in AEAD)
 //!   compress:  none
 //!   user auth: publickey + ssh-ed25519, rsa-sha2-512, rsa-sha2-256,
-//!              ecdsa-sha2-nistp256, ecdsa-sha2-nistp384 (RFC 5656)
+//!              ecdsa-sha2-nistp256, ecdsa-sha2-nistp384 (RFC 5656),
+//!              sk-ssh-ed25519, sk-ecdsa-sha2-nistp256 (openssh PROTOCOL.u2f)
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -1085,7 +1086,7 @@ const MLKem768 = std.crypto.kem.ml_kem.MLKem768;
 const hybrid_client_blob_len = MLKem768.PublicKey.encoded_length + X25519.public_length; // 1216
 const hybrid_server_blob_len = MLKem768.ciphertext_length + X25519.public_length; // 1120
 pub const our_host_key_algos = [_][]const u8{"ssh-ed25519"};
-pub const our_userauth_algos = [_][]const u8{ "ssh-ed25519", "rsa-sha2-512", "rsa-sha2-256", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384" };
+pub const our_userauth_algos = [_][]const u8{ "ssh-ed25519", "rsa-sha2-512", "rsa-sha2-256", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", sk_ed25519_algo, sk_ecdsa_algo };
 pub const our_ciphers = [_][]const u8{"chacha20-poly1305@openssh.com"};
 const our_macs = [_][]const u8{}; // none — implicit in the AEAD cipher
 const our_compression = [_][]const u8{"none"};
@@ -1884,7 +1885,79 @@ fn verifyUserauthSignature(
     if (std.mem.eql(u8, algo, "rsa-sha2-256")) return verifyRsa(Sha256, algo, pubkey_blob, signature_blob, signed.items);
     if (std.mem.eql(u8, algo, "ecdsa-sha2-nistp256")) return verifyEcdsa(ecdsa.EcdsaP256Sha256, "nistp256", pubkey_blob, signature_blob, signed.items);
     if (std.mem.eql(u8, algo, "ecdsa-sha2-nistp384")) return verifyEcdsa(ecdsa.EcdsaP384Sha384, "nistp384", pubkey_blob, signature_blob, signed.items);
+    if (std.mem.eql(u8, algo, sk_ed25519_algo)) return verifySkEd25519(pubkey_blob, signature_blob, signed.items);
+    if (std.mem.eql(u8, algo, sk_ecdsa_algo)) return verifySkEcdsa(pubkey_blob, signature_blob, signed.items);
     return false;
+}
+
+// FIDO security keys (openssh PROTOCOL.u2f)
+const sk_ed25519_algo = "sk-ssh-ed25519@openssh.com";
+const sk_ecdsa_algo = "sk-ecdsa-sha2-nistp256@openssh.com";
+const sk_user_present: u8 = 0x01;
+const sk_signed_len = Sha256.digest_length + 1 + 4 + Sha256.digest_length;
+
+// what a security key signs: SHA256(application) || flags || counter ||
+// SHA256(signed). the flags and counter trail the signature. null unless the
+// key was touched.
+fn skSignedData(application: []const u8, sig_reader: *std.Io.Reader, signed: []const u8) !?[sk_signed_len]u8 {
+    const flags = try sig_reader.takeByte();
+    const counter = try sig_reader.takeArray(4);
+    if (sig_reader.bufferedLen() != 0) return null;
+    if (flags & sk_user_present == 0) return null;
+
+    var out: [sk_signed_len]u8 = undefined;
+    Sha256.hash(application, out[0..32], .{});
+    out[32] = flags;
+    out[33..37].* = counter.*;
+    Sha256.hash(signed, out[37..], .{});
+    return out;
+}
+
+fn verifySkEd25519(pubkey_blob: []const u8, signature_blob: []const u8, signed: []const u8) !bool {
+    // parse pubkey_blob: string algo || string raw_pubkey || string application
+    var pubkey_reader = std.Io.Reader.fixed(pubkey_blob);
+    if (!std.mem.eql(u8, try takeString(&pubkey_reader, 64), sk_ed25519_algo)) return false;
+    const raw_pubkey = try takeString(&pubkey_reader, 64);
+    if (raw_pubkey.len != Ed25519.PublicKey.encoded_length) return false;
+    const application = try takeString(&pubkey_reader, 256);
+    // the fingerprint hashes the whole blob, so it must hold nothing else
+    if (pubkey_reader.bufferedLen() != 0) return false;
+
+    // parse signature_blob: string algo || string raw_signature || byte flags || uint32 counter
+    var sig_reader = std.Io.Reader.fixed(signature_blob);
+    if (!std.mem.eql(u8, try takeString(&sig_reader, 64), sk_ed25519_algo)) return false;
+    const raw_sig = try takeString(&sig_reader, Ed25519.Signature.encoded_length);
+    if (raw_sig.len != Ed25519.Signature.encoded_length) return false;
+    const sk_signed = try skSignedData(application, &sig_reader, signed) orelse return false;
+
+    const pk = Ed25519.PublicKey.fromBytes(raw_pubkey[0..Ed25519.PublicKey.encoded_length].*) catch return false;
+    const sig = Ed25519.Signature.fromBytes(raw_sig[0..Ed25519.Signature.encoded_length].*);
+    sig.verify(&sk_signed, pk) catch return false;
+    return true;
+}
+
+fn verifySkEcdsa(pubkey_blob: []const u8, signature_blob: []const u8, signed: []const u8) !bool {
+    const Ecdsa = ecdsa.EcdsaP256Sha256;
+    // parse pubkey_blob: string algo || string curve || string point || string application
+    var pubkey_reader = std.Io.Reader.fixed(pubkey_blob);
+    if (!std.mem.eql(u8, try takeString(&pubkey_reader, 64), sk_ecdsa_algo)) return false;
+    if (!std.mem.eql(u8, try takeString(&pubkey_reader, 64), "nistp256")) return false;
+    const point = try takeString(&pubkey_reader, 256);
+    const application = try takeString(&pubkey_reader, 256);
+    // the fingerprint hashes the whole blob, so it must hold nothing else
+    if (pubkey_reader.bufferedLen() != 0) return false;
+    // uncompressed only, so one key has one encoding
+    if (point.len == 0 or point[0] != 4) return false;
+
+    // parse signature_blob: string algo || string (mpint r || mpint s) || byte flags || uint32 counter
+    var sig_reader = std.Io.Reader.fixed(signature_blob);
+    if (!std.mem.eql(u8, try takeString(&sig_reader, 64), sk_ecdsa_algo)) return false;
+    const sig = try ecdsaSignature(Ecdsa, try takeString(&sig_reader, 256)) orelse return false;
+    const sk_signed = try skSignedData(application, &sig_reader, signed) orelse return false;
+
+    const pk = Ecdsa.PublicKey.fromSec1(point) catch return false;
+    sig.verify(&sk_signed, pk) catch return false;
+    return true;
 }
 
 fn verifyEd25519(pubkey_blob: []const u8, signature_blob: []const u8, signed: []const u8) !bool {
@@ -1958,21 +2031,26 @@ fn verifyEcdsa(comptime Ecdsa: type, comptime curve: []const u8, pubkey_blob: []
     // parse signature_blob: string algo || string (mpint r || mpint s)
     var sig_reader = std.Io.Reader.fixed(signature_blob);
     if (!std.mem.eql(u8, try takeString(&sig_reader, 64), algo)) return false;
-    var rs_reader = std.Io.Reader.fixed(try takeString(&sig_reader, 256));
-    const r = canonicalMpintMagnitude(try takeString(&rs_reader, 128)) orelse return false;
-    const s = canonicalMpintMagnitude(try takeString(&rs_reader, 128)) orelse return false;
-    if (rs_reader.bufferedLen() != 0) return false;
+    const sig = try ecdsaSignature(Ecdsa, try takeString(&sig_reader, 256)) orelse return false;
 
-    // r and s become fixed-width big-endian halves of the signature
+    const pk = Ecdsa.PublicKey.fromSec1(point) catch return false;
+    sig.verify(signed, pk) catch return false;
+    return true;
+}
+
+// mpint r || mpint s as the fixed-width big-endian halves of a signature
+fn ecdsaSignature(comptime Ecdsa: type, rs: []const u8) !?Ecdsa.Signature {
+    var rs_reader = std.Io.Reader.fixed(rs);
+    const r = canonicalMpintMagnitude(try takeString(&rs_reader, 128)) orelse return null;
+    const s = canonicalMpintMagnitude(try takeString(&rs_reader, 128)) orelse return null;
+    if (rs_reader.bufferedLen() != 0) return null;
+
     const half = Ecdsa.Signature.encoded_length / 2;
-    if (r.len > half or s.len > half) return false;
+    if (r.len > half or s.len > half) return null;
     var sig_bytes: [Ecdsa.Signature.encoded_length]u8 = @splat(0);
     @memcpy(sig_bytes[half - r.len .. half], r);
     @memcpy(sig_bytes[2 * half - s.len ..], s);
-
-    const pk = Ecdsa.PublicKey.fromSec1(point) catch return false;
-    Ecdsa.Signature.fromBytes(sig_bytes).verify(signed, pk) catch return false;
-    return true;
+    return Ecdsa.Signature.fromBytes(sig_bytes);
 }
 
 // the unsigned bytes of a positive mpint in its shortest encoding (RFC 4251
