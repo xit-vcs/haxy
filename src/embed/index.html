@@ -5,22 +5,21 @@
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>HAXY</title>
         <style>
+          /* ghostty's belafonte day */
           html {
-            --bg: rgba(0, 50, 70, 1.0);
-            --fg: rgba(200, 200, 200, 1.0);
-            /* the height of the font's box-drawing characters */
+            --bg: #d5ccba;
+            --fg: #45373c;
+            /* the font's box-drawing height */
             --row: 19px;
             background-color: var(--bg);
             color: var(--fg);
           }
 
-          /* no body margin because it could push content past the viewport and
-             add a window scrollbar */
           body {
             margin: 0;
           }
 
-          /* pages only download the full file if they need a character outside the core */
+          /* the full file loads only for runes outside the core */
           @font-face {
             font-family: 'Haxy Mono';
             src: url('/HaxyMono-Core.woff2') format('woff2');
@@ -38,14 +37,12 @@
             /* 10px columns */
             font-size: 16.6667px;
             line-height: var(--row);
-            /* keep -> and != as typed */
             font-variant-ligatures: none;
             position: relative;
           }
 
           #grid {
             white-space: pre;
-            /* positioning context for the top-level .scroll divs */
             position: relative;
           }
 
@@ -59,27 +56,19 @@
             position: relative;
           }
 
-          /* js sizes the panes to the window; without it the page is as tall
-             as its content and the browser scrolls it */
+          /* js sizes the panes to the window, without it the page scrolls */
           html.js body:has(#grid .scroll:not([data-scroll-direction="horiz"])) {
             height: 100vh;
             overflow: hidden;
           }
 
-          /* each web-native Scroll widget: a box positioned over its viewport
-             (left/top/width/height and per-axis overflow come inline, the latter
-             from the widget's scroll direction) */
           .scroll {
             position: absolute;
-            /* scrollbars are hidden; panes scroll via wheel/trackpad and via
-               scrollIntoView on keyboard focus, so a visible bar would only
-               cover content. (Firefox / WebKit respectively.) */
             scrollbar-width: none;
           }
           .scroll::-webkit-scrollbar {
             display: none;
           }
-          /* code blocks hide theirs too */
           .page textarea[readonly] {
             scrollbar-width: none;
           }
@@ -87,29 +76,24 @@
             display: none;
           }
 
-          /* render each colored cell-run as an inline-block to prevent
-             horizontal seams between rows of the block art. */
+          /* prevents seams between rows of block art */
           #grid span,
           #grid a {
             display: inline-block;
             vertical-align: top;
           }
 
-          /* a double-width rune pinned to its two grid cells so its advance
-             width can't shift the rest of the row. */
           #grid .w2 {
             width: 2ch;
             overflow: hidden;
           }
 
-          /* box-drawing runs, left out of a selection so copied text skips
-             the borders around it */
+          /* keeps borders out of copied text */
           #grid .b {
             user-select: none;
             -webkit-user-select: none;
           }
 
-          /* native controls are positioned over the matching TUI cells. */
           .page input,
           .page textarea,
           .page button {
@@ -128,16 +112,12 @@
             border: none;
           }
 
-          /* the TUI border cells own the frame, so the textarea can't be
-             drag-resized past them */
           .page textarea {
             resize: none;
             overflow-y: auto;
           }
 
-          /* the TUI cells under the button render the border + label;
-             the native button stays transparent so they show through
-             and just owns the click + form-submit behavior. */
+          /* the TUI cells under it draw the button */
           .page button {
             background: transparent;
             color: transparent;
@@ -158,7 +138,6 @@
             text-decoration: underline;
           }
         </style>
-        <!-- tells the css that js runs -->
         <script>document.documentElement.classList.add("js");</script>
     </head>
     <body>
