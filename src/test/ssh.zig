@@ -84,7 +84,6 @@ test "channel close is acknowledged once, unlike channel EOF or transport EOF" {
         try std.testing.expectEqual(.close, std.meta.activeTag(event));
         try std.testing.expectError(error.RemoteClosed, ctx.sess.writeBytes("late output"));
         try ctx.sess.exit(0);
-        try ctx.sess.exit(0);
         var output = std.Io.Reader.fixed(ctx.writer.buffered());
         var receiver = proto.Cipher.init(&TestSession.key, 0);
         if (message != null) {
@@ -961,7 +960,7 @@ const ServerTask = struct {
     captured_exec_len: usize = 0,
     result: ?anyerror = null,
 
-    pub fn handleSession(self: *ServerTask, sess: *proto.SessionCtx, request: proto.Request) !void {
+    pub fn handleSession(self: *ServerTask, sess: *proto.SessionCtx, request: proto.Request) !u32 {
         @memcpy(&self.captured_fp, &sess.fingerprint);
         switch (request) {
             .exec => |exec| {
@@ -972,6 +971,7 @@ const ServerTask = struct {
             },
             .shell => {},
         }
+        return 0;
     }
 
     fn run(self: *ServerTask) void {

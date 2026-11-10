@@ -41,8 +41,8 @@ pub const SessionHandler = struct {
     max_repo_size: ?u64,
     err: *std.Io.Writer,
 
-    /// returning without an exit leaves the protocol layer to send status 0
-    pub fn handleSession(self: *const SessionHandler, sess: *ssh.SessionCtx, request: ssh.Request) !void {
+    /// returns the session's exit status
+    pub fn handleSession(self: *const SessionHandler, sess: *ssh.SessionCtx, request: ssh.Request) !u32 {
         const io = sess.conn.io;
         const start = std.Io.Timestamp.now(io, .awake);
         switch (request) {
@@ -57,8 +57,7 @@ pub const SessionHandler = struct {
             const line = std.fmt.bufPrint(&buf, "haxy ssh: {s}\n", .{@errorName(e)}) catch "haxy ssh: internal error\n";
             sess.writeStderr(line) catch {};
         };
-        // haxy only closes a session itself to refuse it
-        const status: u32 = if (failure != null or sess.closed) 1 else 0;
+        const status: u32 = result catch 1;
         serve_common.logError(io, self.err, "ssh session end: ip={f} kind={s} status={d} duration={f} in={d} out={d}{s}{s}\n", .{
             sess.conn.peer,
             @tagName(request),
@@ -72,7 +71,7 @@ pub const SessionHandler = struct {
         return result;
     }
 
-    fn runSession(self: *const SessionHandler, sess: *ssh.SessionCtx, request: ssh.Request) !void {
+    fn runSession(self: *const SessionHandler, sess: *ssh.SessionCtx, request: ssh.Request) !u32 {
         switch (request) {
             .shell => |shell| {
                 const pty = shell.pty orelse {
@@ -81,15 +80,13 @@ pub const SessionHandler = struct {
                     // exit non-zero.
                     logRefusal(self, sess, "shell without a pty");
                     try sess.writeBytes("haxy ssh: this server only serves the TUI when a pty is allocated (use a normal `ssh` invocation).\r\n");
-                    try sess.exit(1);
-                    return;
+                    return 1;
                 };
-                sess.exemptFromIdleTimeout();
-                try runTuiSession(self, sess, pty, shell.color);
+                // users idle in a TUI legitimately
+                sess.conn.idle.phase.store(.interactive, .release);
+                return runTuiSession(self, sess, pty, shell.color);
             },
-            .exec => |exec| {
-                try runGitSession(self, sess, exec);
-            },
+            .exec => |exec| return runGitSession(self, sess, exec),
         }
     }
 };
@@ -146,7 +143,7 @@ pub fn runListener(
             ) catch |session_err| {
                 // a session logs its own end, and hanging up before one
                 // starts is mostly scanners
-                if (connection.idle_state.session_started.load(.acquire)) return;
+                if (connection.idle_state.phase.load(.acquire) != .presession) return;
                 switch (session_err) {
                     error.EndOfStream, error.UnexpectedEof, error.ReadFailed, error.WriteFailed => {},
                     else => serve_common.logError(ctx.io, ctx.err, "ssh connect failed: ip={f} error={s}\n", .{ peer, @errorName(session_err) }),
@@ -182,33 +179,39 @@ pub const Watchdog = struct {
         stream: *const std.Io.net.Stream,
         idle_state: ssh.IdleState = .{},
         // tick state, touched only by the watchdog
+        phase: ssh.IdleState.Phase = .presession,
+        // ticks counted against the phase's deadline
+        ticks: u32 = 0,
         last_seen: u64 = 0,
-        presession_ticks: u32 = 0,
-        idle_ticks: u32 = 0,
-        closing_ticks: u32 = 0,
 
-        // interactive sessions are exempt only from the idle timeout, so a
-        // stalled teardown can still be broken
         fn timedOut(self: *Connection) bool {
-            if (self.idle_state.closing.load(.acquire)) {
-                self.closing_ticks += 1;
-                return self.closing_ticks >= close_drain_timeout_ticks;
+            const phase = self.idle_state.phase.load(.acquire);
+            if (phase != self.phase) {
+                self.phase = phase;
+                self.ticks = 0;
             }
-            if (!self.idle_state.session_started.load(.acquire)) {
-                self.presession_ticks += 1;
-                return self.presession_ticks >= presession_timeout_ticks;
+            switch (phase) {
+                .presession => {
+                    self.ticks += 1;
+                    return self.ticks >= presession_timeout_ticks;
+                },
+                .session => {
+                    // our own work between packets is not the peer idling
+                    const seen = self.idle_state.activity.load(.acquire);
+                    defer self.last_seen = seen;
+                    if (self.idle_state.waiting.load(.acquire) and seen == self.last_seen) {
+                        self.ticks += 1;
+                    } else {
+                        self.ticks = 0;
+                    }
+                    return self.ticks >= idle_timeout_ticks;
+                },
+                .interactive => return false,
+                .closing => {
+                    self.ticks += 1;
+                    return self.ticks >= close_drain_timeout_ticks;
+                },
             }
-            if (self.idle_state.exempt.load(.acquire)) return false;
-
-            // our own work between packets is not the peer idling
-            const seen = self.idle_state.activity.load(.acquire);
-            defer self.last_seen = seen;
-            if (self.idle_state.waiting.load(.acquire) and seen == self.last_seen) {
-                self.idle_ticks += 1;
-            } else {
-                self.idle_ticks = 0;
-            }
-            return self.idle_ticks >= idle_timeout_ticks;
         }
     };
 
@@ -238,7 +241,7 @@ pub const Watchdog = struct {
     }
 };
 
-fn runTuiSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh.PtySize, color: bool) !void {
+fn runTuiSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh.PtySize, color: bool) !u32 {
     // runTui owns the terminal, whose deinit restores the client's screen and
     // runs as the function unwinds — so any error it returns leaves the TUI torn
     // down and we can surface the failure on the restored screen before exiting.
@@ -248,8 +251,9 @@ fn runTuiSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh
         var buf: [256]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "haxy ssh: {s}\r\n", .{@errorName(err)}) catch "haxy ssh: internal error\r\n";
         sess.writeBytes(msg) catch {};
-        try sess.exit(1);
+        return 1;
     };
+    return 0;
 }
 
 fn runTui(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh.PtySize, color: bool) !void {
@@ -294,7 +298,7 @@ fn runTui(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh.PtySiz
     // the terminal's deinit writes leave-alt / show-cursor / disable-mouse and
     // flushes, restoring the client's screen. as a function-scoped defer it runs
     // before runTui returns — on the normal path and on any error — so the
-    // caller can write to the client afterward (and sess.exit can close cleanly).
+    // caller can write to the client afterward (and the session can close cleanly).
     var terminal_maybe: ?StreamTerminal = try StreamTerminal.init(allocator, &session_writer.interface, terminal_size);
     defer if (terminal_maybe) |*terminal| terminal.deinit();
 
@@ -409,7 +413,7 @@ const ParsedGitCommand = struct {
     }
 };
 
-fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, exec: ssh.Request.Exec) !void {
+fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, exec: ssh.Request.Exec) !u32 {
     const allocator = sess.conn.allocator;
     const io = sess.conn.io;
     const protocol_version = xit.net_server_common.parseProtocolVersion(exec.git_protocol);
@@ -471,6 +475,7 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, exec: ss
             }, pusher.author, &pusher.user_id, handler.server, handler.max_repo_size, handler.err, sess),
         },
     }
+    return 0;
 }
 
 // push to a repo that doesn't exist yet, creating it in the hash format the
@@ -483,7 +488,7 @@ fn runCreatingPush(
     protocol_version: xit.net_server_common.ProtocolVersion,
     reader: *std.Io.Reader,
     writer: *std.Io.Writer,
-) !void {
+) !u32 {
     const allocator = sess.conn.allocator;
     const io = sess.conn.io;
 
@@ -492,7 +497,7 @@ fn runCreatingPush(
     try xit.net_server_receive_pack.advertiseUncreated(.xit, writer, .{ .protocol_version = protocol_version });
     try writer.flush();
     // a client with nothing to push creates nothing
-    const hash_kind = (try xit.net_server_receive_pack.peekObjectFormat(reader)) orelse return;
+    const hash_kind = (try xit.net_server_receive_pack.peekObjectFormat(reader)) orelse return 0;
 
     const location = evt.createRepo(io, allocator, handler.server.users_dir, &creator.owner_id, creator.owner, name, "", .private, hash_kind, null) catch |err| switch (err) {
         error.NameTaken => return writeError(handler, sess, "repo was just created by another push, try again"),
@@ -509,6 +514,7 @@ fn runCreatingPush(
             try push.receivePackAndConsume(repo.self_repo_opts, io, allocator, &repo, reader, writer, .{ .protocol_version = protocol_version, .is_stateless = true, .pseudo_ref = .{ .name = push.clear_undo_ref, .deletable = true } }, creator.owner, &creator.owner_id, handler.server, handler.max_repo_size, handler.err, sess);
         },
     }
+    return 0;
 }
 
 // serve a patch draft: anyone may fetch it, only its author may push to it
@@ -520,7 +526,7 @@ fn runForkSession(
     protocol_version: xit.net_server_common.ProtocolVersion,
     reader: *std.Io.Reader,
     writer: *std.Io.Writer,
-) !void {
+) !u32 {
     const allocator = sess.conn.allocator;
     const io = sess.conn.io;
 
@@ -593,6 +599,7 @@ fn runForkSession(
             },
         }
     }
+    return 0;
 }
 
 fn parseGitCommand(allocator: std.mem.Allocator, command: []const u8) !ParsedGitCommand {
@@ -733,26 +740,27 @@ fn logRefusal(handler: *const SessionHandler, sess: *ssh.SessionCtx, reason: []c
     serve_common.logError(sess.conn.io, handler.err, "ssh refused: ip={f} key={s} reason=\"{s}\"\n", .{ sess.conn.peer, sess.fingerprint, reason });
 }
 
-fn writeError(handler: *const SessionHandler, sess: *ssh.SessionCtx, comptime msg: []const u8) !void {
+// the refusals below return the exit status to hand back
+fn writeError(handler: *const SessionHandler, sess: *ssh.SessionCtx, comptime msg: []const u8) !u32 {
     logRefusal(handler, sess, msg);
     const body = "ERR haxy ssh: " ++ msg;
     var packet: [body.len + 4]u8 = undefined;
     const line = try std.fmt.bufPrint(&packet, "{x:0>4}{s}", .{ packet.len, body });
     try sess.writeBytes(line);
-    try sess.exit(1);
+    return 1;
 }
 
 // git-lfs shows the command's stderr, not git's ERR packet
-fn writeLfsError(handler: *const SessionHandler, sess: *ssh.SessionCtx) !void {
+fn writeLfsError(handler: *const SessionHandler, sess: *ssh.SessionCtx) !u32 {
     const msg = "Git LFS isn't supported";
     logRefusal(handler, sess, msg);
     try sess.writeStderr("haxy ssh: " ++ msg ++ "\n");
-    try sess.exit(1);
+    return 1;
 }
 
 // a refusal naming the key the client presented. a key on no account gets its
 // own message, since clients send whichever key they offer first.
-fn writeKeyError(handler: *const SessionHandler, sess: *ssh.SessionCtx, comptime msg: []const u8) !void {
+fn writeKeyError(handler: *const SessionHandler, sess: *ssh.SessionCtx, comptime msg: []const u8) !u32 {
     const known = known: {
         const io = sess.conn.io;
         const allocator = sess.conn.allocator;
@@ -765,13 +773,13 @@ fn writeKeyError(handler: *const SessionHandler, sess: *ssh.SessionCtx, comptime
 }
 
 // an error line ending with the presented key's fingerprint
-fn writeFingerprintError(handler: *const SessionHandler, sess: *ssh.SessionCtx, comptime msg: []const u8) !void {
+fn writeFingerprintError(handler: *const SessionHandler, sess: *ssh.SessionCtx, comptime msg: []const u8) !u32 {
     logRefusal(handler, sess, msg);
     const prefix = "ERR haxy ssh: " ++ msg ++ " (key ";
     var packet: [4 + prefix.len + ssh.fingerprint_len + 1]u8 = undefined;
     const line = try std.fmt.bufPrint(&packet, "{x:0>4}" ++ prefix ++ "{s})", .{ packet.len, &sess.fingerprint });
     try sess.writeBytes(line);
-    try sess.exit(1);
+    return 1;
 }
 
 test "parseGitCommand rejects malformed input" {
