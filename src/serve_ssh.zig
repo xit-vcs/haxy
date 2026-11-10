@@ -17,9 +17,12 @@ const progress = @import("./progress.zig");
 // on the peer, and bounds the post-CLOSE drain.
 const max_connections: u32 = 4096;
 const watchdog_interval = std.Io.Duration.fromSeconds(5);
-const presession_timeout_ticks: u32 = 6; // 30 seconds
-const idle_timeout_ticks: u32 = 24; // 120 seconds
-const close_drain_timeout_ticks: u32 = 2; // 5-10 seconds
+// covers the client's host key, passphrase and security key prompts
+const presession_timeout_ticks: u32 = 24; // 120 seconds
+// a push sits silent while the client runs its pre-push hook and packs
+const idle_timeout_ticks: u32 = 180; // 15 minutes
+// a slow client is still receiving what the kernel has queued
+const close_drain_timeout_ticks: u32 = 6; // 25-30 seconds
 const escape_timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(25), .clock = .awake } };
 
 var active_connections: std.atomic.Value(u32) = .init(0);
