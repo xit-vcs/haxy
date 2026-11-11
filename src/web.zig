@@ -40,6 +40,8 @@ pub const Frontend = struct {
     files: []const Embed = &.{},
     // writes the html for the template's HAXY_HTML token in place of haxy's
     render_html: ?*const fn (allocator: std.mem.Allocator, page: *const ui.Page, session: *const ui.Session.Data, writer: *std.Io.Writer) anyerror!void = null,
+    // starts the title written for the template's HAXY_TITLE token
+    site_name: []const u8 = "HAXY",
 };
 
 const frontend: Frontend = if (@hasDecl(@import("root"), "haxy_frontend")) @import("root").haxy_frontend else .{};
@@ -2512,6 +2514,11 @@ fn renderPage(
     } else try generateHtml(allocator, &root, &session);
     defer allocator.free(content);
 
+    const title_token = "{{{ HAXY_TITLE }}}";
+    var title: std.ArrayList(u8) = .empty;
+    defer title.deinit(allocator);
+    try appendTitle(allocator, &title, &snapshot.page);
+
     var json_escaped: std.ArrayList(u8) = .empty;
     defer json_escaped.deinit(allocator);
     for (json.written()) |c| switch (c) {
@@ -2525,6 +2532,7 @@ fn renderPage(
     {
         var cursor: usize = 0;
         for (&[_]struct { needle: []const u8, replacement: []const u8 }{
+            .{ .needle = title_token, .replacement = title.items },
             .{ .needle = html_token, .replacement = content },
             .{ .needle = json_token, .replacement = json_escaped.items },
         }) |sub| {
@@ -3092,6 +3100,23 @@ fn webLink(link: ?[]const u8) ?[]const u8 {
 fn sameLink(a: ?[]const u8, b: ?[]const u8) bool {
     if (a) |x| return if (b) |y| std.mem.eql(u8, x, y) else false;
     return b == null;
+}
+
+// writes the escaped title: the site name, then the user, repo or fork the page shows
+fn appendTitle(allocator: std.mem.Allocator, out: *std.ArrayList(u8), page: *const ui.Page) !void {
+    const owner: []const u8, const name: []const u8 = switch (page.*) {
+        .user => |*user| .{ "", user.user.name },
+        .repo => |*repo| .{ repo.header.owner_name, repo.header.name },
+        .fork => |*fork_page| .{ fork_page.header.forker_name, fork_page.header.name },
+        .home, .not_found => .{ "", "" },
+    };
+    try appendEscapedHtml(allocator, out, frontend.site_name);
+    if (name.len > 0) try out.append(allocator, ' ');
+    if (owner.len > 0) {
+        try appendEscapedHtml(allocator, out, owner);
+        try out.append(allocator, ':');
+    }
+    try appendEscapedHtml(allocator, out, name);
 }
 
 fn appendEscapedHtml(allocator: std.mem.Allocator, out: *std.ArrayList(u8), input: []const u8) !void {

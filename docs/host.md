@@ -50,4 +50,11 @@ The data directory
 
 * Backing up the data dir is enough to back up the whole instance. Since all project metadata is stored in the repos themselves (see [event.md](event.md)), there is no separate database to dump.
 
-* When someone forks a repo, haxy copies the target repo's database file. On most filesystems that is a full copy, so a fork of a big repo costs just as much disk as the original. However, haxy copies with `copy_file_range`, which makes a reflink on filesystems that support them, such as XFS and Btrfs. A reflinked copy is nearly instant and shares its blocks with the original until one of them changes. It's worth putting the data dir on one of these filesystems. The same goes for creating a new repo as a copy of an existing one.
+* When someone makes a new repo with "copy repo" or makes a new patch that forks the repo, haxy copies that repo's database file. On most filesystems that is a full copy, so a fork of a big repo costs just as much disk as the original. However, haxy copies with `copy_file_range`, which makes a reflink on filesystems that support them, such as XFS and Btrfs. A reflinked copy is nearly instant and shares its blocks with the original until one of them changes. It's worth putting the data dir on one of these filesystems.
+
+Customizing the web UI
+
+* You can change the web UI without forking haxy. Make a small Zig project that depends on haxy, and in its root file re-export haxy's `main` and declare `pub const haxy_frontend: haxy.web.Frontend`. Its `files` are served ahead of haxy's own, so a file with the same path replaces haxy's version.
+* For a light restyle, set `files` to include your own copy of `index.html`.
+* To show a different name than "HAXY" in page titles, set `site_name`. Haxy always follows it with the user or repo the page shows.
+* To replace the web UI completely, also set `render_html`, which receives each page's data and writes the html for the template's `{{{ HAXY_HTML }}}` token. Everything else works as before, including the `serve` subcommand, the TUI over SSH and git. See [hyperhaxy](https://github.com/xit-vcs/hyperhaxy) for an example of this.
