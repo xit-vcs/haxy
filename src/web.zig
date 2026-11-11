@@ -39,7 +39,7 @@ pub const Frontend = struct {
     // "index.html" is the page template.
     files: []const Embed = &.{},
     // writes the html for the template's HAXY_HTML token in place of haxy's
-    render_html: ?*const fn (allocator: std.mem.Allocator, page: *const ui.Page, session: *const ui.Session.Data, writer: *std.Io.Writer) anyerror!void = null,
+    renderHtml: ?fn (allocator: std.mem.Allocator, page: *const ui.Page, session: *const ui.Session.Data, writer: *std.Io.Writer) anyerror!void = null,
     // starts the title written for the template's HAXY_TITLE token
     site_name: []const u8 = "HAXY",
 };
@@ -2506,7 +2506,7 @@ fn renderPage(
     const html_token = "{{{ HAXY_HTML }}}";
     const content = if (std.mem.indexOf(u8, template, html_token) == null)
         ""
-    else if (frontend.render_html) |render| blk: {
+    else if (frontend.renderHtml) |render| blk: {
         var html: std.Io.Writer.Allocating = .init(allocator);
         errdefer html.deinit();
         try render(allocator, &snapshot.page, &snapshot.session, &html.writer);
