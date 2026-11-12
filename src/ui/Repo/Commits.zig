@@ -20,6 +20,37 @@ const page_size = 20;
 // the largest message read even when it has fewer than the preview's line
 // limit.
 const max_message_size = 100 * 1024;
+// the cells in a stats bar.
+const stats_bar_width = 20;
+// a full stats bar, sliced for each segment.
+const stats_bar: [stats_bar_width]["█".len]u8 = @splat("█".*);
+// added bytes from this size on are highlighted.
+const large_bytes = 1024 * 1024;
+
+// the stats bar's cells for each count, in proportion, with at least one for
+// any nonzero count. the largest count absorbs the rounding.
+fn barCells(counts: [3]u64) [3]usize {
+    const total = counts[0] + counts[1] + counts[2];
+    var cells: [3]usize = undefined;
+    var sum: usize = 0;
+    for (counts, &cells) |count, *c| {
+        c.* = if (count == 0) 0 else @max(1, @as(usize, @intCast(count * stats_bar_width / total)));
+        sum += c.*;
+    }
+    const largest = std.mem.indexOfMax(u64, &counts);
+    cells[largest] = cells[largest] + stats_bar_width - sum;
+    return cells;
+}
+
+// a byte count in the largest unit it reaches.
+fn formatSize(allocator: std.mem.Allocator, bytes: u64) ![]const u8 {
+    if (bytes < 1024) return std.fmt.allocPrint(allocator, "{d} B", .{bytes});
+    const units = [_][]const u8{ "KB", "MB", "GB", "TB" };
+    var value = @as(f64, @floatFromInt(bytes)) / 1024;
+    var unit: usize = 0;
+    while (value >= 1024 and unit + 1 < units.len) : (unit += 1) value /= 1024;
+    return std.fmt.allocPrint(allocator, "{d:.1} {s}", .{ value, units[unit] });
+}
 
 // one commit on the current page.
 pub const Commit = struct {
@@ -502,6 +533,53 @@ pub const View = struct {
         try box.children.put(allocator, flow.getFocus().id, .{ .widget = .{ .word_flow = flow }, .rect = null, .min_size = null });
     }
 
+    // the commit's line, file and byte counts as bars split into added,
+    // changed and removed. nothing when every count is zero.
+    fn addStatsBox(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), stats: xit.patch.CommitStats, web_native: bool) !void {
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const aa = arena.allocator();
+        // each row starts with a newline, dropped from the first
+        var spans: std.ArrayList(wgt.Span) = .empty;
+
+        // a byte count only grows or shrinks, so it has no changed part
+        const rows = [_]struct { []const u8, [3]u64, bool }{
+            .{ "\nlines ", .{ stats.lines_added, stats.lines_changed, stats.lines_removed }, false },
+            .{ "\nfiles ", .{ stats.files_added, stats.files_changed, stats.files_removed }, false },
+            .{ "\nbytes ", .{ stats.bytes_added, 0, stats.bytes_removed }, true },
+        };
+        for (rows) |row| {
+            const label, const counts, const bytes = row;
+            if (std.mem.allEqual(u64, &counts, 0)) continue;
+            try spans.append(aa, .{ .text = label });
+            const colors = [3]Grid.Color{ .ansi(.green), .ansi(.yellow), .ansi(.red) };
+            for (barCells(counts), colors) |cells, color| {
+                if (cells > 0) try spans.append(aa, .{ .text = std.mem.sliceAsBytes(stats_bar[0..cells]), .style = .{ .fg = color } });
+            }
+            try spans.append(aa, .{ .text = " " });
+            for (counts, "+~-") |count, sign| {
+                if (count == 0) continue;
+                const large = bytes and sign == '+' and count >= large_bytes;
+                try spans.append(aa, .{
+                    .text = if (bytes) try aa.print(" {c}{s}", .{ sign, try formatSize(aa, count) }) else try aa.print(" {c}{d}", .{ sign, count }),
+                    .style = if (large) .{ .fg = .ansi(.red), .bold = true } else .{},
+                });
+            }
+        }
+
+        if (spans.items.len == 0) return;
+        spans.items[0].text = spans.items[0].text[1..];
+        var tb = try wgt.TextBox.initSpans(allocator, spans.items, .{ .border = .single, .round_corners = true, .wrap_kind = .none, .top_label = .{ .text = " stats " } });
+        tb.getFocus().mode = .all;
+        // scrolls sideways when a narrow screen cuts the rows off
+        var scroll = wgt.Scroll(ui.Widget).init(allocator, .{ .text_box = tb }, .{ .direction = .horiz, .show_bar = false, .web_native = web_native }) catch |err| {
+            tb.deinit(allocator);
+            return err;
+        };
+        errdefer scroll.deinit(allocator);
+        try box.children.put(allocator, scroll.getFocus().id, .{ .widget = .{ .scroll = scroll }, .rect = null, .min_size = null });
+    }
+
     // how much of the message a pane's box holds: a truncated preview links to
     // the pane holding the whole thing, which is that link's destination.
     const MessageBox = enum { preview, whole };
@@ -677,32 +755,7 @@ pub const View = struct {
                 try items.append(allocator, .{ .text = timestamp.relative, .bottom_label = timestamp.exact });
                 try addFlow(allocator, inner, items.items);
             }
-            if (commit.stats) |stats| {
-                var text: std.Io.Writer.Allocating = .init(allocator);
-                defer text.deinit();
-                const bytes_added = stats.bytes_added >= stats.bytes_removed;
-                const bytes = if (bytes_added) stats.bytes_added - stats.bytes_removed else stats.bytes_removed - stats.bytes_added;
-                // the counts show only when nonzero, the byte delta always
-                const rows = [_]struct { []const u8, u64, bool }{
-                    .{ "lines added", stats.lines_added, false },
-                    .{ "lines changed", stats.lines_changed, false },
-                    .{ "lines removed", stats.lines_removed, false },
-                    .{ if (bytes_added) "bytes added" else "bytes removed", bytes, true },
-                    .{ "files added", stats.files_added, false },
-                    .{ "files changed", stats.files_changed, false },
-                    .{ "files removed", stats.files_removed, false },
-                };
-                for (rows) |row| {
-                    const label, const count, const always = row;
-                    if (count == 0 and !always) continue;
-                    if (text.written().len != 0) try text.writer.writeByte('\n');
-                    try text.writer.print("{s}: {d}", .{ label, count });
-                }
-                var tb = try wgt.TextBox.init(allocator, text.written(), .{ .border = .single, .round_corners = true, .wrap_kind = .none, .top_label = .{ .text = " stats " } });
-                errdefer tb.deinit(allocator);
-                tb.getFocus().mode = .all;
-                try inner.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
-            }
+            if (commit.stats) |stats| try addStatsBox(allocator, inner, stats, !self.session.is_terminal);
             try self.addMessageBox(allocator, inner, commit, .preview);
         }
 
