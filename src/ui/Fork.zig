@@ -86,7 +86,7 @@ pub fn init(arena: *std.heap.ArenaAllocator, session: *ui.Session, route: ui.Rou
             }
 
             const target_path = try evt.repoPath(aa, users_path, &owner_id, &target_id);
-            const target_source = ui.RepoSource{ .path = target_path, .repo_kind = .xit };
+            const target_source = ui.RepoSource{ .path = target_path, .repo_kind = .xit, .temp_path = session.temp_path };
             var target_repo_maybe: ?rp.Repo(.xit, repo_opts) = if (target != null)
                 rp.Repo(.xit, repo_opts).open(io, arena.child_allocator, target_source.localInitOpts()) catch null
             else

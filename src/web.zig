@@ -61,6 +61,8 @@ pub const Host = union(evt.HostKind) {
     server: struct {
         admin_repo_path: []const u8,
         users_path: []const u8,
+        // where served repos put their scratch databases, or null for each repo's dir
+        temp_path: ?[]const u8 = null,
         session_store: SessionStore,
         // the public url of this listener, which git's http clones share
         web_url: []const u8,
@@ -113,7 +115,7 @@ fn requestRepoSource(io: std.Io, allocator: std.mem.Allocator, host: Host, repo_
                 .invalid, .not_found => break :blk null,
             };
             break :blk .{
-                .source = .{ .path = path, .repo_kind = .xit },
+                .source = .{ .path = path, .repo_kind = .xit, .temp_path = server.temp_path },
                 .owned_path = path,
             };
         },
@@ -147,7 +149,7 @@ pub fn handleConnection(
 
         switch (host) {
             .server => |server| if (serve_http.isGitRequest(&request.head)) {
-                try server.serve_git(io, allocator, server.users_path, server.admin_repo_path, stream.socket.address, &http_server, &request, err);
+                try server.serve_git(io, allocator, server.users_path, server.admin_repo_path, server.temp_path, stream.socket.address, &http_server, &request, err);
                 // git's responses end with "Connection: close"
                 break;
             },
@@ -2472,6 +2474,7 @@ fn renderPage(
             // sibling "users" dir next to the admin repo) so the Repo page can
             // read its files.
             session.users_path = server.users_path;
+            session.temp_path = server.temp_path;
             break :blk session;
         },
         .local => |local| ui.Session{

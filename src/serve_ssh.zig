@@ -34,6 +34,8 @@ pub const SessionHandler = struct {
     admin_repo_path: []const u8,
     // where event writes go
     server: evt.Host.Server,
+    // where served repos put their scratch databases, or null for each repo's dir
+    temp_path: ?[]const u8 = null,
     // the web UI's url, shown in the TUI footer and shared by git's http clones
     web_url: []const u8,
     ssh_url: ?[]const u8,
@@ -286,6 +288,7 @@ fn runTui(handler: *const SessionHandler, sess: *ssh.SessionCtx, pty: ssh.PtySiz
     // let page builders open on-disk repos
     ui_session.io = io;
     ui_session.users_path = handler.server.users_path;
+    ui_session.temp_path = handler.temp_path;
     ui_session.ssh_key = try authorizedKeyLine(session_arena.allocator(), sess.public_key);
     ui_session.server_log = .{ .writer = handler.err, .peer = try session_arena.allocator().print("{f}", .{sess.conn.peer}) };
     try ui_session.logInWithSshKey();
@@ -459,7 +462,7 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, exec: ss
     };
     defer allocator.free(repo_path);
 
-    var any_repo = try rp.AnyRepo(.xit, any_repo_opts).open(io, allocator, .{ .path = repo_path });
+    var any_repo = try rp.AnyRepo(.xit, any_repo_opts).open(io, allocator, .{ .path = repo_path, .temp_path = handler.temp_path });
     defer any_repo.deinit(io, allocator);
 
     switch (any_repo) {
@@ -510,7 +513,7 @@ fn runCreatingPush(
 
     switch (hash_kind) {
         inline else => |kind| {
-            var repo = try rp.Repo(.xit, any_repo_opts.toRepoOptsWithHash(kind)).open(io, allocator, .{ .path = repo_path });
+            var repo = try rp.Repo(.xit, any_repo_opts.toRepoOptsWithHash(kind)).open(io, allocator, .{ .path = repo_path, .temp_path = handler.temp_path });
             defer repo.deinit(io, allocator);
             // stateless since the advertisement already went out
             try push.receivePackAndConsume(repo.self_repo_opts, io, allocator, &repo, reader, writer, .{ .protocol_version = protocol_version, .is_stateless = true, .pseudo_ref = .{ .name = push.clear_undo_ref, .deletable = true } }, creator.owner, &creator.owner_id, handler.server, handler.max_repo_size, handler.err, sess);
@@ -578,7 +581,7 @@ fn runForkSession(
 
     const draft_path = try fork.forkPath(allocator, handler.server.users_path, &forker_id, &fork_id);
     defer allocator.free(draft_path);
-    var draft = rp.AnyRepo(.xit, any_repo_opts).open(io, allocator, .{ .path = draft_path }) catch
+    var draft = rp.AnyRepo(.xit, any_repo_opts).open(io, allocator, .{ .path = draft_path, .temp_path = handler.temp_path }) catch
         return writeError(handler, sess, "patch draft not found");
     defer draft.deinit(io, allocator);
     if (service == .upload_pack) {
@@ -594,7 +597,7 @@ fn runForkSession(
         const timestamp: u64 = @intCast(std.Io.Timestamp.now(io, .real).toSeconds());
         switch (draft) {
             inline else => |*repo| {
-                var target_repo = rp.Repo(.xit, repo.self_repo_opts).open(io, allocator, .{ .path = target_path }) catch
+                var target_repo = rp.Repo(.xit, repo.self_repo_opts).open(io, allocator, .{ .path = target_path, .temp_path = handler.temp_path }) catch
                     return writeError(handler, sess, "repo not found or has the wrong hash");
                 defer target_repo.deinit(io, allocator);
                 try push.receiveFork(repo.self_repo_opts, io, allocator, repo, &target_repo, handler.server, &route.id, author, timestamp, reader, writer, handler.max_repo_size, handler.err, sess);

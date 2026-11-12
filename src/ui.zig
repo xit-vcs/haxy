@@ -2230,6 +2230,8 @@ pub const RepoSource = struct {
     // their signing and ssh settings. null on the server paths, which must not
     // read whoever runs the server.
     global_config_path: ?[]const u8 = null,
+    // where scratch databases go, or null for the repo's dir
+    temp_path: ?[]const u8 = null,
 
     // snapshots can be read from any website, so they must not reveal where repos live on disk
     pub fn jsonStringify(self: RepoSource, jw: anytype) !void {
@@ -2237,7 +2239,7 @@ pub const RepoSource = struct {
     }
 
     pub fn localInitOpts(self: RepoSource) rp.InitOpts {
-        return .{ .path = self.path, .global_config_path = self.global_config_path };
+        return .{ .path = self.path, .global_config_path = self.global_config_path, .temp_path = self.temp_path };
     }
 
     pub fn hasBranch(self: RepoSource, io: std.Io, allocator: std.mem.Allocator, branch: []const u8) !bool {
@@ -2411,6 +2413,8 @@ pub const Session = struct {
     io: ?std.Io = null,
     admin_repo: ?*rp.Repo(.xit, evt.admin_repo_opts) = null,
     users_path: ?[]const u8 = null,
+    // where repos opened on the server paths put their scratch databases
+    temp_path: ?[]const u8 = null,
     // the single on-disk repo this session views, when running in local mode
     // (haxy invoked with no arguments inside a repo). null on the server paths,
     // which resolve repos from the admin db instead.

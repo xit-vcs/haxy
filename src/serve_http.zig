@@ -22,6 +22,7 @@ pub const GitHandler = *const fn (
     allocator: std.mem.Allocator,
     users_path: []const u8,
     admin_repo_path: []const u8,
+    temp_path: ?[]const u8,
     // the connection's peer
     peer: std.Io.net.IpAddress,
     http_server: *std.http.Server,
@@ -43,12 +44,13 @@ pub fn gitHandler(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.An
             allocator: std.mem.Allocator,
             users_path: []const u8,
             admin_repo_path: []const u8,
+            temp_path: ?[]const u8,
             peer: std.Io.net.IpAddress,
             http_server: *std.http.Server,
             request: *std.http.Server.Request,
             err: *std.Io.Writer,
         ) anyerror!void {
-            handleGitRequest(repo_kind, sideband_opts, io, allocator, users_path, admin_repo_path, peer, http_server, request) catch |request_err| {
+            handleGitRequest(repo_kind, sideband_opts, io, allocator, users_path, admin_repo_path, temp_path, peer, http_server, request) catch |request_err| {
                 serve_common.logError(io, err, "request failed: {s}\n", .{@errorName(request_err)});
                 try writeSimpleResponse(http_server, 500, "Internal Server Error", "text/plain", @errorName(request_err));
             };
@@ -64,6 +66,7 @@ fn handleGitRequest(
     allocator: std.mem.Allocator,
     users_path: []const u8,
     admin_repo_path: []const u8,
+    temp_path: ?[]const u8,
     peer: std.Io.net.IpAddress,
     http_server: *std.http.Server,
     request: *std.http.Server.Request,
@@ -143,7 +146,7 @@ fn handleGitRequest(
 
     // serve the existing on-disk repo at its event-id directory; HTTP only
     // handles fetch/clone, so a missing repo is simply not found
-    if (!try serveIfExists(repo_kind, any_repo_opts, io, allocator, repo_path, GitService{
+    if (!try serveIfExists(repo_kind, any_repo_opts, io, allocator, repo_path, temp_path, GitService{
         .body_reader = &body_reader,
         .writer = http_server.out,
         .options = http_backend_options,
@@ -183,6 +186,7 @@ fn serveIfExists(
     io: std.Io,
     allocator: std.mem.Allocator,
     repo_path: []const u8,
+    temp_path: ?[]const u8,
     service: anytype,
 ) !bool {
     // a bare open() creates the directory while probing for the repo, so only
@@ -190,14 +194,14 @@ fn serveIfExists(
     std.Io.Dir.accessAbsolute(io, repo_path, .{}) catch return false;
 
     if (any_repo_opts.hash) |hash_kind| {
-        var repo = rp.Repo(repo_kind, any_repo_opts.toRepoOptsWithHash(hash_kind)).open(io, allocator, .{ .path = repo_path }) catch |open_err| switch (open_err) {
+        var repo = rp.Repo(repo_kind, any_repo_opts.toRepoOptsWithHash(hash_kind)).open(io, allocator, .{ .path = repo_path, .temp_path = temp_path }) catch |open_err| switch (open_err) {
             error.RepoNotFound => return false,
             else => |e| return e,
         };
         defer repo.deinit(io, allocator);
         try service.serve(repo_kind, any_repo_opts.toRepoOptsWithHash(hash_kind), &repo, io, allocator);
     } else {
-        var any_repo = rp.AnyRepo(repo_kind, any_repo_opts).open(io, allocator, .{ .path = repo_path }) catch |open_err| switch (open_err) {
+        var any_repo = rp.AnyRepo(repo_kind, any_repo_opts).open(io, allocator, .{ .path = repo_path, .temp_path = temp_path }) catch |open_err| switch (open_err) {
             error.RepoNotFound => return false,
             else => |e| return e,
         };

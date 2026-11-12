@@ -18,6 +18,8 @@ The serve subcommand
 
 * `--max-repo-size` caps how big each repo can get on disk, like `1G`. A push that would go past it is rejected. There is no limit by default, which is fine if you trust your users, and not fine if you've put your instance on the internet.
 
+* `--temp-dir` is where haxy puts the scratch files it makes while serving clones, fetches, pushes and merges. By default they go in each repo's own directory inside the data dir, which is fine unless the data dir is on a network volume; then point this at a local disk, like `/var/tmp/haxy`. Avoid a directory that lives in RAM, like `/tmp` on many distros, because a scratch file can be as big as the clone being served. It's created on the first run, and the files are deleted when each request is done.
+
 * The listen addresses are IPv4 only for now.
 
 The reverse proxy

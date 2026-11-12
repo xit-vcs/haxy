@@ -272,6 +272,7 @@ pub fn init(
         source = .{
             .path = try evt.repoPath(arena.allocator(), users_path, &owner_id, &found.event_id),
             .repo_kind = .xit,
+            .temp_path = session.temp_path,
         };
     }
 

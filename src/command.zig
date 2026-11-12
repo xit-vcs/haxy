@@ -24,6 +24,7 @@ fn commandHelp(command_kind: CommandKind) Help {
             \\use "none" for --ssh-listen to disable ssh. git clones over HTTP share the web UI's listener.
             \\--web-url and --ssh-url set the public urls shown to users, like https://example.com and ssh://example.com.
             \\--max-repo-size caps each repo's on-disk size, like 1G, rejecting pushes past it. no limit by default.
+            \\--temp-dir is where scratch files go instead of each repo's dir. useful when --data-dir is on a network volume.
             ,
         },
         .delete_user => .{
@@ -102,6 +103,7 @@ pub const CommandArgs = struct {
         .{"--ssh-url"},
         .{"--max-repo-size"},
         .{"--data-dir"},
+        .{"--temp-dir"},
     });
 
     pub fn init(allocator: std.mem.Allocator, args: []const []const u8) !CommandArgs {
@@ -233,6 +235,7 @@ fn serveOptions(cmd_args: *CommandArgs) !?srv.Options {
     if (cmd_args.get("--ssh-url")) |value_maybe| options.ssh_url = std.mem.trimEnd(u8, value_maybe orelse return error.SshUrlNeedsValue, "/");
     if (cmd_args.get("--max-repo-size")) |value_maybe| options.max_repo_size = try parseSize(value_maybe orelse return error.MaxRepoSizeNeedsValue);
     if (cmd_args.get("--data-dir")) |value_maybe| options.data_path = value_maybe orelse return error.DataDirNeedsValue;
+    if (cmd_args.get("--temp-dir")) |value_maybe| options.temp_path = value_maybe orelse return error.TempDirNeedsValue;
     return options;
 }
 

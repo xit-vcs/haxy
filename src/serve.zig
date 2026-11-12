@@ -19,6 +19,8 @@ pub const Options = struct {
     // the size a pushed repo's db may grow to, or null for no limit
     max_repo_size: ?u64 = null,
     data_path: []const u8 = ".",
+    // where scratch databases go instead of each repo's dir, or null for the repo's dir
+    temp_path: ?[]const u8 = null,
     git_ssh_prefix: []const u8 = "",
     fallback_on_address_in_use: bool = false,
 };
@@ -118,6 +120,13 @@ pub fn run(
 
     try std.Io.Dir.cwd().createDirPath(io, users_path);
 
+    // create the temp dir
+
+    const temp_path: ?[]const u8 = if (options.temp_path) |path| try std.Io.Dir.path.resolveAlloc(allocator, &.{ cwd_path, path }) else null;
+    defer if (temp_path) |path| allocator.free(path);
+
+    if (temp_path) |path| try std.Io.Dir.cwd().createDirPath(io, path);
+
     // the admin repo path is where the user/repo metadata events live
 
     const admin_repo_path = try std.Io.Dir.path.resolveAlloc(allocator, &.{ data_path, "admin" });
@@ -168,6 +177,7 @@ pub fn run(
             .session_handler = .{
                 .admin_repo_path = admin_repo_path,
                 .server = .{ .users_path = users_path, .admin_repo_path = admin_repo_path },
+                .temp_path = temp_path,
                 .web_url = web_url,
                 .ssh_url = ssh_url,
                 .git_ssh_prefix = options.git_ssh_prefix,
@@ -199,6 +209,7 @@ pub fn run(
     runWebListener(io, allocator, &web_server, &tasks, .{ .server = .{
         .admin_repo_path = admin_repo_path,
         .users_path = users_path,
+        .temp_path = temp_path,
         .session_store = session_store,
         .web_url = web_url,
         .ssh_url = ssh_url,
