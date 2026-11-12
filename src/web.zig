@@ -147,7 +147,7 @@ pub fn handleConnection(
 
         switch (host) {
             .server => |server| if (serve_http.isGitRequest(&request.head)) {
-                try server.serve_git(io, allocator, server.users_dir, server.admin_repo_path, &http_server, &request, err);
+                try server.serve_git(io, allocator, server.users_dir, server.admin_repo_path, stream.socket.address, &http_server, &request, err);
                 // git's responses end with "Connection: close"
                 break;
             },

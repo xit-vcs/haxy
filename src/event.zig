@@ -8,6 +8,7 @@ const rf = xit.ref;
 const pch = @import("patch.zig");
 const copy = @import("copy.zig");
 const notify = @import("notify.zig");
+const popularity = @import("popularity.zig");
 
 pub const User = @import("event/User.zig");
 pub const Repo = @import("event/Repo.zig");
@@ -2526,6 +2527,7 @@ pub fn createUser(
         .author = .{ .name = name, .email = email },
         .event = .{ .user = .{ .name = name, .email = email, .password_hash = password_hash } },
     }});
+    try popularity.addUser(io, allocator, users_dir, &id_bytes);
     return id_bytes;
 }
 
@@ -2568,8 +2570,8 @@ pub fn updateUser(
     }});
 }
 
-// remove a user from the admin repo, then their dir with every repo and fork
-// in it. tombstone first so a missing user never remains visible
+// remove a user from the admin repo and the users list, then their dir with
+// every repo and fork in it. tombstone first so a missing user never remains visible
 pub fn deleteUser(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -2579,6 +2581,7 @@ pub fn deleteUser(
     author: CommitAuthor,
 ) !void {
     try remove(.{ .server = .{ .users_dir = users_dir } }, .admin, .xit, admin_repo_opts, io, allocator, admin_repo, user_id, .user, author);
+    try popularity.removeUser(io, allocator, users_dir, user_id);
     const path = try std.Io.Dir.path.join(allocator, &.{ users_dir, &std.fmt.bytesToHex(user_id.*, .lower) });
     defer allocator.free(path);
     try std.Io.Dir.cwd().deleteTree(io, path);

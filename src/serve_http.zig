@@ -3,6 +3,7 @@ const xit = @import("xit");
 const rp = xit.repo;
 const evt = @import("./event.zig");
 const serve_common = @import("./serve_common.zig");
+const popularity = @import("./popularity.zig");
 
 // whether a web listener request is git's smart http rather than a page
 pub fn isGitRequest(head: *const std.http.Server.Request.Head) bool {
@@ -20,6 +21,8 @@ pub const GitHandler = *const fn (
     allocator: std.mem.Allocator,
     users_dir: []const u8,
     admin_repo_path: []const u8,
+    // the connection's peer
+    peer: std.Io.net.IpAddress,
     http_server: *std.http.Server,
     request: *std.http.Server.Request,
     err: *std.Io.Writer,
@@ -33,11 +36,12 @@ pub fn gitHandler(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.An
             allocator: std.mem.Allocator,
             users_dir: []const u8,
             admin_repo_path: []const u8,
+            peer: std.Io.net.IpAddress,
             http_server: *std.http.Server,
             request: *std.http.Server.Request,
             err: *std.Io.Writer,
         ) anyerror!void {
-            handleGitRequest(repo_kind, any_repo_opts, io, allocator, users_dir, admin_repo_path, http_server, request) catch |request_err| {
+            handleGitRequest(repo_kind, any_repo_opts, io, allocator, users_dir, admin_repo_path, peer, http_server, request) catch |request_err| {
                 serve_common.logError(io, err, "request failed: {s}\n", .{@errorName(request_err)});
                 try writeSimpleResponse(http_server, 500, "Internal Server Error", "text/plain", @errorName(request_err));
             };
@@ -53,6 +57,7 @@ fn handleGitRequest(
     allocator: std.mem.Allocator,
     users_dir: []const u8,
     admin_repo_path: []const u8,
+    peer: std.Io.net.IpAddress,
     http_server: *std.http.Server,
     request: *std.http.Server.Request,
 ) !void {
@@ -77,6 +82,8 @@ fn handleGitRequest(
     defer allocator.free(content_type);
     const has_remote_user = findHeader(request, "authorization") != null;
     const protocol_version = xit.net_server_common.parseProtocolVersion(findHeader(request, "git-protocol"));
+    // read before the body read, which invalidates the request's headers
+    const client = clientAddress(peer, findHeader(request, "x-forwarded-for"));
 
     // pushing over HTTP is not supported; pushes go over SSH
     if (isReceivePack(handler, suffix, uri.query)) {
@@ -88,7 +95,7 @@ fn handleGitRequest(
         try writeSimpleResponse(http_server, 400, "Bad Request", "text/plain", "repo path must be <owner>:<repo>");
         return;
     };
-    const repo_path = blk: {
+    const location: evt.RepoLocation = blk: {
         var admin = rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = admin_repo_path }) catch |err| switch (err) {
             error.RepoNotFound => return error.RepoNotFound,
             else => |e| return e,
@@ -101,8 +108,9 @@ fn handleGitRequest(
             return writeSimpleResponse(http_server, 404, "Not Found", "text/plain", "repo not found");
         // private repos aren't served over HTTP, and answer like missing ones so their names stay hidden
         if (repo.repo.event.read_access == .private) return writeSimpleResponse(http_server, 404, "Not Found", "text/plain", "repo not found");
-        break :blk try evt.repoPath(allocator, users_dir, &try evt.parseEventId(&repo.repo.event.user_id), &repo.event_id);
+        break :blk .{ .owner_id = try evt.parseEventId(&repo.repo.event.user_id), .repo_id = repo.event_id };
     };
+    const repo_path = try evt.repoPath(allocator, users_dir, &location.owner_id, &location.repo_id);
     defer allocator.free(repo_path);
 
     const body = if (request.head.method == .POST) blk: {
@@ -132,7 +140,24 @@ fn handleGitRequest(
         .body_reader = &body_reader,
         .writer = http_server.out,
         .options = http_backend_options,
-    })) try writeSimpleResponse(http_server, 404, "Not Found", "text/plain", "repo not found");
+    })) return writeSimpleResponse(http_server, 404, "Not Found", "text/plain", "repo not found");
+
+    // a served upload-pack is a fetch, since receive-pack was refused above
+    if (handler == .run_service) {
+        if (client) |address| popularity.count(io, allocator, users_dir, location, address);
+    }
+}
+
+// the fetching client: the peer, or behind a reverse proxy on this machine,
+// the last address it forwarded
+fn clientAddress(peer: std.Io.net.IpAddress, forwarded_for: ?[]const u8) ?std.Io.net.IpAddress {
+    const loopback = switch (peer) {
+        .ip4 => |ip4| ip4.bytes[0] == 127,
+        .ip6 => |ip6| std.mem.eql(u8, &ip6.bytes, &std.Io.net.Ip6Address.loopback(0).bytes),
+    };
+    if (!loopback) return peer;
+    var addresses = std.mem.splitBackwardsScalar(u8, forwarded_for orelse return peer, ',');
+    return std.Io.net.IpAddress.parse(std.mem.trim(u8, addresses.first(), " \t"), 0) catch null;
 }
 
 fn findRoute(path: []const u8) ?struct { xit.net_server_http_backend.HandlerKind, []const u8 } {

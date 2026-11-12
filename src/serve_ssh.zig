@@ -11,6 +11,7 @@ const evt = @import("./event.zig");
 const serve_common = @import("./serve_common.zig");
 const fork = @import("./fork.zig");
 const progress = @import("./progress.zig");
+const popularity = @import("./popularity.zig");
 
 // listener resource limits. the watchdog gives peers a hard deadline to start
 // a session, times out non-interactive sessions that stall while we're blocked
@@ -463,9 +464,10 @@ fn runGitSession(handler: *const SessionHandler, sess: *ssh.SessionCtx, exec: ss
 
     switch (any_repo) {
         inline else => |*repo| switch (allowed) {
-            .fetch => {
+            .fetch => |counted| {
                 var sideband = progress.Sideband{ .writer = &writer.interface, .sess = sess };
                 try repo.uploadPack(io, allocator, &reader.interface, &writer.interface, .{ .protocol_version = protocol_version }, &sideband);
+                if (counted) |location| popularity.count(io, allocator, handler.server.users_dir, location, sess.conn.peer);
             },
             .push => |pusher| try push.receivePackAndConsume(repo.self_repo_opts, io, allocator, repo, &reader.interface, &writer.interface, .{
                 .protocol_version = protocol_version,
@@ -626,7 +628,8 @@ const RepoAuthorization = union(enum) { allowed: Allowed, create: RepoCreator, d
 
 // what a key may do in an existing repo
 const Allowed = union(enum) {
-    fetch,
+    // the repo the fetch counts toward, or null when it doesn't count
+    fetch: ?evt.RepoLocation,
     push: Pusher,
 };
 
@@ -677,9 +680,6 @@ fn authorizeRepoKey(
         .upload_pack => .read,
         .receive_pack => .write,
     };
-    // any key may fetch a public repo; a push always needs a key holder
-    if (service == .upload_pack and repo.role != null) return .{ .allowed = .fetch };
-
     // a shared key acts as its highest-role holder, and only the owner and
     // members rise above the base role
     const owner_id = try evt.parseEventId(&repo.repo.event.user_id);
@@ -692,11 +692,17 @@ fn authorizeRepoKey(
         if (best) |held| if (held.role.atLeast(grant.role)) continue;
         best = .{ .id = member_id, .role = grant.role };
     }
+    // a fetch counts toward a public repo, unless its owner or a member makes it
+    const insider = if (best) |held| held.role.atLeast(.write) else false;
+    const counted: ?evt.RepoLocation = if (repo.repo.event.read_access == .public and !insider) .{ .owner_id = owner_id, .repo_id = repo.event_id } else null;
+
+    // any key may fetch a public repo; a push always needs a key holder
+    if (service == .upload_pack and repo.role != null) return .{ .allowed = .{ .fetch = counted } };
     const holder = best orelse return .denied;
     if (!holder.role.atLeast(min_role)) return .denied;
     return .{
         .allowed = switch (service) {
-            .upload_pack => .fetch,
+            .upload_pack => .{ .fetch = counted },
             .receive_pack => blk: {
                 const names = try repo.repo.event.protectedBranchNames(arena.allocator());
                 // members change protected branches only by merging a patch

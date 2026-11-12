@@ -10,6 +10,7 @@ const Key = xitui.input.Key;
 const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
 const inp = @import("../input.zig");
+const popularity = @import("../../popularity.zig");
 
 pub const page_size = 20; // how many users one window shows
 
@@ -22,6 +23,8 @@ const Self = @This();
 
 pub fn init(
     arena: *std.heap.ArenaAllocator,
+    io: std.Io,
+    users_dir: []const u8,
     haxy_moment: evt.AdminDB.HashMap(.read_only),
     route: ui.RoutablePage.HomeUsersRoute,
 ) !Self {
@@ -35,9 +38,21 @@ pub fn init(
         .next_start = null,
         .search = if (route.search.len == 0) null else std.Uri.percentDecodeInPlace(try aa.dupe(u8, route.search.slice())),
     };
-    const prefix = result.search orelse "";
+    // unsearched, the users whose repos the most clients fetched come first
+    const prefix = result.search orelse {
+        const window = try popularity.readUsers(io, arena, users_dir, route.start, page_size);
+        var users: std.ArrayList(evt.User.Public) = .empty;
+        for (window.user_ids) |user_id| {
+            // a user deleted since the index was read is left out
+            const user = (try ui.activeUser(haxy_moment, arena, user_id)) orelse continue;
+            try users.append(aa, .{ .name = user.event.name });
+        }
+        result.users = users.items;
+        result.next_start = window.next_start;
+        return result;
+    };
 
-    // the active users sorted by name; absent until the first user exists
+    // searched, the active users sorted by name; absent until the first user exists
     const index_cursor = try haxy_moment.getCursor(hash.hashInt(hash_kind, evt.User.name_index_key)) orelse return result;
     const index = try DB.SortedMap(.read_only).init(index_cursor);
 

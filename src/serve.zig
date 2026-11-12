@@ -8,6 +8,7 @@ const serve_ssh_protocol = @import("./serve_ssh_protocol.zig");
 const serve_ssh = @import("./serve_ssh.zig");
 const serve_http = @import("./serve_http.zig");
 const evt = @import("./event.zig");
+const popularity = @import("./popularity.zig");
 
 pub const Options = struct {
     web_listen: []const u8 = "127.0.0.1:8080",
@@ -122,13 +123,15 @@ pub fn run(
     const admin_repo_path = try std.Io.Dir.path.resolveAlloc(allocator, &.{ data_dir_path, "admin" });
     defer allocator.free(admin_repo_path);
 
-    // create the admin repo on first run
+    // create the admin repo on first run, and bring the users list's index in
+    // line with its users
     {
         var admin_repo = rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = admin_repo_path }) catch |open_err| switch (open_err) {
             error.RepoNotFound, error.FileNotFound => try evt.initAdminRepo(io, allocator, admin_repo_path),
             else => |e| return e,
         };
         defer admin_repo.deinit(io, allocator);
+        try popularity.reconcile(io, allocator, users_dir, &admin_repo);
     }
 
     const port_policy: PortPolicy = if (options.fallback_on_address_in_use) .fallback else .exact;
