@@ -42,7 +42,7 @@ pub fn init(
     allocator: std.mem.Allocator,
     arena: *std.heap.ArenaAllocator,
     admin_moment: evt.AdminDB.HashMap(.read_only),
-    users_dir: []const u8,
+    users_path: []const u8,
     identity: []const u8,
     owner_id: *const [evt.event_id_size]u8,
     repo_id: *const [evt.event_id_size]u8,
@@ -50,7 +50,7 @@ pub fn init(
     confirm: ?Confirm,
 ) !Self {
     const aa = arena.allocator();
-    const grants = try evt.readRepoGrants(io, allocator, arena, users_dir, owner_id, repo_id);
+    const grants = try evt.readRepoGrants(io, allocator, arena, users_path, owner_id, repo_id);
     var rows: std.ArrayList(Row) = .empty;
     var skipped: usize = 0;
     var next_start: ?usize = null;
@@ -93,7 +93,7 @@ pub fn perform(
     io: std.Io,
     allocator: std.mem.Allocator,
     admin_moment: evt.AdminDB.HashMap(.read_only),
-    users_dir: []const u8,
+    users_path: []const u8,
     actor: ui.Actor,
     identity: []const u8,
     action: Action,
@@ -107,7 +107,7 @@ pub fn perform(
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const repo_id, const role = blk: {
-        var user_repo = (try evt.openUserRepo(io, allocator, users_dir, &owner_id)) orelse return error.NotFound;
+        var user_repo = (try evt.openUserRepo(io, allocator, users_path, &owner_id)) orelse return error.NotFound;
         defer user_repo.deinit(io, allocator);
         const moment = (try evt.userMoment(&user_repo)) orelse return error.NotFound;
         const found = (try evt.Repo.readByName(evt.UserDB, evt.user_repo_opts.hash, moment, &arena, parsed.name)) orelse return error.NotFound;
@@ -120,13 +120,13 @@ pub fn perform(
         .grant => {
             const already_added = if (role) |held| held != .read else std.mem.eql(u8, &user_id, &owner_id);
             if (already_added) return .already_added;
-            try evt.grantRole(io, allocator, users_dir, &owner_id, &repo_id, &user_id, .write, actor.author);
+            try evt.grantRole(io, allocator, users_path, &owner_id, &repo_id, &user_id, .write, actor.author);
         },
-        .revoke => try evt.revokeRole(io, allocator, users_dir, &owner_id, &repo_id, &user_id, actor.author),
+        .revoke => try evt.revokeRole(io, allocator, users_path, &owner_id, &repo_id, &user_id, actor.author),
         // only a listed grant changes role
         .promote, .demote => {
             if (role == null) return error.EventNotFound;
-            try evt.grantRole(io, allocator, users_dir, &owner_id, &repo_id, &user_id, if (action == .promote) .owner else .write, actor.author);
+            try evt.grantRole(io, allocator, users_path, &owner_id, &repo_id, &user_id, if (action == .promote) .owner else .write, actor.author);
         },
     }
     return null;
@@ -346,11 +346,11 @@ pub const View = struct {
     fn act(self: *View, allocator: std.mem.Allocator, action: Action, name: []const u8) !void {
         if (comptime wasm) return;
         const io = self.session.io orelse return;
-        const users_dir = self.session.users_dir orelse return;
+        const users_path = self.session.users_path orelse return;
         const admin_repo = self.session.admin_repo orelse return;
         const actor = (try self.session.authorize(self.data.identity, .owner, null)) orelse return;
         const moment = try evt.currentMoment(evt.admin_repo_opts, admin_repo);
-        const failure = perform(io, allocator, moment, users_dir, actor, self.data.identity, action, name) catch |err| switch (err) {
+        const failure = perform(io, allocator, moment, users_path, actor, self.data.identity, action, name) catch |err| switch (err) {
             // a stale row; the refresh below shows the list as it is
             error.EventNotFound => null,
             else => return err,

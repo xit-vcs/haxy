@@ -1709,7 +1709,7 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
             const entry = self.entry orelse return;
             const mode = entry.notify_action orelse return;
             const io = self.session.io orelse return;
-            const users_dir = self.session.users_dir orelse return;
+            const users_path = self.session.users_path orelse return;
             const source = self.data.repo_source orelse return;
             const actor = (try self.session.authorize(self.data.identity, .read, null)) orelse return;
             // a server actor always has both ids
@@ -1720,8 +1720,8 @@ pub fn Detail(comptime kind: evt.EventKind, comptime Data: type) type {
             };
             const thread_id = try evt.parseEventId(entry.id);
             switch (mode) {
-                .subscribe => try notify.subscribe(io, allocator, users_dir, &user_id, location, &thread_id, actor.author),
-                .mute => try notify.mute(io, allocator, users_dir, &user_id, location, &thread_id, actor.author),
+                .subscribe => try notify.subscribe(io, allocator, users_path, &user_id, location, &thread_id, actor.author),
+                .mute => try notify.mute(io, allocator, users_path, &user_id, location, &thread_id, actor.author),
             }
             try self.session.navigate(ui.RoutablePage.repoThreadCommentsRoute(kind, self.data.identity, entry.id, 0) orelse return error.RouteTooLong);
         }

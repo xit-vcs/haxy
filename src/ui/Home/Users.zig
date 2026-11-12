@@ -24,7 +24,7 @@ const Self = @This();
 pub fn init(
     arena: *std.heap.ArenaAllocator,
     io: std.Io,
-    users_dir: []const u8,
+    users_path: []const u8,
     haxy_moment: evt.AdminDB.HashMap(.read_only),
     route: ui.RoutablePage.HomeUsersRoute,
 ) !Self {
@@ -40,7 +40,7 @@ pub fn init(
     };
     // unsearched, the users whose repos the most clients fetched come first
     const prefix = result.search orelse {
-        const window = try popularity.readUsers(io, arena, users_dir, route.start, page_size);
+        const window = try popularity.readUsers(io, arena, users_path, route.start, page_size);
         var users: std.ArrayList(evt.User.Public) = .empty;
         for (window.user_ids) |user_id| {
             // a user deleted since the index was read is left out

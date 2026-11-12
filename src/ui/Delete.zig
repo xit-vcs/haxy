@@ -46,7 +46,7 @@ pub const Target = union(enum) {
 pub fn perform(
     io: std.Io,
     allocator: std.mem.Allocator,
-    users_dir: []const u8,
+    users_path: []const u8,
     admin_repo: *rp.Repo(.xit, evt.admin_repo_opts),
     user_id: [evt.event_id_size]u8,
     target: Target,
@@ -68,25 +68,25 @@ pub fn perform(
             const parsed = evt.parseOwnerRepoPath(identity) orelse return error.NotFound;
             if (!std.mem.eql(u8, parsed.owner, user.event.name)) return error.NotFound;
             const repo_id = blk: {
-                var user_repo = (try evt.openUserRepo(io, allocator, users_dir, &user_id)) orelse return error.NotFound;
+                var user_repo = (try evt.openUserRepo(io, allocator, users_path, &user_id)) orelse return error.NotFound;
                 defer user_repo.deinit(io, allocator);
                 const moment = (try evt.userMoment(&user_repo)) orelse return error.NotFound;
                 const found = (try evt.Repo.readByName(evt.UserDB, evt.user_repo_opts.hash, moment, &arena, parsed.name)) orelse return error.NotFound;
                 break :blk found.event_id;
             };
-            try evt.deleteRepo(io, allocator, users_dir, &user_id, &repo_id, author);
+            try evt.deleteRepo(io, allocator, users_path, &user_id, &repo_id, author);
         },
         .fork => |f| {
             const parsed = evt.parseOwnerRepoPath(f.identity) orelse return error.NotFound;
             if (!std.mem.eql(u8, parsed.owner, user.event.name)) return error.NotFound;
             const fork_id = evt.parseEventId(&f.id) catch return error.NotFound;
-            const record = (try evt.readForkById(io, allocator, &arena, users_dir, &user_id, &fork_id)) orelse return error.NotFound;
+            const record = (try evt.readForkById(io, allocator, &arena, users_path, &user_id, &fork_id)) orelse return error.NotFound;
             if (record.removed) return error.NotFound;
-            try fork.remove(io, allocator, users_dir, &user_id, &f.id, author);
+            try fork.remove(io, allocator, users_path, &user_id, &f.id, author);
         },
         .user => |name| {
             if (!std.mem.eql(u8, name, user.event.name)) return error.NotFound;
-            try evt.deleteUser(io, allocator, users_dir, admin_repo, &user_id, author);
+            try evt.deleteUser(io, allocator, users_path, admin_repo, &user_id, author);
         },
     }
     return null;
@@ -221,7 +221,7 @@ pub const View = struct {
     fn submitForm(self: *View, allocator: std.mem.Allocator) !void {
         if (comptime wasm) return;
         const io = self.session.io orelse return;
-        const users_dir = self.session.users_dir orelse return;
+        const users_path = self.session.users_path orelse return;
         const admin_repo = self.session.admin_repo orelse return;
         const user_id = self.session.userId() orelse return;
 
@@ -230,7 +230,7 @@ pub const View = struct {
         const password = try self.textInput(password_index).text(allocator);
         defer allocator.free(password);
 
-        const failure = perform(io, allocator, users_dir, admin_repo, user_id, self.target, confirm, password) catch |err| switch (err) {
+        const failure = perform(io, allocator, users_path, admin_repo, user_id, self.target, confirm, password) catch |err| switch (err) {
             // only the main owner is offered the form
             error.NotFound => return,
             else => return err,

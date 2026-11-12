@@ -15,7 +15,7 @@ pub const RepoPath = union(enum) {
 pub fn resolveRepoPath(
     io: std.Io,
     allocator: std.mem.Allocator,
-    users_dir: []const u8,
+    users_path: []const u8,
     admin_repo_path: []const u8,
     requested: []const u8,
 ) !RepoPath {
@@ -23,13 +23,13 @@ pub fn resolveRepoPath(
     const location = (try evt.resolveOrCreateRepo(
         io,
         allocator,
-        users_dir,
+        users_path,
         admin_repo_path,
         owner_repo.owner,
         owner_repo.name,
         null,
     )) orelse return .not_found;
-    return .{ .ok = try evt.repoPath(allocator, users_dir, &location.owner_id, &location.repo_id) };
+    return .{ .ok = try evt.repoPath(allocator, users_path, &location.owner_id, &location.repo_id) };
 }
 
 // every connection task shares one error writer, so writing to it takes a

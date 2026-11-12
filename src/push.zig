@@ -265,11 +265,11 @@ pub fn receivePackAndConsume(
                     error.CancelTransaction => null,
                     else => |e| return e,
                 };
-                try pch.detectMerged(repo_opts, state, &moment, ctx.io, ctx.allocator, ctx.server.users_dir, ctx.updates.items.items, ctx.error_writer);
+                try pch.detectMerged(repo_opts, state, &moment, ctx.io, ctx.allocator, ctx.server.users_path, ctx.updates.items.items, ctx.error_writer);
 
                 // the revisions the pushed branches cause belong to the push
                 _ = try pch.refreshBranchesInTransaction(.{ .server = ctx.server }, repo_opts, state, &moment, ctx.io, ctx.allocator, ctx.updates.items.items, null, ctx.sideband);
-                _ = try pch.updateStaleMergeChecks(repo_opts, state, ctx.io, ctx.allocator, ctx.server.users_dir, ctx.sideband);
+                _ = try pch.updateStaleMergeChecks(repo_opts, state, ctx.io, ctx.allocator, ctx.server.users_path, ctx.sideband);
             }
 
             if (ctx.sideband.gone) return error.ClientGone;
@@ -575,7 +575,7 @@ pub fn receiveFork(
         refreshed = true;
     }
 
-    if (!refreshed) pch.refreshMergeability(repo_opts, io, allocator, target_repo, server.users_dir, patch_id);
+    if (!refreshed) pch.refreshMergeability(repo_opts, io, allocator, target_repo, server.users_path, patch_id);
     sideband.run(io, .{ .complete_one = .writing_patch }) catch {};
     sideband.run(io, .{ .end = .writing_patch }) catch {};
 

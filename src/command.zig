@@ -204,7 +204,7 @@ pub const Command = union(CommandKind) {
             .delete_user => {
                 if (cmd_args.positional_args.len != 1) return null;
                 var options: srv.DeleteUserOptions = .{ .name = cmd_args.positional_args[0] };
-                if (cmd_args.get("--data-dir")) |value_maybe| options.data_dir = value_maybe orelse return error.DataDirNeedsValue;
+                if (cmd_args.get("--data-dir")) |value_maybe| options.data_path = value_maybe orelse return error.DataDirNeedsValue;
                 return .{ .delete_user = options };
             },
         }
@@ -232,7 +232,7 @@ fn serveOptions(cmd_args: *CommandArgs) !?srv.Options {
     if (cmd_args.get("--web-url")) |value_maybe| options.web_url = std.mem.trimEnd(u8, value_maybe orelse return error.WebUrlNeedsValue, "/");
     if (cmd_args.get("--ssh-url")) |value_maybe| options.ssh_url = std.mem.trimEnd(u8, value_maybe orelse return error.SshUrlNeedsValue, "/");
     if (cmd_args.get("--max-repo-size")) |value_maybe| options.max_repo_size = try parseSize(value_maybe orelse return error.MaxRepoSizeNeedsValue);
-    if (cmd_args.get("--data-dir")) |value_maybe| options.data_dir = value_maybe orelse return error.DataDirNeedsValue;
+    if (cmd_args.get("--data-dir")) |value_maybe| options.data_path = value_maybe orelse return error.DataDirNeedsValue;
     return options;
 }
 

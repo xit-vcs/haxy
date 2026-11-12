@@ -20,7 +20,7 @@ pub fn isGitRequest(head: *const std.http.Server.Request.Head) bool {
 pub const GitHandler = *const fn (
     io: std.Io,
     allocator: std.mem.Allocator,
-    users_dir: []const u8,
+    users_path: []const u8,
     admin_repo_path: []const u8,
     // the connection's peer
     peer: std.Io.net.IpAddress,
@@ -41,14 +41,14 @@ pub fn gitHandler(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.An
         fn handle(
             io: std.Io,
             allocator: std.mem.Allocator,
-            users_dir: []const u8,
+            users_path: []const u8,
             admin_repo_path: []const u8,
             peer: std.Io.net.IpAddress,
             http_server: *std.http.Server,
             request: *std.http.Server.Request,
             err: *std.Io.Writer,
         ) anyerror!void {
-            handleGitRequest(repo_kind, sideband_opts, io, allocator, users_dir, admin_repo_path, peer, http_server, request) catch |request_err| {
+            handleGitRequest(repo_kind, sideband_opts, io, allocator, users_path, admin_repo_path, peer, http_server, request) catch |request_err| {
                 serve_common.logError(io, err, "request failed: {s}\n", .{@errorName(request_err)});
                 try writeSimpleResponse(http_server, 500, "Internal Server Error", "text/plain", @errorName(request_err));
             };
@@ -62,7 +62,7 @@ fn handleGitRequest(
     comptime any_repo_opts: rp.AnyRepoOpts(repo_kind),
     io: std.Io,
     allocator: std.mem.Allocator,
-    users_dir: []const u8,
+    users_path: []const u8,
     admin_repo_path: []const u8,
     peer: std.Io.net.IpAddress,
     http_server: *std.http.Server,
@@ -111,13 +111,13 @@ fn handleGitRequest(
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
         const moment = try evt.currentMoment(evt.admin_repo_opts, &admin);
-        const repo = (try evt.readRepoByOwnerAndName(io, allocator, &arena, moment, users_dir, owner_repo.owner, owner_repo.name, null)) orelse
+        const repo = (try evt.readRepoByOwnerAndName(io, allocator, &arena, moment, users_path, owner_repo.owner, owner_repo.name, null)) orelse
             return writeSimpleResponse(http_server, 404, "Not Found", "text/plain", "repo not found");
         // private repos aren't served over HTTP, and answer like missing ones so their names stay hidden
         if (repo.repo.event.read_access == .private) return writeSimpleResponse(http_server, 404, "Not Found", "text/plain", "repo not found");
         break :blk .{ .owner_id = try evt.parseEventId(&repo.repo.event.user_id), .repo_id = repo.event_id };
     };
-    const repo_path = try evt.repoPath(allocator, users_dir, &location.owner_id, &location.repo_id);
+    const repo_path = try evt.repoPath(allocator, users_path, &location.owner_id, &location.repo_id);
     defer allocator.free(repo_path);
 
     const body = if (request.head.method == .POST) blk: {
@@ -151,7 +151,7 @@ fn handleGitRequest(
 
     // a served upload-pack is a fetch, since receive-pack was refused above
     if (handler == .run_service) {
-        if (client) |address| popularity.count(io, allocator, users_dir, location, address);
+        if (client) |address| popularity.count(io, allocator, users_path, location, address);
     }
 }
 

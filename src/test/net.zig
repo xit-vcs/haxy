@@ -536,8 +536,8 @@ fn testPushFork(
 
     const admin_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "admin" });
     defer allocator.free(admin_path);
-    const users_dir = try std.Io.Dir.path.join(allocator, &.{ temp_path, "users" });
-    defer allocator.free(users_dir);
+    const users_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "users" });
+    defer allocator.free(users_path);
 
     var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
     const fork_id = evt.EventWithId.randomId(prng.random());
@@ -550,14 +550,14 @@ fn testPushFork(
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
         const moment = try evt.currentMoment(evt.admin_repo_opts, &admin);
-        const target = (try evt.readRepoByOwnerAndName(io, allocator, &arena, moment, users_dir, "admin", "target", null)) orelse return error.NotFound;
+        const target = (try evt.readRepoByOwnerAndName(io, allocator, &arena, moment, users_path, "admin", "target", null)) orelse return error.NotFound;
         repo_id = target.event_id;
         user_id = try evt.parseEventId(&target.repo.event.user_id);
         // patches are off on a new repo
-        try evt.updateRepo(io, allocator, users_dir, &user_id, .{ .name = "admin", .email = "admin@example.test" }, "target", "target", target.repo.event.description, target.repo.event.read_access, .read, .read, .read);
-        var user_repo = (try evt.openUserRepo(io, allocator, users_dir, &user_id)) orelse return error.NotFound;
+        try evt.updateRepo(io, allocator, users_path, &user_id, .{ .name = "admin", .email = "admin@example.test" }, "target", "target", target.repo.event.description, target.repo.event.read_access, .read, .read, .read);
+        var user_repo = (try evt.openUserRepo(io, allocator, users_path, &user_id)) orelse return error.NotFound;
         defer user_repo.deinit(io, allocator);
-        break :blk try fork.create(.{}, io, allocator, users_dir, .{
+        break :blk try fork.create(.{}, io, allocator, users_path, .{
             .id = fork_id_hex,
             .user_id = user_id,
             .repo_id = repo_id,
@@ -628,7 +628,7 @@ fn testPushFork(
     {
         var admin = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = admin_path });
         defer admin.deinit(io, allocator);
-        var user_repo = (try evt.openUserRepo(io, allocator, users_dir, &user_id)) orelse return error.NotFound;
+        var user_repo = (try evt.openUserRepo(io, allocator, users_path, &user_id)) orelse return error.NotFound;
         defer user_repo.deinit(io, allocator);
         var target = try rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = target_path });
         defer target.deinit(io, allocator);
@@ -636,7 +636,7 @@ fn testPushFork(
         try std.testing.expectError(error.NotFound, evt.currentMoment(repo_opts, &target));
         try std.testing.expectEqual(null, try (try target.core.latestMoment()).getCursor(hash.hashInt(hash_kind, evt.Patch.patch_id_to_mergeability_key)));
         try target.addBranch(io, .{ .name = "feature" });
-        try pch.publish(repo_opts, io, allocator, .{ .users_dir = users_dir }, &admin, &target, .{
+        try pch.publish(repo_opts, io, allocator, .{ .users_path = users_path }, &admin, &target, .{
             .id = fork_id_hex,
             .user_id = user_id,
             .repo_id = repo_id,
@@ -647,7 +647,7 @@ fn testPushFork(
         defer arena.deinit();
         const moment = try evt.currentMoment(repo_opts, &target);
         const patch = (try evt.Patch.readById(evt.EventDB(hash_kind), hash_kind, moment, &arena, &fork_id)) orelse return error.NotFound;
-        try evt.Patch.update(.{ .server = .{ .users_dir = users_dir } }, .xit, repo_opts, io, allocator, &target, &fork_id, .{ .fields = .{
+        try evt.Patch.update(.{ .server = .{ .users_path = users_path } }, .xit, repo_opts, io, allocator, &target, &fork_id, .{ .fields = .{
             .title = "edited feature",
             .description = patch.event.description,
             .labels = patch.event.labels,
@@ -735,7 +735,7 @@ fn testPushFork(
     {
         var target = try rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = target_path });
         defer target.deinit(io, allocator);
-        try evt.remove(.{ .server = .{ .users_dir = users_dir } }, .repo, .xit, repo_opts, io, allocator, &target, &fork_id, .patch, .{ .name = "admin", .email = "admin@example.test" });
+        try evt.remove(.{ .server = .{ .users_path = users_path } }, .repo, .xit, repo_opts, io, allocator, &target, &fork_id, .patch, .{ .name = "admin", .email = "admin@example.test" });
     }
     try client.push(io, allocator, "patch-to-feature", "master:patch", false, .{ .wire = .{ .ssh = .{ .command = ssh_cmd } } });
     {
@@ -759,7 +759,7 @@ fn testPushFork(
         defer arena.deinit();
         const moment = try evt.currentMoment(repo_opts, &target);
         const removed = (try evt.Patch.readById(evt.EventDB(hash_kind), hash_kind, moment, &arena, &fork_id)) orelse return error.NotFound;
-        try evt.consume(.{ .server = .{ .users_dir = users_dir } }, .repo, .xit, repo_opts, io, allocator, &target, evt.events_ref, &.{.{
+        try evt.consume(.{ .server = .{ .users_path = users_path } }, .repo, .xit, repo_opts, io, allocator, &target, evt.events_ref, &.{.{
             .id = fork_id_hex,
             .timestamp = 4,
             .author = .{ .name = "admin", .email = "admin@example.test" },
@@ -806,9 +806,9 @@ fn testPushFork(
     //
 
     {
-        var user_repo = (try evt.openUserRepo(io, allocator, users_dir, &user_id)) orelse return error.NotFound;
+        var user_repo = (try evt.openUserRepo(io, allocator, users_path, &user_id)) orelse return error.NotFound;
         defer user_repo.deinit(io, allocator);
-        try evt.remove(.{ .server = .{ .users_dir = users_dir } }, .user, .xit, evt.user_repo_opts, io, allocator, &user_repo, &repo_id, .repo, .{ .name = "admin", .email = "admin@example.test" });
+        try evt.remove(.{ .server = .{ .users_path = users_path } }, .user, .xit, evt.user_repo_opts, io, allocator, &user_repo, &repo_id, .repo, .{ .name = "admin", .email = "admin@example.test" });
     }
     const clone_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "fork-clone" });
     defer allocator.free(clone_path);
@@ -825,9 +825,9 @@ fn testPushFork(
     try std.testing.expectEqualStrings(&third_source_oid, &(try fork_clone.readRef(io, fork.ref) orelse return error.NotFound));
 
     {
-        var user_repo = (try evt.openUserRepo(io, allocator, users_dir, &user_id)) orelse return error.NotFound;
+        var user_repo = (try evt.openUserRepo(io, allocator, users_path, &user_id)) orelse return error.NotFound;
         defer user_repo.deinit(io, allocator);
-        try evt.consume(.{ .server = .{ .users_dir = users_dir } }, .user, .xit, evt.user_repo_opts, io, allocator, &user_repo, evt.events_ref, &.{
+        try evt.consume(.{ .server = .{ .users_path = users_path } }, .user, .xit, evt.user_repo_opts, io, allocator, &user_repo, evt.events_ref, &.{
             .{
                 .id = std.fmt.bytesToHex(repo_id, .lower),
                 .timestamp = 2,
@@ -842,7 +842,7 @@ fn testPushFork(
         });
         var admin = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = admin_path });
         defer admin.deinit(io, allocator);
-        try evt.consume(.{ .server = .{ .users_dir = users_dir } }, .admin, .xit, evt.admin_repo_opts, io, allocator, &admin, evt.events_ref, &.{
+        try evt.consume(.{ .server = .{ .users_path = users_path } }, .admin, .xit, evt.admin_repo_opts, io, allocator, &admin, evt.events_ref, &.{
             .{
                 .id = std.fmt.bytesToHex(user_id, .lower),
                 .timestamp = 2,
@@ -866,9 +866,9 @@ fn testPushFork(
 
     // once the target is gone, only the forker's key may fetch the fork
     {
-        var user_repo = (try evt.openUserRepo(io, allocator, users_dir, &user_id)) orelse return error.NotFound;
+        var user_repo = (try evt.openUserRepo(io, allocator, users_path, &user_id)) orelse return error.NotFound;
         defer user_repo.deinit(io, allocator);
-        try evt.remove(.{ .server = .{ .users_dir = users_dir } }, .user, .xit, evt.user_repo_opts, io, allocator, &user_repo, &repo_id, .repo, .{ .name = "admin", .email = "admin@example.test" });
+        try evt.remove(.{ .server = .{ .users_path = users_path } }, .user, .xit, evt.user_repo_opts, io, allocator, &user_repo, &repo_id, .repo, .{ .name = "admin", .email = "admin@example.test" });
     }
     try std.testing.expectError(error.ServerReportedError, client.fetch(io, allocator, "denied", .{ .wire = .{ .ssh = .{ .command = reject_ssh_cmd } } }));
 }
@@ -1776,9 +1776,9 @@ fn setupAdmin(io: std.Io, allocator: std.mem.Allocator, data_path: []const u8) !
     var password_hash_buf: [evt.User.password_hash_max_len]u8 = undefined;
     const password_hash = try evt.User.hashPassword("password", &password_hash_buf, io);
 
-    const users_dir = try std.Io.Dir.path.join(allocator, &.{ data_path, "users" });
-    defer allocator.free(users_dir);
-    try evt.consume(.{ .server = .{ .users_dir = users_dir } }, .admin, .xit, evt.admin_repo_opts, io, allocator, &repo, evt.events_ref, &[_]evt.EventWithId{.{
+    const users_path = try std.Io.Dir.path.join(allocator, &.{ data_path, "users" });
+    defer allocator.free(users_path);
+    try evt.consume(.{ .server = .{ .users_path = users_path } }, .admin, .xit, evt.admin_repo_opts, io, allocator, &repo, evt.events_ref, &[_]evt.EventWithId{.{
         .id = std.fmt.bytesToHex(user_id, .lower),
         .author = .{ .name = "admin", .email = "admin@example.test" },
         .event = .{ .user = .{
@@ -1789,13 +1789,13 @@ fn setupAdmin(io: std.Io, allocator: std.mem.Allocator, data_path: []const u8) !
         } },
     }});
 
-    const user_repo_path = try evt.userRepoPath(allocator, users_dir, &user_id);
+    const user_repo_path = try evt.userRepoPath(allocator, users_path, &user_id);
     defer allocator.free(user_repo_path);
     var user_repo = try evt.initUserRepo(io, allocator, user_repo_path);
     defer user_repo.deinit(io, allocator);
 }
 
-// resolve admin:<repo_name> to its on-disk directory under <data_dir>/users via
+// resolve admin:<repo_name> to its on-disk directory under <data_path>/users via
 // the event store
 fn repoOnDiskPath(
     io: std.Io,
@@ -1806,19 +1806,19 @@ fn repoOnDiskPath(
 ) !?[]u8 {
     const admin_repo_path = try std.Io.Dir.path.join(allocator, &.{ data_path, "admin" });
     defer allocator.free(admin_repo_path);
-    const users_dir = try std.Io.Dir.path.join(allocator, &.{ data_path, "users" });
-    defer allocator.free(users_dir);
+    const users_path = try std.Io.Dir.path.join(allocator, &.{ data_path, "users" });
+    defer allocator.free(users_path);
 
     const location = (try evt.resolveOrCreateRepo(
         io,
         allocator,
-        users_dir,
+        users_path,
         admin_repo_path,
         "admin",
         repo_name,
         if (create) .{ .read_access = .public } else null,
     )) orelse return null;
-    return try evt.repoPath(allocator, users_dir, &location.owner_id, &location.repo_id);
+    return try evt.repoPath(allocator, users_path, &location.owner_id, &location.repo_id);
 }
 
 // build the remote URL addressing admin:<repo_name> over the given transport

@@ -127,7 +127,7 @@ pub const View = struct {
     fn submitForm(self: *View, allocator: std.mem.Allocator) !void {
         if (comptime wasm) return;
         const io = self.session.io orelse return;
-        const users_dir = self.session.users_dir orelse return;
+        const users_path = self.session.users_path orelse return;
         const admin_repo = self.session.admin_repo orelse return;
 
         const name_input = try formField(self.formBox(), "name");
@@ -143,7 +143,7 @@ pub const View = struct {
         const password_again = try password_again_input.text(allocator);
         defer allocator.free(password_again);
 
-        const id = evt.createUser(io, allocator, users_dir, admin_repo, name, email, password, password_again) catch |err| {
+        const id = evt.createUser(io, allocator, users_path, admin_repo, name, email, password, password_again) catch |err| {
             self.session.logServer("signup failed", "name=\"{f}\" error={s}", .{ std.zig.fmtString(name), @errorName(err) });
             const aa = self.session.arena.allocator();
             self.session.data.form_feedback = .{ .user = .{

@@ -35,7 +35,7 @@ pub fn init(
     return .{
         .header = try Header.init(arena, about.title),
         .about = about,
-        .users = try Users.init(arena, session.io orelse return error.NoMoment, session.users_dir orelse return error.NoMoment, haxy_moment, users_route),
+        .users = try Users.init(arena, session.io orelse return error.NoMoment, session.users_path orelse return error.NoMoment, haxy_moment, users_route),
         .user_notifications = try ui.UserNotifications.init(arena, session, user_tab),
         .quit = Quit.init(),
     };

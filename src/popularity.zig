@@ -104,13 +104,13 @@ fn openSketch(io: std.Io, allocator: std.mem.Allocator, repo_path: []const u8) !
 pub fn count(
     io: std.Io,
     allocator: std.mem.Allocator,
-    users_dir: []const u8,
+    users_path: []const u8,
     location: evt.RepoLocation,
     address: std.Io.net.IpAddress,
 ) void {
     mutex.lockUncancelable(io);
     defer mutex.unlock(io);
-    countLocked(io, allocator, users_dir, location, address) catch |err| {
+    countLocked(io, allocator, users_path, location, address) catch |err| {
         std.log.warn("failed to count a fetch: {s}", .{@errorName(err)});
     };
 }
@@ -118,19 +118,19 @@ pub fn count(
 fn countLocked(
     io: std.Io,
     allocator: std.mem.Allocator,
-    users_dir: []const u8,
+    users_path: []const u8,
     location: evt.RepoLocation,
     address: std.Io.net.IpAddress,
 ) !void {
     // a deleted repo or owner has no dir left to hold a sketch
-    const repo_path = try evt.repoPath(allocator, users_dir, &location.owner_id, &location.repo_id);
+    const repo_path = try evt.repoPath(allocator, users_path, &location.owner_id, &location.repo_id);
     defer allocator.free(repo_path);
     if (try openSketch(io, allocator, repo_path)) |file| {
         defer file.close(io);
         _ = try sketch.add(io, file, addressHash(address, &location.repo_id));
     }
 
-    const user_repo_path = try evt.userRepoPath(allocator, users_dir, &location.owner_id);
+    const user_repo_path = try evt.userRepoPath(allocator, users_path, &location.owner_id);
     defer allocator.free(user_repo_path);
     const file = try openSketch(io, allocator, user_repo_path) orelse return;
     defer file.close(io);
@@ -152,7 +152,7 @@ fn countLocked(
             try order.put(&evt.orderKeyDesc(ctx.score, ctx.user_id));
         }
     };
-    try writeIndex(io, allocator, users_dir, Ctx{ .user_id = &location.owner_id, .score = try sketch.estimate(io, file) });
+    try writeIndex(io, allocator, users_path, Ctx{ .user_id = &location.owner_id, .score = try sketch.estimate(io, file) });
 }
 
 // the index's user scores and order, from its root
@@ -166,8 +166,8 @@ fn openIndex(cursor: *DB.Cursor(.read_write)) !struct { DB.HashMap(.read_write),
 
 // run `ctx` as one transaction on the index, under its exclusive lock. the
 // root is a map, so no history is kept.
-fn writeIndex(io: std.Io, allocator: std.mem.Allocator, users_dir: []const u8, ctx: anytype) !void {
-    const path = try std.Io.Dir.path.join(allocator, &.{ users_dir, index_name });
+fn writeIndex(io: std.Io, allocator: std.mem.Allocator, users_path: []const u8, ctx: anytype) !void {
+    const path = try std.Io.Dir.path.join(allocator, &.{ users_path, index_name });
     defer allocator.free(path);
     const file = try std.Io.Dir.cwd().createFile(io, path, .{ .read = true, .truncate = false });
     defer file.close(io);
@@ -184,7 +184,7 @@ fn writeIndex(io: std.Io, allocator: std.mem.Allocator, users_dir: []const u8, c
 }
 
 // list a new user, at 0
-pub fn addUser(io: std.Io, allocator: std.mem.Allocator, users_dir: []const u8, user_id: *const [evt.event_id_size]u8) !void {
+pub fn addUser(io: std.Io, allocator: std.mem.Allocator, users_path: []const u8, user_id: *const [evt.event_id_size]u8) !void {
     const Ctx = struct {
         user_id: *const [evt.event_id_size]u8,
 
@@ -194,11 +194,11 @@ pub fn addUser(io: std.Io, allocator: std.mem.Allocator, users_dir: []const u8, 
             try order.put(&evt.orderKeyDesc(0, ctx.user_id));
         }
     };
-    try writeIndex(io, allocator, users_dir, Ctx{ .user_id = user_id });
+    try writeIndex(io, allocator, users_path, Ctx{ .user_id = user_id });
 }
 
 // unlist a deleted user
-pub fn removeUser(io: std.Io, allocator: std.mem.Allocator, users_dir: []const u8, user_id: *const [evt.event_id_size]u8) !void {
+pub fn removeUser(io: std.Io, allocator: std.mem.Allocator, users_path: []const u8, user_id: *const [evt.event_id_size]u8) !void {
     const Ctx = struct {
         user_id: *const [evt.event_id_size]u8,
 
@@ -210,15 +210,15 @@ pub fn removeUser(io: std.Io, allocator: std.mem.Allocator, users_dir: []const u
             _ = try scores.remove(key);
         }
     };
-    try writeIndex(io, allocator, users_dir, Ctx{ .user_id = user_id });
+    try writeIndex(io, allocator, users_path, Ctx{ .user_id = user_id });
 }
 
 // list every active user missing from the index, with their sketch's estimate
-pub fn reconcile(io: std.Io, allocator: std.mem.Allocator, users_dir: []const u8, admin_repo: *rp.Repo(.xit, evt.admin_repo_opts)) !void {
+pub fn reconcile(io: std.Io, allocator: std.mem.Allocator, users_path: []const u8, admin_repo: *rp.Repo(.xit, evt.admin_repo_opts)) !void {
     const Ctx = struct {
         io: std.Io,
         allocator: std.mem.Allocator,
-        users_dir: []const u8,
+        users_path: []const u8,
         admin_repo: *rp.Repo(.xit, evt.admin_repo_opts),
 
         pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
@@ -239,7 +239,7 @@ pub fn reconcile(io: std.Io, allocator: std.mem.Allocator, users_dir: []const u8
                 const key = hash.hashInt(hash_kind, &user_id);
                 if (try scores.getCursor(key) != null) continue;
 
-                const user_repo_path = try evt.userRepoPath(ctx.allocator, ctx.users_dir, &user_id);
+                const user_repo_path = try evt.userRepoPath(ctx.allocator, ctx.users_path, &user_id);
                 defer ctx.allocator.free(user_repo_path);
                 const path = try std.Io.Dir.path.join(ctx.allocator, &.{ user_repo_path, repo_dir_name, sketch_name });
                 defer ctx.allocator.free(path);
@@ -256,7 +256,7 @@ pub fn reconcile(io: std.Io, allocator: std.mem.Allocator, users_dir: []const u8
             }
         }
     };
-    try writeIndex(io, allocator, users_dir, Ctx{ .io = io, .allocator = allocator, .users_dir = users_dir, .admin_repo = admin_repo });
+    try writeIndex(io, allocator, users_path, Ctx{ .io = io, .allocator = allocator, .users_path = users_path, .admin_repo = admin_repo });
 }
 
 // a window of the users list, most fetched first
@@ -267,9 +267,9 @@ pub const Window = struct {
 };
 
 // up to `max` user ids from `start` in the users list order
-pub fn readUsers(io: std.Io, arena: *std.heap.ArenaAllocator, users_dir: []const u8, start: usize, max: usize) !Window {
+pub fn readUsers(io: std.Io, arena: *std.heap.ArenaAllocator, users_path: []const u8, start: usize, max: usize) !Window {
     const gpa = arena.child_allocator;
-    const path = try std.Io.Dir.path.join(gpa, &.{ users_dir, index_name });
+    const path = try std.Io.Dir.path.join(gpa, &.{ users_path, index_name });
     defer gpa.free(path);
     // readers take no lock
     const file = try std.Io.Dir.cwd().openFile(io, path, .{});

@@ -33,7 +33,7 @@ const Self = @This();
 
 pub fn init(arena: *std.heap.ArenaAllocator, session: *ui.Session, route: ui.RoutablePage) !Self {
     const io = session.io orelse return error.NotFound;
-    const users_dir = session.users_dir orelse return error.NotFound;
+    const users_path = session.users_path orelse return error.NotFound;
     const haxy_moment = session.haxy_moment orelse return error.NoMoment;
     const route_fork = route.forkRoute() orelse return error.UnexpectedRoute;
     // the route's identity names the forker and the repo name the fork was made under
@@ -41,7 +41,7 @@ pub fn init(arena: *std.heap.ArenaAllocator, session: *ui.Session, route: ui.Rou
     const id = evt.parseEventId(route_fork.id.slice()) catch return error.NotFound;
     const gpa = arena.child_allocator;
     const forker_id = (try evt.User.readIdByName(evt.AdminDB, evt.admin_repo_opts.hash, haxy_moment, identity.owner)) orelse return error.NotFound;
-    const fork_record = (try evt.readForkById(io, gpa, arena, users_dir, &forker_id, &id)) orelse return error.NotFound;
+    const fork_record = (try evt.readForkById(io, gpa, arena, users_path, &forker_id, &id)) orelse return error.NotFound;
     if (fork_record.removed) return error.NotFound;
     const forker = if (session.userId()) |user_id| std.mem.eql(u8, &user_id, &forker_id) else false;
     if (route == .fork_delete and !forker) return error.NotFound;
@@ -49,7 +49,7 @@ pub fn init(arena: *std.heap.ArenaAllocator, session: *ui.Session, route: ui.Rou
     const owner_id = try evt.parseEventId(&fork_record.event.repo_user_id);
 
     // a deleted target, or one whose owner was deleted, leaves the fork to its forker
-    const target = try evt.readRepoById(io, gpa, arena, users_dir, &owner_id, &target_id, session.userId());
+    const target = try evt.readRepoById(io, gpa, arena, users_path, &owner_id, &target_id, session.userId());
     // a draft is as readable as the repo it targets
     const target_role: evt.Repo.Role = if (target) |found| role: {
         // patches that are off take their drafts with them
@@ -68,7 +68,7 @@ pub fn init(arena: *std.heap.ArenaAllocator, session: *ui.Session, route: ui.Rou
         .location = .{ .fork = .{ .identity = identity.identity, .id = &id_hex } },
         .viewer = try ui.Viewer.init(session, arena, target_role),
     };
-    const fork_path = try fork.forkPath(aa, users_dir, &forker_id, &id);
+    const fork_path = try fork.forkPath(aa, users_path, &forker_id, &id);
     // a fork shares its target's hash kind
     var any_fork = try rp.AnyRepo(.xit, .{}).open(io, arena.child_allocator, .{ .path = fork_path, .require_repo_root = true });
     defer any_fork.deinit(io, arena.child_allocator);
@@ -85,7 +85,7 @@ pub fn init(arena: *std.heap.ArenaAllocator, session: *ui.Session, route: ui.Rou
                 @memcpy(&commits_base_oid, revision.record.event.base_oid);
             }
 
-            const target_path = try evt.repoPath(aa, users_dir, &owner_id, &target_id);
+            const target_path = try evt.repoPath(aa, users_path, &owner_id, &target_id);
             const target_source = ui.RepoSource{ .path = target_path, .repo_kind = .xit };
             var target_repo_maybe: ?rp.Repo(.xit, repo_opts) = if (target != null)
                 rp.Repo(.xit, repo_opts).open(io, arena.child_allocator, target_source.localInitOpts()) catch null

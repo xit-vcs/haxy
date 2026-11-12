@@ -18,14 +18,14 @@ pub const Options = struct {
     ssh_url: ?[]const u8 = null,
     // the size a pushed repo's db may grow to, or null for no limit
     max_repo_size: ?u64 = null,
-    data_dir: []const u8 = ".",
+    data_path: []const u8 = ".",
     git_ssh_prefix: []const u8 = "",
     fallback_on_address_in_use: bool = false,
 };
 
 pub const DeleteUserOptions = struct {
     name: []const u8,
-    data_dir: []const u8 = ".",
+    data_path: []const u8 = ".",
 };
 
 // delete the named user as their own delete tab does, minus the password check
@@ -37,16 +37,16 @@ pub fn deleteUser(
     out: *std.Io.Writer,
     err: *std.Io.Writer,
 ) !void {
-    const data_dir_path = try std.Io.Dir.path.resolveAlloc(allocator, &.{ cwd_path, options.data_dir });
-    defer allocator.free(data_dir_path);
-    const users_dir = try std.Io.Dir.path.resolveAlloc(allocator, &.{ data_dir_path, "users" });
-    defer allocator.free(users_dir);
-    const admin_repo_path = try std.Io.Dir.path.resolveAlloc(allocator, &.{ data_dir_path, "admin" });
+    const data_path = try std.Io.Dir.path.resolveAlloc(allocator, &.{ cwd_path, options.data_path });
+    defer allocator.free(data_path);
+    const users_path = try std.Io.Dir.path.resolveAlloc(allocator, &.{ data_path, "users" });
+    defer allocator.free(users_path);
+    const admin_repo_path = try std.Io.Dir.path.resolveAlloc(allocator, &.{ data_path, "admin" });
     defer allocator.free(admin_repo_path);
 
     var admin_repo = rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = admin_repo_path }) catch |open_err| switch (open_err) {
         error.RepoNotFound, error.FileNotFound => {
-            try err.print("no haxy data in {s}\n", .{data_dir_path});
+            try err.print("no haxy data in {s}\n", .{data_path});
             return error.HandledError;
         },
         else => |e| return e,
@@ -64,7 +64,7 @@ pub fn deleteUser(
         return error.HandledError;
     };
 
-    try evt.deleteUser(io, allocator, users_dir, &admin_repo, &user_id, .{ .name = user.event.name, .email = user.event.email });
+    try evt.deleteUser(io, allocator, users_path, &admin_repo, &user_id, .{ .name = user.event.name, .email = user.event.email });
     try out.print("deleted user {s}\n", .{user.event.name});
 }
 
@@ -105,22 +105,22 @@ pub fn run(
 ) !void {
     // create the data dir
 
-    const data_dir_path = try std.Io.Dir.path.resolveAlloc(allocator, &.{ cwd_path, options.data_dir });
-    defer allocator.free(data_dir_path);
+    const data_path = try std.Io.Dir.path.resolveAlloc(allocator, &.{ cwd_path, options.data_path });
+    defer allocator.free(data_path);
 
-    const data_dir = try std.Io.Dir.cwd().createDirPathOpen(io, data_dir_path, .{});
+    const data_dir = try std.Io.Dir.cwd().createDirPathOpen(io, data_path, .{});
     defer data_dir.close(io);
 
     // create the users dir
 
-    const users_dir = try std.Io.Dir.path.resolveAlloc(allocator, &.{ data_dir_path, "users" });
-    defer allocator.free(users_dir);
+    const users_path = try std.Io.Dir.path.resolveAlloc(allocator, &.{ data_path, "users" });
+    defer allocator.free(users_path);
 
-    try std.Io.Dir.cwd().createDirPath(io, users_dir);
+    try std.Io.Dir.cwd().createDirPath(io, users_path);
 
     // the admin repo path is where the user/repo metadata events live
 
-    const admin_repo_path = try std.Io.Dir.path.resolveAlloc(allocator, &.{ data_dir_path, "admin" });
+    const admin_repo_path = try std.Io.Dir.path.resolveAlloc(allocator, &.{ data_path, "admin" });
     defer allocator.free(admin_repo_path);
 
     // create the admin repo on first run, and bring the users list's index in
@@ -131,7 +131,7 @@ pub fn run(
             else => |e| return e,
         };
         defer admin_repo.deinit(io, allocator);
-        try popularity.reconcile(io, allocator, users_dir, &admin_repo);
+        try popularity.reconcile(io, allocator, users_path, &admin_repo);
     }
 
     const port_policy: PortPolicy = if (options.fallback_on_address_in_use) .fallback else .exact;
@@ -164,10 +164,10 @@ pub fn run(
         };
         break :blk .{
             .listener = listener,
-            .host_key = try serve_ssh_protocol.HostKey.loadOrGenerate(io, allocator, data_dir_path),
+            .host_key = try serve_ssh_protocol.HostKey.loadOrGenerate(io, allocator, data_path),
             .session_handler = .{
                 .admin_repo_path = admin_repo_path,
-                .server = .{ .users_dir = users_dir, .admin_repo_path = admin_repo_path },
+                .server = .{ .users_path = users_path, .admin_repo_path = admin_repo_path },
                 .web_url = web_url,
                 .ssh_url = ssh_url,
                 .git_ssh_prefix = options.git_ssh_prefix,
@@ -193,12 +193,12 @@ pub fn run(
         serve_ssh.runListener(io, allocator, &ssh.host_key, &ssh.session_handler, &ssh.watchdog, &ssh.listener.server, &tasks, err);
     }
 
-    try err.print("serving web UI and git over HTTP on http://{s}:{d}/, users dir {s}\n", .{ web_listen_address.host, web_server.socket.address.getPort(), users_dir });
+    try err.print("serving web UI and git over HTTP on http://{s}:{d}/, users dir {s}\n", .{ web_listen_address.host, web_server.socket.address.getPort(), users_path });
     try err.flush();
 
     runWebListener(io, allocator, &web_server, &tasks, .{ .server = .{
         .admin_repo_path = admin_repo_path,
-        .users_dir = users_dir,
+        .users_path = users_path,
         .session_store = session_store,
         .web_url = web_url,
         .ssh_url = ssh_url,

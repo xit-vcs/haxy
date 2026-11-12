@@ -40,7 +40,7 @@ pub fn init(arena: *std.heap.ArenaAllocator, identity: []const u8, repo: evt.Rep
 pub fn perform(
     io: std.Io,
     allocator: std.mem.Allocator,
-    users_dir: []const u8,
+    users_path: []const u8,
     actor: ui.Actor,
     identity: []const u8,
     action: Action,
@@ -51,7 +51,7 @@ pub fn perform(
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const repo_id = blk: {
-        var user_repo = (try evt.openUserRepo(io, allocator, users_dir, &owner_id)) orelse return error.NotFound;
+        var user_repo = (try evt.openUserRepo(io, allocator, users_path, &owner_id)) orelse return error.NotFound;
         defer user_repo.deinit(io, allocator);
         const moment = (try evt.userMoment(&user_repo)) orelse return error.NotFound;
         const found = (try evt.Repo.readByName(evt.UserDB, evt.user_repo_opts.hash, moment, &arena, parsed.name)) orelse return error.NotFound;
@@ -62,7 +62,7 @@ pub fn perform(
     // branch's row links to it, so its encoded name must fit in a route
     if (action != .unprotect) {
         if ((try ui.urlEncodeRef(arena.allocator(), branch)).len > ui.RoutablePage.ref_route_max_len) return .too_long;
-        const path = try evt.repoPath(allocator, users_dir, &owner_id, &repo_id);
+        const path = try evt.repoPath(allocator, users_path, &owner_id, &repo_id);
         defer allocator.free(path);
         const source = ui.RepoSource{ .path = path, .repo_kind = .xit };
         if (!try source.hasBranch(io, allocator, branch)) return .not_found;
@@ -76,7 +76,7 @@ pub fn perform(
             return null;
         }
     }
-    evt.protectBranch(io, allocator, users_dir, &owner_id, &repo_id, branch, action == .protect, actor.author) catch |err| {
+    evt.protectBranch(io, allocator, users_path, &owner_id, &repo_id, branch, action == .protect, actor.author) catch |err| {
         if (ui.Session.FormFeedback.BranchesFailure.fromError(err)) |failure| return failure;
         return err;
     };
@@ -254,9 +254,9 @@ pub const View = struct {
     fn act(self: *View, allocator: std.mem.Allocator, action: Action, branch: []const u8) !void {
         if (comptime wasm) return;
         const io = self.session.io orelse return;
-        const users_dir = self.session.users_dir orelse return;
+        const users_path = self.session.users_path orelse return;
         const actor = (try self.session.authorize(self.data.identity, .owner, null)) orelse return;
-        if (try perform(io, allocator, users_dir, actor, self.data.identity, action, branch)) |failure| {
+        if (try perform(io, allocator, users_path, actor, self.data.identity, action, branch)) |failure| {
             self.session.data.form_feedback = .{ .repo_branches = .{ .failure = failure, .name = try self.session.arena.allocator().dupe(u8, branch), .default = action == .default } };
             return;
         }

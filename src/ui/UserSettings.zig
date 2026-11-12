@@ -206,7 +206,7 @@ pub const View = struct {
     fn submitForm(self: *View, allocator: std.mem.Allocator) !void {
         if (comptime wasm) return;
         const io = self.session.io orelse return;
-        const users_dir = self.session.users_dir orelse return;
+        const users_path = self.session.users_path orelse return;
         const admin_repo = self.session.admin_repo orelse return;
         const user_id = self.session.userId() orelse return;
 
@@ -219,7 +219,7 @@ pub const View = struct {
         const new_password_again = try (try self.formField("new_password_again")).text(allocator);
         defer allocator.free(new_password_again);
 
-        evt.updateUser(io, allocator, users_dir, admin_repo, &user_id, email, current_password, new_password, new_password_again) catch |err| switch (err) {
+        evt.updateUser(io, allocator, users_path, admin_repo, &user_id, email, current_password, new_password, new_password_again) catch |err| switch (err) {
             // the account was removed under them
             error.NotFound => return ui.UserNotifications.logOut(self.session),
             else => {

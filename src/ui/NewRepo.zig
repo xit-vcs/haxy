@@ -137,7 +137,7 @@ pub const View = struct {
     fn submitForm(self: *View, allocator: std.mem.Allocator) !void {
         if (comptime wasm) return;
         const io = self.session.io orelse return;
-        const users_dir = self.session.users_dir orelse return;
+        const users_path = self.session.users_path orelse return;
         const admin_repo = self.session.admin_repo orelse return;
         const user_id = self.session.userId() orelse return;
         const moment = try evt.currentMoment(evt.admin_repo_opts, admin_repo);
@@ -155,7 +155,7 @@ pub const View = struct {
         const hash_kind = std.meta.stringToEnum(hash.HashKind, (try formRadio(self.formBox(), "hash")).selected()) orelse unreachable;
         const access = std.meta.stringToEnum(evt.Repo.Access, (try formRadio(self.formBox(), "access")).selected()) orelse unreachable;
 
-        _ = evt.createRepo(io, allocator, users_dir, &user_id, .{ .name = user.event.name, .email = user.event.email }, name, description, access, hash_kind, if (copy.len == 0) null else .{ .admin_moment = moment, .path = copy }) catch |err| {
+        _ = evt.createRepo(io, allocator, users_path, &user_id, .{ .name = user.event.name, .email = user.event.email }, name, description, access, hash_kind, if (copy.len == 0) null else .{ .admin_moment = moment, .path = copy }) catch |err| {
             const failure = ui.Session.FormFeedback.RepoFailure.fromError(err) orelse return err;
             const aa = self.session.arena.allocator();
             self.session.data.form_feedback = .{ .repo = .{ .failure = failure, .fields = .{

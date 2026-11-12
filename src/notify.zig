@@ -64,8 +64,8 @@ pub fn idOf(repo_id: *const [evt.event_id_size]u8, thread_id: *const [evt.event_
 }
 
 // run `ctx` in a transaction on the user's repo
-fn transact(io: std.Io, allocator: std.mem.Allocator, users_dir: []const u8, user_id: *const [evt.event_id_size]u8, ctx: anytype) !void {
-    var user_repo = (try evt.openUserRepo(io, allocator, users_dir, user_id)) orelse return error.NotFound;
+fn transact(io: std.Io, allocator: std.mem.Allocator, users_path: []const u8, user_id: *const [evt.event_id_size]u8, ctx: anytype) !void {
+    var user_repo = (try evt.openUserRepo(io, allocator, users_path, user_id)) orelse return error.NotFound;
     defer user_repo.deinit(io, allocator);
 
     try user_repo.core.db_file.lock(io, .exclusive);
@@ -93,7 +93,7 @@ fn removeNotif(moment: UserDB.HashMap(.read_write), records: UserDB.HashMap(.rea
 }
 
 // upsert one user's batch as unread and newest, pruning past the cap
-pub fn deliver(io: std.Io, allocator: std.mem.Allocator, users_dir: []const u8, user_id: *const [evt.event_id_size]u8, notifs: []const Notif) !void {
+pub fn deliver(io: std.Io, allocator: std.mem.Allocator, users_path: []const u8, user_id: *const [evt.event_id_size]u8, notifs: []const Notif) !void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
@@ -136,7 +136,7 @@ pub fn deliver(io: std.Io, allocator: std.mem.Allocator, users_dir: []const u8, 
         }
     };
 
-    try transact(io, allocator, users_dir, user_id, Ctx{
+    try transact(io, allocator, users_path, user_id, Ctx{
         .arena = &arena,
         .notifs = notifs,
         .time = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
@@ -147,7 +147,7 @@ pub fn deliver(io: std.Io, allocator: std.mem.Allocator, users_dir: []const u8, 
 pub fn markRead(
     io: std.Io,
     allocator: std.mem.Allocator,
-    users_dir: []const u8,
+    users_path: []const u8,
     user_id: *const [evt.event_id_size]u8,
     notif_id: *const [evt.event_id_size]u8,
     last_child_id: *const [evt.event_id_size]u8,
@@ -172,11 +172,11 @@ pub fn markRead(
         }
     };
 
-    try transact(io, allocator, users_dir, user_id, Ctx{ .arena = &arena, .notif_id = notif_id, .last_child_id = last_child_id });
+    try transact(io, allocator, users_path, user_id, Ctx{ .arena = &arena, .notif_id = notif_id, .last_child_id = last_child_id });
 }
 
 // remove a notif. the thread's next bump recreates it.
-pub fn dismiss(io: std.Io, allocator: std.mem.Allocator, users_dir: []const u8, user_id: *const [evt.event_id_size]u8, notif_id: *const [evt.event_id_size]u8) !void {
+pub fn dismiss(io: std.Io, allocator: std.mem.Allocator, users_path: []const u8, user_id: *const [evt.event_id_size]u8, notif_id: *const [evt.event_id_size]u8) !void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
@@ -192,7 +192,7 @@ pub fn dismiss(io: std.Io, allocator: std.mem.Allocator, users_dir: []const u8, 
         }
     };
 
-    try transact(io, allocator, users_dir, user_id, Ctx{ .arena = &arena, .notif_id = notif_id });
+    try transact(io, allocator, users_path, user_id, Ctx{ .arena = &arena, .notif_id = notif_id });
 }
 
 // up to `count` notifs from `start`, newest first. `moment` is the user repo's latest.
@@ -239,42 +239,42 @@ pub fn unreadCount(moment: UserDB.HashMap(.read_only)) !u64 {
 pub fn subscribe(
     io: std.Io,
     allocator: std.mem.Allocator,
-    users_dir: []const u8,
+    users_path: []const u8,
     user_id: *const [evt.event_id_size]u8,
     location: evt.RepoLocation,
     thread_id: *const [evt.event_id_size]u8,
     author: evt.CommitAuthor,
 ) !void {
     {
-        var owner_repo = (try evt.openUserRepo(io, allocator, users_dir, &location.owner_id)) orelse return error.NotFound;
+        var owner_repo = (try evt.openUserRepo(io, allocator, users_path, &location.owner_id)) orelse return error.NotFound;
         defer owner_repo.deinit(io, allocator);
         const moment = try owner_repo.core.latestMoment();
         const notif_id = idOf(&location.repo_id, thread_id);
         if (try isNotified(moment, &notif_id, user_id)) return;
         if (try tierFull(moment, &notif_id, .subscribed)) return;
     }
-    try writeMode(io, allocator, users_dir, user_id, &location, thread_id, .subscribed, author);
+    try writeMode(io, allocator, users_path, user_id, &location, thread_id, .subscribed, author);
 }
 
 // never notify `user_id` of the thread `thread_id` in the repo at `location`, dropping its notif
 pub fn mute(
     io: std.Io,
     allocator: std.mem.Allocator,
-    users_dir: []const u8,
+    users_path: []const u8,
     user_id: *const [evt.event_id_size]u8,
     location: evt.RepoLocation,
     thread_id: *const [evt.event_id_size]u8,
     author: evt.CommitAuthor,
 ) !void {
-    try writeMode(io, allocator, users_dir, user_id, &location, thread_id, .muted, author);
-    try dismiss(io, allocator, users_dir, user_id, &idOf(&location.repo_id, thread_id));
+    try writeMode(io, allocator, users_path, user_id, &location, thread_id, .muted, author);
+    try dismiss(io, allocator, users_path, user_id, &idOf(&location.repo_id, thread_id));
 }
 
 // write the user's notify event for a thread, then move them to its tier in the owner's index
 pub fn writeMode(
     io: std.Io,
     allocator: std.mem.Allocator,
-    users_dir: []const u8,
+    users_path: []const u8,
     user_id: *const [evt.event_id_size]u8,
     location: *const evt.RepoLocation,
     thread_id: *const [evt.event_id_size]u8,
@@ -282,9 +282,9 @@ pub fn writeMode(
     author: evt.CommitAuthor,
 ) !void {
     {
-        var user_repo = (try evt.openUserRepo(io, allocator, users_dir, user_id)) orelse return error.NotFound;
+        var user_repo = (try evt.openUserRepo(io, allocator, users_path, user_id)) orelse return error.NotFound;
         defer user_repo.deinit(io, allocator);
-        try evt.consume(.{ .server = .{ .users_dir = users_dir } }, .user, .xit, evt.user_repo_opts, io, allocator, &user_repo, evt.events_ref, &[_]evt.EventWithId{.{
+        try evt.consume(.{ .server = .{ .users_path = users_path } }, .user, .xit, evt.user_repo_opts, io, allocator, &user_repo, evt.events_ref, &[_]evt.EventWithId{.{
             .id = std.fmt.bytesToHex(evt.Notify.idOf(&location.repo_id, thread_id), .lower),
             .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
             .author = author,
@@ -296,7 +296,7 @@ pub fn writeMode(
             } },
         }});
     }
-    indexMode(io, allocator, users_dir, location, thread_id, user_id, mode);
+    indexMode(io, allocator, users_path, location, thread_id, user_id, mode);
 }
 
 // move `user_id` to `mode`'s tier on the thread in its repo owner's index, or
@@ -304,7 +304,7 @@ pub fn writeMode(
 fn indexMode(
     io: std.Io,
     allocator: std.mem.Allocator,
-    users_dir: []const u8,
+    users_path: []const u8,
     location: *const evt.RepoLocation,
     thread_id: *const [evt.event_id_size]u8,
     user_id: *const [evt.event_id_size]u8,
@@ -327,7 +327,7 @@ fn indexMode(
         }
     };
 
-    transact(io, allocator, users_dir, &location.owner_id, Ctx{
+    transact(io, allocator, users_path, &location.owner_id, Ctx{
         .notif_id = idOf(&location.repo_id, thread_id),
         .user_id = user_id,
         .mode = mode,
@@ -341,13 +341,13 @@ fn indexMode(
 // commented. logs rather than returning a failure.
 pub fn subscribeParticipants(io: std.Io, allocator: std.mem.Allocator, server: evt.Host.Server, repo_path: []const u8, events: []const evt.EventWithId) void {
     const admin_repo_path = server.admin_repo_path orelse return;
-    const location = evt.parseRepoPath(server.users_dir, repo_path) orelse return;
-    subscribeEach(io, allocator, server.users_dir, admin_repo_path, location, events) catch |err| {
+    const location = evt.parseRepoPath(server.users_path, repo_path) orelse return;
+    subscribeEach(io, allocator, server.users_path, admin_repo_path, location, events) catch |err| {
         std.log.warn("failed to subscribe thread participants: {s}", .{@errorName(err)});
     };
 }
 
-fn subscribeEach(io: std.Io, allocator: std.mem.Allocator, users_dir: []const u8, admin_repo_path: []const u8, location: evt.RepoLocation, events: []const evt.EventWithId) !void {
+fn subscribeEach(io: std.Io, allocator: std.mem.Allocator, users_path: []const u8, admin_repo_path: []const u8, location: evt.RepoLocation, events: []const evt.EventWithId) !void {
     var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = admin_repo_path });
     defer admin_repo.deinit(io, allocator);
     const admin_moment = try evt.currentMoment(evt.admin_repo_opts, &admin_repo);
@@ -365,7 +365,7 @@ fn subscribeEach(io: std.Io, allocator: std.mem.Allocator, users_dir: []const u8
         const thread_id = try evt.parseEventId(&thread_hex);
         // a mute stands, and a record only ever moves up to involved
         {
-            var user_repo = (try evt.openUserRepo(io, allocator, users_dir, &user_id)) orelse continue;
+            var user_repo = (try evt.openUserRepo(io, allocator, users_path, &user_id)) orelse continue;
             defer user_repo.deinit(io, allocator);
             if (try evt.userMoment(&user_repo)) |moment| {
                 if (try evt.Notify.readMode(UserDB, hash_kind, moment, &arena, &location.repo_id, &thread_id)) |existing| {
@@ -375,12 +375,12 @@ fn subscribeEach(io: std.Io, allocator: std.mem.Allocator, users_dir: []const u8
         }
         // a full commented tier takes nobody new, so a later comment checks again
         if (mode == .commented) {
-            var owner_repo = (try evt.openUserRepo(io, allocator, users_dir, &location.owner_id)) orelse return error.NotFound;
+            var owner_repo = (try evt.openUserRepo(io, allocator, users_path, &location.owner_id)) orelse return error.NotFound;
             defer owner_repo.deinit(io, allocator);
             if (try tierFull(try owner_repo.core.latestMoment(), &idOf(&location.repo_id, &thread_id), .commented)) continue;
         }
         // the write's own author, which for an assignment is the assigner
-        try writeMode(io, allocator, users_dir, &user_id, &location, &thread_id, mode, event.author);
+        try writeMode(io, allocator, users_path, &user_id, &location, &thread_id, mode, event.author);
     }
 }
 
@@ -450,8 +450,8 @@ pub fn deliverTransaction(
     progress_ctx_maybe: ?repo_opts.ProgressCtx,
 ) void {
     const admin_repo_path = server.admin_repo_path orelse return;
-    const location = evt.parseRepoPath(server.users_dir, repo.core.work_path) orelse return;
-    deliverEach(repo_opts, io, allocator, server.users_dir, admin_repo_path, location, repo, moment_index, pusher_id, progress_ctx_maybe) catch |err| {
+    const location = evt.parseRepoPath(server.users_path, repo.core.work_path) orelse return;
+    deliverEach(repo_opts, io, allocator, server.users_path, admin_repo_path, location, repo, moment_index, pusher_id, progress_ctx_maybe) catch |err| {
         std.log.warn("failed to deliver notifications: {s}", .{@errorName(err)});
     };
 }
@@ -493,7 +493,7 @@ fn deliverEach(
     comptime repo_opts: rp.RepoOpts(.xit),
     io: std.Io,
     allocator: std.mem.Allocator,
-    users_dir: []const u8,
+    users_path: []const u8,
     admin_repo_path: []const u8,
     location: evt.RepoLocation,
     repo: *rp.Repo(.xit, repo_opts),
@@ -506,7 +506,7 @@ fn deliverEach(
     // the transaction's events, newest first
     const ids = (try evt.momentEventIds(DB, repo_opts.hash, haxy_moment, moment_index)) orelse return;
 
-    var owner_repo = (try evt.openUserRepo(io, allocator, users_dir, &location.owner_id)) orelse return;
+    var owner_repo = (try evt.openUserRepo(io, allocator, users_path, &location.owner_id)) orelse return;
     defer owner_repo.deinit(io, allocator);
     const owner_moment = (try evt.userMoment(&owner_repo)) orelse return;
     // the owner's plain data, which holds the tier index
@@ -592,7 +592,7 @@ fn deliverEach(
     progress.report(repo_opts, io, progress_ctx_maybe, .{ .text = "Delivering notifications" });
     progress.report(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .writing_patch, .estimated_total_items = inboxes.by_user.count() } });
     for (inboxes.by_user.keys(), inboxes.by_user.values()) |*user_id, notifs| {
-        deliver(io, allocator, users_dir, user_id, notifs.items) catch |err| {
+        deliver(io, allocator, users_path, user_id, notifs.items) catch |err| {
             std.log.warn("failed to deliver notifications: {s}", .{@errorName(err)});
         };
         progress.report(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .writing_patch });

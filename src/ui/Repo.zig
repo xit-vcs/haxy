@@ -255,8 +255,8 @@ pub fn init(
     } else {
         const haxy_moment = session.haxy_moment orelse return error.NoMoment;
         const io = session.io orelse return error.NoMoment;
-        const users_dir = session.users_dir orelse return error.NoMoment;
-        const found = (try evt.readRepoByOwnerAndName(io, arena.child_allocator, arena, haxy_moment, users_dir, repo_identity.owner, repo_identity.name, session.userId())) orelse return error.NotFound;
+        const users_path = session.users_path orelse return error.NoMoment;
+        const found = (try evt.readRepoByOwnerAndName(io, arena.child_allocator, arena, haxy_moment, users_path, repo_identity.owner, repo_identity.name, session.userId())) orelse return error.NotFound;
         // a repo the session can't read doesn't exist to it
         role = found.role orelse return error.NotFound;
         repo = found.repo;
@@ -270,7 +270,7 @@ pub fn init(
 
         // the repo's working copy lives in its owner's dir.
         source = .{
-            .path = try evt.repoPath(arena.allocator(), users_dir, &owner_id, &found.event_id),
+            .path = try evt.repoPath(arena.allocator(), users_path, &owner_id, &found.event_id),
             .repo_kind = .xit,
         };
     }
@@ -342,7 +342,7 @@ pub fn init(
                                         .repo_delete => .delete,
                                         else => .settings,
                                     },
-                                    .members = try Members.init(io, gpa, arena, session.haxy_moment orelse return error.NoMoment, session.users_dir orelse return error.NoMoment, repo_identity.identity, &owner_id, &repo_id, members_route.start, if (members_route.confirm) |action| .{ .action = action, .name = members_route.user.slice() } else null),
+                                    .members = try Members.init(io, gpa, arena, session.haxy_moment orelse return error.NoMoment, session.users_path orelse return error.NoMoment, repo_identity.identity, &owner_id, &repo_id, members_route.start, if (members_route.confirm) |action| .{ .action = action, .name = members_route.user.slice() } else null),
                                     .branches = try Branches.init(arena, repo_identity.identity, repo.event, default_branch),
                                     .delete = if (creator) .{ .target = .{ .repo = identity } } else null,
                                 };
@@ -451,12 +451,12 @@ fn readNotify(
 ) !void {
     const user_id = session.userId() orelse return;
     const io = session.io orelse return error.NoMoment;
-    const users_dir = session.users_dir orelse return error.NoMoment;
+    const users_path = session.users_path orelse return error.NoMoment;
     const gpa = arena.child_allocator;
 
     {
         // the owner's plain data, which holds the tier index
-        var owner_repo = (try evt.openUserRepo(io, gpa, users_dir, owner_id)) orelse return error.NotFound;
+        var owner_repo = (try evt.openUserRepo(io, gpa, users_path, owner_id)) orelse return error.NotFound;
         defer owner_repo.deinit(io, gpa);
         const owner_moment = try notify.latestMoment(&owner_repo);
 
@@ -466,7 +466,7 @@ fn readNotify(
     }
 
     if (viewed_thread.len == 0) return;
-    var user_repo = (try evt.openUserRepo(io, gpa, users_dir, &user_id)) orelse return;
+    var user_repo = (try evt.openUserRepo(io, gpa, users_path, &user_id)) orelse return;
     defer user_repo.deinit(io, gpa);
     const latest = (try notify.latestMoment(&user_repo)) orelse return;
     const notif_id = notify.idOf(repo_id, &try evt.parseEventId(viewed_thread));
@@ -478,7 +478,7 @@ fn readNotify(
     const kinds = try evt.EventDB(repo_opts.hash).HashMap(.read_only).init(kinds_cursor);
     // a child the page can't show leaves it unread
     if (try evt.readEventKind(repo_opts.hash, kinds, &item.notif.last_child_id) == null) return;
-    try notify.markRead(io, gpa, users_dir, &user_id, &notif_id, &item.notif.last_child_id);
+    try notify.markRead(io, gpa, users_path, &user_id, &notif_id, &item.notif.last_child_id);
 }
 
 // set the viewer's notify button on each of a window's threads

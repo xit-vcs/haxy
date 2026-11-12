@@ -357,9 +357,9 @@ fn authorizedSource(session: *ui.Session, identity: []const u8) !?ui.RepoSource 
     const moment = try evt.currentMoment(evt.admin_repo_opts, admin_repo);
     const pair = ui.RoutablePage.RepoIdentity.parse(identity) orelse return error.NotFound;
     const io = session.io orelse return error.NotFound;
-    const users_dir = session.users_dir orelse return error.NotFound;
-    const found = try evt.readRepoByOwnerAndName(io, session.page_arena.child_allocator, session.page_arena, moment, users_dir, pair.owner, pair.name, null) orelse return error.NotFound;
-    return .{ .path = try evt.repoPath(session.page_arena.allocator(), users_dir, &try evt.parseEventId(&found.repo.event.user_id), &found.event_id), .repo_kind = .xit };
+    const users_path = session.users_path orelse return error.NotFound;
+    const found = try evt.readRepoByOwnerAndName(io, session.page_arena.child_allocator, session.page_arena, moment, users_path, pair.owner, pair.name, null) orelse return error.NotFound;
+    return .{ .path = try evt.repoPath(session.page_arena.allocator(), users_path, &try evt.parseEventId(&found.repo.event.user_id), &found.event_id), .repo_kind = .xit };
 }
 
 pub const View = struct {

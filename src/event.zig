@@ -93,21 +93,21 @@ pub fn initUserRepo(io: std.Io, allocator: std.mem.Allocator, path: []const u8) 
 }
 
 // a user repo's path, inside the user's dir
-pub fn userRepoPath(allocator: std.mem.Allocator, users_dir: []const u8, user_id: *const [event_id_size]u8) ![]u8 {
-    return try std.Io.Dir.path.join(allocator, &.{ users_dir, &std.fmt.bytesToHex(user_id.*, .lower), "user" });
+pub fn userRepoPath(allocator: std.mem.Allocator, users_path: []const u8, user_id: *const [event_id_size]u8) ![]u8 {
+    return try std.Io.Dir.path.join(allocator, &.{ users_path, &std.fmt.bytesToHex(user_id.*, .lower), "user" });
 }
 
 // a repo's path, inside its owner's dir
-pub fn repoPath(allocator: std.mem.Allocator, users_dir: []const u8, owner_id: *const [event_id_size]u8, repo_id: *const [event_id_size]u8) ![]u8 {
-    return try std.Io.Dir.path.join(allocator, &.{ users_dir, &std.fmt.bytesToHex(owner_id.*, .lower), "repos", &std.fmt.bytesToHex(repo_id.*, .lower) });
+pub fn repoPath(allocator: std.mem.Allocator, users_path: []const u8, owner_id: *const [event_id_size]u8, repo_id: *const [event_id_size]u8) ![]u8 {
+    return try std.Io.Dir.path.join(allocator, &.{ users_path, &std.fmt.bytesToHex(owner_id.*, .lower), "repos", &std.fmt.bytesToHex(repo_id.*, .lower) });
 }
 
 // the ids a repo path names, or null for a path `repoPath` didn't build
-pub fn parseRepoPath(users_dir: []const u8, path: []const u8) ?RepoLocation {
+pub fn parseRepoPath(users_path: []const u8, path: []const u8) ?RepoLocation {
     const repos_dir = std.Io.Dir.path.dirname(path) orelse return null;
     if (!std.mem.eql(u8, std.Io.Dir.path.basename(repos_dir), "repos")) return null;
     const owner_dir = std.Io.Dir.path.dirname(repos_dir) orelse return null;
-    if (!std.mem.eql(u8, std.Io.Dir.path.dirname(owner_dir) orelse return null, users_dir)) return null;
+    if (!std.mem.eql(u8, std.Io.Dir.path.dirname(owner_dir) orelse return null, users_path)) return null;
     return .{
         .owner_id = parseEventId(std.Io.Dir.path.basename(owner_dir)) catch return null,
         .repo_id = parseEventId(std.Io.Dir.path.basename(path)) catch return null,
@@ -126,13 +126,13 @@ pub const repo_activity_window_secs = 5 * 60;
 pub fn bumpRepoActivity(
     io: std.Io,
     allocator: std.mem.Allocator,
-    users_dir: []const u8,
+    users_path: []const u8,
     owner_id: *const [event_id_size]u8,
     repo_id: *const [event_id_size]u8,
     timestamp: u64,
 ) !void {
     const hash_kind = user_repo_opts.hash;
-    var user_repo = (try openUserRepo(io, allocator, users_dir, owner_id)) orelse return;
+    var user_repo = (try openUserRepo(io, allocator, users_path, owner_id)) orelse return;
     defer user_repo.deinit(io, allocator);
 
     // a recent bump skips the transaction
@@ -171,9 +171,9 @@ pub fn bumpRepoActivity(
 
 // bump the repo at `repo_path` to now, logging rather than returning a failure
 pub fn bumpRepoActivityAt(io: std.Io, allocator: std.mem.Allocator, server: Host.Server, repo_path: []const u8) void {
-    const location = parseRepoPath(server.users_dir, repo_path) orelse return;
+    const location = parseRepoPath(server.users_path, repo_path) orelse return;
     const now: u64 = @intCast(std.Io.Timestamp.now(io, .real).toSeconds());
-    bumpRepoActivity(io, allocator, server.users_dir, &location.owner_id, &location.repo_id, now) catch |err| {
+    bumpRepoActivity(io, allocator, server.users_path, &location.owner_id, &location.repo_id, now) catch |err| {
         std.log.warn("failed to record repo activity: {s}", .{@errorName(err)});
     };
 }
@@ -245,8 +245,8 @@ pub fn readLoginKeyUser(moment: AdminDB.HashMap(.read_only), fingerprint: *const
 }
 
 // open a user's repo, or null when it's missing
-pub fn openUserRepo(io: std.Io, allocator: std.mem.Allocator, users_dir: []const u8, user_id: *const [event_id_size]u8) !?rp.Repo(.xit, user_repo_opts) {
-    const path = try userRepoPath(allocator, users_dir, user_id);
+pub fn openUserRepo(io: std.Io, allocator: std.mem.Allocator, users_path: []const u8, user_id: *const [event_id_size]u8) !?rp.Repo(.xit, user_repo_opts) {
+    const path = try userRepoPath(allocator, users_path, user_id);
     defer allocator.free(path);
     return rp.Repo(.xit, user_repo_opts).open(io, allocator, .{ .path = path, .require_repo_root = true }) catch |err| switch (err) {
         error.RepoNotFound, error.FileNotFound => null,
@@ -269,13 +269,13 @@ pub fn readRepoByOwnerAndName(
     allocator: std.mem.Allocator,
     arena: *std.heap.ArenaAllocator,
     admin_moment: AdminDB.HashMap(.read_only),
-    users_dir: []const u8,
+    users_path: []const u8,
     owner_name: []const u8,
     repo_name: []const u8,
     viewer_id: ?[event_id_size]u8,
 ) !?Repo.RepoWithRole {
     const owner_id = (try User.readIdByName(AdminDB, admin_repo_opts.hash, admin_moment, owner_name)) orelse return null;
-    var user_repo = (try openUserRepo(io, allocator, users_dir, &owner_id)) orelse return null;
+    var user_repo = (try openUserRepo(io, allocator, users_path, &owner_id)) orelse return null;
     defer user_repo.deinit(io, allocator);
     const moment = (try userMoment(&user_repo)) orelse return null;
     const found = (try Repo.readByName(UserDB, user_repo_opts.hash, moment, arena, repo_name)) orelse return null;
@@ -292,12 +292,12 @@ pub fn readRepoById(
     io: std.Io,
     allocator: std.mem.Allocator,
     arena: *std.heap.ArenaAllocator,
-    users_dir: []const u8,
+    users_path: []const u8,
     owner_id: *const [event_id_size]u8,
     repo_id: *const [event_id_size]u8,
     viewer_id: ?[event_id_size]u8,
 ) !?Repo.RepoWithRole {
-    var user_repo = (try openUserRepo(io, allocator, users_dir, owner_id)) orelse return null;
+    var user_repo = (try openUserRepo(io, allocator, users_path, owner_id)) orelse return null;
     defer user_repo.deinit(io, allocator);
     const moment = (try userMoment(&user_repo)) orelse return null;
     const repo = (try Repo.readById(UserDB, user_repo_opts.hash, moment, arena, repo_id)) orelse return null;
@@ -313,11 +313,11 @@ pub fn readRepoGrants(
     io: std.Io,
     allocator: std.mem.Allocator,
     arena: *std.heap.ArenaAllocator,
-    users_dir: []const u8,
+    users_path: []const u8,
     owner_id: *const [event_id_size]u8,
     repo_id: *const [event_id_size]u8,
 ) ![]const Grant {
-    var user_repo = (try openUserRepo(io, allocator, users_dir, owner_id)) orelse return &.{};
+    var user_repo = (try openUserRepo(io, allocator, users_path, owner_id)) orelse return &.{};
     defer user_repo.deinit(io, allocator);
     const moment = (try userMoment(&user_repo)) orelse return &.{};
     return try Grant.readByTarget(UserDB, user_repo_opts.hash, moment, arena, repo_id);
@@ -328,11 +328,11 @@ pub fn readForkById(
     io: std.Io,
     allocator: std.mem.Allocator,
     arena: *std.heap.ArenaAllocator,
-    users_dir: []const u8,
+    users_path: []const u8,
     forker_id: *const [event_id_size]u8,
     fork_id: *const [event_id_size]u8,
 ) !?Fork.Record {
-    var user_repo = (try openUserRepo(io, allocator, users_dir, forker_id)) orelse return null;
+    var user_repo = (try openUserRepo(io, allocator, users_path, forker_id)) orelse return null;
     defer user_repo.deinit(io, allocator);
     const moment = (try userMoment(&user_repo)) orelse return null;
     return try Fork.readById(UserDB, user_repo_opts.hash, moment, arena, fork_id);
@@ -453,7 +453,7 @@ pub const Host = union(HostKind) {
     server: Server,
 
     pub const Server = struct {
-        users_dir: []const u8,
+        users_path: []const u8,
         // where repo writes resolve their participants and recipients, null where they notify nobody
         admin_repo_path: ?[]const u8 = null,
     };
@@ -743,7 +743,7 @@ pub fn consume(
                 allocator: std.mem.Allocator,
                 ref: rf.Ref,
                 events: []const EventWithId,
-                users_dir: []const u8,
+                users_path: []const u8,
                 patch_ids: []const [event_id_size]u8,
                 first_parent_oids: ?[1][hash.hexLen(repo_opts.hash)]u8,
                 moment_index: *?u64,
@@ -754,7 +754,7 @@ pub fn consume(
 
                     try commitEvents(.xit, repo_opts, state, ctx.io, ctx.allocator, ctx.ref, ctx.events, ctx.first_parent_oids);
                     ctx.moment_index.* = try consumeInTransaction(role, .xit, repo_opts, state, &moment, ctx.io, ctx.allocator, ctx.ref);
-                    _ = try pch.updateMergeChecks(repo_opts, state, ctx.io, ctx.allocator, ctx.users_dir, ctx.patch_ids, null);
+                    _ = try pch.updateMergeChecks(repo_opts, state, ctx.io, ctx.allocator, ctx.users_path, ctx.patch_ids, null);
                     try xit.undo.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .custom = .{ .action_kind = undo_action } });
                 }
             };
@@ -769,7 +769,7 @@ pub fn consume(
                 .allocator = allocator,
                 .ref = resolved_ref,
                 .events = events,
-                .users_dir = if (host == .server) host.server.users_dir else "",
+                .users_path = if (host == .server) host.server.users_path else "",
                 .patch_ids = patch_ids.items,
                 .first_parent_oids = first_parent_oids,
                 .moment_index = &moment_index,
@@ -2224,7 +2224,7 @@ pub const RepoLocation = struct {
 pub fn resolveOrCreateRepo(
     io: std.Io,
     allocator: std.mem.Allocator,
-    users_dir: []const u8,
+    users_path: []const u8,
     admin_repo_path: []const u8,
     owner_name: []const u8,
     repo_name: []const u8,
@@ -2243,7 +2243,7 @@ pub fn resolveOrCreateRepo(
 
     // an unknown owner can't own a repo, so the push is rejected
     const owner_user_id = (try User.readIdByName(AdminDB, admin_repo_opts.hash, admin_moment, owner_name)) orelse return null;
-    var user_repo = (try openUserRepo(io, allocator, users_dir, &owner_user_id)) orelse return null;
+    var user_repo = (try openUserRepo(io, allocator, users_path, &owner_user_id)) orelse return null;
     defer user_repo.deinit(io, allocator);
 
     // an already-registered repo reuses its event id, so a re-push (or a clone)
@@ -2260,7 +2260,7 @@ pub fn resolveOrCreateRepo(
 
     var id_bytes: [event_id_size]u8 = undefined;
     io.random(&id_bytes);
-    try writeRepoEvent(io, allocator, users_dir, &user_repo, &owner_user_id, .{ .name = owner.event.name, .email = owner.event.email }, &id_bytes, repo_name, "", create_options.read_access);
+    try writeRepoEvent(io, allocator, users_path, &user_repo, &owner_user_id, .{ .name = owner.event.name, .email = owner.event.email }, &id_bytes, repo_name, "", create_options.read_access);
     return .{ .owner_id = owner_user_id, .repo_id = id_bytes };
 }
 
@@ -2271,13 +2271,13 @@ pub const CopySource = struct {
 };
 
 // the on-disk path of the repo `source` names, which `viewer_id` must be able to read
-fn copySourcePath(io: std.Io, allocator: std.mem.Allocator, users_dir: []const u8, source: CopySource, viewer_id: *const [event_id_size]u8) ![]u8 {
+fn copySourcePath(io: std.Io, allocator: std.mem.Allocator, users_path: []const u8, source: CopySource, viewer_id: *const [event_id_size]u8) ![]u8 {
     const parsed = parseOwnerRepoPath(source.path) orelse return error.InvalidCopySource;
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    const found = (try readRepoByOwnerAndName(io, allocator, &arena, source.admin_moment, users_dir, parsed.owner, parsed.name, viewer_id.*)) orelse return error.InvalidCopySource;
+    const found = (try readRepoByOwnerAndName(io, allocator, &arena, source.admin_moment, users_path, parsed.owner, parsed.name, viewer_id.*)) orelse return error.InvalidCopySource;
     if (found.role == null) return error.InvalidCopySource;
-    return try repoPath(allocator, users_dir, &try parseEventId(&found.repo.event.user_id), &found.event_id);
+    return try repoPath(allocator, users_path, &try parseEventId(&found.repo.event.user_id), &found.event_id);
 }
 
 // create a bare repo with `hash_kind`, or a copy of `copy_from` with its hash
@@ -2285,7 +2285,7 @@ fn copySourcePath(io: std.Io, allocator: std.mem.Allocator, users_dir: []const u
 pub fn createRepo(
     io: std.Io,
     allocator: std.mem.Allocator,
-    users_dir: []const u8,
+    users_path: []const u8,
     owner_id: *const [event_id_size]u8,
     owner: CommitAuthor,
     name: []const u8,
@@ -2295,14 +2295,14 @@ pub fn createRepo(
     copy_from: ?CopySource,
 ) !RepoLocation {
     try Repo.validateName(name);
-    var user_repo = (try openUserRepo(io, allocator, users_dir, owner_id)) orelse return error.NotFound;
+    var user_repo = (try openUserRepo(io, allocator, users_path, owner_id)) orelse return error.NotFound;
     defer user_repo.deinit(io, allocator);
     if (try userMoment(&user_repo)) |moment| {
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
         if (try Repo.readByName(UserDB, user_repo_opts.hash, moment, &arena, name) != null) return error.NameTaken;
     }
-    const source_path = if (copy_from) |source| try copySourcePath(io, allocator, users_dir, source, owner_id) else null;
+    const source_path = if (copy_from) |source| try copySourcePath(io, allocator, users_path, source, owner_id) else null;
     defer if (source_path) |path| allocator.free(path);
 
     var id_bytes: [event_id_size]u8 = undefined;
@@ -2310,7 +2310,7 @@ pub fn createRepo(
 
     // the directory comes first so a listed repo always has one
     {
-        const path = try repoPath(allocator, users_dir, owner_id, &id_bytes);
+        const path = try repoPath(allocator, users_path, owner_id, &id_bytes);
         defer allocator.free(path);
         if (source_path) |source| try copy.create(io, allocator, source, path) else switch (hash_kind) {
             inline else => |kind| {
@@ -2320,7 +2320,7 @@ pub fn createRepo(
         }
     }
 
-    try writeRepoEvent(io, allocator, users_dir, &user_repo, owner_id, owner, &id_bytes, name, description, read_access);
+    try writeRepoEvent(io, allocator, users_path, &user_repo, owner_id, owner, &id_bytes, name, description, read_access);
     return .{ .owner_id = owner_id.*, .repo_id = id_bytes };
 }
 
@@ -2329,7 +2329,7 @@ pub fn createRepo(
 pub fn updateRepo(
     io: std.Io,
     allocator: std.mem.Allocator,
-    users_dir: []const u8,
+    users_path: []const u8,
     owner_id: *const [event_id_size]u8,
     author: CommitAuthor,
     old_name: []const u8,
@@ -2341,7 +2341,7 @@ pub fn updateRepo(
     patch_role: ?Repo.Role,
 ) !void {
     try Repo.validateName(name);
-    var user_repo = (try openUserRepo(io, allocator, users_dir, owner_id)) orelse return error.NotFound;
+    var user_repo = (try openUserRepo(io, allocator, users_path, owner_id)) orelse return error.NotFound;
     defer user_repo.deinit(io, allocator);
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -2358,7 +2358,7 @@ pub fn updateRepo(
     event.discuss_role = discuss_role;
     event.issue_role = issue_role;
     event.patch_role = patch_role;
-    try consume(.{ .server = .{ .users_dir = users_dir } }, .user, .xit, user_repo_opts, io, allocator, &user_repo, events_ref, &[_]EventWithId{.{
+    try consume(.{ .server = .{ .users_path = users_path } }, .user, .xit, user_repo_opts, io, allocator, &user_repo, events_ref, &[_]EventWithId{.{
         .id = std.fmt.bytesToHex(found.event_id, .lower),
         .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
         .author = author,
@@ -2371,17 +2371,17 @@ pub fn updateRepo(
 pub fn deleteRepo(
     io: std.Io,
     allocator: std.mem.Allocator,
-    users_dir: []const u8,
+    users_path: []const u8,
     owner_id: *const [event_id_size]u8,
     repo_id: *const [event_id_size]u8,
     author: CommitAuthor,
 ) !void {
     {
-        var user_repo = (try openUserRepo(io, allocator, users_dir, owner_id)) orelse return error.NotFound;
+        var user_repo = (try openUserRepo(io, allocator, users_path, owner_id)) orelse return error.NotFound;
         defer user_repo.deinit(io, allocator);
-        try remove(.{ .server = .{ .users_dir = users_dir } }, .user, .xit, user_repo_opts, io, allocator, &user_repo, repo_id, .repo, author);
+        try remove(.{ .server = .{ .users_path = users_path } }, .user, .xit, user_repo_opts, io, allocator, &user_repo, repo_id, .repo, author);
     }
-    const path = try repoPath(allocator, users_dir, owner_id, repo_id);
+    const path = try repoPath(allocator, users_path, owner_id, repo_id);
     defer allocator.free(path);
     try std.Io.Dir.cwd().deleteTree(io, path);
 }
@@ -2391,16 +2391,16 @@ pub fn deleteRepo(
 pub fn grantRole(
     io: std.Io,
     allocator: std.mem.Allocator,
-    users_dir: []const u8,
+    users_path: []const u8,
     owner_id: *const [event_id_size]u8,
     repo_id: *const [event_id_size]u8,
     user_id: *const [event_id_size]u8,
     role: Repo.Role,
     author: CommitAuthor,
 ) !void {
-    var user_repo = (try openUserRepo(io, allocator, users_dir, owner_id)) orelse return error.NotFound;
+    var user_repo = (try openUserRepo(io, allocator, users_path, owner_id)) orelse return error.NotFound;
     defer user_repo.deinit(io, allocator);
-    try consume(.{ .server = .{ .users_dir = users_dir } }, .user, .xit, user_repo_opts, io, allocator, &user_repo, events_ref, &[_]EventWithId{.{
+    try consume(.{ .server = .{ .users_path = users_path } }, .user, .xit, user_repo_opts, io, allocator, &user_repo, events_ref, &[_]EventWithId{.{
         .id = std.fmt.bytesToHex(Grant.idOf(repo_id, user_id), .lower),
         .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
         .author = author,
@@ -2412,13 +2412,13 @@ pub fn grantRole(
 pub fn revokeRole(
     io: std.Io,
     allocator: std.mem.Allocator,
-    users_dir: []const u8,
+    users_path: []const u8,
     owner_id: *const [event_id_size]u8,
     repo_id: *const [event_id_size]u8,
     user_id: *const [event_id_size]u8,
     author: CommitAuthor,
 ) !void {
-    var user_repo = (try openUserRepo(io, allocator, users_dir, owner_id)) orelse return error.NotFound;
+    var user_repo = (try openUserRepo(io, allocator, users_path, owner_id)) orelse return error.NotFound;
     defer user_repo.deinit(io, allocator);
     // a revoked grant stays in the kind index, which is all `remove` checks
     {
@@ -2427,7 +2427,7 @@ pub fn revokeRole(
         const moment = (try userMoment(&user_repo)) orelse return error.EventNotFound;
         if (try Grant.readRole(UserDB, user_repo_opts.hash, moment, &arena, repo_id, user_id) == null) return error.EventNotFound;
     }
-    try remove(.{ .server = .{ .users_dir = users_dir } }, .user, .xit, user_repo_opts, io, allocator, &user_repo, &Grant.idOf(repo_id, user_id), .grant, author);
+    try remove(.{ .server = .{ .users_path = users_path } }, .user, .xit, user_repo_opts, io, allocator, &user_repo, &Grant.idOf(repo_id, user_id), .grant, author);
 }
 
 // add `branch` to the protected branches of the repo `repo_id` in its owner's
@@ -2436,14 +2436,14 @@ pub fn revokeRole(
 pub fn protectBranch(
     io: std.Io,
     allocator: std.mem.Allocator,
-    users_dir: []const u8,
+    users_path: []const u8,
     owner_id: *const [event_id_size]u8,
     repo_id: *const [event_id_size]u8,
     branch: []const u8,
     protect: bool,
     author: CommitAuthor,
 ) !void {
-    var user_repo = (try openUserRepo(io, allocator, users_dir, owner_id)) orelse return error.NotFound;
+    var user_repo = (try openUserRepo(io, allocator, users_path, owner_id)) orelse return error.NotFound;
     defer user_repo.deinit(io, allocator);
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -2473,7 +2473,7 @@ pub fn protectBranch(
 
     var event = repo.event;
     event.protected_branches = branches.items;
-    try consume(.{ .server = .{ .users_dir = users_dir } }, .user, .xit, user_repo_opts, io, allocator, &user_repo, events_ref, &[_]EventWithId{.{
+    try consume(.{ .server = .{ .users_path = users_path } }, .user, .xit, user_repo_opts, io, allocator, &user_repo, events_ref, &[_]EventWithId{.{
         .id = std.fmt.bytesToHex(repo_id.*, .lower),
         .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
         .author = author,
@@ -2485,7 +2485,7 @@ pub fn protectBranch(
 pub fn createUser(
     io: std.Io,
     allocator: std.mem.Allocator,
-    users_dir: []const u8,
+    users_path: []const u8,
     admin_repo: *rp.Repo(.xit, admin_repo_opts),
     name: []const u8,
     email: []const u8,
@@ -2515,19 +2515,19 @@ pub fn createUser(
 
     // the user repo comes first so a listed user can always create repos
     {
-        const path = try userRepoPath(allocator, users_dir, &id_bytes);
+        const path = try userRepoPath(allocator, users_path, &id_bytes);
         defer allocator.free(path);
         var user_repo = try initUserRepo(io, allocator, path);
         defer user_repo.deinit(io, allocator);
     }
 
-    try consume(.{ .server = .{ .users_dir = users_dir } }, .admin, .xit, admin_repo_opts, io, allocator, admin_repo, events_ref, &[_]EventWithId{.{
+    try consume(.{ .server = .{ .users_path = users_path } }, .admin, .xit, admin_repo_opts, io, allocator, admin_repo, events_ref, &[_]EventWithId{.{
         .id = std.fmt.bytesToHex(id_bytes, .lower),
         .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
         .author = .{ .name = name, .email = email },
         .event = .{ .user = .{ .name = name, .email = email, .password_hash = password_hash } },
     }});
-    try popularity.addUser(io, allocator, users_dir, &id_bytes);
+    try popularity.addUser(io, allocator, users_path, &id_bytes);
     return id_bytes;
 }
 
@@ -2536,7 +2536,7 @@ pub fn createUser(
 pub fn updateUser(
     io: std.Io,
     allocator: std.mem.Allocator,
-    users_dir: []const u8,
+    users_path: []const u8,
     admin_repo: *rp.Repo(.xit, admin_repo_opts),
     user_id: *const [event_id_size]u8,
     email: []const u8,
@@ -2562,7 +2562,7 @@ pub fn updateUser(
         event.password_hash = try User.hashPassword(new_password, &password_hash_buf, io);
     }
 
-    try consume(.{ .server = .{ .users_dir = users_dir } }, .admin, .xit, admin_repo_opts, io, allocator, admin_repo, events_ref, &[_]EventWithId{.{
+    try consume(.{ .server = .{ .users_path = users_path } }, .admin, .xit, admin_repo_opts, io, allocator, admin_repo, events_ref, &[_]EventWithId{.{
         .id = std.fmt.bytesToHex(user_id.*, .lower),
         .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
         .author = .{ .name = event.name, .email = email },
@@ -2575,14 +2575,14 @@ pub fn updateUser(
 pub fn deleteUser(
     io: std.Io,
     allocator: std.mem.Allocator,
-    users_dir: []const u8,
+    users_path: []const u8,
     admin_repo: *rp.Repo(.xit, admin_repo_opts),
     user_id: *const [event_id_size]u8,
     author: CommitAuthor,
 ) !void {
-    try remove(.{ .server = .{ .users_dir = users_dir } }, .admin, .xit, admin_repo_opts, io, allocator, admin_repo, user_id, .user, author);
-    try popularity.removeUser(io, allocator, users_dir, user_id);
-    const path = try std.Io.Dir.path.join(allocator, &.{ users_dir, &std.fmt.bytesToHex(user_id.*, .lower) });
+    try remove(.{ .server = .{ .users_path = users_path } }, .admin, .xit, admin_repo_opts, io, allocator, admin_repo, user_id, .user, author);
+    try popularity.removeUser(io, allocator, users_path, user_id);
+    const path = try std.Io.Dir.path.join(allocator, &.{ users_path, &std.fmt.bytesToHex(user_id.*, .lower) });
     defer allocator.free(path);
     try std.Io.Dir.cwd().deleteTree(io, path);
 }
@@ -2591,7 +2591,7 @@ pub fn deleteUser(
 pub fn addUserKey(
     io: std.Io,
     allocator: std.mem.Allocator,
-    users_dir: []const u8,
+    users_path: []const u8,
     admin_repo: *rp.Repo(.xit, admin_repo_opts),
     user_id: *const [event_id_size]u8,
     key_text: []const u8,
@@ -2606,7 +2606,7 @@ pub fn addUserKey(
     for (supported) |name| {
         if (std.mem.eql(u8, key_type, name)) break;
     } else return error.UnsupportedKey;
-    try writeUserKeys(io, allocator, users_dir, admin_repo, user_id, &fingerprint, key);
+    try writeUserKeys(io, allocator, users_path, admin_repo, user_id, &fingerprint, key);
 }
 
 // remove the user's ssh key with this fingerprint. removing a key they don't
@@ -2614,12 +2614,12 @@ pub fn addUserKey(
 pub fn removeUserKey(
     io: std.Io,
     allocator: std.mem.Allocator,
-    users_dir: []const u8,
+    users_path: []const u8,
     admin_repo: *rp.Repo(.xit, admin_repo_opts),
     user_id: *const [event_id_size]u8,
     fingerprint: *const [User.fingerprint_len]u8,
 ) !void {
-    try writeUserKeys(io, allocator, users_dir, admin_repo, user_id, fingerprint, null);
+    try writeUserKeys(io, allocator, users_path, admin_repo, user_id, fingerprint, null);
 }
 
 // rewrite the user's ssh keys with `added` appended, or without the key with
@@ -2627,7 +2627,7 @@ pub fn removeUserKey(
 fn writeUserKeys(
     io: std.Io,
     allocator: std.mem.Allocator,
-    users_dir: []const u8,
+    users_path: []const u8,
     admin_repo: *rp.Repo(.xit, admin_repo_opts),
     user_id: *const [event_id_size]u8,
     fingerprint: *const [User.fingerprint_len]u8,
@@ -2662,7 +2662,7 @@ fn writeUserKeys(
 
     var event = user.event;
     event.ssh_keys = keys.items;
-    try consume(.{ .server = .{ .users_dir = users_dir } }, .admin, .xit, admin_repo_opts, io, allocator, admin_repo, events_ref, &[_]EventWithId{.{
+    try consume(.{ .server = .{ .users_path = users_path } }, .admin, .xit, admin_repo_opts, io, allocator, admin_repo, events_ref, &[_]EventWithId{.{
         .id = std.fmt.bytesToHex(user_id.*, .lower),
         .timestamp = @intCast(std.Io.Timestamp.now(io, .real).toSeconds()),
         .author = .{ .name = event.name, .email = event.email },
@@ -2674,7 +2674,7 @@ fn writeUserKeys(
 fn writeRepoEvent(
     io: std.Io,
     allocator: std.mem.Allocator,
-    users_dir: []const u8,
+    users_path: []const u8,
     user_repo: *rp.Repo(.xit, user_repo_opts),
     owner_id: *const [event_id_size]u8,
     owner: CommitAuthor,
@@ -2684,7 +2684,7 @@ fn writeRepoEvent(
     read_access: Repo.Access,
 ) !void {
     const timestamp: u64 = @intCast(std.Io.Timestamp.now(io, .real).toSeconds());
-    try consume(.{ .server = .{ .users_dir = users_dir } }, .user, .xit, user_repo_opts, io, allocator, user_repo, events_ref, &[_]EventWithId{.{
+    try consume(.{ .server = .{ .users_path = users_path } }, .user, .xit, user_repo_opts, io, allocator, user_repo, events_ref, &[_]EventWithId{.{
         .id = std.fmt.bytesToHex(id_bytes.*, .lower),
         .timestamp = timestamp,
         .author = owner,
@@ -2695,7 +2695,7 @@ fn writeRepoEvent(
             .read_access = read_access,
         } },
     }});
-    bumpRepoActivity(io, allocator, users_dir, owner_id, id_bytes, timestamp) catch |err| {
+    bumpRepoActivity(io, allocator, users_path, owner_id, id_bytes, timestamp) catch |err| {
         std.log.warn("failed to record repo activity: {s}", .{@errorName(err)});
     };
 }

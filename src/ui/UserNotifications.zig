@@ -43,11 +43,11 @@ pub fn init(arena: *std.heap.ArenaAllocator, session: *ui.Session, tab: ui.Routa
     const user_id = session.userId() orelse return result;
     result.ssh_keys = try ui.UserKeys.init(arena, session, &user_id, tab);
     const io = session.io orelse return error.NoMoment;
-    const users_dir = session.users_dir orelse return error.NoMoment;
+    const users_path = session.users_path orelse return error.NoMoment;
     const gpa = arena.child_allocator;
     const aa = arena.allocator();
 
-    var user_repo = (try evt.openUserRepo(io, gpa, users_dir, &user_id)) orelse return result;
+    var user_repo = (try evt.openUserRepo(io, gpa, users_path, &user_id)) orelse return result;
     defer user_repo.deinit(io, gpa);
     const moment = (try notify.latestMoment(&user_repo)) orelse return result;
     session.data.unread_notifs = try notify.unreadCount(moment);

@@ -30,8 +30,8 @@ pub fn parseRoute(route_path: []const u8) ?Route {
 }
 
 // a fork's path, inside its forker's dir
-pub fn forkPath(allocator: std.mem.Allocator, users_dir: []const u8, forker_id: *const [evt.event_id_size]u8, fork_id: *const [evt.event_id_size]u8) ![]u8 {
-    return try std.Io.Dir.path.join(allocator, &.{ users_dir, &std.fmt.bytesToHex(forker_id.*, .lower), "forks", &std.fmt.bytesToHex(fork_id.*, .lower) });
+pub fn forkPath(allocator: std.mem.Allocator, users_path: []const u8, forker_id: *const [evt.event_id_size]u8, fork_id: *const [evt.event_id_size]u8) ![]u8 {
+    return try std.Io.Dir.path.join(allocator, &.{ users_path, &std.fmt.bytesToHex(forker_id.*, .lower), "forks", &std.fmt.bytesToHex(fork_id.*, .lower) });
 }
 
 const forker_section = "haxy";
@@ -86,7 +86,7 @@ pub fn create(
     comptime any_opts: rp.AnyRepoOpts(.xit),
     io: std.Io,
     allocator: std.mem.Allocator,
-    users_dir: []const u8,
+    users_path: []const u8,
     input: CreateInput,
 ) ![]u8 {
     if (!evt.Patch.fieldsValid(input.title, input.labels)) return error.InvalidPatch;
@@ -94,11 +94,11 @@ pub fn create(
 
     // get the fork id and path
     const fork_id = try evt.parseEventId(&input.id);
-    const fork_path = try forkPath(allocator, users_dir, &input.user_id, &fork_id);
+    const fork_path = try forkPath(allocator, users_path, &input.user_id, &fork_id);
     errdefer allocator.free(fork_path);
 
     // make sure the fork id doesn't already exist
-    var user_repo = (try evt.openUserRepo(io, allocator, users_dir, &input.user_id)) orelse return error.InvalidPatchDraft;
+    var user_repo = (try evt.openUserRepo(io, allocator, users_path, &input.user_id)) orelse return error.InvalidPatchDraft;
     defer user_repo.deinit(io, allocator);
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -109,12 +109,12 @@ pub fn create(
     if (existing != null) return error.InvalidPatchDraft;
 
     // the fork copies the target's db, so it takes the target's hash kind
-    const target_path = try evt.repoPath(allocator, users_dir, &input.repo_user_id, &input.repo_id);
+    const target_path = try evt.repoPath(allocator, users_path, &input.repo_user_id, &input.repo_id);
     defer allocator.free(target_path);
     var any_target = try rp.AnyRepo(.xit, any_opts).open(io, allocator, .{ .path = target_path, .require_repo_root = true });
     defer any_target.deinit(io, allocator);
     switch (any_target) {
-        inline else => |*target_repo| try copyTarget(target_repo.self_repo_opts, io, allocator, users_dir, target_repo, &user_repo, fork_path, input),
+        inline else => |*target_repo| try copyTarget(target_repo.self_repo_opts, io, allocator, users_path, target_repo, &user_repo, fork_path, input),
     }
     return fork_path;
 }
@@ -124,7 +124,7 @@ fn copyTarget(
     comptime repo_opts: rp.RepoOpts(.xit),
     io: std.Io,
     allocator: std.mem.Allocator,
-    users_dir: []const u8,
+    users_path: []const u8,
     target_repo: *rp.Repo(.xit, repo_opts),
     user_repo: *rp.Repo(.xit, evt.user_repo_opts),
     fork_path: []const u8,
@@ -211,7 +211,7 @@ fn copyTarget(
     }
 
     // create the patch event
-    try evt.consume(.{ .server = .{ .users_dir = users_dir } }, .fork, .xit, repo_opts, io, allocator, &fork_repo, evt.events_ref, &.{.{
+    try evt.consume(.{ .server = .{ .users_path = users_path } }, .fork, .xit, repo_opts, io, allocator, &fork_repo, evt.events_ref, &.{.{
         .id = input.id,
         .timestamp = input.timestamp,
         .author = input.author,
@@ -224,7 +224,7 @@ fn copyTarget(
     }});
 
     // create the fork event
-    try evt.consume(.{ .server = .{ .users_dir = users_dir } }, .user, .xit, evt.user_repo_opts, io, allocator, user_repo, evt.events_ref, &.{.{
+    try evt.consume(.{ .server = .{ .users_path = users_path } }, .user, .xit, evt.user_repo_opts, io, allocator, user_repo, evt.events_ref, &.{.{
         .id = input.id,
         .timestamp = input.timestamp,
         .author = input.author,
@@ -240,21 +240,21 @@ fn copyTarget(
 pub fn remove(
     io: std.Io,
     allocator: std.mem.Allocator,
-    users_dir: []const u8,
+    users_path: []const u8,
     forker_id: *const [evt.event_id_size]u8,
     id: *const [evt.event_id_size * 2]u8,
     author: evt.CommitAuthor,
 ) !void {
     const fork_id = try evt.parseEventId(id);
-    var user_repo = (try evt.openUserRepo(io, allocator, users_dir, forker_id)) orelse return error.InvalidPatchDraft;
+    var user_repo = (try evt.openUserRepo(io, allocator, users_path, forker_id)) orelse return error.InvalidPatchDraft;
     defer user_repo.deinit(io, allocator);
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const moment = (try evt.userMoment(&user_repo)) orelse return error.InvalidPatchDraft;
     const record = (try evt.Fork.readById(evt.UserDB, evt.user_repo_opts.hash, moment, &arena, &fork_id)) orelse return error.InvalidPatchDraft;
-    if (!record.removed) try evt.remove(.{ .server = .{ .users_dir = users_dir } }, .user, .xit, evt.user_repo_opts, io, allocator, &user_repo, &fork_id, .fork, author);
+    if (!record.removed) try evt.remove(.{ .server = .{ .users_path = users_path } }, .user, .xit, evt.user_repo_opts, io, allocator, &user_repo, &fork_id, .fork, author);
 
-    const path = try forkPath(allocator, users_dir, forker_id, &fork_id);
+    const path = try forkPath(allocator, users_path, forker_id, &fork_id);
     defer allocator.free(path);
     try std.Io.Dir.cwd().deleteTree(io, path);
 }

@@ -62,7 +62,7 @@ test "repo undo visibility and fresh owner authorization" {
     const aa = arena.allocator();
     const base = try temp.dir.realPathFileAlloc(io, ".", aa);
     const admin_path = try std.Io.Dir.path.join(aa, &.{ base, "admin" });
-    const users_dir = try std.Io.Dir.path.join(aa, &.{ base, "users" });
+    const users_path = try std.Io.Dir.path.join(aa, &.{ base, "users" });
     var admin = try xit.repo.Repo(.xit, evt.admin_repo_opts).init(io, allocator, .{ .path = admin_path });
     defer admin.deinit(io, allocator);
     const owner: [evt.event_id_size]u8 = @splat(1);
@@ -77,14 +77,14 @@ test "repo undo visibility and fresh owner authorization" {
         .{ .id = writer_hex, .author = author, .event = .{ .user = .{ .name = "writer", .email = "writer@example.test", .password_hash = "unused" } } },
         .{ .id = std.fmt.bytesToHex(reader, .lower), .author = author, .event = .{ .user = .{ .name = "reader", .email = "reader@example.test", .password_hash = "unused" } } },
     };
-    try evt.consume(.{ .server = .{ .users_dir = users_dir } }, .admin, .xit, evt.admin_repo_opts, io, allocator, &admin, evt.events_ref, &seed);
-    var user_repo = try evt.initUserRepo(io, allocator, try evt.userRepoPath(aa, users_dir, &owner));
+    try evt.consume(.{ .server = .{ .users_path = users_path } }, .admin, .xit, evt.admin_repo_opts, io, allocator, &admin, evt.events_ref, &seed);
+    var user_repo = try evt.initUserRepo(io, allocator, try evt.userRepoPath(aa, users_path, &owner));
     defer user_repo.deinit(io, allocator);
-    try evt.consume(.{ .server = .{ .users_dir = users_dir } }, .user, .xit, evt.user_repo_opts, io, allocator, &user_repo, evt.events_ref, &.{
+    try evt.consume(.{ .server = .{ .users_path = users_path } }, .user, .xit, evt.user_repo_opts, io, allocator, &user_repo, evt.events_ref, &.{
         .{ .id = std.fmt.bytesToHex(repo_id, .lower), .author = author, .event = .{ .repo = repo_event } },
         .{ .id = std.fmt.bytesToHex(evt.Grant.idOf(&repo_id, &writer), .lower), .author = author, .event = .{ .grant = .{ .target_id = std.fmt.bytesToHex(repo_id, .lower), .user_id = writer_hex, .role = .write } } },
     });
-    const path = try evt.repoPath(aa, users_dir, &owner, &repo_id);
+    const path = try evt.repoPath(aa, users_path, &owner, &repo_id);
     {
         var repo = try xit.repo.Repo(.xit, .{}).init(io, allocator, .{ .path = path });
         defer repo.deinit(io, allocator);
@@ -94,7 +94,7 @@ test "repo undo visibility and fresh owner authorization" {
     for ([_]?[]const u8{ &owner, &writer, &reader, null }, [_]bool{ true, true, false, false }) |user, allowed| {
         var session = try ui.Session.init(&arena, &admin, .{ .user_id = user });
         session.io = io;
-        session.users_dir = users_dir;
+        session.users_path = users_path;
         const files = ui.RoutablePage.repoFilesRoute("alice:demo", null, "", "", 0).?;
         session.data.current_page = files;
         const page = try ui.Repo.init(&arena, &session, files);
@@ -118,7 +118,7 @@ test "repo undo visibility and fresh owner authorization" {
     }
     var session = try ui.Session.init(&arena, &admin, .{ .user_id = &owner });
     session.io = io;
-    session.users_dir = users_dir;
+    session.users_path = users_path;
     try Undo.perform(allocator, &session, ui.RoutablePage.repoUndoRoute("alice:demo", 2).?.repo_undo);
     try std.testing.expectEqual(null, session.next_page.?.repo_undo.index);
     {
@@ -130,7 +130,7 @@ test "repo undo visibility and fresh owner authorization" {
     }
     // keep the old session/page moment, but transfer ownership to the writer.
     repo_event.user_id = writer_hex;
-    try evt.consume(.{ .server = .{ .users_dir = users_dir } }, .user, .xit, evt.user_repo_opts, io, allocator, &user_repo, evt.events_ref, &.{.{ .id = std.fmt.bytesToHex(repo_id, .lower), .author = author, .event = .{ .repo = repo_event } }});
+    try evt.consume(.{ .server = .{ .users_path = users_path } }, .user, .xit, evt.user_repo_opts, io, allocator, &user_repo, evt.events_ref, &.{.{ .id = std.fmt.bytesToHex(repo_id, .lower), .author = author, .event = .{ .repo = repo_event } }});
     session.next_page = null;
     Undo.handleRequest(allocator, &session, ui.RoutablePage.repoUndoRoute("alice:demo", 1).?.repo_undo);
     try std.testing.expectEqualStrings("Forbidden", session.data.undo_failure.?);
@@ -179,21 +179,21 @@ test "malformed undo history is shown as an error" {
     // a server with one user who owns the repo
     const base = try temp.dir.realPathFileAlloc(io, ".", aa);
     const admin_path = try std.Io.Dir.path.join(aa, &.{ base, "admin" });
-    const users_dir = try std.Io.Dir.path.join(aa, &.{ base, "users" });
+    const users_path = try std.Io.Dir.path.join(aa, &.{ base, "users" });
     var admin = try xit.repo.Repo(.xit, evt.admin_repo_opts).init(io, allocator, .{ .path = admin_path });
     defer admin.deinit(io, allocator);
     const owner: [evt.event_id_size]u8 = @splat(1);
     const repo_id: [evt.event_id_size]u8 = @splat(4);
     const author: evt.CommitAuthor = .{ .name = "test", .email = "test@example.test" };
-    try evt.consume(.{ .server = .{ .users_dir = users_dir } }, .admin, .xit, evt.admin_repo_opts, io, allocator, &admin, evt.events_ref, &.{
+    try evt.consume(.{ .server = .{ .users_path = users_path } }, .admin, .xit, evt.admin_repo_opts, io, allocator, &admin, evt.events_ref, &.{
         .{ .id = std.fmt.bytesToHex(owner, .lower), .author = author, .event = .{ .user = .{ .name = "alice", .email = "alice@example.test", .password_hash = "unused" } } },
     });
-    var user_repo = try evt.initUserRepo(io, allocator, try evt.userRepoPath(aa, users_dir, &owner));
+    var user_repo = try evt.initUserRepo(io, allocator, try evt.userRepoPath(aa, users_path, &owner));
     defer user_repo.deinit(io, allocator);
-    try evt.consume(.{ .server = .{ .users_dir = users_dir } }, .user, .xit, evt.user_repo_opts, io, allocator, &user_repo, evt.events_ref, &.{
+    try evt.consume(.{ .server = .{ .users_path = users_path } }, .user, .xit, evt.user_repo_opts, io, allocator, &user_repo, evt.events_ref, &.{
         .{ .id = std.fmt.bytesToHex(repo_id, .lower), .author = author, .event = .{ .repo = .{ .user_id = std.fmt.bytesToHex(owner, .lower), .name = "demo", .description = "", .read_access = .public } } },
     });
-    const path = try evt.repoPath(aa, users_dir, &owner, &repo_id);
+    const path = try evt.repoPath(aa, users_path, &owner, &repo_id);
     const Repo = xit.repo.Repo(.xit, .{});
     var repo = try Repo.init(io, allocator, .{ .path = path });
     defer repo.deinit(io, allocator);
@@ -210,7 +210,7 @@ test "malformed undo history is shown as an error" {
 
     var session = try ui.Session.init(&arena, &admin, .{ .user_id = &owner });
     session.io = io;
-    session.users_dir = users_dir;
+    session.users_path = users_path;
     // tabs switch in-page, so every tab carries the undo data and its failure
     const files = try ui.Repo.init(&arena, &session, ui.RoutablePage.repoFilesRoute("alice:demo", null, "", "", 0).?);
     try std.testing.expectEqual(0, files.undo.?.items.len);

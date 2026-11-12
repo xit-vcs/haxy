@@ -358,7 +358,7 @@ pub const Form = struct {
     fn submitForm(self: *Form, allocator: std.mem.Allocator) !void {
         if (comptime wasm) return;
         const io = self.session.io orelse return;
-        const users_dir = self.session.users_dir orelse return;
+        const users_path = self.session.users_path orelse return;
         const actor = (try self.session.authorize(self.data.identity, .owner, null)) orelse return;
 
         const name = try (try formField(self.formBox(), "name")).text(allocator);
@@ -370,7 +370,7 @@ pub const Form = struct {
         const issue_role = labelRole((try formRadio(self.formBox(), "issue_role")).selected()) catch unreachable;
         const patch_role = labelRole((try formRadio(self.formBox(), "patch_role")).selected()) catch unreachable;
 
-        const route = update(io, allocator, users_dir, actor, self.data.identity, name, description, access, discuss_role, issue_role, patch_role) catch |err| {
+        const route = update(io, allocator, users_path, actor, self.data.identity, name, description, access, discuss_role, issue_role, patch_role) catch |err| {
             const failure = ui.Session.FormFeedback.RepoFailure.fromError(err) orelse return err;
             const aa = self.session.arena.allocator();
             self.session.data.form_feedback = .{ .repo_settings = .{ .failure = failure, .fields = .{
@@ -414,7 +414,7 @@ pub const Form = struct {
 pub fn update(
     io: std.Io,
     allocator: std.mem.Allocator,
-    users_dir: []const u8,
+    users_path: []const u8,
     actor: ui.Actor,
     identity: []const u8,
     name: []const u8,
@@ -426,7 +426,7 @@ pub fn update(
 ) !ui.RoutablePage {
     const parsed = ui.RoutablePage.RepoIdentity.parse(identity) orelse return error.NotFound;
     const owner_id = actor.repo_user_id orelse return error.NotFound;
-    try evt.updateRepo(io, allocator, users_dir, &owner_id, actor.author, parsed.name, name, description, access, discuss_role, issue_role, patch_role);
+    try evt.updateRepo(io, allocator, users_path, &owner_id, actor.author, parsed.name, name, description, access, discuss_role, issue_role, patch_role);
     var buf: [ui.RoutablePage.repo_route_max_len]u8 = undefined;
     const new_identity = std.fmt.bufPrint(&buf, "{s}:{s}", .{ parsed.owner, name }) catch return error.RouteTooLong;
     return ui.RoutablePage.repoSettingsRoute(new_identity) orelse error.RouteTooLong;

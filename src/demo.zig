@@ -95,12 +95,12 @@ pub fn main(init: std.process.Init) !void {
     serve_options.git_ssh_prefix = git_ssh_prefix;
     serve_options.fallback_on_address_in_use = true;
 
-    const server_path = if (std.mem.eql(u8, serve_options.data_dir, "."))
+    const server_path = if (std.mem.eql(u8, serve_options.data_path, "."))
         try std.Io.Dir.path.join(allocator, &.{ cwd_path, temp_dir_name, "server" })
     else
-        try std.Io.Dir.path.resolveAlloc(allocator, &.{ cwd_path, serve_options.data_dir });
+        try std.Io.Dir.path.resolveAlloc(allocator, &.{ cwd_path, serve_options.data_path });
     defer allocator.free(server_path);
-    serve_options.data_dir = server_path;
+    serve_options.data_path = server_path;
 
     const work_path = try std.Io.Dir.path.join(allocator, &.{ server_path, "admin" });
     defer allocator.free(work_path);
@@ -235,8 +235,8 @@ pub fn main(init: std.process.Init) !void {
             };
         }
         // commit the seed events and consume them into the database
-        const users_dir = try std.Io.Dir.path.join(arena.allocator(), &.{ server_path, "users" });
-        try evt.consume(.{ .server = .{ .users_dir = users_dir } }, .admin, .xit, evt.admin_repo_opts, io, allocator, &repo, evt.events_ref, &events_to_consume);
+        const users_path = try std.Io.Dir.path.join(arena.allocator(), &.{ server_path, "users" });
+        try evt.consume(.{ .server = .{ .users_path = users_path } }, .admin, .xit, evt.admin_repo_opts, io, allocator, &repo, evt.events_ref, &events_to_consume);
 
         // admin is granted ownership of every repo, so it has full privileges
         // everywhere (including undo) while the other users only own their own
@@ -270,7 +270,7 @@ pub fn main(init: std.process.Init) !void {
 
         // each user's repo holds the repos they own and the grants on them
         for (user_ids, 0..) |user_id, user_index| {
-            const user_repo_path = try evt.userRepoPath(arena.allocator(), users_dir, &user_id);
+            const user_repo_path = try evt.userRepoPath(arena.allocator(), users_path, &user_id);
             var user_repo = try evt.initUserRepo(io, allocator, user_repo_path);
             defer user_repo.deinit(io, allocator);
             var owned: std.ArrayList(evt.EventWithId) = .empty;
@@ -280,12 +280,12 @@ pub fn main(init: std.process.Init) !void {
                 // admin already owns its own repos
                 if (r.user_index != 0) try owned.append(arena.allocator(), grant_event);
             }
-            if (owned.items.len > 0) try evt.consume(.{ .server = .{ .users_dir = users_dir } }, .user, .xit, evt.user_repo_opts, io, allocator, &user_repo, evt.events_ref, owned.items);
+            if (owned.items.len > 0) try evt.consume(.{ .server = .{ .users_path = users_path } }, .user, .xit, evt.user_repo_opts, io, allocator, &user_repo, evt.events_ref, owned.items);
         }
 
         // the creation timestamps order the repos tabs
         for (repo_data, &repo_event_ids, repo_events) |r, *id_bytes, event| {
-            try evt.bumpRepoActivity(io, allocator, users_dir, &user_ids[r.user_index], id_bytes, event.timestamp);
+            try evt.bumpRepoActivity(io, allocator, users_path, &user_ids[r.user_index], id_bytes, event.timestamp);
         }
 
         // every repo gets the same generated history, so build it once into a
@@ -925,7 +925,7 @@ pub fn main(init: std.process.Init) !void {
             defer template_repo_dir.close(io);
 
             for (repo_event_ids, 0..) |id_bytes, repo_index| {
-                const repo_path = try evt.repoPath(arena.allocator(), users_dir, &user_ids[repo_data[repo_index].user_index], &id_bytes);
+                const repo_path = try evt.repoPath(arena.allocator(), users_path, &user_ids[repo_data[repo_index].user_index], &id_bytes);
                 {
                     var dest_dir = try cwd.createDirPathOpen(io, repo_path, .{});
                     defer dest_dir.close(io);
@@ -949,15 +949,15 @@ pub fn main(init: std.process.Init) !void {
             const location: evt.RepoLocation = .{ .owner_id = user_ids[r.user_index], .repo_id = id_bytes };
             // only the last repo has patches
             const thread_ids: []const [evt.event_id_size]u8 = if (repo_index + 1 == repo_data.len) &admin_thread_ids else admin_thread_ids[0..2];
-            for (thread_ids) |*thread_id| try notify.writeMode(io, allocator, users_dir, &admin_user_id, &location, thread_id, .involved, .{ .name = user_data[0].name, .email = user_data[0].email });
+            for (thread_ids) |*thread_id| try notify.writeMode(io, allocator, users_path, &admin_user_id, &location, thread_id, .involved, .{ .name = user_data[0].name, .email = user_data[0].email });
 
-            const repo_path = try evt.repoPath(arena.allocator(), users_dir, &location.owner_id, &location.repo_id);
+            const repo_path = try evt.repoPath(arena.allocator(), users_path, &location.owner_id, &location.repo_id);
             var target_repo = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = repo_path, .require_repo_root = true });
             defer target_repo.deinit(io, allocator);
             const index_cursor = try (try evt.currentMoment(.{}, &target_repo)).getCursor(hash.hashInt(.sha1, evt.moment_index_key)) orelse return error.CursorNotFound;
             const current = try index_cursor.readUint();
             for (0..current + 1) |moment_index| {
-                notify.deliverTransaction(io, allocator, .{ .users_dir = users_dir, .admin_repo_path = work_path }, .{}, &target_repo, moment_index, null, null);
+                notify.deliverTransaction(io, allocator, .{ .users_path = users_path, .admin_repo_path = work_path }, .{}, &target_repo, moment_index, null, null);
             }
         }
 
@@ -971,7 +971,7 @@ pub fn main(init: std.process.Init) !void {
 
     // let the native TUI's page builders open the on-disk repos for the file tree
     session.io = io;
-    session.users_dir = try std.Io.Dir.path.join(session_arena.allocator(), &.{ server_path, "users" });
+    session.users_path = try std.Io.Dir.path.join(session_arena.allocator(), &.{ server_path, "users" });
 
     // leave a one-shot session for the first browser to hit the web ui, so it
     // starts logged in as admin
@@ -1143,7 +1143,7 @@ fn seedTimestamp(now: u64, index: usize, count: usize, oldest_age: u64, newest_a
 fn seedPatchRevision(
     io: std.Io,
     allocator: std.mem.Allocator,
-    users_dir: []const u8,
+    users_path: []const u8,
     forker_id: *const [evt.event_id_size]u8,
     patch_id: *const [evt.event_id_size]u8,
     title: []const u8,
@@ -1157,7 +1157,7 @@ fn seedPatchRevision(
     removed_path: ?[]const u8,
 ) !void {
     const patch_hex = std.fmt.bytesToHex(patch_id.*, .lower);
-    const fork_path = try fork.forkPath(allocator, users_dir, forker_id, patch_id);
+    const fork_path = try fork.forkPath(allocator, users_path, forker_id, patch_id);
     defer allocator.free(fork_path);
     var fork_repo = try rp.Repo(.xit, .{}).open(io, allocator, .{ .path = fork_path, .require_repo_root = true });
     defer fork_repo.deinit(io, allocator);
@@ -1210,7 +1210,7 @@ fn seedPatchRevision(
         .{ .tree = .{ .name = "base", .oid = &base_tree_oid } },
         .{ .tree = .{ .name = "head", .oid = &head_tree_oid } },
     };
-    try evt.consume(.{ .server = .{ .users_dir = users_dir } }, .fork, .xit, .{}, io, allocator, &fork_repo, evt.events_ref, &.{.{
+    try evt.consume(.{ .server = .{ .users_path = users_path } }, .fork, .xit, .{}, io, allocator, &fork_repo, evt.events_ref, &.{.{
         .id = std.fmt.bytesToHex(revision_id, .lower),
         .timestamp = revision_timestamp,
         .author = author,
@@ -1225,7 +1225,7 @@ fn seedPatchRevision(
     const patch_record = (try evt.Patch.readById(evt.EventDB(.sha1), .sha1, moment, &arena, patch_id)) orelse return error.NotFound;
     var patch = patch_record.event;
     patch.revision = evt.Patch.Revision.fromRecord(revision_id, revision_record);
-    try evt.consume(.{ .server = .{ .users_dir = users_dir } }, .fork, .xit, .{}, io, allocator, &fork_repo, evt.events_ref, &.{.{
+    try evt.consume(.{ .server = .{ .users_path = users_path } }, .fork, .xit, .{}, io, allocator, &fork_repo, evt.events_ref, &.{.{
         .id = patch_hex,
         .timestamp = revision_timestamp + 1,
         .author = author,
@@ -1300,15 +1300,15 @@ fn seedPatches(
         },
     };
 
-    const users_dir = try std.Io.Dir.path.join(allocator, &.{ server_path, "users" });
-    defer allocator.free(users_dir);
+    const users_path = try std.Io.Dir.path.join(allocator, &.{ server_path, "users" });
+    defer allocator.free(users_path);
     const patch_author = evt.CommitAuthor{ .name = "admin", .email = "admin@example.test" };
     var patch_ids: [patch_data.len][evt.event_id_size]u8 = undefined;
     for (patch_data, 0..) |patch, i| {
         const timestamp = seedTimestamp(now, i, patch_data.len, 25 * std.time.s_per_day, 3 * std.time.s_per_hour);
         patch_ids[i] = evt.EventWithId.randomId(random);
         const patch_hex = std.fmt.bytesToHex(patch_ids[i], .lower);
-        const path = try fork.create(.{}, io, allocator, users_dir, .{
+        const path = try fork.create(.{}, io, allocator, users_path, .{
             .id = patch_hex,
             .user_id = user_id.*,
             .repo_id = repo_id.*,
@@ -1355,10 +1355,10 @@ fn seedPatches(
                 }
                 break :blk .{ "patch.txt", contents.len };
             };
-            try seedPatchRevision(io, allocator, users_dir, user_id, &patch_ids[i], patch.title, patch_author, timestamp + 1, random, base_oid, file_path, contents[0..count], patch.removed_path);
+            try seedPatchRevision(io, allocator, users_path, user_id, &patch_ids[i], patch.title, patch_author, timestamp + 1, random, base_oid, file_path, contents[0..count], patch.removed_path);
         }
         const status = patch.status orelse continue;
-        try pch.publish(.{}, io, allocator, .{ .users_dir = users_dir }, admin_repo, target_repo, .{
+        try pch.publish(.{}, io, allocator, .{ .users_path = users_path }, admin_repo, target_repo, .{
             .id = patch_hex,
             .user_id = user_id.*,
             .repo_id = repo_id.*,
@@ -1367,14 +1367,14 @@ fn seedPatches(
         });
 
         if (status == .merged) {
-            try pch.mergeAndRemoveFork(.{}, io, allocator, .{ .users_dir = users_dir }, target_repo, .{
+            try pch.mergeAndRemoveFork(.{}, io, allocator, .{ .users_path = users_path }, target_repo, .{
                 .id = patch_hex,
                 .revision = .source,
                 .author = patch_author,
                 .timestamp = timestamp + 7,
             });
         } else if (status != .open) {
-            try evt.Patch.update(.{ .server = .{ .users_dir = users_dir } }, .xit, .{}, io, allocator, target_repo, &patch_ids[i], .{ .status = status }, patch_author);
+            try evt.Patch.update(.{ .server = .{ .users_path = users_path } }, .xit, .{}, io, allocator, target_repo, &patch_ids[i], .{ .status = status }, patch_author);
         }
     }
 
@@ -1406,7 +1406,7 @@ fn seedPatches(
             } },
         };
     }
-    try evt.consume(.{ .server = .{ .users_dir = users_dir } }, .repo, .xit, .{}, io, allocator, target_repo, evt.events_ref, &comments);
+    try evt.consume(.{ .server = .{ .users_path = users_path } }, .repo, .xit, .{}, io, allocator, target_repo, evt.events_ref, &comments);
 
     // create divergent metadata edits on the next three patches
     var patch_arena = std.heap.ArenaAllocator.init(allocator);
@@ -1466,7 +1466,7 @@ fn seedPatches(
     theirs[2].author = .{ .name = "bobby", .email = "bobby@example.test" };
     theirs[2].event.patch = theirs_values[2];
 
-    try evt.consume(.{ .server = .{ .users_dir = users_dir } }, .repo, .xit, .{}, io, allocator, target_repo, evt.events_ref, &ours);
+    try evt.consume(.{ .server = .{ .users_path = users_path } }, .repo, .xit, .{}, io, allocator, target_repo, evt.events_ref, &ours);
     try commitEventsAtRef(io, allocator, target_repo, other_ref, &theirs, seed_tip);
     {
         var merge = try target_repo.mergeAtRef(io, allocator, .{ .kind = .full, .action = .{ .new = .{ .source = &.{.{ .ref = other_ref }} } } }, evt.events_ref, null);
@@ -1474,8 +1474,8 @@ fn seedPatches(
         if (merge.result != .success) return error.MergeFailed;
     }
     try target_repo.removeBranch(io, .{ .name = other_ref.name });
-    try evt.consume(.{ .server = .{ .users_dir = users_dir } }, .repo, .xit, .{}, io, allocator, target_repo, evt.events_ref, &.{});
-    try pch.writeBranchPatch(.{ .server = .{ .users_dir = users_dir } }, .xit, .{}, io, allocator, target_repo, std.fmt.bytesToHex(evt.EventWithId.randomId(random), .lower), .{
+    try evt.consume(.{ .server = .{ .users_path = users_path } }, .repo, .xit, .{}, io, allocator, target_repo, evt.events_ref, &.{});
+    try pch.writeBranchPatch(.{ .server = .{ .users_path = users_path } }, .xit, .{}, io, allocator, target_repo, std.fmt.bytesToHex(evt.EventWithId.randomId(random), .lower), .{
         .title = "Merge the existing feature branch",
         .description = "This patch tracks the `feature` branch in this repo without creating a fork.",
         .labels = "feature",
@@ -1485,22 +1485,22 @@ fn seedPatches(
 
     // a push onto the branch that patch tracks, so the undo tab shows the
     // action and the patch refresh it sets off
-    try seedPush(io, allocator, target_repo, users_dir, patch_author, now - 15);
-    try pch.refreshBranches(.{ .server = .{ .users_dir = users_dir } }, .xit, .{}, io, allocator, target_repo, null);
+    try seedPush(io, allocator, target_repo, users_path, patch_author, now - 15);
+    try pch.refreshBranches(.{ .server = .{ .users_path = users_path } }, .xit, .{}, io, allocator, target_repo, null);
     return patch_ids[patch_ids.len - 1];
 }
 
 // stand in for a client push, which the fixture has no server to receive: one
 // transaction moves the branch, refreshes the patches tracking it and records
 // the action, the way receive-pack does
-fn seedPush(io: std.Io, allocator: std.mem.Allocator, repo: *rp.Repo(.xit, .{}), users_dir: []const u8, author: evt.CommitAuthor, timestamp: u64) !void {
+fn seedPush(io: std.Io, allocator: std.mem.Allocator, repo: *rp.Repo(.xit, .{}), users_path: []const u8, author: evt.CommitAuthor, timestamp: u64) !void {
     const Repo = rp.Repo(.xit, .{});
     const DB = Repo.DB;
     const Ctx = struct {
         core: *Repo.Core,
         io: std.Io,
         allocator: std.mem.Allocator,
-        users_dir: []const u8,
+        users_path: []const u8,
         author: evt.CommitAuthor,
         timestamp: u64,
         before: DB.HashMap(.read_only),
@@ -1542,12 +1542,12 @@ fn seedPush(io: std.Io, allocator: std.mem.Allocator, repo: *rp.Repo(.xit, .{}),
 
             // receive-pack patches the new tips before the branches refresh
             try xit.patch.writePatches(opts, state, ctx.io, ctx.allocator, &.{ feature_new, docs_new }, null);
-            _ = try pch.refreshBranchesInTransaction(.{ .server = .{ .users_dir = ctx.users_dir } }, opts, state, &moment, ctx.io, ctx.allocator, &updates, null, null);
+            _ = try pch.refreshBranchesInTransaction(.{ .server = .{ .users_path = ctx.users_path } }, opts, state, &moment, ctx.io, ctx.allocator, &updates, null, null);
             try push.writeUndo(opts, state, ctx.io, ctx.allocator, ctx.author, &updates, ctx.before);
         }
     };
 
-    try transaction(io, repo, Ctx{ .core = &repo.core, .io = io, .allocator = allocator, .users_dir = users_dir, .author = author, .timestamp = timestamp, .before = try repo.core.latestMoment() });
+    try transaction(io, repo, Ctx{ .core = &repo.core, .io = io, .allocator = allocator, .users_path = users_path, .author = author, .timestamp = timestamp, .before = try repo.core.latestMoment() });
 }
 
 // commit `events` onto `ref`, rooted at `parent`, as one transaction.

@@ -131,8 +131,8 @@ pub const IdleState = struct {
 pub const HostKey = struct {
     keypair: Ed25519.KeyPair,
 
-    pub fn loadOrGenerate(io: std.Io, allocator: std.mem.Allocator, data_dir_path: []const u8) !HostKey {
-        const path = try std.Io.Dir.path.join(allocator, &.{ data_dir_path, host_key_file_name });
+    pub fn loadOrGenerate(io: std.Io, allocator: std.mem.Allocator, data_path: []const u8) !HostKey {
+        const path = try std.Io.Dir.path.join(allocator, &.{ data_path, host_key_file_name });
         defer allocator.free(path);
 
         const cwd = std.Io.Dir.cwd();

@@ -85,8 +85,8 @@ test "user and repo" {
 
     // commit and consume the seed events. users go in the admin repo, repos in
     // their owner's user repo.
-    try evt.consume(.{ .server = .{ .users_dir = temp_path } }, .admin, .xit, repo_opts, io, allocator, &repo, evt.events_ref, &events_to_consume);
-    try evt.consume(.{ .server = .{ .users_dir = temp_path } }, .user, .xit, repo_opts, io, allocator, &user_repo, evt.events_ref, &.{repo_event});
+    try evt.consume(.{ .server = .{ .users_path = temp_path } }, .admin, .xit, repo_opts, io, allocator, &repo, evt.events_ref, &events_to_consume);
+    try evt.consume(.{ .server = .{ .users_path = temp_path } }, .user, .xit, repo_opts, io, allocator, &user_repo, evt.events_ref, &.{repo_event});
 
     {
         const haxy_moment = try evt.currentMoment(repo_opts, &repo);
@@ -137,7 +137,7 @@ test "user and repo" {
     };
 
     // commit and consume the removal
-    try evt.consume(.{ .server = .{ .users_dir = temp_path } }, .user, .xit, repo_opts, io, allocator, &user_repo, evt.events_ref, &events_to_consume2);
+    try evt.consume(.{ .server = .{ .users_path = temp_path } }, .user, .xit, repo_opts, io, allocator, &user_repo, evt.events_ref, &events_to_consume2);
 
     {
         const haxy_moment = try evt.currentMoment(repo_opts, &user_repo);
@@ -156,7 +156,7 @@ test "user and repo" {
     }
 
     // a non-null payload restores the repo and its indexes
-    try evt.consume(.{ .server = .{ .users_dir = temp_path } }, .user, .xit, repo_opts, io, allocator, &user_repo, evt.events_ref, &.{repo_event});
+    try evt.consume(.{ .server = .{ .users_path = temp_path } }, .user, .xit, repo_opts, io, allocator, &user_repo, evt.events_ref, &.{repo_event});
 
     {
         const haxy_moment = try evt.currentMoment(repo_opts, &user_repo);
@@ -183,7 +183,7 @@ test "user and repo" {
     };
 
     // commit and consume the removal
-    try evt.consume(.{ .server = .{ .users_dir = temp_path } }, .admin, .xit, repo_opts, io, allocator, &repo, evt.events_ref, &events_to_consume3);
+    try evt.consume(.{ .server = .{ .users_path = temp_path } }, .admin, .xit, repo_opts, io, allocator, &repo, evt.events_ref, &events_to_consume3);
 
     {
         const haxy_moment = try evt.currentMoment(repo_opts, &repo);
@@ -253,7 +253,7 @@ test "repos and users paginate newest first" {
 
     // one user in the admin repo, then four repos in creation order with
     // deliberately skewed timestamps in the user's repo
-    try evt.consume(.{ .server = .{ .users_dir = temp_path } }, .admin, .xit, repo_opts, io, allocator, &admin, evt.events_ref, &.{
+    try evt.consume(.{ .server = .{ .users_path = temp_path } }, .admin, .xit, repo_opts, io, allocator, &admin, evt.events_ref, &.{
         .{ .id = std.fmt.bytesToHex(user_id, .lower), .author = author, .timestamp = 100, .event = .{ .user = .{ .name = "alice", .email = "alice@example.test", .password_hash = pw } } },
     });
     const events = [_]evt.EventWithId{
@@ -262,7 +262,7 @@ test "repos and users paginate newest first" {
         .{ .id = std.fmt.bytesToHex(repo_ids[2], .lower), .author = author, .timestamp = 5_000, .event = .{ .repo = .{ .user_id = std.fmt.bytesToHex(user_id, .lower), .name = "repo2", .description = "d2" } } },
         .{ .id = std.fmt.bytesToHex(repo_ids[3], .lower), .author = author, .timestamp = 20, .event = .{ .repo = .{ .user_id = std.fmt.bytesToHex(user_id, .lower), .name = "repo3", .description = "d3" } } },
     };
-    try evt.consume(.{ .server = .{ .users_dir = temp_path } }, .user, .xit, repo_opts, io, allocator, &repo, evt.events_ref, &events);
+    try evt.consume(.{ .server = .{ .users_path = temp_path } }, .user, .xit, repo_opts, io, allocator, &repo, evt.events_ref, &events);
 
     {
         const moment = try evt.currentMoment(repo_opts, &repo);
@@ -276,7 +276,7 @@ test "repos and users paginate newest first" {
     }
 
     // removing repo1 retains its place in the canonical order
-    try evt.consume(.{ .server = .{ .users_dir = temp_path } }, .user, .xit, repo_opts, io, allocator, &repo, evt.events_ref, &[_]evt.EventWithId{
+    try evt.consume(.{ .server = .{ .users_path = temp_path } }, .user, .xit, repo_opts, io, allocator, &repo, evt.events_ref, &[_]evt.EventWithId{
         .{ .id = std.fmt.bytesToHex(repo_ids[1], .lower), .author = author, .timestamp = 200, .event = .{ .repo = null } },
     });
     {
@@ -285,7 +285,7 @@ test "repos and users paginate newest first" {
     }
 
     // update repo0 at a later timestamp -> keeps its original place
-    try evt.consume(.{ .server = .{ .users_dir = temp_path } }, .user, .xit, repo_opts, io, allocator, &repo, evt.events_ref, &[_]evt.EventWithId{
+    try evt.consume(.{ .server = .{ .users_path = temp_path } }, .user, .xit, repo_opts, io, allocator, &repo, evt.events_ref, &[_]evt.EventWithId{
         .{ .id = std.fmt.bytesToHex(repo_ids[0], .lower), .author = author, .timestamp = 300, .event = .{ .repo = .{ .user_id = std.fmt.bytesToHex(user_id, .lower), .name = "repo0", .description = "updated" } } },
     });
     {
@@ -311,8 +311,8 @@ test "fork query and removal lifecycle" {
     const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
     defer allocator.free(temp_path);
 
-    const users_dir = try std.Io.Dir.path.join(allocator, &.{ temp_path, "users" });
-    defer allocator.free(users_dir);
+    const users_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "users" });
+    defer allocator.free(users_path);
     const admin_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "admin" });
     defer allocator.free(admin_path);
 
@@ -324,7 +324,7 @@ test "fork query and removal lifecycle" {
 
     var admin = try rp.Repo(.xit, evt.admin_repo_opts).init(io, allocator, .{ .path = admin_path });
     defer admin.deinit(io, allocator);
-    try evt.consume(.{ .server = .{ .users_dir = users_dir } }, .admin, .xit, evt.admin_repo_opts, io, allocator, &admin, evt.events_ref, &.{
+    try evt.consume(.{ .server = .{ .users_path = users_path } }, .admin, .xit, evt.admin_repo_opts, io, allocator, &admin, evt.events_ref, &.{
         .{
             .id = std.fmt.bytesToHex(user_id, .lower),
             .timestamp = 1,
@@ -336,11 +336,11 @@ test "fork query and removal lifecycle" {
             } },
         },
     });
-    const user_repo_path = try evt.userRepoPath(allocator, users_dir, &user_id);
+    const user_repo_path = try evt.userRepoPath(allocator, users_path, &user_id);
     defer allocator.free(user_repo_path);
     var user_repo = try evt.initUserRepo(io, allocator, user_repo_path);
     defer user_repo.deinit(io, allocator);
-    try evt.consume(.{ .server = .{ .users_dir = users_dir } }, .user, .xit, evt.user_repo_opts, io, allocator, &user_repo, evt.events_ref, &.{
+    try evt.consume(.{ .server = .{ .users_path = users_path } }, .user, .xit, evt.user_repo_opts, io, allocator, &user_repo, evt.events_ref, &.{
         .{
             .id = std.fmt.bytesToHex(repo_id, .lower),
             .timestamp = 1,
@@ -353,7 +353,7 @@ test "fork query and removal lifecycle" {
         },
     });
 
-    const target_path = try evt.repoPath(allocator, users_dir, &user_id, &repo_id);
+    const target_path = try evt.repoPath(allocator, users_path, &user_id, &repo_id);
     defer allocator.free(target_path);
     var target = try rp.Repo(.xit, fork_repo_opts).init(io, allocator, .{ .path = target_path });
     defer target.deinit(io, allocator);
@@ -365,7 +365,7 @@ test "fork query and removal lifecycle" {
     try target.add(io, allocator, &.{"README"});
     _ = try target.commit(io, allocator, .{ .message = "initial" });
 
-    const draft_path = try fork.create(.{ .is_test = true }, io, allocator, users_dir, .{
+    const draft_path = try fork.create(.{ .is_test = true }, io, allocator, users_path, .{
         .target_branch = "master",
         .id = fork_id_hex,
         .user_id = user_id,
@@ -397,7 +397,7 @@ test "fork query and removal lifecycle" {
     try std.testing.expectEqualStrings("add a feature", draft.event.title);
     try std.testing.expectEqual(null, draft.event.revision);
 
-    try fork.remove(io, allocator, users_dir, &user_id, &fork_id_hex, author);
+    try fork.remove(io, allocator, users_path, &user_id, &fork_id_hex, author);
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, draft_path, .{}));
     _ = arena.reset(.retain_capacity);
     moment = try evt.currentMoment(evt.user_repo_opts, &user_repo);
@@ -406,7 +406,7 @@ test "fork query and removal lifecycle" {
     try std.testing.expectEqual(0, try activeForkCount(moment));
     try std.testing.expectEqual(0, try draftForkCount(moment, &repo_id));
 
-    try fork.remove(io, allocator, users_dir, &user_id, &fork_id_hex, author);
+    try fork.remove(io, allocator, users_path, &user_id, &fork_id_hex, author);
 }
 
 fn draftForkCount(moment: evt.UserDB.HashMap(.read_only), repo_id: []const u8) !u64 {

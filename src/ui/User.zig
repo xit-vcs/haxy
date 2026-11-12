@@ -61,11 +61,11 @@ pub fn init(
     const user = (try evt.User.readById(DB, hash_kind, haxy_moment, arena, &user_id)) orelse return error.NotFound;
 
     const io = session.io orelse return error.NoMoment;
-    const users_dir = session.users_dir orelse return error.NoMoment;
+    const users_path = session.users_path orelse return error.NoMoment;
     const gpa = arena.child_allocator;
 
     // a user with no user repo or no events has empty lists
-    var user_repo_maybe = try evt.openUserRepo(io, gpa, users_dir, &user_id);
+    var user_repo_maybe = try evt.openUserRepo(io, gpa, users_path, &user_id);
     defer if (user_repo_maybe) |*user_repo| user_repo.deinit(io, gpa);
     const user_moment = if (user_repo_maybe) |*user_repo| try evt.userMoment(user_repo) else null;
 
@@ -138,7 +138,7 @@ pub fn init(
                 // the target lives in its owner's user repo
                 const owner_id = try evt.parseEventId(&record.event.repo_user_id);
                 // a deleted target, or one whose owner was deleted, leaves the fork to its forker
-                const target = try evt.readRepoById(io, gpa, arena, users_dir, &owner_id, &try evt.parseEventId(&record.event.repo_id), session.userId());
+                const target = try evt.readRepoById(io, gpa, arena, users_path, &owner_id, &try evt.parseEventId(&record.event.repo_id), session.userId());
                 if (target) |value| {
                     if (value.role == null) continue;
                     // patches that are off take their drafts with them
@@ -149,7 +149,7 @@ pub fn init(
                 }
 
                 var title: []const u8 = "(unavailable)";
-                const path = try fork.forkPath(arena.allocator(), users_dir, &user_id, &fork_id);
+                const path = try fork.forkPath(arena.allocator(), users_path, &user_id, &fork_id);
                 if (rp.AnyRepo(.xit, .{}).open(io, gpa, .{ .path = path, .require_repo_root = true })) |opened| {
                     var any_fork = opened;
                     defer any_fork.deinit(io, gpa);

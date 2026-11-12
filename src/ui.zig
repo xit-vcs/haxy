@@ -2333,7 +2333,7 @@ pub fn authorizeUser(
     io: std.Io,
     moment: evt.AdminDB.HashMap(.read_only),
     arena: *std.heap.ArenaAllocator,
-    users_dir: []const u8,
+    users_path: []const u8,
     user_id: [evt.event_id_size]u8,
     identity: []const u8,
     min_role: evt.Repo.Role,
@@ -2342,7 +2342,7 @@ pub fn authorizeUser(
     const user = (try activeUser(moment, arena, user_id)) orelse return .login_required;
 
     const owner_repo = evt.parseOwnerRepoPath(identity) orelse return .repo_not_found;
-    const repo = (try evt.readRepoByOwnerAndName(io, arena.child_allocator, arena, moment, users_dir, owner_repo.owner, owner_repo.name, user_id)) orelse return .repo_not_found;
+    const repo = (try evt.readRepoByOwnerAndName(io, arena.child_allocator, arena, moment, users_path, owner_repo.owner, owner_repo.name, user_id)) orelse return .repo_not_found;
     // a repo the user can't read doesn't exist to them
     const role = repo.role orelse return .repo_not_found;
     if (!role.atLeast(min_role)) return .forbidden;
@@ -2410,7 +2410,7 @@ pub const Session = struct {
     // rebuilds pages from the serialized snapshot rather than from disk.
     io: ?std.Io = null,
     admin_repo: ?*rp.Repo(.xit, evt.admin_repo_opts) = null,
-    users_dir: ?[]const u8 = null,
+    users_path: ?[]const u8 = null,
     // the single on-disk repo this session views, when running in local mode
     // (haxy invoked with no arguments inside a repo). null on the server paths,
     // which resolve repos from the admin db instead.
@@ -2753,7 +2753,7 @@ pub const Session = struct {
         if (builtin.target.cpu.arch == .wasm32) return;
         const key = self.ssh_key orelse return;
         const io = self.io orelse return;
-        const users_dir = self.users_dir orelse return;
+        const users_path = self.users_path orelse return;
         const admin_repo = self.admin_repo orelse return;
         const user_id = self.userId() orelse return;
         const fingerprint = evt.User.fingerprintOfKey(key) orelse return;
@@ -2763,7 +2763,7 @@ pub const Session = struct {
         const month = day.calculateMonthDay();
         const line = try std.fmt.allocPrint(allocator, "{s} added {d:0>4}-{d:0>2}-{d:0>2} via login", .{ key, day.year, month.month.numeric(), month.day_index + 1 });
         defer allocator.free(line);
-        evt.addUserKey(io, allocator, users_dir, admin_repo, &user_id, line) catch |err| switch (err) {
+        evt.addUserKey(io, allocator, users_path, admin_repo, &user_id, line) catch |err| switch (err) {
             // it's already there, or there's no room for it
             error.KeyAdded, error.TooManyKeys => {},
             else => return err,
@@ -2817,9 +2817,9 @@ pub const Session = struct {
         // the session's moment predates this input, so read the roles afresh
         const admin_repo = self.admin_repo orelse return null;
         const io = self.io orelse return null;
-        const users_dir = self.users_dir orelse return null;
+        const users_path = self.users_path orelse return null;
         const moment = try evt.currentMoment(evt.admin_repo_opts, admin_repo);
-        return switch (try authorizeUser(io, moment, self.page_arena, users_dir, user_id, identity, min_role, thread_kind)) {
+        return switch (try authorizeUser(io, moment, self.page_arena, users_path, user_id, identity, min_role, thread_kind)) {
             .actor => |actor| actor,
             .login_required, .repo_not_found, .forbidden => null,
         };
@@ -2830,7 +2830,7 @@ pub const Session = struct {
         return switch (self.data.host_kind) {
             .local => .local,
             .server => .{ .server = .{
-                .users_dir = self.users_dir orelse unreachable,
+                .users_path = self.users_path orelse unreachable,
                 .admin_repo_path = (self.admin_repo orelse unreachable).core.work_path,
             } },
         };

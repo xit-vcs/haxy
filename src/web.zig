@@ -60,7 +60,7 @@ pub const Host = union(evt.HostKind) {
     local: ui.RepoSource,
     server: struct {
         admin_repo_path: []const u8,
-        users_dir: []const u8,
+        users_path: []const u8,
         session_store: SessionStore,
         // the public url of this listener, which git's http clones share
         web_url: []const u8,
@@ -73,7 +73,7 @@ pub const Host = union(evt.HostKind) {
     pub fn event(self: Host) evt.Host {
         return switch (self) {
             .local => .local,
-            .server => |server| .{ .server = .{ .users_dir = server.users_dir, .admin_repo_path = server.admin_repo_path } },
+            .server => |server| .{ .server = .{ .users_path = server.users_path, .admin_repo_path = server.admin_repo_path } },
         };
     }
 };
@@ -108,7 +108,7 @@ fn requestRepoSource(io: std.Io, allocator: std.mem.Allocator, host: Host, repo_
     return switch (host) {
         .server => |server| blk: {
             const identity = repoBaseIdentity(repo_base) orelse break :blk null;
-            const path = switch (try serve_common.resolveRepoPath(io, allocator, server.users_dir, server.admin_repo_path, identity)) {
+            const path = switch (try serve_common.resolveRepoPath(io, allocator, server.users_path, server.admin_repo_path, identity)) {
                 .ok => |value| value,
                 .invalid, .not_found => break :blk null,
             };
@@ -147,7 +147,7 @@ pub fn handleConnection(
 
         switch (host) {
             .server => |server| if (serve_http.isGitRequest(&request.head)) {
-                try server.serve_git(io, allocator, server.users_dir, server.admin_repo_path, stream.socket.address, &http_server, &request, err);
+                try server.serve_git(io, allocator, server.users_path, server.admin_repo_path, stream.socket.address, &http_server, &request, err);
                 // git's responses end with "Connection: close"
                 break;
             },
@@ -196,11 +196,11 @@ fn handleRequest(
                         return switch (@field(PostRoute, name)) {
                             .login => handleLogin(io, request, allocator, base, server.admin_repo_path, server.session_store),
                             .logout => handleLogout(request, allocator, base, server.session_store),
-                            .@"repo/new" => handleRepoNew(io, request, allocator, path, server.admin_repo_path, server.users_dir, server.session_store),
-                            .@"user/new" => handleUserNew(io, request, allocator, path, server.admin_repo_path, server.users_dir, server.session_store, error_writer),
-                            .user => handleUserSettings(io, request, allocator, base, server.admin_repo_path, server.users_dir, server.session_store),
-                            .addkey => handleUserKeyAdd(io, request, allocator, base, server.admin_repo_path, server.users_dir, server.session_store),
-                            .removekey => handleUserKeyRemove(io, request, allocator, base, server.admin_repo_path, server.users_dir, server.session_store),
+                            .@"repo/new" => handleRepoNew(io, request, allocator, path, server.admin_repo_path, server.users_path, server.session_store),
+                            .@"user/new" => handleUserNew(io, request, allocator, path, server.admin_repo_path, server.users_path, server.session_store, error_writer),
+                            .user => handleUserSettings(io, request, allocator, base, server.admin_repo_path, server.users_path, server.session_store),
+                            .addkey => handleUserKeyAdd(io, request, allocator, base, server.admin_repo_path, server.users_path, server.session_store),
+                            .removekey => handleUserKeyRemove(io, request, allocator, base, server.admin_repo_path, server.users_path, server.session_store),
                             .delete => handleDelete(io, request, allocator, base, server),
                             .settings => handleRepoSettings(io, request, allocator, path, host),
                             .grant => handleMembers(io, request, allocator, base, host, .grant),
@@ -223,8 +223,8 @@ fn handleRequest(
                             .attach => handleAttach(io, request, allocator, base, host),
                             .assign => handleAssign(io, request, allocator, base, host),
                             .unassign => handleUnassign(io, request, allocator, base, host),
-                            .subscribe => handleNotify(io, request, allocator, base, host, server.users_dir, .subscribe),
-                            .mute => handleNotify(io, request, allocator, base, host, server.users_dir, .mute),
+                            .subscribe => handleNotify(io, request, allocator, base, host, server.users_path, .subscribe),
+                            .mute => handleNotify(io, request, allocator, base, host, server.users_path, .mute),
                             .search => handleSearch(request, allocator, base, host),
                         };
                     }
@@ -599,7 +599,7 @@ fn authorizeWrite(
         var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = server.admin_repo_path });
         defer admin_repo.deinit(io, allocator);
         const moment = try evt.currentMoment(evt.admin_repo_opts, &admin_repo);
-        break :blk try ui.authorizeUser(io, moment, arena, server.users_dir, user_id, identity, min_role, thread_kind);
+        break :blk try ui.authorizeUser(io, moment, arena, server.users_path, user_id, identity, min_role, thread_kind);
     };
     switch (authorization) {
         .actor => |actor| return actor,
@@ -635,7 +635,7 @@ fn mayRead(
         break :blk if (try ui.activeUser(moment, &arena, id) != null) id else null;
     };
     const owner_repo = evt.parseOwnerRepoPath(identity) orelse return false;
-    const repo = (try evt.readRepoByOwnerAndName(io, allocator, &arena, moment, server.users_dir, owner_repo.owner, owner_repo.name, user_id)) orelse return false;
+    const repo = (try evt.readRepoByOwnerAndName(io, allocator, &arena, moment, server.users_path, owner_repo.owner, owner_repo.name, user_id)) orelse return false;
     return repo.role != null;
 }
 
@@ -726,7 +726,7 @@ fn handleRepoNew(
     allocator: std.mem.Allocator,
     form_location: []const u8,
     admin_repo_path: []const u8,
-    users_dir: []const u8,
+    users_path: []const u8,
     session_store: SessionStore,
 ) !void {
     const user_id = requestUserId(request, session_store) orelse return respondLoginRequired(request);
@@ -753,7 +753,7 @@ fn handleRepoNew(
     const hash_kind = std.meta.stringToEnum(hash.HashKind, hash_value) orelse return request.respond("invalid hash", bad_request);
     const access = std.meta.stringToEnum(evt.Repo.Access, access_value) orelse return request.respond("invalid access", bad_request);
 
-    _ = evt.createRepo(io, allocator, users_dir, &user_id, .{ .name = user.event.name, .email = user.event.email }, name, description, access, hash_kind, if (copy.len == 0) null else .{ .admin_moment = moment, .path = copy }) catch |err| {
+    _ = evt.createRepo(io, allocator, users_path, &user_id, .{ .name = user.event.name, .email = user.event.email }, name, description, access, hash_kind, if (copy.len == 0) null else .{ .admin_moment = moment, .path = copy }) catch |err| {
         const failure = ui.Session.FormFeedback.RepoFailure.fromError(err) orelse return err;
         return respondFormFailure(request, allocator, session_store, form_location, .{ .repo = .{ .failure = failure, .fields = .{
             .name = name,
@@ -810,7 +810,7 @@ fn handleRepoSettings(
     }
     const discuss_role, const issue_role, const patch_role = roles;
 
-    const updated = ui.Repo.Settings.update(io, allocator, server.users_dir, actor, route.repo_settings.slice(), name, description, access, discuss_role, issue_role, patch_role) catch |err| switch (err) {
+    const updated = ui.Repo.Settings.update(io, allocator, server.users_path, actor, route.repo_settings.slice(), name, description, access, discuss_role, issue_role, patch_role) catch |err| switch (err) {
         error.NotFound => return respondRepoNotFound(request),
         else => {
             const failure = ui.Session.FormFeedback.RepoFailure.fromError(err) orelse return err;
@@ -860,7 +860,7 @@ fn handleMembers(io: std.Io, request: *std.http.Server.Request, allocator: std.m
         var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = server.admin_repo_path });
         defer admin_repo.deinit(io, allocator);
         const moment = try evt.currentMoment(evt.admin_repo_opts, &admin_repo);
-        break :blk ui.Repo.Members.perform(io, allocator, moment, server.users_dir, actor, identity, action, name) catch |err| switch (err) {
+        break :blk ui.Repo.Members.perform(io, allocator, moment, server.users_path, actor, identity, action, name) catch |err| switch (err) {
             error.NotFound, error.EventNotFound => return respondRepoNotFound(request),
             else => return err,
         };
@@ -899,7 +899,7 @@ fn handleBranches(io: std.Io, request: *std.http.Server.Request, allocator: std.
         .unprotect => if (target.branch.len != 0) std.Uri.percentDecodeInPlace(try arena.allocator().dupe(u8, target.branch.slice())) else return respondRepoNotFound(request),
     };
 
-    const failure = ui.Repo.Branches.perform(io, allocator, server.users_dir, actor, identity, action, branch) catch |err| switch (err) {
+    const failure = ui.Repo.Branches.perform(io, allocator, server.users_path, actor, identity, action, branch) catch |err| switch (err) {
         error.NotFound => return respondRepoNotFound(request),
         else => return err,
     };
@@ -916,7 +916,7 @@ fn handleUserNew(
     allocator: std.mem.Allocator,
     form_location: []const u8,
     admin_repo_path: []const u8,
-    users_dir: []const u8,
+    users_path: []const u8,
     session_store: SessionStore,
     error_writer: *std.Io.Writer,
 ) !void {
@@ -945,7 +945,7 @@ fn handleUserNew(
     const user_id = blk: {
         var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = admin_repo_path });
         defer admin_repo.deinit(io, allocator);
-        break :blk evt.createUser(io, allocator, users_dir, &admin_repo, name, email, password, password_again) catch |err| {
+        break :blk evt.createUser(io, allocator, users_path, &admin_repo, name, email, password, password_again) catch |err| {
             serve_common.logError(io, error_writer, "web signup failed: ip={s} name=\"{f}\" error={s}\n", .{ client, std.zig.fmtString(name), @errorName(err) });
             const failure = ui.Session.FormFeedback.UserFailure.fromError(err) orelse return err;
             return respondFormFailure(request, allocator, session_store, form_location, .{ .user = .{ .failure = failure, .fields = .{ .name = name, .email = email } } });
@@ -974,7 +974,7 @@ fn handleUserSettings(
     allocator: std.mem.Allocator,
     form_location: []const u8,
     admin_repo_path: []const u8,
-    users_dir: []const u8,
+    users_path: []const u8,
     session_store: SessionStore,
 ) !void {
     const user_id = requestUserId(request, session_store) orelse return respondLoginRequired(request);
@@ -993,7 +993,7 @@ fn handleUserSettings(
     {
         var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = admin_repo_path });
         defer admin_repo.deinit(io, allocator);
-        evt.updateUser(io, allocator, users_dir, &admin_repo, &user_id, email, current_password, new_password, new_password_again) catch |err| switch (err) {
+        evt.updateUser(io, allocator, users_path, &admin_repo, &user_id, email, current_password, new_password, new_password_again) catch |err| switch (err) {
             error.NotFound => return respondLoginRequired(request),
             else => {
                 const failure = ui.Session.FormFeedback.UserFailure.fromError(err) orelse return err;
@@ -1016,7 +1016,7 @@ fn handleUserKeyAdd(
     allocator: std.mem.Allocator,
     form_location: []const u8,
     admin_repo_path: []const u8,
-    users_dir: []const u8,
+    users_path: []const u8,
     session_store: SessionStore,
 ) !void {
     const user_id = requestUserId(request, session_store) orelse return respondLoginRequired(request);
@@ -1029,7 +1029,7 @@ fn handleUserKeyAdd(
     {
         var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = admin_repo_path });
         defer admin_repo.deinit(io, allocator);
-        evt.addUserKey(io, allocator, users_dir, &admin_repo, &user_id, key) catch |err| switch (err) {
+        evt.addUserKey(io, allocator, users_path, &admin_repo, &user_id, key) catch |err| switch (err) {
             error.NotFound => return respondLoginRequired(request),
             else => {
                 const failure = ui.Session.FormFeedback.KeyFailure.fromError(err) orelse return err;
@@ -1052,7 +1052,7 @@ fn handleUserKeyRemove(
     allocator: std.mem.Allocator,
     base: []const u8,
     admin_repo_path: []const u8,
-    users_dir: []const u8,
+    users_path: []const u8,
     session_store: SessionStore,
 ) !void {
     const user_id = requestUserId(request, session_store) orelse return respondLoginRequired(request);
@@ -1063,7 +1063,7 @@ fn handleUserKeyRemove(
     {
         var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = admin_repo_path });
         defer admin_repo.deinit(io, allocator);
-        evt.removeUserKey(io, allocator, users_dir, &admin_repo, &user_id, &tab.key.bytes) catch |err| switch (err) {
+        evt.removeUserKey(io, allocator, users_path, &admin_repo, &user_id, &tab.key.bytes) catch |err| switch (err) {
             error.NotFound => return respondLoginRequired(request),
             else => return err,
         };
@@ -1102,7 +1102,7 @@ fn handleDelete(io: std.Io, request: *std.http.Server.Request, allocator: std.me
     const confirm = (try parseFormField(arena.allocator(), body, "confirm")) orelse "";
     const password = (try parseFormField(arena.allocator(), body, "password")) orelse "";
 
-    const failure = ui.Delete.perform(io, allocator, server.users_dir, &admin_repo, user_id, target, confirm, password) catch |err| switch (err) {
+    const failure = ui.Delete.perform(io, allocator, server.users_path, &admin_repo, user_id, target, confirm, password) catch |err| switch (err) {
         error.NotFound => return respondDeleteNotFound(request),
         else => return err,
     };
@@ -1222,7 +1222,7 @@ fn handleThreadNew(
         const repo_id = evt.parseEventId(std.Io.Dir.path.basename(request_repo.source.path)) catch return respondRemoveNotFound(request);
         const repo_user_id = actor.repo_user_id orelse unreachable;
         const identity = ui.RoutablePage.RepoIdentity.parse(repoBaseIdentity(base) orelse return respondRemoveNotFound(request)) orelse return respondRemoveNotFound(request);
-        const fork_path = try fork.create(.{}, io, allocator, server.users_dir, .{
+        const fork_path = try fork.create(.{}, io, allocator, server.users_path, .{
             .id = event_id_hex,
             .user_id = user_id,
             .repo_id = repo_id,
@@ -1772,7 +1772,7 @@ fn handleNotify(
     allocator: std.mem.Allocator,
     base: []const u8,
     host: Host,
-    users_dir: []const u8,
+    users_path: []const u8,
     mode: ui.NotifyAction,
 ) !void {
     const parts = commentBaseParts(host, base) orelse return respondRemoveNotFound(request);
@@ -1791,8 +1791,8 @@ fn handleNotify(
     };
 
     switch (mode) {
-        .subscribe => try notify.subscribe(io, allocator, users_dir, &user_id, location, &parts.thread_id, actor.author),
-        .mute => try notify.mute(io, allocator, users_dir, &user_id, location, &parts.thread_id, actor.author),
+        .subscribe => try notify.subscribe(io, allocator, users_path, &user_id, location, &parts.thread_id, actor.author),
+        .mute => try notify.mute(io, allocator, users_path, &user_id, location, &parts.thread_id, actor.author),
     }
     try request.respond("", .{ .status = .see_other, .keep_alive = false, .extra_headers = &.{.{ .name = "location", .value = base }} });
 }
@@ -1988,11 +1988,11 @@ fn handleRemove(
             const user_id = actor.user_id orelse return respondLoginRequired(request);
 
             // a draft lives in its author's user repo
-            if (try evt.readForkById(io, allocator, &author_arena, server.users_dir, &user_id, &parts.id)) |fork_record| {
+            if (try evt.readForkById(io, allocator, &author_arena, server.users_path, &user_id, &parts.id)) |fork_record| {
                 const repo_id = evt.parseEventId(std.Io.Dir.path.basename(source.path)) catch return respondRemoveNotFound(request);
                 if (!fork_record.removed and fork_record.event.stage == .draft and std.mem.eql(u8, &fork_record.event.repo_id, &std.fmt.bytesToHex(repo_id, .lower))) {
                     const id = std.fmt.bytesToHex(parts.id, .lower);
-                    try fork.remove(io, allocator, server.users_dir, &user_id, &id, author);
+                    try fork.remove(io, allocator, server.users_path, &user_id, &id, author);
 
                     const location = try allocator.print("{s}/patches/drafts", .{parts.repo_base});
                     defer allocator.free(location);
@@ -2201,7 +2201,7 @@ fn handleThreadEdit(
         var admin_repo = try rp.Repo(.xit, evt.admin_repo_opts).open(io, allocator, .{ .path = server.admin_repo_path });
         defer admin_repo.deinit(io, allocator);
         const id = std.fmt.bytesToHex(parts.thread_id, .lower);
-        if (try pch.editDraft(.{}, io, allocator, server.users_dir, &admin_repo, .{
+        if (try pch.editDraft(.{}, io, allocator, server.users_path, &admin_repo, .{
             .id = id,
             .user_id = user_id,
             .repo_id = repo_id,
@@ -2471,7 +2471,7 @@ fn renderPage(
             // give the page builders filesystem access to the on-disk repos (a
             // sibling "users" dir next to the admin repo) so the Repo page can
             // read its files.
-            session.users_dir = server.users_dir;
+            session.users_path = server.users_path;
             break :blk session;
         },
         .local => |local| ui.Session{
