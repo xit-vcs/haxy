@@ -4,6 +4,7 @@ const rp = xit.repo;
 const evt = @import("./event.zig");
 const serve_common = @import("./serve_common.zig");
 const popularity = @import("./popularity.zig");
+const progress = @import("./progress.zig");
 
 // whether a web listener request is git's smart http rather than a page
 pub fn isGitRequest(head: *const std.http.Server.Request.Head) bool {
@@ -30,6 +31,12 @@ pub const GitHandler = *const fn (
 
 // the git request handler for one repo backend, so the web listener needn't be generic
 pub fn gitHandler(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoOpts(repo_kind)) GitHandler {
+    // a fetch reports its progress on the sideband, as it does over ssh
+    const sideband_opts = comptime opts: {
+        var opts = any_repo_opts;
+        opts.ProgressCtx = *progress.Sideband;
+        break :opts opts;
+    };
     return struct {
         fn handle(
             io: std.Io,
@@ -41,7 +48,7 @@ pub fn gitHandler(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.An
             request: *std.http.Server.Request,
             err: *std.Io.Writer,
         ) anyerror!void {
-            handleGitRequest(repo_kind, any_repo_opts, io, allocator, users_dir, admin_repo_path, peer, http_server, request) catch |request_err| {
+            handleGitRequest(repo_kind, sideband_opts, io, allocator, users_dir, admin_repo_path, peer, http_server, request) catch |request_err| {
                 serve_common.logError(io, err, "request failed: {s}\n", .{@errorName(request_err)});
                 try writeSimpleResponse(http_server, 500, "Internal Server Error", "text/plain", @errorName(request_err));
             };
@@ -215,7 +222,8 @@ const GitService = struct {
         io: std.Io,
         allocator: std.mem.Allocator,
     ) !void {
-        try repo.httpBackend(io, allocator, self.body_reader, self.writer, .http, self.options);
+        var sideband = progress.Sideband{ .writer = self.writer };
+        try repo.httpBackend(io, allocator, self.body_reader, self.writer, .http, self.options, &sideband);
     }
 };
 
