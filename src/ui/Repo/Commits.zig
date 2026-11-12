@@ -404,8 +404,7 @@ pub const View = struct {
         if (session.data.host_kind == .server) {
             var header_view = try ui.widget.SearchHeader.init(allocator, session, data.handle, " search ", data.search, data.search_available, data.searchRoute() orelse return error.RouteTooLong);
             errdefer header_view.deinit(allocator);
-            // a row taller than the header, leaving a blank line beneath it
-            try outer.children.put(allocator, header_view.getFocus().id, .{ .widget = .{ .search_header = header_view }, .rect = null, .min_size = .{ .width = null, .height = 4 } });
+            try outer.children.put(allocator, header_view.getFocus().id, .{ .widget = .{ .search_header = header_view }, .rect = null, .min_size = .{ .width = null, .height = ui.widget.SearchBox.min_size.height } });
         }
 
         // an empty list shows the empty message in place of the split
