@@ -1,6 +1,6 @@
 Most git forges keep issues, pull requests, and discussions in a database on the server, completely separate from the repo. While it is easy to move your repo to another forge, it's often a pain to move the rest of this data. Like Hotel California, you can come but you can never leave.
 
-Haxy instead stores all of that in the repo itself, so it moves around with your code. This also means you can view and edit this metadata locally. If you have haxy installed locally, just clone the repo and run `haxy` inside it. Haxy will run in "local mode", displaying its UI in your terminal and all your issues and other metadata will be readable offline.
+Haxy instead stores all of that in the repo itself, so it moves around with your code. This also means you can view and edit this metadata locally. If you have haxy installed locally, just clone the repo and run `haxy` inside it. Haxy will run in [local mode](local.md), displaying its UI in your terminal and all your issues and other metadata will be readable offline.
 
 The events branch
 
@@ -24,9 +24,9 @@ Consuming events
 
 * Reading a chain of commits every time you want to list issues would be painfully slow, so haxy "consumes" the events into a database: essentially, a form of event sourcing. Consuming walks the new commits on the events branch and turns each one into a record, along with the indexes the UI needs (open issues, issues per label, comments per thread, and so on).
 
-* On the server, repos are stored by xit, so this database is just more data inside the repo's own [xitdb](https://xitdb.net/) file. A push and the consuming of the events it carries happen in a single transaction, so if an event is invalid, the whole push is rejected. See the devlog about [the event system](https://www.youtube.com/watch?v=0kKKWfaYaKE).
+* On the server, repos are stored by xit, so this database is just more data inside the repo's own [xitdb](https://xitdb.net/) file. A push and the consuming of the events it carries happen in a single transaction, so if an event is invalid, the whole push is rejected.
 
-* In local mode, a plain git repo has no database to put this in, so haxy keeps a standalone one in a file called `haxy` inside the `.git` dir. It's only a cache; if you delete it, haxy just consumes the events again the next time it opens the repo. See the devlog about [local mode](https://www.youtube.com/watch?v=BZwUNrJ95ng).
+* In [local mode](local.md), a plain git repo has no database to put this in, so haxy keeps a standalone one in a file called `haxy` inside the `.git` dir. It's only a cache; if you delete it, haxy just consumes the events again the next time it opens the repo.
 
 * xitdb is immutable, so haxy keeps the database state after every event commit. If someone rebases and force-pushes the events branch, haxy finds the last commit that is still in the history, throws away every state after it, and consumes from there. Nothing has to be rebuilt from scratch.
 

@@ -51,7 +51,7 @@ To build, install zig 0.17.0 and do `zig build` and you'll find the binary at `z
 
 On a production server you would run this binary with the `serve` subcommand. [Read more](docs/host.md) about self-hosting.
 
-To run it in local mode, just run it with no subcommand in any git repo. It will show a completely offline haxy UI just for that repo.
+To run it in local mode, just run it with no subcommand in any git repo. It will show a completely offline haxy UI just for that repo. [Read more](docs/local.md) about local mode.
 
 The easiest way to try Haxy out is like this:
 

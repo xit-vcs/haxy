@@ -2,7 +2,7 @@ Haxy has one UI, and it's a TUI. Rather than build a terminal UI for the nerds a
 
 The terminal
 
-* In local mode, you just run `haxy` inside a repo and the TUI is drawn directly in your terminal. While it runs, haxy also serves the web UI for that repo on a local port, which is shown in the footer.
+* In [local mode](local.md), you just run `haxy` inside a repo and the TUI is drawn directly in your terminal. While it runs, haxy also serves the web UI for that repo on a local port, which is shown in the footer.
 
 * A haxy server lets you browse the instance over SSH. When you connect, the server runs the TUI and streams it to you over the SSH channel, so all you need is an SSH client. Each connection gets its own session with its own state.
 
