@@ -360,6 +360,8 @@ pub const View = struct {
     shown: Shown = .{ .index = null, .narrow = false },
     // the detail's way back to a list that isn't shown beside it
     back_id: ?usize = null,
+    // the list's width: its widest row, at most list_max_width
+    list_width: usize = list_max_width,
 
     const Shown = struct { index: ?usize, narrow: bool };
 
@@ -409,6 +411,7 @@ pub const View = struct {
         errdefer box.deinit(allocator);
 
         var shows_file = false;
+        var list_width: usize = 0;
 
         // the directory listing on the left (one focusable row each).
         {
@@ -421,7 +424,7 @@ pub const View = struct {
                 // copied by their text boxes.
                 const aa = session.page_arena.allocator();
                 if (data.dir.len != 0) {
-                    try addRow(allocator, &list_box, "..", "", try dirLink(session.page_arena, data, parentDir(data.dir)));
+                    try addRow(allocator, &list_box, &list_width, "..", "", try dirLink(session.page_arena, data, parentDir(data.dir)));
                 }
                 for (data.entries) |entry| {
                     const path = try childDir(aa, data.dir, entry.name);
@@ -438,9 +441,9 @@ pub const View = struct {
                         try dirLink(session.page_arena, data, path)
                     else
                         try fileLink(session.page_arena, data, path, entry.loaded, lineNumber(entry.window_start));
-                    try addRow(allocator, &list_box, label, bottom_label, link);
+                    try addRow(allocator, &list_box, &list_width, label, bottom_label, link);
                 }
-                if (data.capped) try addRow(allocator, &list_box, "(list truncated)", "", "");
+                if (data.capped) try addRow(allocator, &list_box, &list_width, "(list truncated)", "", "");
                 // select the file the route named, else prefer a README so its
                 // contents greet the visitor in the detail pane, else the first
                 // row. a non-root directory has a leading ".." row, so the entry
@@ -463,7 +466,10 @@ pub const View = struct {
                 break :blk sc;
             };
             errdefer list_scroll.deinit(allocator);
-            try box.children.put(allocator, list_scroll.getFocus().id, .{ .widget = .{ .scroll = list_scroll }, .rect = null, .min_size = .{ .width = list_max_width, .height = null }, .max_size = .{ .width = list_max_width, .height = null } });
+            // the terminal's scrollbar takes a column
+            if (session.is_terminal) list_width += 1;
+            list_width = @min(list_width, list_max_width);
+            try box.children.put(allocator, list_scroll.getFocus().id, .{ .widget = .{ .scroll = list_scroll }, .rect = null, .min_size = .{ .width = list_width, .height = null } });
         }
 
         // the detail pane on the right — a "next" nav box above a scroll of the
@@ -521,10 +527,12 @@ pub const View = struct {
         // focus lives in the split, except that search results start in the
         // search box so the term can be refined right away.
         outer.getFocus().child_id = outer.children.keys()[if (data.find != null) header_index else outer.children.count() - 1];
-        return .{ .box = outer, .data = data, .session = session };
+        return .{ .box = outer, .data = data, .session = session, .list_width = list_width };
     }
 
-    fn addRow(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8, bottom_label: []const u8, link: []const u8) !void {
+    // `widest` grows to the row's width, its labels plus the border's two columns
+    fn addRow(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), widest: *usize, label: []const u8, bottom_label: []const u8, link: []const u8) !void {
+        widest.* = @max(widest.*, 2 + @max(try xitui.width.displayWidth(label), try xitui.width.displayWidth(bottom_label)));
         var row = try wgt.TextBox.init(allocator, label, .{ .border = .hidden, .round_corners = true, .wrap_kind = .none, .bottom_label = .{ .text = bottom_label } });
         errdefer row.deinit(allocator);
         row.getFocus().mode = .all;
@@ -630,7 +638,7 @@ pub const View = struct {
 
         // whether the detail pane fits beside the list, which decides the list
         // cap below and whether the detail carries a way back to the list
-        const both_panes_fit = if (constraint.max_size.width) |w| w >= list_max_width + detail_min_width else true;
+        const both_panes_fit = if (constraint.max_size.width) |w| w >= self.list_width + detail_min_width else true;
 
         // swap the detail pane to the selected entry when the selection changes.
         try self.refreshDetail(allocator, !both_panes_fit);
@@ -651,11 +659,11 @@ pub const View = struct {
         const has_content = self.detailInner().children.count() > 0;
         self.detailScrollFrame().options.border = if (!has_content) null else if (self.focusOnContent(root_focus)) .double else .single;
 
-        // cap the list at list_max_width only while the detail pane fits beside
+        // cap the list at list_width only while the detail pane fits beside
         // it. the box drops the detail pane when the width can't hold both
         // minimums, so when it's that narrow we lift the cap and let the list
         // fill the whole width.
-        self.contentBox().children.values()[list_index].max_size = if (both_panes_fit) .{ .width = list_max_width, .height = null } else null;
+        self.contentBox().children.values()[list_index].max_size = if (both_panes_fit) .{ .width = self.list_width, .height = null } else null;
 
         // stretch the detail pane and its bordered scroll frame across the rest
         // of the width so the pane fills the area rather than shrinking to its
@@ -665,7 +673,7 @@ pub const View = struct {
         // phantom horizontal scroll. (height fills via the scroll clipping to the
         // viewport.)
         if (constraint.max_size.width) |w| {
-            const detail_w = if (both_panes_fit) w - list_max_width else w;
+            const detail_w = if (both_panes_fit) w - self.list_width else w;
             self.contentBox().children.values()[detail_index].min_size = .{ .width = detail_w, .height = null };
             self.detailOuter().children.values()[detail_scroll_index].min_size = .{ .width = detail_w, .height = null };
         } else {
