@@ -2527,7 +2527,7 @@ pub fn createUser(
         .author = .{ .name = name, .email = email },
         .event = .{ .user = .{ .name = name, .email = email, .password_hash = password_hash } },
     }});
-    try popularity.addUser(io, allocator, users_path, &id_bytes);
+    popularity.addUser(io, allocator, users_path, &id_bytes);
     return id_bytes;
 }
 
@@ -2581,7 +2581,7 @@ pub fn deleteUser(
     author: CommitAuthor,
 ) !void {
     try remove(.{ .server = .{ .users_path = users_path } }, .admin, .xit, admin_repo_opts, io, allocator, admin_repo, user_id, .user, author);
-    try popularity.removeUser(io, allocator, users_path, user_id);
+    popularity.removeUser(io, allocator, users_path, user_id);
     const path = try std.Io.Dir.path.join(allocator, &.{ users_path, &std.fmt.bytesToHex(user_id.*, .lower) });
     defer allocator.free(path);
     try std.Io.Dir.cwd().deleteTree(io, path);

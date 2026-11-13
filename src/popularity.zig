@@ -184,8 +184,8 @@ fn writeIndex(io: std.Io, allocator: std.mem.Allocator, users_path: []const u8, 
     };
 }
 
-// list a new user, at 0
-pub fn addUser(io: std.Io, allocator: std.mem.Allocator, users_path: []const u8, user_id: *const [evt.event_id_size]u8) !void {
+// list a new user, at 0. failures are logged, not returned.
+pub fn addUser(io: std.Io, allocator: std.mem.Allocator, users_path: []const u8, user_id: *const [evt.event_id_size]u8) void {
     const Ctx = struct {
         user_id: *const [evt.event_id_size]u8,
 
@@ -195,11 +195,13 @@ pub fn addUser(io: std.Io, allocator: std.mem.Allocator, users_path: []const u8,
             try order.put(&evt.orderKeyDesc(0, ctx.user_id));
         }
     };
-    try writeIndex(io, allocator, users_path, Ctx{ .user_id = user_id });
+    writeIndex(io, allocator, users_path, Ctx{ .user_id = user_id }) catch |err| {
+        std.log.warn("failed to list a new user: {s}", .{@errorName(err)});
+    };
 }
 
-// unlist a deleted user
-pub fn removeUser(io: std.Io, allocator: std.mem.Allocator, users_path: []const u8, user_id: *const [evt.event_id_size]u8) !void {
+// unlist a deleted user. failures are logged, not returned.
+pub fn removeUser(io: std.Io, allocator: std.mem.Allocator, users_path: []const u8, user_id: *const [evt.event_id_size]u8) void {
     const Ctx = struct {
         user_id: *const [evt.event_id_size]u8,
 
@@ -211,7 +213,9 @@ pub fn removeUser(io: std.Io, allocator: std.mem.Allocator, users_path: []const 
             _ = try scores.remove(key);
         }
     };
-    try writeIndex(io, allocator, users_path, Ctx{ .user_id = user_id });
+    writeIndex(io, allocator, users_path, Ctx{ .user_id = user_id }) catch |err| {
+        std.log.warn("failed to unlist a deleted user: {s}", .{@errorName(err)});
+    };
 }
 
 // list every active user missing from the index, with their sketch's estimate
