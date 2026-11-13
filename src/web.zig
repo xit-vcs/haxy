@@ -2,6 +2,7 @@ const std = @import("std");
 const xit = @import("xit");
 const rp = xit.repo;
 const obj = xit.object;
+const tr = xit.tree;
 const hash = xit.hash;
 const evt = @import("./event.zig");
 const serve_common = @import("./serve_common.zig");
@@ -281,8 +282,9 @@ fn handleRequest(
         return;
     }
 
-    // an attachment serves raw bytes rather than a page, so it is matched
-    // before the routable pages
+    // raw files and attachments serve bytes rather than a page, so they are
+    // matched before the routable pages
+    if (ui.RoutablePage.fromRawUrl(path, host == .local)) |raw| return serveRaw(io, request, allocator, raw, host);
     if (attachmentRequest(path)) |attachment| return serveAttachment(io, request, allocator, attachment, host);
 
     // embeds are matched before the pages so an embed's name never reads as a user
@@ -1542,9 +1544,13 @@ fn sendAttachment(
     var object_reader = obj.ObjectReader(repo_kind, repo_opts).init(state, io, allocator, blob_oid) catch return respondAttachmentNotFound(request);
     defer object_reader.deinit();
     if (object_reader.header().kind != .blob) return respondAttachmentNotFound(request);
+    try respondBlob(request, allocator, &object_reader, record.name);
+}
 
-    const content_type = attachmentContentType(record.name);
-    const encoded_name = try ui.urlEncodeRef(allocator, record.name);
+// stream a blob named `name`: an image shows inline, anything else downloads
+fn respondBlob(request: *std.http.Server.Request, allocator: std.mem.Allocator, object_reader: anytype, name: []const u8) !void {
+    const content_type = inlineContentType(name);
+    const encoded_name = try ui.urlEncodeRef(allocator, name);
     defer allocator.free(encoded_name);
     const disposition = try allocator.print("{s}; filename*=UTF-8''{s}", .{ if (content_type == null) "attachment" else "inline", encoded_name });
     defer allocator.free(disposition);
@@ -1556,8 +1562,8 @@ fn sendAttachment(
             .extra_headers = &.{
                 .{ .name = "content-type", .value = content_type orelse "application/octet-stream" },
                 .{ .name = "content-disposition", .value = disposition },
-                // uploaded bytes are never sniffed into a type that could run
-                // as script on this origin
+                // served bytes are never sniffed into a type that could run as
+                // script on this origin
                 .{ .name = "x-content-type-options", .value = "nosniff" },
             },
         },
@@ -1567,8 +1573,8 @@ fn sendAttachment(
 }
 
 // the images a browser renders safely inline. anything else downloads as
-// opaque bytes, so an uploaded page can't run on this origin.
-fn attachmentContentType(name: []const u8) ?[]const u8 {
+// opaque bytes, so a served page can't run on this origin.
+fn inlineContentType(name: []const u8) ?[]const u8 {
     const types = [_]struct { ext: []const u8, value: []const u8 }{
         .{ .ext = ".png", .value = "image/png" },
         .{ .ext = ".jpg", .value = "image/jpeg" },
@@ -1580,6 +1586,68 @@ fn attachmentContentType(name: []const u8) ?[]const u8 {
         if (name.len > entry.ext.len and std.ascii.eqlIgnoreCase(name[name.len - entry.ext.len ..], entry.ext)) return entry.value;
     }
     return null;
+}
+
+// serve a file's bytes from the tree its url names
+fn serveRaw(
+    io: std.Io,
+    request: *std.http.Server.Request,
+    allocator: std.mem.Allocator,
+    raw: ui.RoutablePage.RawFile,
+    host: Host,
+) !void {
+    if (!try mayRead(io, allocator, request, host, raw.base)) return respondFileNotFound(request);
+    const request_repo = (try requestRepoSource(io, allocator, host, raw.base)) orelse return respondFileNotFound(request);
+    defer request_repo.deinit(allocator);
+    const source = request_repo.source;
+    switch (source.repo_kind) {
+        inline else => |repo_kind| {
+            var any_repo = try rp.AnyRepo(repo_kind, .{}).open(io, allocator, source.localInitOpts());
+            defer any_repo.deinit(io, allocator);
+            switch (any_repo) {
+                inline else => |*repo| try sendRaw(repo_kind, repo.self_repo_opts, io, request, allocator, repo, raw),
+            }
+        },
+    }
+}
+
+fn sendRaw(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    io: std.Io,
+    request: *std.http.Server.Request,
+    allocator: std.mem.Allocator,
+    repo: *rp.Repo(repo_kind, repo_opts),
+    raw: ui.RoutablePage.RawFile,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    // resolved as the files view does, so a patch revision's tree oid works too
+    const resolved = (try ui.ResolvedRefOrOid(repo_kind, repo_opts).init(repo, io, arena.allocator(), raw.ref_or_oid, raw.value)) orelse return respondFileNotFound(request);
+
+    var moment = repo.core.latestMoment() catch return respondFileNotFound(request);
+    const state = rp.Repo(repo_kind, repo_opts).State(.read_only){ .core = &repo.core, .extra = .{ .moment = &moment } };
+    const name, const blob_oid = blob: {
+        var tree_dir = tr.TreeDir(repo_kind, repo_opts).init(state, io, allocator, &resolved.oid, raw.path) catch return respondFileNotFound(request);
+        defer tree_dir.deinit();
+        // a directory has no file name
+        const file_name = tree_dir.file_name orelse return respondFileNotFound(request);
+        const entry = tree_dir.entries.get(file_name) orelse unreachable;
+        break :blob .{ file_name, std.fmt.bytesToHex(entry.oid, .lower) };
+    };
+
+    var object_reader = obj.ObjectReader(repo_kind, repo_opts).init(state, io, allocator, &blob_oid) catch return respondFileNotFound(request);
+    defer object_reader.deinit();
+    // a submodule's commit isn't a blob
+    if (object_reader.header().kind != .blob) return respondFileNotFound(request);
+    try respondBlob(request, allocator, &object_reader, name);
+}
+
+fn respondFileNotFound(request: *std.http.Server.Request) !void {
+    try request.respond("file not found", .{
+        .status = .not_found,
+        .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+    });
 }
 
 fn respondAttachmentNotFound(request: *std.http.Server.Request) !void {

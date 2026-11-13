@@ -480,9 +480,14 @@ pub const View = struct {
                 errdefer frame.deinit(allocator);
 
                 {
-                    var nav_box = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .horiz });
-                    errdefer nav_box.deinit(allocator);
-                    try frame.children.put(allocator, nav_box.getFocus().id, .{ .widget = .{ .box = nav_box }, .rect = null, .min_size = null });
+                    // scrolls sideways when a narrow screen cuts the buttons off
+                    var nav_scroll = blk2: {
+                        var nav_box = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .horiz });
+                        errdefer nav_box.deinit(allocator);
+                        break :blk2 try wgt.Scroll(ui.Widget).init(allocator, .{ .box = nav_box }, .{ .direction = .horiz, .show_bar = false, .web_native = !session.is_terminal });
+                    };
+                    errdefer nav_scroll.deinit(allocator);
+                    try frame.children.put(allocator, nav_scroll.getFocus().id, .{ .widget = .{ .scroll = nav_scroll }, .rect = null, .min_size = null });
                 }
                 {
                     // the content scroll wrapped in a bordered box; build sets the
@@ -590,7 +595,7 @@ pub const View = struct {
     }
 
     fn navBox(self: *View) *wgt.Box(ui.Widget) {
-        return &self.detailOuter().children.values()[detail_nav_index].widget.box;
+        return &self.detailOuter().children.values()[detail_nav_index].widget.scroll.child.box;
     }
 
     // the bordered box wrapping the content scroll (border toggles with focus).
@@ -729,6 +734,10 @@ pub const View = struct {
                     const page_arena = self.session.page_arena;
                     const link = try page_arena.allocator().print("ai:{s}", .{try self.session.data.current_page.toUrl(page_arena)});
                     self.back_id = try addNavButton(allocator, nav_box, "← back to file list", link);
+                }
+                // the download leads the links, so it stays put as they come and go
+                if (try self.data.handle.location.rawUrl(self.session.page_arena, self.data.ref_or_oid, self.data.ref_or_oid_value, path)) |url| {
+                    _ = try addNavButton(allocator, nav_box, "download", try self.session.page_arena.allocator().print(ui.raw_link_prefix ++ "{s}", .{url}));
                 }
                 // the window links sit above the scroll, so they stay put
                 // while the content scrolls.
@@ -975,7 +984,7 @@ pub const View = struct {
         return true;
     }
 
-    // enter the detail pane, landing on the "next" link when there is one (so
+    // enter the detail pane, landing on the nav row when there is one (so
     // right-arrow reaches it), else on the content. a directory or ".." row has
     // neither, so there's nothing to enter. selecting the frame's child (then
     // focusing the frame) also handles the too-narrow case where the pane isn't

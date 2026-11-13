@@ -333,6 +333,8 @@ pub const RoutablePage = union(enum) {
 
     const home_segment = "home";
     const files_seg = "files";
+    // serves a file's bytes rather than a page
+    const raw_seg = "raw";
     const commits_seg = "commits";
     // ends a commits route naming its commit's full message
     const message_seg = "message";
@@ -551,6 +553,14 @@ pub const RoutablePage = union(enum) {
                     forkFilesRoute(f.identity, f.id, value, path, line)
                 else
                     null,
+            };
+        }
+
+        // the url a file's bytes are served from, null for a fork
+        pub fn rawUrl(self: RepoLocation, arena: *std.heap.ArenaAllocator, ref_or_oid: RefOrOid, value: []const u8, path: []const u8) !?[]const u8 {
+            return switch (self) {
+                .repo => |repo_identity| try arena.allocator().print("{s}/" ++ raw_seg ++ "/{s}:{s}/" ++ path_seg ++ "{s}", .{ try repoUrlPrefix(arena, repo_identity), @tagName(ref_or_oid), value, path }),
+                .fork => null,
             };
         }
 
@@ -1480,6 +1490,30 @@ pub const RoutablePage = union(enum) {
         if (std.mem.eql(u8, path, "/")) return repoFilesRoute("", null, "", "", 0);
         if (path.len < 2 or path[0] != '/') return null;
         return repoSubRoute("", path[1..]);
+    }
+
+    // a file's bytes, which `RepoLocation.rawUrl` links to
+    pub const RawFile = struct {
+        // "/<owner>:<name>", or "" in local mode
+        base: []const u8,
+        ref_or_oid: RefOrOid,
+        // url-encoded, as routes hold it
+        value: []const u8,
+        path: []const u8,
+    };
+
+    // parse a raw file url, anchored on its leading segments since a path may
+    // hold anything
+    pub fn fromRawUrl(path: []const u8, local: bool) ?RawFile {
+        if (path.len < 2 or path[0] != '/') return null;
+        var segments = std.mem.splitScalar(u8, path[1..], '/');
+        const base = if (local) "" else path[0 .. 1 + (segments.next() orelse return null).len];
+        if (!std.mem.eql(u8, segments.next() orelse return null, raw_seg)) return null;
+        var params = Params{};
+        params.scanPairs(&segments) catch return null;
+        if (!params.only(&.{ .branch, .tag, .object })) return null;
+        const ref = (params.ref() catch return null) orelse return null;
+        return .{ .base = base, .ref_or_oid = ref.kind, .value = ref.value, .path = pathValue(segments.rest()) orelse return null };
     }
 
     // a thread remove view's url: the thread, then any comment and attachment
