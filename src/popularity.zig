@@ -40,7 +40,6 @@ const sketch = struct {
         _ = try file.readPositionalAll(io, &old, slot);
         if (value <= old[0]) return false;
         try file.writePositionalAll(io, &.{value}, slot);
-        try file.sync(io);
         return true;
     }
 
@@ -146,7 +145,9 @@ fn countLocked(
             // a deleted user stays out
             const old_cursor = try scores.getCursor(key) orelse return error.CancelTransaction;
             const old_score = try old_cursor.readUint();
-            if (old_score == ctx.score) return error.CancelTransaction;
+            // a move within 1% is inside the sketch's error
+            const move = @max(old_score, ctx.score) - @min(old_score, ctx.score);
+            if (move * 100 <= old_score) return error.CancelTransaction;
             try scores.put(key, .{ .uint = ctx.score });
             _ = try order.remove(&evt.orderKeyDesc(old_score, ctx.user_id));
             try order.put(&evt.orderKeyDesc(ctx.score, ctx.user_id));
