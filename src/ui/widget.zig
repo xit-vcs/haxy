@@ -1001,14 +1001,7 @@ pub const RichText = struct {
         if (max_width == 0 or constraint.max_size.height == 0) return;
         const focused_link = self.linkOf(root_focus.grandchild_id);
 
-        try wgt.wrapLines(allocator, &self.lines, self.runes, if (self.pre) .none else .word, max_width);
-        // trailing spaces are dropped so a wrapped link doesn't highlight them
-        if (!self.pre) for (self.lines.items) |*line| {
-            while (line.end > line.start and self.runes[line.end - 1] == ' ') {
-                line.end -= 1;
-                line.width -= 1;
-            }
-        };
+        try wgt.wrapLines(allocator, &self.lines, self.runes, if (self.pre) .none else .word, max_width, 0);
         const visible = @min(self.lines.items.len, constraint.max_size.height orelse self.lines.items.len);
         var width: usize = 1;
         for (self.lines.items[0..visible]) |line| width = @max(width, line.width);

@@ -440,7 +440,7 @@ pub const Heading = struct {
         const chars = try aa.alloc(u21, self.plain.len);
         for (self.plain, chars) |c, *char| char.* = c;
         var lines: std.ArrayList(wgt.Line) = .empty;
-        try wgt.wrapLines(aa, &lines, chars, .word, max_chars);
+        try wgt.wrapLines(aa, &lines, chars, .word, max_chars, 0);
 
         // a blank row between lines keeps the glyphs from touching
         var out: std.ArrayList(u8) = .empty;

@@ -325,8 +325,7 @@ fn readFileContent(
     var i = start;
     while (i < end) : (i += 1) {
         const line = try line_iter.get(i);
-        // a line's byte length bounds its display width
-        widest = @max(widest, line.len);
+        widest = @max(widest, widthBound(line));
         // the first line always goes in; xit's max_line_size bounds it
         if (lines.items.len > 0 and (lines.items.len + 1) * widest > max_window_cells) break;
         try lines.append(arena, try arena.dupe(u8, line));
@@ -544,9 +543,9 @@ pub const View = struct {
     // it's borderless — the border lives on the surrounding scroll frame, which
     // doubles when this content is focused. a non-empty `link` makes activating
     // the box follow it, like addRow.
-    fn addContentBox(self: *View, allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), spans: []const wgt.Span, link: []const u8) !void {
+    fn addContentBox(self: *View, allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), spans: []const wgt.Span, link: []const u8, tab_start: usize) !void {
         _ = self;
-        var tb = try wgt.TextBox.initSpans(allocator, spans, .{ .border = null, .wrap_kind = .none });
+        var tb = try wgt.TextBox.initSpans(allocator, spans, .{ .border = null, .wrap_kind = .none, .tab_start = tab_start });
         errdefer tb.deinit(allocator);
         tb.getFocus().mode = .all;
         if (link.len != 0) tb.getFocus().kind = .{ .custom = link };
@@ -739,9 +738,9 @@ pub const View = struct {
                     // the placeholder carries the file's "a:" link, so enter
                     // (or a click) here loads the file like on its list row.
                     const link = try fileLink(self.session.page_arena, self.data, path, false, 0);
-                    try self.addContentBox(allocator, inner, &.{.{ .text = "(press enter to load this file)" }}, link);
+                    try self.addContentBox(allocator, inner, &.{.{ .text = "(press enter to load this file)" }}, link, 0);
                 } else if (entry.is_binary) {
-                    try self.addContentBox(allocator, inner, &.{.{ .text = "(binary file)" }}, "");
+                    try self.addContentBox(allocator, inner, &.{.{ .text = "(binary file)" }}, "", 0);
                 } else if (isMarkdown(entry.name) and entry.window_start == 0 and !entry.has_more and entry.lines.len <= max_markdown_lines) {
                     const page_arena = self.session.page_arena;
                     const doc = try md.parse(page_arena.allocator(), entry.lines);
@@ -750,7 +749,8 @@ pub const View = struct {
                     try inner.children.put(allocator, view.getFocus().id, .{ .widget = .{ .markdown = view }, .rect = null, .min_size = null });
                     markdown = true;
                 } else {
-                    try self.addContentBox(allocator, inner, try numberedContent(self.session.page_arena, self.data, path, entry.lines, entry.window_start), "");
+                    const content = try numberedContent(self.session.page_arena, self.data, path, entry.lines, entry.window_start);
+                    try self.addContentBox(allocator, inner, content.spans, "", content.gutter);
                 }
             }
         }
@@ -1035,8 +1035,8 @@ pub const View = struct {
 // (right-aligned in a column wide enough for the last number, then a space),
 // like the diffs view. each number links to the window starting at its line.
 // `start` is the window's 0-based first line, so numbers continue across
-// paginated windows.
-fn numberedContent(page_arena: *std.heap.ArenaAllocator, data: *const Self, path: []const u8, lines: []const []const u8, start: usize) ![]const wgt.Span {
+// paginated windows. the gutter is the cells before each line's text.
+fn numberedContent(page_arena: *std.heap.ArenaAllocator, data: *const Self, path: []const u8, lines: []const []const u8, start: usize) !struct { spans: []const wgt.Span, gutter: usize } {
     const arena = page_arena.allocator();
     const width = std.fmt.count("{d}", .{start + lines.len});
     var spans: std.ArrayList(wgt.Span) = .empty;
@@ -1046,7 +1046,12 @@ fn numberedContent(page_arena: *std.heap.ArenaAllocator, data: *const Self, path
         try spans.append(arena, .{ .text = try arena.print("{d: >[1]}", .{ number, width }), .link = try route.toUrl(page_arena) });
         try spans.append(arena, .{ .text = try arena.print(" {s}{s}", .{ line, if (i + 1 < lines.len) "\n" else "" }) });
     }
-    return spans.toOwnedSlice(arena);
+    return .{ .spans = try spans.toOwnedSlice(arena), .gutter = width + 1 };
+}
+
+// a line's display width is at most its byte length, with each tab a whole tab stop
+pub fn widthBound(line: []const u8) usize {
+    return line.len + std.mem.count(u8, line, "\t") * (wgt.tab_width - 1);
 }
 
 // the index of the "README"/"README.md" file entry (case-insensitive), or null
@@ -1058,7 +1063,7 @@ fn readmeIndex(entries: []const Entry) ?usize {
     return null;
 }
 
-fn isMarkdown(name: []const u8) bool {
+pub fn isMarkdown(name: []const u8) bool {
     const extension = std.Io.Dir.path.extension(name);
     return std.ascii.eqlIgnoreCase(extension, ".md") or std.ascii.eqlIgnoreCase(extension, ".markdown");
 }

@@ -10,6 +10,7 @@ const Key = xit.xitui.input.Key;
 const Grid = xit.xitui.grid.Grid;
 const Focus = xit.xitui.focus.Focus;
 const inp = @import("../input.zig");
+const Files = @import("Files.zig");
 
 pub const page_size = 10;
 
@@ -21,6 +22,8 @@ pub const Hunk = struct {
     text: []const u8,
     // one byte per line of text: the edit's +/-/space prefix
     prefixes: []const u8,
+    // the cells before each line's text: its number, a space and its prefix
+    gutter: usize = 0,
     status: Status = .changed,
 };
 
@@ -248,6 +251,7 @@ pub fn render(
                 .path = if (path_attached) null else try arena.dupe(u8, pair.path),
                 .text = rendered.text,
                 .prefixes = rendered.prefixes,
+                .gutter = rendered.gutter,
             });
             path_attached = true;
         }
@@ -263,7 +267,7 @@ fn renderHunk(
     arena: std.mem.Allocator,
     hunk_iter: *df.HunkIterator(repo_kind, repo_opts),
     hunk: *df.Hunk(repo_kind, repo_opts),
-) !struct { text: []const u8, prefixes: []const u8, widest: usize } {
+) !struct { text: []const u8, prefixes: []const u8, gutter: usize, widest: usize } {
     var out: std.Io.Writer.Allocating = .init(arena);
     defer out.deinit();
     var prefixes: std.ArrayList(u8) = .empty;
@@ -290,10 +294,10 @@ fn renderHunk(
         try out.writer.splatByteAll(' ', width - std.fmt.count("{d}", .{num}));
         try out.writer.print("{d} {c}{s}", .{ num, prefix, text });
         try prefixes.append(arena, prefix);
-        widest_text = @max(widest_text, text.len);
+        widest_text = @max(widest_text, Files.widthBound(text));
     }
-    // each line's number, space and prefix come before its text
-    return .{ .text = try out.toOwnedSlice(), .prefixes = try prefixes.toOwnedSlice(arena), .widest = width + 2 + widest_text };
+    const gutter = width + 2;
+    return .{ .text = try out.toOwnedSlice(), .prefixes = try prefixes.toOwnedSlice(arena), .gutter = gutter, .widest = gutter + widest_text };
 }
 
 // the line number to show for an edit: the new-side number for kept and inserted
@@ -309,29 +313,33 @@ fn editLineNum(edit: df.Edit) usize {
 fn appendWindow(data: @This(), allocator: std.mem.Allocator, session: *ui.Session, box: *wgt.Box(ui.Widget)) !void {
     if (data.path.len != 0) {
         const status = if (data.window.hunks.len > 0) data.window.hunks[0].status else .changed;
-        try addSpans(allocator, box, &.{.{ .text = data.path }}, try data.route.fileLink(session.page_arena, data.path, status), status.label(), status.border());
+        try addSpans(allocator, box, &.{.{ .text = data.path }}, try data.route.fileLink(session.page_arena, data.path, status), status.label(), status.border(), .{});
         try addLink(allocator, box, "← all files", try data.route.link(session.page_arena, 0, ""));
     }
     if (data.window.start > 0) try addLink(allocator, box, "← previous", try data.route.link(session.page_arena, data.window.start -| page_size, data.path));
+    // a window's first hunk of each file carries its path. markdown hunks wrap
+    // at the view's width, code keeps its lines
+    var markdown = false;
     for (data.window.hunks) |hunk| {
+        if (hunk.path) |path| markdown = Files.isMarkdown(path);
         if (data.path.len == 0) if (hunk.path) |path| {
             // a changed file's path narrows the diff to it, the others open the file
             const link = if (hunk.status == .changed) try data.route.link(session.page_arena, 0, path) else try data.route.fileLink(session.page_arena, path, hunk.status);
-            try addSpans(allocator, box, &.{.{ .text = path }}, link, hunk.status.label(), hunk.status.border());
+            try addSpans(allocator, box, &.{.{ .text = path }}, link, hunk.status.label(), hunk.status.border(), .{});
         };
-        if (hunk.text.len != 0) try addHunk(allocator, box, hunk);
+        if (hunk.text.len != 0) try addHunk(allocator, box, hunk, markdown);
     }
     if (data.window.truncated) try addLink(allocator, box, "the rest of the diff is too large to show", "");
     if (data.window.has_more) try addLink(allocator, box, "next →", try data.route.link(session.page_arena, data.window.start + data.window.hunks.len, data.path));
 }
 
 fn addLink(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), text: []const u8, link: []const u8) !void {
-    try addSpans(allocator, box, &.{.{ .text = text }}, link, "", .single);
+    try addSpans(allocator, box, &.{.{ .text = text }}, link, "", .single, .{});
 }
 
 // one span per line, inserted lines green and deleted lines red. the text
 // box copies the text, so the spans only live until init.
-fn addHunk(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), hunk: Hunk) !void {
+fn addHunk(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), hunk: Hunk, wrap: bool) !void {
     var spans: std.ArrayList(wgt.Span) = .empty;
     defer spans.deinit(allocator);
     var start: usize = 0;
@@ -346,11 +354,15 @@ fn addHunk(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), hunk: Hunk) !
         try spans.append(allocator, .{ .text = hunk.text[start..end], .style = style });
         start = end;
     }
-    try addSpans(allocator, box, spans.items, "", "", .single);
+    try addSpans(allocator, box, spans.items, "", "", .single, .{ .gutter = hunk.gutter, .wrap = wrap });
 }
 
-fn addSpans(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), spans: []const wgt.Span, link: []const u8, label: []const u8, border: wgt.Border) !void {
-    var tb = try wgt.TextBox.initSpans(allocator, spans, .{ .border = border, .round_corners = true, .wrap_kind = .none, .top_label = .{ .text = label } });
+// a hunk's text starts after its gutter: tab stops count from there, and
+// wrapped rows line up with it
+const TextLayout = struct { gutter: usize = 0, wrap: bool = false };
+
+fn addSpans(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), spans: []const wgt.Span, link: []const u8, label: []const u8, border: wgt.Border, text_layout: TextLayout) !void {
+    var tb = try wgt.TextBox.initSpans(allocator, spans, .{ .border = border, .round_corners = true, .wrap_kind = if (text_layout.wrap) .word else .none, .wrap_indent = text_layout.gutter, .tab_start = text_layout.gutter, .top_label = .{ .text = label } });
     errdefer tb.deinit(allocator);
     tb.getFocus().mode = .all;
     if (link.len != 0) tb.getFocus().kind = .{ .custom = link };
@@ -379,6 +391,15 @@ pub const View = struct {
     }
     pub fn build(self: *View, allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
         self.clearGrid();
+        // the scroll leaves its content unbounded, so cap the wrapping hunks at
+        // the viewport, less the terminal's scrollbar column
+        const wrap_width: ?layout.MaybeSize = if (constraint.max_size.width) |w| .{ .width = w -| @intFromBool(!self.scroll.options.web_native), .height = null } else null;
+        for (self.inner().children.values()) |*child| switch (child.widget) {
+            .text_box => |tb| if (tb.options.wrap_kind != .none) {
+                child.max_size = wrap_width;
+            },
+            else => {},
+        };
         try self.scroll.build(allocator, constraint, root_focus);
     }
     pub fn clearGrid(self: *View) void {
