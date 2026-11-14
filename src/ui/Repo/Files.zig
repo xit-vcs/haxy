@@ -746,15 +746,15 @@ pub const View = struct {
                 if (narrow) {
                     const page_arena = self.session.page_arena;
                     const link = try page_arena.allocator().print("ai:{s}", .{try self.session.data.current_page.toUrl(page_arena)});
-                    self.back_id = try addNavButton(allocator, nav_box, "← back to file list", link);
+                    self.back_id = try addNavButton(allocator, nav_box, "← back to file list", "", link);
                 }
                 // the download leads the links, so it stays put as they come and go
                 if (try self.data.handle.location.rawUrl(self.session.page_arena, self.data.ref_or_oid, self.data.ref_or_oid_value, path)) |url| {
-                    _ = try addNavButton(allocator, nav_box, "download", try self.session.page_arena.allocator().print(ui.raw_link_prefix ++ "{s}", .{url}));
+                    _ = try addNavButton(allocator, nav_box, "download", "", try self.session.page_arena.allocator().print(ui.raw_link_prefix ++ "{s}", .{url}));
                 }
                 if (self.data.history) {
                     const route = self.data.handle.location.historyRoute(self.data.ref_or_oid, self.data.ref_or_oid_value, path) orelse return error.RouteTooLong;
-                    _ = try addNavButton(allocator, nav_box, "commit history", try self.session.page_arena.allocator().print("a:{s}", .{try route.toUrl(self.session.page_arena)}));
+                    _ = try addNavButton(allocator, nav_box, "commit history", " of file ", try self.session.page_arena.allocator().print("a:{s}", .{try route.toUrl(self.session.page_arena)}));
                 }
                 // the window links sit above the scroll, so they stay put
                 // while the content scrolls.
@@ -810,12 +810,12 @@ pub const View = struct {
         const path = try childDir(page_arena.allocator(), self.data.dir, entry.name);
         const route = self.data.filesRoute(path, target_start) orelse return error.RouteTooLong;
         const link = try page_arena.allocator().print("a:{s}", .{try route.toUrl(page_arena)});
-        _ = try addNavButton(allocator, box, label, link);
+        _ = try addNavButton(allocator, box, label, "", link);
     }
 
     // a bordered button in the nav row carrying `link`, returning its focus id
-    fn addNavButton(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8, link: []const u8) !usize {
-        var tb = try wgt.TextBox.init(allocator, label, .{ .border = .single, .round_corners = true, .wrap_kind = .none });
+    fn addNavButton(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8, bottom_label: []const u8, link: []const u8) !usize {
+        var tb = try wgt.TextBox.init(allocator, label, .{ .border = .single, .round_corners = true, .wrap_kind = .none, .bottom_label = .{ .text = bottom_label } });
         errdefer tb.deinit(allocator);
         tb.getFocus().mode = .all;
         tb.getFocus().kind = .{ .custom = link };
