@@ -247,6 +247,8 @@ pub fn receivePackAndConsume(
             var receive_options = ctx.options;
             receive_options.applied_ref_updates = ctx.updates;
             receive_options.deferred_response = ctx.response;
+            // the refs were advertised before the lock
+            receive_options.is_stateless = true;
             try xit.net_server_receive_pack.run(.xit, repo_opts, state, ctx.io, ctx.allocator, ctx.reader, ctx.writer, receive_options, ctx.sideband);
             // receive-pack refuses the clear ref alongside any other update.
             // clearing writes nothing here, and runs once this transaction
@@ -286,6 +288,9 @@ pub fn receivePackAndConsume(
             try ctx.sideband.checkSize(ctx.io);
         }
     };
+
+    // the advertisement goes out ahead of the lock, unless the caller sent its own
+    if (!options.is_stateless) try advertiseAndAwait(repo_opts, io, allocator, repo, reader, writer, options);
 
     const result = blk: {
         try lockForPush(io, repo.core.db_file, sess);
@@ -339,6 +344,28 @@ pub fn receivePackAndConsume(
     try response.finish(writer, null);
 }
 
+// a client runs its pre-push hook before it sends its first command. the refs
+// are advertised and that command awaited here, so no lock is held meanwhile.
+fn advertiseAndAwait(
+    comptime repo_opts: rp.RepoOpts(.xit),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    repo: *rp.Repo(.xit, repo_opts),
+    reader: *std.Io.Reader,
+    writer: *std.Io.Writer,
+    options: xit.net_server_receive_pack.Options,
+) !void {
+    var moment = try repo.core.latestMoment();
+    const state = rp.Repo(.xit, repo_opts).State(.read_only){ .core = &repo.core, .extra = .{ .moment = &moment } };
+    try xit.net_server_receive_pack.advertise(.xit, repo_opts, state, io, allocator, writer, options);
+    try writer.flush();
+    _ = reader.peek(1) catch |err| switch (err) {
+        // a client that hung up has nothing to push
+        error.EndOfStream => {},
+        else => |e| return e,
+    };
+}
+
 // git shows nothing until the push gets the lock, so a wait behind another
 // writer is announced
 fn lockForPush(io: std.Io, file: std.Io.File, sess: ?*ssh.SessionCtx) !void {
@@ -379,6 +406,10 @@ pub fn receiveFork(
     const patch_id = try evt.parseEventId(id);
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
+
+    // ahead of the state below, so the push acts on what is current once the
+    // client is ready
+    try advertiseAndAwait(repo_opts, io, allocator, fork_repo, reader, writer, .{});
 
     // load the fork and target patch state
     const fork_moment = evt.currentMoment(repo_opts, fork_repo) catch return error.PatchDataUnavailable;
@@ -441,7 +472,7 @@ pub fn receiveFork(
                 // receive the branch update
                 var moment = try DB.HashMap(.read_write).init(cursor.*);
                 const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
-                try xit.net_server_receive_pack.run(.xit, repo_opts, state, ctx.io, ctx.allocator, ctx.reader, ctx.writer, .{ .allowed_ref = "refs/heads/" ++ fork.ref.name, .deferred_response = ctx.response }, ctx.sideband);
+                try xit.net_server_receive_pack.run(.xit, repo_opts, state, ctx.io, ctx.allocator, ctx.reader, ctx.writer, .{ .is_stateless = true, .allowed_ref = "refs/heads/" ++ fork.ref.name, .deferred_response = ctx.response }, ctx.sideband);
                 try writeReceivedPatches(repo_opts, state, ctx.io, ctx.allocator, ctx.response, ctx.writer);
                 if (ctx.sideband.gone) return error.ClientGone;
 

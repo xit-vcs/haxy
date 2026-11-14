@@ -62,6 +62,12 @@ pub const Sideband = struct {
     pub fn run(self: *Sideband, io: std.Io, event: rp.ProgressEvent) !void {
         // every unpacked object reports, so a push stops soon after crossing the limit
         if (event == .complete_one) try self.checkSize(io);
+        // a pack arrives without a pause, so the watchdog holds it to a short limit
+        if (self.sess) |sess| switch (event) {
+            .start => |start| if (start.kind == .writing_object_from_pack) sess.conn.idle.phase.store(.receiving, .release),
+            .end => |kind| if (kind == .writing_object_from_pack) sess.conn.idle.phase.store(.session, .release),
+            else => {},
+        };
         switch (event) {
             .start => |start| {
                 if (!reported(start.kind)) return;

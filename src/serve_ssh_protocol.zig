@@ -117,6 +117,8 @@ pub const IdleState = struct {
         // until a shell or exec request arrives
         presession,
         session,
+        // a session whose pushed pack is arriving
+        receiving,
         // a session whose user idles legitimately
         interactive,
         // the close drain

@@ -22,6 +22,8 @@ const watchdog_interval = std.Io.Duration.fromSeconds(5);
 const presession_timeout_ticks: u32 = 24; // 120 seconds
 // a push sits silent while the client runs its pre-push hook and packs
 const idle_timeout_ticks: u32 = 180; // 15 minutes
+// a pack that stops arriving has lost its client, and holds the repo's lock
+const receiving_timeout_ticks: u32 = 24; // 120 seconds
 // a slow client is still receiving what the kernel has queued
 const close_drain_timeout_ticks: u32 = 6; // 25-30 seconds
 const escape_timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(25), .clock = .awake } };
@@ -198,7 +200,7 @@ pub const Watchdog = struct {
                     self.ticks += 1;
                     return self.ticks >= presession_timeout_ticks;
                 },
-                .session => {
+                .session, .receiving => {
                     // our own work between packets is not the peer idling
                     const seen = self.idle_state.activity.load(.acquire);
                     defer self.last_seen = seen;
@@ -207,7 +209,7 @@ pub const Watchdog = struct {
                     } else {
                         self.ticks = 0;
                     }
-                    return self.ticks >= idle_timeout_ticks;
+                    return self.ticks >= if (phase == .receiving) receiving_timeout_ticks else idle_timeout_ticks;
                 },
                 .interactive => return false,
                 .closing => {
