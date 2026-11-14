@@ -8,6 +8,16 @@ const wgt = xitui.widget;
 
 const allocator = std.heap.wasm_allocator;
 
+// parsing the page json holds about this many routes on the stack: a 4696 byte
+// route needed between 8 and 9 pages
+const stack_routes = 128;
+comptime {
+    const size = @sizeOf(ui.RoutablePage);
+    if (size * stack_routes > @import("build_options").stack_size) {
+        @compileError(std.fmt.comptimePrint("RoutablePage is {d} bytes, too big for the wasm stack: raise stack_pages in build.zig", .{size}));
+    }
+}
+
 var root: ?ui.Widget = null;
 var page_arena = std.heap.ArenaAllocator.init(allocator);
 var snapshot: ui.Snapshot = undefined;

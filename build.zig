@@ -26,11 +26,18 @@ pub fn build(b: *std.Build) void {
         exe.rdynamic = true;
         exe.import_memory = false;
         exe.export_memory = true;
-        exe.stack_size = std.wasm.page_size * 12;
+        // parsing the page json at startup holds many routes on the stack, so
+        // main_wasm.zig checks the route size against it
+        const stack_pages = 64;
+        const stack_size = std.wasm.page_size * stack_pages;
+        exe.stack_size = stack_size;
+        const options = b.addOptions();
+        options.addOption(u64, "stack_size", stack_size);
+        exe.root_module.addOptions("build_options", options);
 
-        // start small and let the allocator grow on demand up to wasm32's
-        // architectural ceiling (65536 pages = 4 GiB)
-        const initial_pages = 16;
+        // start small past the stack and let the allocator grow on demand up
+        // to wasm32's architectural ceiling (65536 pages = 4 GiB)
+        const initial_pages = stack_pages + 16;
         const max_pages = 65536;
         exe.initial_memory = std.wasm.page_size * initial_pages;
         exe.max_memory = std.wasm.page_size * max_pages;
