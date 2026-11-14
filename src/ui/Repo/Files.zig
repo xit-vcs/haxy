@@ -34,6 +34,12 @@ const max_preloaded_bytes = 2 * 1024 * 1024;
 // how many rows a listing holds, for a directory and for search results alike.
 const max_list_entries = 1000;
 
+// the columns of a line history label.
+const label_width = 24;
+
+// the most of a commit message read for its line history label.
+const label_read_size = 256;
+
 // one entry in the directory currently being viewed.
 pub const Entry = struct {
     name: []const u8,
@@ -52,6 +58,11 @@ pub const Entry = struct {
     // whether this file's content was read; unloaded files load via their
     // "a:" link.
     loaded: bool = false,
+    // whether the window shows each line's commit, which only the route's
+    // selected file can. its commits and their labels are parallel to `lines`.
+    line_history: bool = false,
+    line_commits: []const []const u8 = &.{},
+    line_labels: []const []const u8 = &.{},
 };
 
 // where links and clone commands for this repository are rooted, and who views it.
@@ -98,7 +109,7 @@ pub fn initPatchRev(
     const id = evt.parseEventId(id_hex) catch return error.NotFound;
     const record = (try evt.readFromRepo(evt.PatchRev, repo_kind, repo_opts, io, gpa, arena, repo, &id)) orelse return error.NotFound;
     if (record.removed) return error.NotFound;
-    var data = try init(repo_kind, repo_opts, arena, repo, io, gpa, handle, .object, record.head_tree_oid, path, line, "");
+    var data = try init(repo_kind, repo_opts, arena, repo, io, gpa, handle, .object, record.head_tree_oid, path, line, "", false);
     data.patchrev_id = try arena.allocator().dupe(u8, id_hex);
     return data;
 }
@@ -134,6 +145,7 @@ pub fn init(
     path: []const u8,
     line: usize,
     find: []const u8,
+    line_history: bool,
 ) !Self {
     const aa = arena.allocator();
     const term: ?[]const u8 = if (find.len == 0) null else std.Uri.percentDecodeInPlace(try aa.dupe(u8, find));
@@ -160,13 +172,16 @@ pub fn init(
     var preloaded_bytes: usize = 0;
     var find_available = false;
 
-    // stats exist for every commit with a snapshot, so they mark the history
-    const history = if (comptime repo_kind == .xit) history: {
-        if (handle.location != .repo) break :history false;
-        var commit = obj.Object(.xit, repo_opts).initCommit(state, io, gpa, &resolved.oid) catch break :history false;
+    // stats exist for every commit with a snapshot, so they mark the history.
+    // this is the commit it's read at, with tags peeled.
+    const history_oid: ?@TypeOf(resolved.oid) = if (comptime repo_kind == .xit) history: {
+        if (handle.location != .repo) break :history null;
+        var commit = obj.Object(.xit, repo_opts).initCommit(state, io, gpa, &resolved.oid) catch break :history null;
         defer commit.deinit();
-        break :history try xit.patch.readCommitStats(repo_opts, &moment, &commit.oid) != null;
-    } else false;
+        if (try xit.patch.readCommitStats(repo_opts, &moment, &commit.oid) == null) break :history null;
+        break :history commit.oid;
+    } else null;
+    const line_history_oid = if (line_history) history_oid orelse return error.NotFound else null;
 
     // the index covers branch tips only, so any other view gets no search box
     // and refuses a find: url.
@@ -192,6 +207,7 @@ pub fn init(
                 try entries.append(aa, try fileEntry(repo_kind, repo_opts, state, io, gpa, aa, "", sf, oid, null, selected, line, &preloaded_bytes));
             };
         }
+        if (line_history_oid) |*oid| try loadLineHistory(repo_opts, state, io, gpa, aa, oid, path, entries.items, path);
         return .{
             .handle = try handle.dupe(aa),
             .ref_or_oid = resolved.ref_or_oid,
@@ -202,7 +218,7 @@ pub fn init(
             .capped = capped,
             .find = value,
             .find_available = true,
-            .history = history,
+            .history = history_oid != null,
         };
     }
     if (term != null) return error.NotFound;
@@ -250,6 +266,9 @@ pub fn init(
             }
         }
     }
+    if (comptime repo_kind == .xit) if (line_history_oid) |*oid| {
+        try loadLineHistory(repo_opts, state, io, gpa, aa, oid, path, entries.items, selected_file orelse return error.NotFound);
+    };
 
     return .{
         .handle = try handle.dupe(aa),
@@ -260,8 +279,83 @@ pub fn init(
         .entries = entries.items,
         .capped = capped,
         .find_available = find_available,
-        .history = history,
+        .history = history_oid != null,
     };
+}
+
+// fill the route's file `name` with each window line's commit and label,
+// reading each commit once. a 404 when it has no line history.
+fn loadLineHistory(
+    comptime repo_opts: rp.RepoOpts(.xit),
+    state: rp.Repo(.xit, repo_opts).State(.read_only),
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    aa: std.mem.Allocator,
+    commit_oid: *const [xit.hash.hexLen(repo_opts.hash)]u8,
+    path: []const u8,
+    entries: []Entry,
+    name: []const u8,
+) !void {
+    const entry = for (entries) |*e| {
+        if (!e.is_dir and !e.is_binary and std.mem.eql(u8, e.name, name)) break e;
+    } else return error.NotFound;
+    const oids = (try xit.patch.lineCommits(repo_opts, state.extra.moment, gpa, commit_oid, path, entry.window_start, entry.lines.len)) orelse return error.NotFound;
+    defer gpa.free(oids);
+    if (oids.len != entry.lines.len) return error.InvalidLineList;
+
+    const Commit = struct { oid: []const u8, label: []const u8 };
+    var seen: std.AutoHashMapUnmanaged([xit.hash.hexLen(repo_opts.hash)]u8, Commit) = .empty;
+    defer seen.deinit(gpa);
+    const commits = try aa.alloc([]const u8, oids.len);
+    const labels = try aa.alloc([]const u8, oids.len);
+    for (oids, commits, labels) |*oid, *commit, *label| {
+        const found = try seen.getOrPut(gpa, oid.*);
+        if (!found.found_existing) {
+            var object = try obj.Object(.xit, repo_opts).initCommit(state, io, gpa, oid);
+            defer object.deinit();
+            var message: std.ArrayList(u8) = .empty;
+            defer message.deinit(gpa);
+            object.readMessage(gpa, &message, .limited(label_read_size)) catch |err| switch (err) {
+                error.StreamTooLong => {},
+                else => |e| return e,
+            };
+            found.value_ptr.* = .{ .oid = try aa.dupe(u8, oid), .label = try lineLabel(aa, message.items) };
+        }
+        commit.* = found.value_ptr.oid;
+        label.* = found.value_ptr.label;
+    }
+    entry.line_history = true;
+    entry.line_commits = commits;
+    entry.line_labels = labels;
+}
+
+// a commit message's first line in at most label_width columns, cut with ".."
+// when longer. it ends early at malformed text, which a partial read can leave.
+fn lineLabel(aa: std.mem.Allocator, message: []const u8) ![]const u8 {
+    const text = std.mem.trimStart(u8, message, " \t\r\n");
+    var label: std.ArrayList(u8) = .empty;
+    var width: usize = 0;
+    // where the label ends when a cut needs room for the ".."
+    var cut: usize = 0;
+    var i: usize = 0;
+    while (i < text.len) {
+        const len = std.unicode.utf8ByteSequenceLength(text[i]) catch break;
+        if (i + len > text.len) break;
+        const rune = std.unicode.utf8Decode(text[i..][0..len]) catch break;
+        if (rune == '\n') break;
+        const rune_width = xitui.width.cellWidth(rune);
+        if (width + rune_width > label_width) {
+            label.shrinkRetainingCapacity(cut);
+            try label.appendSlice(aa, "..");
+            break;
+        }
+        // a tab would move the columns after it
+        if (rune < ' ') try label.append(aa, ' ') else try label.appendSlice(aa, text[i..][0..len]);
+        width += rune_width;
+        if (width <= label_width - 2) cut = label.items.len;
+        i += len;
+    }
+    return std.mem.trimEnd(u8, label.items, " ");
 }
 
 // build one file's row, reading its content window when the preload budget (or
@@ -452,7 +546,7 @@ pub const View = struct {
                     const link = if (entry.is_dir)
                         try dirLink(session.page_arena, data, path)
                     else
-                        try fileLink(session.page_arena, data, path, entry.loaded, lineNumber(entry.window_start));
+                        try fileLink(session.page_arena, data, path, entry, lineNumber(entry.window_start));
                     try addRow(allocator, &list_box, &list_width, label, bottom_label, link);
                 }
                 if (data.capped) try addRow(allocator, &list_box, &list_width, "(list truncated)", "", "");
@@ -756,6 +850,13 @@ pub const View = struct {
                     const route = self.data.handle.location.historyRoute(self.data.ref_or_oid, self.data.ref_or_oid_value, path) orelse return error.RouteTooLong;
                     _ = try addNavButton(allocator, nav_box, "commit history", " of file ", try self.session.page_arena.allocator().print("a:{s}", .{try route.toUrl(self.session.page_arena)}));
                 }
+                // toggles the file's line history, keeping its window
+                if (self.data.history and entry.loaded and !entry.is_binary) {
+                    var route = self.data.filesRoute(path, lineNumber(entry.window_start)) orelse return error.RouteTooLong;
+                    route.repo_files.line_history = !entry.line_history;
+                    const link = try self.session.page_arena.allocator().print("a:{s}", .{try route.toUrl(self.session.page_arena)});
+                    _ = try addNavButton(allocator, nav_box, if (entry.line_history) "hide line history" else "line history", " of file ", link);
+                }
                 // the window links sit above the scroll, so they stay put
                 // while the content scrolls.
                 if (entry.window_start > 0) try self.addNavLink(allocator, nav_box, "scroll to top", entry, 0);
@@ -763,11 +864,11 @@ pub const View = struct {
                 if (!entry.loaded) {
                     // the placeholder carries the file's "a:" link, so enter
                     // (or a click) here loads the file like on its list row.
-                    const link = try fileLink(self.session.page_arena, self.data, path, false, 0);
+                    const link = try fileLink(self.session.page_arena, self.data, path, entry, 0);
                     try self.addContentBox(allocator, inner, &.{.{ .text = "(press enter to load this file)" }}, link, 0);
                 } else if (entry.is_binary) {
                     try self.addContentBox(allocator, inner, &.{.{ .text = "(binary file)" }}, "", 0);
-                } else if (isMarkdown(entry.name) and entry.window_start == 0 and !entry.has_more and entry.lines.len <= max_markdown_lines) {
+                } else if (isMarkdown(entry.name) and !entry.line_history and entry.window_start == 0 and !entry.has_more and entry.lines.len <= max_markdown_lines) {
                     const page_arena = self.session.page_arena;
                     const doc = try md.parse(page_arena.allocator(), entry.lines);
                     var view = try Markdown.View.init(allocator, self.session, doc, self.data, path);
@@ -775,7 +876,7 @@ pub const View = struct {
                     try inner.children.put(allocator, view.getFocus().id, .{ .widget = .{ .markdown = view }, .rect = null, .min_size = null });
                     markdown = true;
                 } else {
-                    const content = try numberedContent(self.session.page_arena, self.data, path, entry.lines, entry.window_start);
+                    const content = try numberedContent(self.session.page_arena, self.data, path, entry);
                     try self.addContentBox(allocator, inner, content.spans, "", content.gutter);
                 }
             }
@@ -808,7 +909,7 @@ pub const View = struct {
     fn addNavLink(self: *View, allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8, entry: Entry, target_start: usize) !void {
         const page_arena = self.session.page_arena;
         const path = try childDir(page_arena.allocator(), self.data.dir, entry.name);
-        const route = self.data.filesRoute(path, target_start) orelse return error.RouteTooLong;
+        const route = entryRoute(self.data, entry, path, target_start) orelse return error.RouteTooLong;
         const link = try page_arena.allocator().print("a:{s}", .{try route.toUrl(page_arena)});
         _ = try addNavButton(allocator, box, label, "", link);
     }
@@ -1057,22 +1158,36 @@ pub const View = struct {
     }
 };
 
-// `lines` as spans, each prefixed with its 1-based file line number
-// (right-aligned in a column wide enough for the last number, then a space),
-// like the diffs view. each number links to the window starting at its line.
-// `start` is the window's 0-based first line, so numbers continue across
-// paginated windows. the gutter is the cells before each line's text.
-fn numberedContent(page_arena: *std.heap.ArenaAllocator, data: *const Self, path: []const u8, lines: []const []const u8, start: usize) !struct { spans: []const wgt.Span, gutter: usize } {
+// the entry's window lines as spans, each prefixed with its 1-based file line
+// number (right-aligned in a column wide enough for the last number, then a
+// space), like the diffs view. each number links to the window starting at its
+// line, and numbers continue across paginated windows. line history adds a
+// column of commit labels after the numbers, each linking to its commit and
+// shown on the first line of its commit's run. the gutter is the cells before
+// each line's text.
+fn numberedContent(page_arena: *std.heap.ArenaAllocator, data: *const Self, path: []const u8, entry: Entry) !struct { spans: []const wgt.Span, gutter: usize } {
     const arena = page_arena.allocator();
-    const width = std.fmt.count("{d}", .{start + lines.len});
+    const lines = entry.lines;
+    const width = std.fmt.count("{d}", .{entry.window_start + lines.len});
+    const label_column: usize = if (entry.line_history) 1 + label_width else 0;
+    const blank: [1 + label_width]u8 = @splat(' ');
     var spans: std.ArrayList(wgt.Span) = .empty;
     for (lines, 0..) |line, i| {
-        const number = start + i + 1;
-        const route = data.filesRoute(path, number) orelse return error.RouteTooLong;
+        const number = entry.window_start + i + 1;
+        const route = entryRoute(data, entry, path, number) orelse return error.RouteTooLong;
         try spans.append(arena, .{ .text = try arena.print("{d: >[1]}", .{ number, width }), .link = try route.toUrl(page_arena) });
-        try spans.append(arena, .{ .text = try arena.print(" {s}{s}", .{ line, if (i + 1 < lines.len) "\n" else "" }) });
+        var padding = label_column;
+        if (entry.line_history and (i == 0 or !std.mem.eql(u8, entry.line_commits[i], entry.line_commits[i - 1]))) {
+            const label = entry.line_labels[i];
+            const commit_route = data.handle.location.commitsRoute(.object, entry.line_commits[i], "") orelse return error.RouteTooLong;
+            try spans.append(arena, .{ .text = " " });
+            // styled like a markdown link
+            try spans.append(arena, .{ .text = label, .style = .{ .fg = .ansi(.cyan), .underline = true }, .link = try commit_route.toUrl(page_arena) });
+            padding -= 1 + try xitui.width.displayWidth(label);
+        }
+        try spans.append(arena, .{ .text = try std.mem.concat(arena, u8, &.{ blank[0..padding], " ", line, if (i + 1 < lines.len) "\n" else "" }) });
     }
-    return .{ .spans = try spans.toOwnedSlice(arena), .gutter = width + 1 };
+    return .{ .spans = try spans.toOwnedSlice(arena), .gutter = width + label_column + 1 };
 }
 
 // a line's display width is at most its byte length, with each tab a whole tab stop
@@ -1118,10 +1233,17 @@ fn dirLink(page_arena: *std.heap.ArenaAllocator, data: *const Self, path: []cons
 // (crossPageLink ignores it, so a click selects the row in place and shows its
 // contents); an unloaded file gets an "a:" link, so activating it reloads the
 // page with that file selected and its content read.
-fn fileLink(page_arena: *std.heap.ArenaAllocator, data: *const Self, path: []const u8, loaded: bool, line: usize) ![]const u8 {
-    const route = data.filesRoute(path, line) orelse return error.RouteTooLong;
-    const prefix = if (loaded) "ai:" else "a:";
+fn fileLink(page_arena: *std.heap.ArenaAllocator, data: *const Self, path: []const u8, entry: Entry, line: usize) ![]const u8 {
+    const route = entryRoute(data, entry, path, line) orelse return error.RouteTooLong;
+    const prefix = if (entry.loaded) "ai:" else "a:";
     return page_arena.allocator().print("{s}{s}", .{ prefix, try route.toUrl(page_arena) });
+}
+
+// the file's route at `line`, keeping its line history
+fn entryRoute(data: *const Self, entry: Entry, path: []const u8, line: usize) ?ui.RoutablePage {
+    var route = data.filesRoute(path, line) orelse return null;
+    if (entry.line_history) route.repo_files.line_history = true;
+    return route;
 }
 
 // the url `line` value for a content window: its first line's 1-based number,
@@ -1145,19 +1267,6 @@ fn parentDir(dir: []const u8) []const u8 {
 // a directory too wide for the list column is clipped from the left.
 fn resultDirLabel(aa: std.mem.Allocator, path: []const u8) ![]const u8 {
     const slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return "";
-    const dir = path[0..slash];
     // the row's border and the label's padding take two columns each
-    const max_width = View.list_max_width - 4;
-    var width = try xitui.width.displayWidth(dir);
-    if (width <= max_width) return aa.print(" {s} ", .{dir});
-
-    const ellipsis = "..";
-    var iter = (try std.unicode.Utf8View.init(dir)).iterator();
-    var start: usize = 0;
-    while (width > max_width - ellipsis.len) {
-        const slice = iter.nextCodepointSlice() orelse break;
-        width -= xitui.width.cellWidth(try std.unicode.utf8Decode(slice));
-        start += slice.len;
-    }
-    return aa.print(" " ++ ellipsis ++ "{s} ", .{dir[start..]});
+    return ui.startClippedLabel(aa, path[0..slash], View.list_max_width - 4);
 }

@@ -222,13 +222,7 @@ pub fn render(
         // the path label rides on the first of this file's hunks we actually show.
         var path_attached = false;
         while (true) {
-            var hunk = (hunk_iter.next(gpa) catch |err| switch (err) {
-                error.DiffTooLarge => {
-                    truncated = true;
-                    break :file_loop;
-                },
-                else => |e| return e,
-            }) orelse break;
+            var hunk = (try hunk_iter.next(gpa)) orelse break;
             defer hunk.deinit(gpa);
 
             const i = index;

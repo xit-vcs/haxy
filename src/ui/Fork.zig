@@ -145,7 +145,7 @@ pub fn init(arena: *std.heap.ArenaAllocator, session: *ui.Session, route: ui.Rou
                 else => "",
             };
             const commits_message = route == .fork_commits and route.fork_commits.message;
-            const files = try Files.init(.xit, repo_opts, arena, fork_repo, io, arena.child_allocator, handle, requested_ref, requested_value, files_path, files_line, files_find);
+            const files = try Files.init(.xit, repo_opts, arena, fork_repo, io, arena.child_allocator, handle, requested_ref, requested_value, files_path, files_line, files_find, false);
             var commits = try Commits.init(.xit, repo_opts, arena, fork_repo, io, arena.child_allocator, haxy_moment, handle, requested_ref, requested_value, commits_message, &commits_base_oid, "", "", "");
             commits.commit_count = if (newest_revision) |revision| revision.record.commit_count else 0;
             const diff_start: usize = switch (route) {

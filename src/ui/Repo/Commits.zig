@@ -95,6 +95,8 @@ default_branch: []const u8 = "",
 no_commits: bool = false,
 // the file whose history this list holds ("" = the whole log)
 path: []const u8 = "",
+// the file's name before the rename its history ends at ("" = none)
+renamed_from: []const u8 = "",
 
 const Self = @This();
 
@@ -164,6 +166,7 @@ pub fn init(
     var default_branch: []const u8 = "";
     // whether a search or a file's history filled the list instead of the log
     var listed = false;
+    var renamed_from: []const u8 = "";
     // paging keeps the ref and starts the walk at the url's commit
     var start_oid = resolved.oid;
     if (from.len != 0) @memcpy(&start_oid, from);
@@ -186,6 +189,10 @@ pub fn init(
             count += 1;
             const parent = commit_object.content.commit.metadata.firstParent() orelse break;
             change = try xit.patch.lastChange(repo_opts, &moment, parent, path);
+        }
+        // a walk that ends at a rename links past it
+        if (next_start == null and count != 0) {
+            renamed_from = (try xit.patch.renamedFrom(repo_opts, &moment, aa, buf[count - 1].oid[0..hex_len], path)) orelse "";
         }
         listed = true;
     }
@@ -269,6 +276,7 @@ pub fn init(
         .search_available = search_available,
         .default_branch = default_branch,
         .path = try aa.dupe(u8, path),
+        .renamed_from = renamed_from,
     };
 }
 
@@ -499,6 +507,13 @@ pub const View = struct {
                 }
                 if (data.next_start) |next| {
                     try addRow(allocator, &list_box, "next →", try nextPageLink(session.page_arena, data, next), "");
+                }
+                if (data.renamed_from.len != 0) {
+                    const pa = session.page_arena;
+                    // the rename's first parent, where the old name's history goes on
+                    const route = data.handle.location.historyRoute(.object, data.commits[data.commits.len - 1].parent_oid, data.renamed_from) orelse return error.RouteTooLong;
+                    // the row's border and the label's padding take two columns each
+                    try addRow(allocator, &list_box, "history before the rename", try pa.allocator().print("a:{s}", .{try route.toUrl(pa)}), try ui.startClippedLabel(pa.allocator(), data.renamed_from, list_max_width - 4));
                 }
                 if (list_box.children.count() > 0) list_box.getFocus().child_id = list_box.children.keys()[0];
                 break :blk try wgt.Scroll(ui.Widget).init(allocator, .{ .box = list_box }, .{ .direction = .vert, .web_native = !session.is_terminal, .fill = true });

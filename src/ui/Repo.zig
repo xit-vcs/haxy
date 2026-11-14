@@ -95,6 +95,7 @@ pub fn init(
         .repo_files => |*f| f.find.slice(),
         else => "",
     };
+    const files_line_history = route == .repo_files and route.repo_files.line_history;
     // the commits view's pane shows the whole message of the commit it walks from
     const commits_message = route == .repo_commits and route.repo_commits.message;
     const commits_base_oid: []const u8 = switch (route) {
@@ -370,7 +371,7 @@ pub fn init(
                             const files_data = if (patchrev_id.len != 0)
                                 try Files.initPatchRev(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, handle, patchrev_id, files_dir, files_line)
                             else
-                                try Files.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, handle, ref_or_oid, ref_value, files_dir, files_line, files_find);
+                                try Files.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, handle, ref_or_oid, ref_value, files_dir, files_line, files_find, files_line_history);
                             const changes_data: Changes = if (route == .repo_diff)
                                 .{ .diff = try Diff.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, route.repo_diff) }
                             else if (patchrev_id.len != 0) diff: {

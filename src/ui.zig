@@ -57,6 +57,23 @@ pub fn clippedBottomLabel(buffer: []u8, text: []const u8) ![]const u8 {
     return try std.fmt.bufPrint(buffer, "{s}{s}", .{ text[0..if (clipped) clipped_end else end], if (clipped) ".." else "" });
 }
 
+// `text` as a label with its padding, clipped from the start with ".." to fit
+// `max_width` columns
+pub fn startClippedLabel(allocator: std.mem.Allocator, text: []const u8, max_width: usize) ![]const u8 {
+    var width = try xitui.width.displayWidth(text);
+    if (width <= max_width) return allocator.print(" {s} ", .{text});
+
+    const ellipsis = "..";
+    var iter = (try std.unicode.Utf8View.init(text)).iterator();
+    var start: usize = 0;
+    while (width > max_width - ellipsis.len) {
+        const slice = iter.nextCodepointSlice() orelse break;
+        width -= xitui.width.cellWidth(try std.unicode.utf8Decode(slice));
+        start += slice.len;
+    }
+    return allocator.print(" " ++ ellipsis ++ "{s} ", .{text[start..]});
+}
+
 pub const detail_preview_lines = 50;
 
 pub fn detailPreviewEnd(text: []const u8) ?usize {
@@ -335,6 +352,8 @@ pub const RoutablePage = union(enum) {
     const files_seg = "files";
     // serves a file's bytes rather than a page
     const raw_seg = "raw";
+    // a files route whose file shows each line's commit
+    const blame_seg = "blame";
     const commits_seg = "commits";
     // ends a commits route naming its commit's full message
     const message_seg = "message";
@@ -362,7 +381,8 @@ pub const RoutablePage = union(enum) {
     const path_seg = "path:";
 
     // a repo route is "username:reponame", optionally followed by the files
-    // tab's "/files/<refkind>:<refvalue>[/line:<n>][/path:<dir>]"; the bare
+    // tab's "/files/<refkind>:<refvalue>[/line:<n>][/path:<dir>]" ("/blame/" in
+    // place of "/files/" shows each line's commit); the bare
     // pair means the default branch's files root. a local session's routes
     // elide the identity: "" at the bare root, else starting at the tail's "/".
     pub const repo_route_max_len = 1024;
@@ -418,6 +438,8 @@ pub const RoutablePage = union(enum) {
         path: Array(repo_route_max_len) = .{},
         // the selected file's first visible line (1-based; 0 = unset).
         line: usize = 0,
+        // the selected file shows each line's commit
+        line_history: bool = false,
     };
 
     pub const RepoDiffRoute = struct {
@@ -1182,7 +1204,7 @@ pub const RoutablePage = union(enum) {
                 const prefix = try repoUrlPrefix(arena, f.name.slice());
                 if (f.ref_kind == null and f.patchrev_id.len == 0 and f.find.len == 0 and f.line == 0) break :blk if (prefix.len == 0) "/" else prefix;
                 var out: std.Io.Writer.Allocating = .init(arena.allocator());
-                try out.writer.print("{s}/" ++ files_seg, .{prefix});
+                try out.writer.print("{s}/{s}", .{ prefix, if (f.line_history) blame_seg else files_seg });
                 if (f.ref_kind) |kind| if (f.ref_value.len != 0) try out.writer.print("/{s}:{s}", .{ @tagName(kind), f.ref_value.slice() });
                 if (f.patchrev_id.len != 0) try out.writer.print("/patchrev:{s}", .{f.patchrev_id.slice()});
                 if (f.find.len != 0) try out.writer.print("/" ++ find_seg ++ "{s}", .{f.find.slice()});
@@ -1923,15 +1945,19 @@ pub const RoutablePage = union(enum) {
             if (!params.only(&.{.moment}) or segments.next() != null) return null;
             return repoEventsRoute(pair, .active, kind, event_id, params.moment() catch return null);
         }
-        if (std.mem.eql(u8, tab, files_seg)) {
+        if (std.mem.eql(u8, tab, files_seg) or std.mem.eql(u8, tab, blame_seg)) {
+            const line_history = std.mem.eql(u8, tab, blame_seg);
             params.scanPairs(&segments) catch return null;
             if (params.values.get(.patchrev)) |id| {
-                if (!params.only(&.{ .line, .patchrev })) return null;
+                // a patch revision's tree has no line history
+                if (line_history or !params.only(&.{ .line, .patchrev })) return null;
                 return repoPatchRevFilesRoute(pair, id, pathValue(segments.rest()) orelse return null, params.line() orelse return null);
             }
             if (!params.only(&.{ .line, .branch, .tag, .object, .find })) return null;
             const line = params.line() orelse return null;
             const dir = pathValue(segments.rest()) orelse return null;
+            // only a file has line history
+            if (line_history and dir.len == 0) return null;
             const find = params.values.get(.find) orelse "";
             const ref = params.ref() catch return null;
             // a find route's `path` names the selected result, so unlike a
@@ -1946,6 +1972,7 @@ pub const RoutablePage = union(enum) {
                 route.repo_files.find = Array(find_route_max_len).from(find) orelse return null;
                 route.repo_files.path = Array(repo_route_max_len).from(dir) orelse return null;
             }
+            route.repo_files.line_history = line_history;
             return route;
         }
         if (std.mem.eql(u8, tab, commits_seg)) {
@@ -2010,7 +2037,8 @@ pub const RoutablePage = union(enum) {
                 std.mem.eql(u8, a_f.patchrev_id.slice(), b.repo_files.patchrev_id.slice()) and
                 std.mem.eql(u8, a_f.find.slice(), b.repo_files.find.slice()) and
                 std.mem.eql(u8, a_f.path.slice(), b.repo_files.path.slice()) and
-                a_f.line == b.repo_files.line,
+                a_f.line == b.repo_files.line and
+                a_f.line_history == b.repo_files.line_history,
             .repo_commits => |a_c| std.mem.eql(u8, a_c.name.slice(), b.repo_commits.name.slice()) and
                 a_c.ref_or_oid == b.repo_commits.ref_or_oid and
                 std.mem.eql(u8, a_c.value.slice(), b.repo_commits.value.slice()) and
