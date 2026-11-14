@@ -288,7 +288,7 @@ pub fn receivePackAndConsume(
     };
 
     const result = blk: {
-        try repo.core.db_file.lock(io, .exclusive);
+        try lockForPush(io, repo.core.db_file, sess);
         defer repo.core.db_file.unlock(io);
 
         // read under the lock, so no other push lands in between
@@ -337,6 +337,14 @@ pub fn receivePackAndConsume(
     if (moment_index) |index| notify.deliverTransaction(io, allocator, server, repo_opts, repo, index, pusher_id, &sideband);
     evt.bumpRepoActivityAt(io, allocator, server, repo.core.work_path);
     try response.finish(writer, null);
+}
+
+// git shows nothing until the push gets the lock, so a wait behind another
+// writer is announced
+fn lockForPush(io: std.Io, file: std.Io.File, sess: ?*ssh.SessionCtx) !void {
+    if (try file.tryLock(io, .exclusive)) return;
+    if (sess) |s| s.writeStderr("haxy ssh: waiting for another change to this repo to finish\n") catch {};
+    try file.lock(io, .exclusive);
 }
 
 // discard every earlier transaction by compacting the database. the patch
@@ -506,7 +514,7 @@ pub fn receiveFork(
             }
         };
 
-        try fork_repo.core.db_file.lock(io, .exclusive);
+        try lockForPush(io, fork_repo.core.db_file, sess);
         defer fork_repo.core.db_file.unlock(io);
 
         const history = try DB.ArrayList(.read_write).init(fork_repo.core.db.rootCursor());
