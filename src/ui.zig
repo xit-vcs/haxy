@@ -357,8 +357,8 @@ pub const RoutablePage = union(enum) {
     const patch_seg = "patch:";
     const discuss_seg = "discuss:";
     const comment_seg = "comment:";
-    // marks a files or diff route's trailing path: the value is the raw
-    // remainder of the url, so it must come last
+    // marks a files, diff or commits route's trailing path: the value is the
+    // raw remainder of the url, so it must come last
     const path_seg = "path:";
 
     // a repo route is "username:reponame", optionally followed by the files
@@ -445,6 +445,8 @@ pub const RoutablePage = union(enum) {
         merge: Array(ref_route_max_len) = .{},
         // the pane shows the whole message of the commit the log walks from.
         message: bool = false,
+        // the file whose history the list shows ("" = the whole log)
+        path: Array(repo_route_max_len) = .{},
     };
 
     pub const RepoUndoRoute = struct {
@@ -564,6 +566,14 @@ pub const RoutablePage = union(enum) {
             };
         }
 
+        // the commits that changed a file, null for a fork
+        pub fn historyRoute(self: RepoLocation, ref_or_oid: RefOrOid, value: []const u8, path: []const u8) ?RoutablePage {
+            return switch (self) {
+                .repo => |repo_identity| repoHistoryRoute(repo_identity, ref_or_oid, value, path),
+                .fork => null,
+            };
+        }
+
         pub fn commitsRoute(self: RepoLocation, ref_or_oid: ?RefOrOid, value: []const u8, base_oid: []const u8) ?RoutablePage {
             return switch (self) {
                 .repo => |repo_identity| repoCommitsRoute(repo_identity, ref_or_oid, value, base_oid),
@@ -576,11 +586,12 @@ pub const RoutablePage = union(enum) {
             };
         }
 
-        // commit `oid`'s diff against `base_oid` (all zeros for a root commit)
-        pub fn commitDiffRoute(self: RepoLocation, oid: []const u8, base_oid: []const u8) ?RoutablePage {
+        // commit `oid`'s diff against `base_oid` (all zeros for a root commit),
+        // narrowed to `path` unless it's ""
+        pub fn commitDiffRoute(self: RepoLocation, oid: []const u8, base_oid: []const u8, path: []const u8) ?RoutablePage {
             return switch (self) {
-                .repo => |repo_identity| repoDiffRoute(repo_identity, .object, oid, 0, "", base_oid),
-                .fork => |f| forkDiffRoute(f.identity, f.id, oid, base_oid, 0, ""),
+                .repo => |repo_identity| repoDiffRoute(repo_identity, .object, oid, 0, path, base_oid),
+                .fork => |f| forkDiffRoute(f.identity, f.id, oid, base_oid, 0, path),
             };
         }
 
@@ -775,6 +786,13 @@ pub const RoutablePage = union(enum) {
             .value = Array(ref_route_max_len).from(value) orelse return null,
             .base_oid = Array(ref_route_max_len).from(base_oid) orelse return null,
         } };
+    }
+
+    // build a `.repo_commits` route listing the commits that changed `path`
+    pub fn repoHistoryRoute(identity: []const u8, ref_or_oid: RefOrOid, value: []const u8, path: []const u8) ?RoutablePage {
+        var route = repoCommitsRoute(identity, ref_or_oid, value, "") orelse return null;
+        route.repo_commits.path = Array(repo_route_max_len).from(path) orelse return null;
+        return route;
     }
 
     pub fn repoCommitsMergeRoute(identity: []const u8, oid: []const u8) ?RoutablePage {
@@ -1182,6 +1200,7 @@ pub const RoutablePage = union(enum) {
                 if (c.from.len != 0) try out.writer.print("/" ++ from_seg ++ "{s}", .{c.from.slice()});
                 if (c.merge.len != 0) try out.writer.print("/" ++ merge_seg ++ "{s}", .{c.merge.slice()});
                 if (c.message) try out.writer.print("/" ++ message_seg, .{});
+                if (c.path.len != 0) try out.writer.print("/" ++ path_seg ++ "{s}", .{c.path.slice()});
                 break :blk out.written();
             },
             .repo_diff => |d| blk: {
@@ -1946,10 +1965,13 @@ pub const RoutablePage = union(enum) {
             // the index covers branch and tag tips, so only they can be
             // searched or paged by commit; an object roots the list itself
             if ((search.len != 0 or from.len != 0) and ref.kind == .object) return null;
-            var route = if (std.mem.eql(u8, segments.rest(), message_seg))
+            const rest = segments.rest();
+            var route = if (std.mem.eql(u8, rest, message_seg))
                 repoCommitMessageRoute(pair, ref.kind, ref.value, base_oid) orelse return null
-            else if (segments.rest().len == 0)
+            else if (rest.len == 0)
                 repoCommitsRoute(pair, ref.kind, ref.value, base_oid) orelse return null
+            else if (search.len == 0 and base_oid.len == 0)
+                repoHistoryRoute(pair, ref.kind, ref.value, pathValue(rest) orelse return null) orelse return null
             else
                 return null;
             if (search.len != 0) route.repo_commits.search = Array(search_route_max_len).from(search) orelse return null;
@@ -1996,7 +2018,8 @@ pub const RoutablePage = union(enum) {
                 std.mem.eql(u8, a_c.search.slice(), b.repo_commits.search.slice()) and
                 std.mem.eql(u8, a_c.from.slice(), b.repo_commits.from.slice()) and
                 std.mem.eql(u8, a_c.merge.slice(), b.repo_commits.merge.slice()) and
-                a_c.message == b.repo_commits.message,
+                a_c.message == b.repo_commits.message and
+                std.mem.eql(u8, a_c.path.slice(), b.repo_commits.path.slice()),
             .repo_diff => |a_d| std.mem.eql(u8, a_d.name.slice(), b.repo_diff.name.slice()) and
                 a_d.ref_or_oid == b.repo_diff.ref_or_oid and
                 std.mem.eql(u8, a_d.value.slice(), b.repo_diff.value.slice()) and

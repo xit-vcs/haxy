@@ -93,6 +93,8 @@ search_available: bool = false,
 default_branch: []const u8 = "",
 // the repo's default branch has no commit yet, so the tab shows a placeholder
 no_commits: bool = false,
+// the file whose history this list holds ("" = the whole log)
+path: []const u8 = "",
 
 const Self = @This();
 
@@ -118,6 +120,7 @@ pub fn init(
     base_oid: []const u8,
     search: []const u8,
     from: []const u8,
+    path: []const u8,
 ) !Self {
     const aa = arena.allocator();
     const hex_len = ui.ResolvedRefOrOid(repo_kind, repo_opts).hex_len;
@@ -159,14 +162,40 @@ pub fn init(
     var next_start: ?[]const u8 = null;
     var search_available = false;
     var default_branch: []const u8 = "";
-    var searched = false;
+    // whether a search or a file's history filled the list instead of the log
+    var listed = false;
+    // paging keeps the ref and starts the walk at the url's commit
+    var start_oid = resolved.oid;
+    if (from.len != 0) @memcpy(&start_oid, from);
+
+    // a file's history steps from each commit that changed it to the one that
+    // changed it before, along first parents. only a repository's xit patch
+    // data records them.
+    if (path.len != 0) {
+        if (comptime repo_kind != .xit) return error.NotFound;
+        if (handle.location != .repo) return error.NotFound;
+        var change = try xit.patch.lastChange(repo_opts, &moment, &start_oid, path);
+        while (change) |oid| {
+            if (count == page_size) {
+                next_start = try aa.dupe(u8, &oid);
+                break;
+            }
+            var commit_object = try obj.Object(.xit, repo_opts).initCommit(state, io, gpa, &oid);
+            defer commit_object.deinit();
+            buf[count] = try commitEntry(repo_kind, repo_opts, arena, repo, io, gpa, admin_moment, &commit_object, message and count == 0);
+            count += 1;
+            const parent = commit_object.content.commit.metadata.firstParent() orelse break;
+            change = try xit.patch.lastChange(repo_opts, &moment, parent, path);
+        }
+        listed = true;
+    }
 
     // the index covers a repository's branch and tag tips, so a fork gets no
     // search box and refuses a search: url. an object view or a list bounded by
     // a base, whose version would also cover the commits before it, searches
     // the default branch instead.
     if (comptime repo_kind == .xit) index: {
-        if (handle.location != .repo) break :index;
+        if (handle.location != .repo or path.len != 0) break :index;
         if (resolved.ref_or_oid == .object or base_oid.len != 0) {
             var head_buffer: [xit.ref.MAX_REF_CONTENT_SIZE]u8 = undefined;
             const branch = switch (repo.head(io, &head_buffer) catch break :index) {
@@ -201,15 +230,11 @@ pub fn init(
             buf[count] = try commitEntry(repo_kind, repo_opts, arena, repo, io, gpa, admin_moment, &commit_object, message and count == 0);
             count += 1;
         }
-        searched = true;
+        listed = true;
     }
-    if (query != null and !searched) return error.NotFound;
+    if (query != null and !listed) return error.NotFound;
 
-    if (!searched) {
-        // paging keeps the ref and starts the walk at the url's commit
-        var start_oid = resolved.oid;
-        if (from.len != 0) @memcpy(&start_oid, from);
-
+    if (!listed) {
         var iter = repo.log(io, gpa, .{ .start_oids = &.{start_oid}, .first_parent = true }) catch return emptyResult(aa, handle, resolved.ref_or_oid, resolved.value, base_oid);
         defer iter.deinit();
         while (try iter.next(gpa)) |commit_object| {
@@ -230,7 +255,7 @@ pub fn init(
         .ref_or_oid = resolved.ref_or_oid,
         .ref_or_oid_value = resolved.value,
         .base_oid = try aa.dupe(u8, base_oid),
-        .commit_count = if (repo_kind == .xit and handle.location == .repo) blk: {
+        .commit_count = if (repo_kind == .xit and handle.location == .repo and path.len == 0) blk: {
             if (base_oid.len == 0) {
                 const stats = (xit.patch.readCommitStats(repo_opts, state.extra.moment, &resolved.oid) catch null) orelse break :blk null;
                 break :blk stats.first_parent_depth;
@@ -243,6 +268,7 @@ pub fn init(
         .search = query,
         .search_available = search_available,
         .default_branch = default_branch,
+        .path = try aa.dupe(u8, path),
     };
 }
 
@@ -431,9 +457,18 @@ pub const View = struct {
             return .{ .box = outer, .data = data, .session = session };
         }
 
-        // the search box and the clone url at the top. local mode has neither.
-        if (session.data.host_kind == .server) {
-            var header_view = try ui.widget.SearchHeader.init(allocator, session, data.handle, " search ", data.search, data.search_available, data.searchRoute() orelse return error.RouteTooLong);
+        // the search box and the clone url at the top. local mode has neither,
+        // but a file's history still shows its link back to the file.
+        if (session.data.host_kind == .server or data.path.len != 0) {
+            const file_link: ?ui.widget.SearchHeader.Link = if (data.path.len == 0) null else link: {
+                const pa = session.page_arena;
+                const route = data.handle.location.filesRoute(data.ref_or_oid, data.ref_or_oid_value, data.path, 0) orelse return error.RouteTooLong;
+                break :link .{
+                    .text = try pa.allocator().print("history of {s}", .{data.path}),
+                    .url = try pa.allocator().print("a:{s}", .{try route.toUrl(pa)}),
+                };
+            };
+            var header_view = try ui.widget.SearchHeader.init(allocator, session, data.handle, " search ", data.search, data.search_available, data.searchRoute() orelse return error.RouteTooLong, file_link);
             errdefer header_view.deinit(allocator);
             try outer.children.put(allocator, header_view.getFocus().id, .{ .widget = .{ .search_header = header_view }, .rect = null, .min_size = .{ .width = null, .height = ui.widget.SearchBox.min_size.height } });
         }
@@ -738,7 +773,8 @@ pub const View = struct {
             {
                 var items: std.ArrayList(ui.widget.WordFlow.Item) = .empty;
                 defer items.deinit(allocator);
-                const diff_route = self.data.handle.location.commitDiffRoute(commit.oid, commit.parent_oid) orelse return error.RouteTooLong;
+                // a file's history narrows the diff to that file
+                const diff_route = self.data.handle.location.commitDiffRoute(commit.oid, commit.parent_oid, self.data.path) orelse return error.RouteTooLong;
                 try items.append(allocator, .{ .text = "view diff", .link = try pa.allocator().print("a:{s}", .{try diff_route.toUrl(pa)}) });
                 try items.append(allocator, .{ .text = "view files at this commit", .link = try filesObjectLink(pa, self.data.handle.location, commit.oid) });
                 if (commit.merge) if (self.data.handle.location.commitsMergeRoute(commit.oid)) |route| {
@@ -901,13 +937,17 @@ fn commitsLink(page_arena: *std.heap.ArenaAllocator, data: *const Self, oid: []c
 }
 
 // this list's page starting at `oid`: a repo's branch or tag keeps its ref (and
-// its query) and moves `from` along, so the search box survives paging. a fork
-// or an object view roots the page at the commit itself.
+// its query or file) and moves `from` along, so the search box survives paging.
+// a fork or an object view roots the page at the commit itself.
 fn pageRoute(data: *const Self, oid: []const u8) ?ui.RoutablePage {
-    if (data.handle.location != .repo or data.ref_or_oid == .object) {
-        return data.handle.location.commitsRoute(.object, oid, data.base_oid);
+    const location = data.handle.location;
+    if (location != .repo or data.ref_or_oid == .object) {
+        return if (data.path.len != 0) location.historyRoute(.object, oid, data.path) else location.commitsRoute(.object, oid, data.base_oid);
     }
-    const route = data.handle.location.commitsRoute(data.ref_or_oid, data.ref_or_oid_value, data.base_oid) orelse return null;
+    const route = (if (data.path.len != 0)
+        location.historyRoute(data.ref_or_oid, data.ref_or_oid_value, data.path)
+    else
+        location.commitsRoute(data.ref_or_oid, data.ref_or_oid_value, data.base_oid)) orelse return null;
     const paged = route.withFrom(oid) orelse return null;
     return paged.withSearch(data.search orelse return paged);
 }
@@ -929,9 +969,9 @@ fn filesObjectLink(page_arena: *std.heap.ArenaAllocator, location: ui.RoutablePa
 // the in-page "ai:" anchor for selecting a commit, showing its whole message
 // when `message` is set. the href is only followed with js off.
 fn commitRowLink(page_arena: *std.heap.ArenaAllocator, data: *const Self, commit: Commit, message: bool) ![]const u8 {
-    // a result roots the same results page at its commit, so the query
-    // survives following the row
-    if (data.search != null) {
+    // a result roots the same results page at its commit, so the query or
+    // file survives following the row
+    if (data.search != null or data.path.len != 0) {
         const route = pageRoute(data, commit.oid) orelse return error.RouteTooLong;
         return page_arena.allocator().print("ai:{s}", .{try route.toUrl(page_arena)});
     }

@@ -113,6 +113,10 @@ pub fn init(
         .repo_commits => |*c| c.merge.slice(),
         else => "",
     };
+    const commits_path: []const u8 = switch (route) {
+        .repo_commits => |*c| c.path.slice(),
+        else => "",
+    };
     // the refs tab windows one column at a time: `refs_from` (a url-encoded
     // ref name) roots `refs_kind`'s column, the other stays at its first window.
     const refs_kind: ui.RoutablePage.RefKind = switch (route) {
@@ -372,7 +376,7 @@ pub fn init(
                             else if (patchrev_id.len != 0) diff: {
                                 const diff_route = ui.RoutablePage.repoPatchRevDiffRoute(repo_identity.identity, patchrev_id, 0, "") orelse return error.RouteTooLong;
                                 break :diff .{ .diff = try Diff.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, diff_route.repo_diff) };
-                            } else .{ .commits = try Commits.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, session.haxy_moment, handle, ref_or_oid, ref_value, commits_message, base_oid, commits_search, commits_from) };
+                            } else .{ .commits = try Commits.init(repo_kind, opened.self_repo_opts, arena, opened, io, gpa, session.haxy_moment, handle, ref_or_oid, ref_value, commits_message, base_oid, commits_search, commits_from, commits_path) };
                             const target_branch = if (files_data.ref_or_oid == .branch) files_data.ref_or_oid_value else "";
                             var discussions_data = try Discussions.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, discussions_search, discussions_selected, discussions_comment, discussions_comments_start, discussions_view, tabViewer(handle, repo, .discuss));
                             var issues_data = try Issues.init(repo_kind, opened.self_repo_opts, arena, opened, io, session.haxy_moment, repo_identity.identity, issues_search, issues_selected, issues_comment, issues_comments_start, issues_theirs, issues_view, tabViewer(handle, repo, .issue));

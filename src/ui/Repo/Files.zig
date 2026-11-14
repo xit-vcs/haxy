@@ -4,6 +4,7 @@ const ui = @import("../../ui.zig");
 const xit = @import("xit");
 const rp = xit.repo;
 const tr = xit.tree;
+const obj = xit.object;
 const df = xit.diff;
 const xitui = xit.xitui;
 const wgt = xitui.widget;
@@ -77,6 +78,8 @@ find: ?[]const u8 = null,
 find_available: bool = false,
 // the repo's default branch has no commit yet, so the tab shows a placeholder
 no_commits: bool = false,
+// whether the viewed commit has patch data, so a file links to its history
+history: bool = false,
 
 const Self = @This();
 
@@ -157,6 +160,14 @@ pub fn init(
     var preloaded_bytes: usize = 0;
     var find_available = false;
 
+    // stats exist for every commit with a snapshot, so they mark the history
+    const history = if (comptime repo_kind == .xit) history: {
+        if (handle.location != .repo) break :history false;
+        var commit = obj.Object(.xit, repo_opts).initCommit(state, io, gpa, &resolved.oid) catch break :history false;
+        defer commit.deinit();
+        break :history try xit.patch.readCommitStats(repo_opts, &moment, &commit.oid) != null;
+    } else false;
+
     // the index covers branch tips only, so any other view gets no search box
     // and refuses a find: url.
     if (comptime repo_kind == .xit) index: {
@@ -191,6 +202,7 @@ pub fn init(
             .capped = capped,
             .find = value,
             .find_available = true,
+            .history = history,
         };
     }
     if (term != null) return error.NotFound;
@@ -248,6 +260,7 @@ pub fn init(
         .entries = entries.items,
         .capped = capped,
         .find_available = find_available,
+        .history = history,
     };
 }
 
@@ -391,7 +404,7 @@ pub const View = struct {
 
         // the search box and the clone url at the top. local mode has neither.
         if (session.data.host_kind == .server) {
-            var header_view = try ui.widget.SearchHeader.init(allocator, session, data.handle, " find file ", data.find, data.find_available, data.filesRoute("", 0) orelse return error.RouteTooLong);
+            var header_view = try ui.widget.SearchHeader.init(allocator, session, data.handle, " find file ", data.find, data.find_available, data.filesRoute("", 0) orelse return error.RouteTooLong, null);
             errdefer header_view.deinit(allocator);
             try outer.children.put(allocator, header_view.getFocus().id, .{ .widget = .{ .search_header = header_view }, .rect = null, .min_size = .{ .width = null, .height = ui.widget.SearchBox.min_size.height } });
         }
@@ -738,6 +751,10 @@ pub const View = struct {
                 // the download leads the links, so it stays put as they come and go
                 if (try self.data.handle.location.rawUrl(self.session.page_arena, self.data.ref_or_oid, self.data.ref_or_oid_value, path)) |url| {
                     _ = try addNavButton(allocator, nav_box, "download", try self.session.page_arena.allocator().print(ui.raw_link_prefix ++ "{s}", .{url}));
+                }
+                if (self.data.history) {
+                    const route = self.data.handle.location.historyRoute(self.data.ref_or_oid, self.data.ref_or_oid_value, path) orelse return error.RouteTooLong;
+                    _ = try addNavButton(allocator, nav_box, "commit history", try self.session.page_arena.allocator().print("a:{s}", .{try route.toUrl(self.session.page_arena)}));
                 }
                 // the window links sit above the scroll, so they stay put
                 // while the content scrolls.

@@ -1363,12 +1363,18 @@ pub const HeaderScroll = struct {
     }
 };
 
-// a tab's sub-header: an optional search box on the left, then a spacer, then
-// the clone url on the right. the owning view turns a submitted query into a
-// route, so route building stays with the tab that knows its own url.
+// a tab's sub-header: an optional search box and link on the left, then a
+// spacer, then the clone url on the right. the owning view turns a submitted
+// query into a route, so route building stays with the tab that knows its own url.
 pub const SearchHeader = struct {
     scroll: HeaderScroll,
     session: *ui.Session,
+
+    // a box following `url`, which carries its link prefix
+    pub const Link = struct {
+        text: []const u8,
+        url: []const u8,
+    };
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -1378,6 +1384,7 @@ pub const SearchHeader = struct {
         text: ?[]const u8,
         show_input: bool,
         action: ui.RoutablePage,
+        link: ?Link,
     ) !SearchHeader {
         var scroll = try HeaderScroll.init(allocator, session);
         errdefer scroll.deinit(allocator);
@@ -1389,6 +1396,16 @@ pub const SearchHeader = struct {
             errdefer search_box.deinit(allocator);
             box.getFocus().child_id = search_box.getFocus().id;
             try box.children.put(allocator, search_box.getFocus().id, .{ .widget = .{ .search_box = search_box }, .rect = null, .min_size = SearchBox.min_size });
+        }
+
+        if (link) |value| {
+            var link_box = try wgt.TextBox.init(allocator, value.text, .{ .border = .single, .round_corners = true, .wrap_kind = .none });
+            errdefer link_box.deinit(allocator);
+            link_box.getFocus().mode = .all;
+            link_box.getFocus().kind = .{ .custom = value.url };
+            const size: layout.MaybeSize = .{ .width = try xitui.width.displayWidth(value.text) + 2, .height = 3 };
+            if (box.getFocus().child_id == null) box.getFocus().child_id = link_box.getFocus().id;
+            try box.children.put(allocator, link_box.getFocus().id, .{ .widget = .{ .text_box = link_box }, .rect = null, .min_size = size, .max_size = size });
         }
 
         // the spacer pushes the clone url to the right edge.
@@ -1436,9 +1453,14 @@ pub const SearchHeader = struct {
             }
         }
         const clone_url = self.cloneUrl() orelse return;
+        // the link steps right to the clone url
+        if (current != clone_url.getFocus().id) {
+            if (key == .tab or key == .arrow_right) root_focus.setFocus(clone_url.getFocus().id);
+            return;
+        }
         if (key == .back_tab or (key == .arrow_left and clone_url.selected == 0)) {
-            if (self.searchBox()) |search_box| {
-                root_focus.setFocus(search_box.getFocus().id);
+            if (self.leading()) |focus| {
+                root_focus.setFocus(focus.id);
                 return;
             }
         }
@@ -1453,19 +1475,25 @@ pub const SearchHeader = struct {
         return try search_box.text(allocator);
     }
 
-    // enter the header, preferring the search box.
+    // enter the header, preferring the box on the left.
     pub fn focusHeader(self: *SearchHeader, root_focus: *Focus) bool {
-        if (self.searchBox()) |search_box| {
-            root_focus.setFocus(search_box.getFocus().id);
-            return true;
-        }
-        const clone_url = self.cloneUrl() orelse return false;
-        root_focus.setFocus(clone_url.getFocus().id);
+        const focus = self.leading() orelse (self.cloneUrl() orelse return false).getFocus();
+        root_focus.setFocus(focus.id);
         return true;
     }
 
     pub fn hasFocusable(self: *SearchHeader) bool {
-        return self.cloneUrl() != null or self.searchBox() != null;
+        return self.cloneUrl() != null or self.leading() != null;
+    }
+
+    // the search box, or the link
+    fn leading(self: *SearchHeader) ?*Focus {
+        for (self.scroll.row().children.values()) |*child| switch (child.widget) {
+            .search_box => |*search_box| return search_box.getFocus(),
+            .text_box => |*link_box| return link_box.getFocus(),
+            else => {},
+        };
+        return null;
     }
 
     fn cloneUrl(self: *SearchHeader) ?*CopyableText {
