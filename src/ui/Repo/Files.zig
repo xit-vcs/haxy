@@ -588,13 +588,9 @@ pub const View = struct {
 
                 {
                     // scrolls sideways when a narrow screen cuts the buttons off
-                    var nav_scroll = blk2: {
-                        var nav_box = try wgt.Box(ui.Widget).init(allocator, .{ .border = null, .direction = .horiz });
-                        errdefer nav_box.deinit(allocator);
-                        break :blk2 try wgt.Scroll(ui.Widget).init(allocator, .{ .box = nav_box }, .{ .direction = .horiz, .show_bar = false, .web_native = !session.is_terminal });
-                    };
+                    var nav_scroll = try ui.widget.HeaderScroll.init(allocator, session);
                     errdefer nav_scroll.deinit(allocator);
-                    try frame.children.put(allocator, nav_scroll.getFocus().id, .{ .widget = .{ .scroll = nav_scroll }, .rect = null, .min_size = null });
+                    try frame.children.put(allocator, nav_scroll.getFocus().id, .{ .widget = .{ .header_scroll = nav_scroll }, .rect = null, .min_size = null });
                 }
                 {
                     // the content scroll wrapped in a bordered box; build sets the
@@ -701,8 +697,13 @@ pub const View = struct {
         return &self.contentBox().children.values()[detail_index].widget.box;
     }
 
+    // the nav row's focus id in the detail pane, which focus moves select
+    fn navId(self: *View) usize {
+        return self.detailOuter().children.keys()[detail_nav_index];
+    }
+
     fn navBox(self: *View) *wgt.Box(ui.Widget) {
-        return &self.detailOuter().children.values()[detail_nav_index].widget.scroll.child.box;
+        return self.detailOuter().children.values()[detail_nav_index].widget.header_scroll.row();
     }
 
     // the bordered box wrapping the content scroll (border toggles with focus).
@@ -840,27 +841,31 @@ pub const View = struct {
                 if (narrow) {
                     const page_arena = self.session.page_arena;
                     const link = try page_arena.allocator().print("ai:{s}", .{try self.session.data.current_page.toUrl(page_arena)});
-                    self.back_id = try addNavButton(allocator, nav_box, "← back to file list", "", link);
+                    self.back_id = try addNavButton(allocator, nav_box, "← back to file list", link);
                 }
                 // the download leads the links, so it stays put as they come and go
                 if (try self.data.handle.location.rawUrl(self.session.page_arena, self.data.ref_or_oid, self.data.ref_or_oid_value, path)) |url| {
-                    _ = try addNavButton(allocator, nav_box, "download", "", try self.session.page_arena.allocator().print(ui.raw_link_prefix ++ "{s}", .{url}));
-                }
-                if (self.data.history) {
-                    const route = self.data.handle.location.historyRoute(self.data.ref_or_oid, self.data.ref_or_oid_value, path) orelse return error.RouteTooLong;
-                    _ = try addNavButton(allocator, nav_box, "commit history", " of file ", try self.session.page_arena.allocator().print("a:{s}", .{try route.toUrl(self.session.page_arena)}));
-                }
-                // toggles the file's line history, keeping its window
-                if (self.data.history and entry.loaded and !entry.is_binary) {
-                    var route = self.data.filesRoute(path, lineNumber(entry.window_start)) orelse return error.RouteTooLong;
-                    route.repo_files.line_history = !entry.line_history;
-                    const link = try self.session.page_arena.allocator().print("a:{s}", .{try route.toUrl(self.session.page_arena)});
-                    _ = try addNavButton(allocator, nav_box, if (entry.line_history) "hide line history" else "line history", " of file ", link);
+                    _ = try addNavButton(allocator, nav_box, "download file", try self.session.page_arena.allocator().print(ui.raw_link_prefix ++ "{s}", .{url}));
                 }
                 // the window links sit above the scroll, so they stay put
                 // while the content scrolls.
                 if (entry.window_start > 0) try self.addNavLink(allocator, nav_box, "scroll to top", entry, 0);
                 if (entry.has_more) try self.addNavLink(allocator, nav_box, "next lines →", entry, lineNumber(entry.window_start + entry.lines.len));
+                // the history links sit at the right edge, past a spacer
+                if (self.data.history) {
+                    var spacer = try ui.widget.Spacer.init(allocator);
+                    errdefer spacer.deinit(allocator);
+                    try nav_box.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null });
+                    const history_route = self.data.handle.location.historyRoute(self.data.ref_or_oid, self.data.ref_or_oid_value, path) orelse return error.RouteTooLong;
+                    _ = try addNavButton(allocator, nav_box, "commit history", try self.session.page_arena.allocator().print("a:{s}", .{try history_route.toUrl(self.session.page_arena)}));
+                    // toggles the file's line history, keeping its window
+                    if (entry.loaded and !entry.is_binary) {
+                        var route = self.data.filesRoute(path, lineNumber(entry.window_start)) orelse return error.RouteTooLong;
+                        route.repo_files.line_history = !entry.line_history;
+                        const link = try self.session.page_arena.allocator().print("a:{s}", .{try route.toUrl(self.session.page_arena)});
+                        _ = try addNavButton(allocator, nav_box, if (entry.line_history) "hide line history" else "line history", link);
+                    }
+                }
                 if (!entry.loaded) {
                     // the placeholder carries the file's "a:" link, so enter
                     // (or a click) here loads the file like on its list row.
@@ -885,7 +890,7 @@ pub const View = struct {
         // the pane at its nav row when it has one, else at the content
         if (nav_box.children.count() > 0) nav_box.getFocus().child_id = nav_box.children.keys()[0];
         if (inner.children.count() > 0) inner.getFocus().child_id = inner.children.keys()[0];
-        self.detailOuter().getFocus().child_id = if (nav_box.children.count() > 0) nav_box.getFocus().id else self.detailScrollFrame().getFocus().id;
+        self.detailOuter().getFocus().child_id = if (nav_box.children.count() > 0) self.navId() else self.detailScrollFrame().getFocus().id;
 
         // reserve the nav row's height (the shrink scroll frame yields it).
         self.detailOuter().children.values()[detail_nav_index].min_size =
@@ -911,16 +916,18 @@ pub const View = struct {
         const path = try childDir(page_arena.allocator(), self.data.dir, entry.name);
         const route = entryRoute(self.data, entry, path, target_start) orelse return error.RouteTooLong;
         const link = try page_arena.allocator().print("a:{s}", .{try route.toUrl(page_arena)});
-        _ = try addNavButton(allocator, box, label, "", link);
+        _ = try addNavButton(allocator, box, label, link);
     }
 
-    // a bordered button in the nav row carrying `link`, returning its focus id
-    fn addNavButton(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8, bottom_label: []const u8, link: []const u8) !usize {
-        var tb = try wgt.TextBox.init(allocator, label, .{ .border = .single, .round_corners = true, .wrap_kind = .none, .bottom_label = .{ .text = bottom_label } });
+    // a bordered button in the nav row carrying `link`, returning its focus id.
+    // its size is fixed, so the row's spacer takes the rest.
+    fn addNavButton(allocator: std.mem.Allocator, box: *wgt.Box(ui.Widget), label: []const u8, link: []const u8) !usize {
+        var tb = try wgt.TextBox.init(allocator, label, .{ .border = .single, .round_corners = true, .wrap_kind = .none });
         errdefer tb.deinit(allocator);
         tb.getFocus().mode = .all;
         tb.getFocus().kind = .{ .custom = link };
-        try box.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = null });
+        const size: layout.MaybeSize = .{ .width = try xitui.width.displayWidth(label) + 2, .height = row_height };
+        try box.children.put(allocator, tb.getFocus().id, .{ .widget = .{ .text_box = tb }, .rect = null, .min_size = size, .max_size = size });
         return tb.getFocus().id;
     }
 
@@ -1096,10 +1103,14 @@ pub const View = struct {
         const keys = nav_box.children.keys();
         const cur_id = nav_box.getFocus().child_id orelse return false;
         const cur: isize = @intCast(nav_box.children.getIndex(cur_id) orelse return false);
-        const target = cur + delta;
-        if (target < 0 or target >= @as(isize, @intCast(keys.len))) return false;
-        root_focus.setFocus(keys[@intCast(target)]);
-        return true;
+        var target = cur + delta;
+        while (target >= 0 and target < @as(isize, @intCast(keys.len))) : (target += delta) {
+            // the spacer between the buttons takes no focus
+            if (nav_box.children.values()[@intCast(target)].widget == .spacer) continue;
+            root_focus.setFocus(keys[@intCast(target)]);
+            return true;
+        }
+        return false;
     }
 
     // enter the detail pane, landing on the nav row when there is one (so
@@ -1110,7 +1121,7 @@ pub const View = struct {
     fn focusDetail(self: *View, root_focus: *Focus) !void {
         const frame = self.detailOuter();
         if (self.navBox().children.count() > 0) {
-            frame.getFocus().child_id = self.navBox().getFocus().id;
+            frame.getFocus().child_id = self.navId();
         } else if (self.detailInner().children.count() > 0) {
             frame.getFocus().child_id = self.detailScrollFrame().getFocus().id;
         } else return;
@@ -1136,7 +1147,7 @@ pub const View = struct {
 
     fn contentAtTop(self: *View) bool {
         if (self.detailActive()) {
-            if (self.detailOuter().getFocus().child_id == self.navBox().getFocus().id) return true;
+            if (self.detailOuter().getFocus().child_id == self.navId()) return true;
             return self.navBox().children.count() == 0 and
                 (!self.session.is_terminal or self.detailScroll().y == 0);
         }
