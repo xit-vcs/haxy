@@ -39,13 +39,11 @@ pub const View = struct {
     center: ui.widget.Center,
     session: *ui.Session,
 
-    const max_width = 80;
-
     pub fn init(allocator: std.mem.Allocator, data: *const Self, session: *ui.Session) !View {
         const doc = try md.parseText(session.page_arena.allocator(), data.text);
 
         var scroll = blk: {
-            var markdown = try Markdown.View.init(allocator, session, doc, null, evt.admin_about_path);
+            var markdown = try Markdown.View.init(allocator, session, doc, null, evt.admin_about_path, null);
             errdefer markdown.deinit(allocator);
             break :blk try wgt.Scroll(ui.Widget).init(allocator, .{ .markdown = markdown }, .{ .direction = .vert, .web_native = !session.is_terminal, .fill = true });
         };
@@ -55,7 +53,7 @@ pub const View = struct {
         frame.getFocus().child_id = scroll.getFocus().id;
         try frame.children.put(allocator, scroll.getFocus().id, .{ .widget = .{ .scroll = scroll }, .rect = null, .min_size = null, .flex = .grow });
         var center = try ui.widget.Center.init(allocator, .{ .box = frame });
-        center.max_width = max_width;
+        center.max_width = Markdown.readable_width;
         return .{ .center = center, .session = session };
     }
 

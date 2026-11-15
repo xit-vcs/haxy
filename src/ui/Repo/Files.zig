@@ -876,7 +876,7 @@ pub const View = struct {
                 } else if (isMarkdown(entry.name) and !entry.line_history and entry.window_start == 0 and !entry.has_more and entry.lines.len <= max_markdown_lines) {
                     const page_arena = self.session.page_arena;
                     const doc = try md.parse(page_arena.allocator(), entry.lines);
-                    var view = try Markdown.View.init(allocator, self.session, doc, self.data, path);
+                    var view = try Markdown.View.init(allocator, self.session, doc, self.data, path, Markdown.readable_width);
                     errdefer view.deinit(allocator);
                     try inner.children.put(allocator, view.getFocus().id, .{ .widget = .{ .markdown = view }, .rect = null, .min_size = null });
                     markdown = true;

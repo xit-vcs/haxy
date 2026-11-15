@@ -12,6 +12,9 @@ const Focus = xitui.focus.Focus;
 const RichText = ui.widget.RichText;
 const CopyableText = ui.widget.CopyableText;
 
+// the widest a page of wrapped prose gets, so its lines don't run too long
+pub const readable_width = 80;
+
 // a rendered markdown file: one child per block, word-wrapped to the width.
 // without `data` (a file outside any repo), repo-relative links aren't clickable.
 pub const View = struct {
@@ -20,7 +23,8 @@ pub const View = struct {
     // registered after the links so they win hit-testing
     body: *Focus,
 
-    pub fn init(allocator: std.mem.Allocator, session: *ui.Session, doc: md.Document, data: ?*const Files, file_path: []const u8) !View {
+    // `prose_width` caps where text wraps, leaving code at the full width
+    pub fn init(allocator: std.mem.Allocator, session: *ui.Session, doc: md.Document, data: ?*const Files, file_path: []const u8, prose_width: ?usize) !View {
         const builder: Builder = .{
             .allocator = allocator,
             .session = session,
@@ -28,6 +32,7 @@ pub const View = struct {
             .dir = if (std.mem.lastIndexOfScalar(u8, file_path, '/')) |slash| file_path[0..slash] else "",
             .page_arena = session.page_arena,
             .fonts = !hasUncoveredHeading(doc.blocks),
+            .prose_width = prose_width,
         };
         var box = try builder.blocksBox(doc.blocks, true);
         errdefer box.deinit(allocator);
@@ -119,7 +124,7 @@ pub const Frame = struct {
 
         var box = try wgt.Box(ui.Widget).init(allocator, .{ .border = .single, .round_corners = true, .direction = .vert, .top_label = .{ .text = label }, .bottom_label = .{ .text = bottom_label } });
         errdefer box.deinit(allocator);
-        var markdown = try View.init(allocator, session, doc, null, "");
+        var markdown = try View.init(allocator, session, doc, null, "", null);
         errdefer markdown.deinit(allocator);
         try box.children.put(allocator, markdown.getFocus().id, .{ .widget = .{ .markdown = markdown }, .rect = null, .min_size = null });
         box.getFocus().child_id = markdown.getFocus().id;
@@ -212,6 +217,8 @@ const Builder = struct {
     page_arena: *std.heap.ArenaAllocator,
     // whether headings may use the title fonts
     fonts: bool,
+    // the width text wraps at, or null for the full width
+    prose_width: ?usize,
 
     // a vertical box of `blocks`, with a blank row between them when `gap`
     fn blocksBox(b: Builder, blocks: []const md.Block, gap: bool) anyerror!wgt.Box(ui.Widget) {
@@ -226,13 +233,13 @@ const Builder = struct {
         switch (block) {
             .heading => |heading| {
                 const spans = try b.runSpans(heading.inlines, .{ .bold = true });
-                try put(allocator, box, .{ .markdown_heading = try Heading.init(allocator, b.page_arena, heading.level, spans, b.fonts, heading.center) });
+                try b.putProse(box, .{ .markdown_heading = try Heading.init(allocator, b.page_arena, heading.level, spans, b.fonts, heading.center) });
             },
             .paragraph => |paragraph| {
                 var text = try RichText.init(allocator, try b.runSpans(paragraph.inlines, .{}));
                 text.center = paragraph.center;
                 text.pre = paragraph.pre;
-                try put(allocator, box, .{ .rich_text = text });
+                try b.putProse(box, .{ .rich_text = text });
             },
             .code => |lines| {
                 const text = try std.mem.join(b.page_arena.allocator(), "\n", lines);
@@ -274,12 +281,18 @@ const Builder = struct {
                 try put(allocator, box, .{ .box = list_box });
             },
             // wider than any pane, and clipped to the width
-            .rule => try put(allocator, box, .{ .text_box = try wgt.TextBox.init(allocator, std.mem.asBytes(&@as([512]["─".len]u8, @splat("─".*))), .{ .border = null, .wrap_kind = .none, .style = .{ .dim = true } }) }),
+            .rule => try b.putProse(box, .{ .text_box = try wgt.TextBox.init(allocator, std.mem.asBytes(&@as([512]["─".len]u8, @splat("─".*))), .{ .border = null, .wrap_kind = .none, .style = .{ .dim = true } }) }),
             .raw => |lines| {
                 const text = try std.mem.join(b.page_arena.allocator(), "\n", lines);
                 try put(allocator, box, .{ .text_box = try wgt.TextBox.init(allocator, text, .{ .border = null, .wrap_kind = .none }) });
             },
         }
+    }
+
+    // a block of text, capped at the prose width
+    fn putProse(b: Builder, box: *wgt.Box(ui.Widget), widget: ui.Widget) !void {
+        try put(b.allocator, box, widget);
+        if (b.prose_width) |width| box.children.values()[box.children.count() - 1].max_size = .{ .width = width, .height = null };
     }
 
     // styled spans for `inlines` over `base`, with each link resolved
