@@ -290,7 +290,7 @@ pub fn receivePackAndConsume(
     };
 
     // the advertisement goes out ahead of the lock, unless the caller sent its own
-    if (!options.is_stateless) try advertiseAndAwait(repo_opts, io, allocator, repo, reader, writer, options);
+    if (!options.is_stateless) try advertiseAndAwait(repo_opts, io, allocator, repo, reader, writer, options, sess);
 
     const result = blk: {
         try lockForPush(io, repo.core.db_file, sess);
@@ -354,7 +354,13 @@ fn advertiseAndAwait(
     reader: *std.Io.Reader,
     writer: *std.Io.Writer,
     options: xit.net_server_receive_pack.Options,
+    sess: ?*ssh.SessionCtx,
 ) !void {
+    // a change in progress is waited out first, so the refs are current and
+    // the notice is the last thing the client sees before it blocks
+    try lockForPush(io, repo.core.db_file, sess);
+    repo.core.db_file.unlock(io);
+
     var moment = try repo.core.latestMoment();
     const state = rp.Repo(.xit, repo_opts).State(.read_only){ .core = &repo.core, .extra = .{ .moment = &moment } };
     try xit.net_server_receive_pack.advertise(.xit, repo_opts, state, io, allocator, writer, options);
@@ -409,7 +415,7 @@ pub fn receiveFork(
 
     // ahead of the state below, so the push acts on what is current once the
     // client is ready
-    try advertiseAndAwait(repo_opts, io, allocator, fork_repo, reader, writer, .{});
+    try advertiseAndAwait(repo_opts, io, allocator, fork_repo, reader, writer, .{}, sess);
 
     // load the fork and target patch state
     const fork_moment = evt.currentMoment(repo_opts, fork_repo) catch return error.PatchDataUnavailable;
