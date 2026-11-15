@@ -697,9 +697,8 @@ fn authorizeRepoKey(
         if (best) |held| if (held.role.atLeast(grant.role)) continue;
         best = .{ .id = member_id, .role = grant.role };
     }
-    // a fetch counts toward a public repo, unless its owner or a member makes it
-    const insider = if (best) |held| held.role.atLeast(.write) else false;
-    const counted: ?evt.RepoLocation = if (repo.repo.event.read_access == .public and !insider) .{ .owner_id = owner_id, .repo_id = repo.event_id } else null;
+    // a fetch counts toward a public repo
+    const counted: ?evt.RepoLocation = if (repo.repo.event.read_access == .public) .{ .owner_id = owner_id, .repo_id = repo.event_id } else null;
 
     // any key may fetch a public repo; a push always needs a key holder
     if (service == .upload_pack and repo.role != null) return .{ .allowed = .{ .fetch = counted } };
