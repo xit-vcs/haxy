@@ -34,9 +34,9 @@ Merging
 
 * Since the metadata is in a branch, two people can change it at the same time: one person might edit issues offline using haxy's local mode, and another person may do so on the server. Haxy's local mode displays a "sync" button in the events tab. This will pull the latest events from the server, combine them with the local changes using a regular merge commit, and then push.
 
-* A merge commit isn't an event, so instead of consuming it, haxy does a three-way merge of the records on each side, using their common ancestor as the base. For issues and patches this is done field by field: if only one side changed the title, that change is taken. If both sides changed the same field differently, the record is marked as conflicted and shows up in the UI for someone to resolve. Every other kind of record is merged as a whole: a change made on only one side is taken, and if both sides changed it, the target's version wins.
+* A merge commit isn't an event, so instead of consuming it, haxy does a three-way merge of the records on each side, using their common ancestor as the base. For issues and patches this is done field by field: if only one side changed the title, that change is taken. If both sides changed the same field differently, the record is marked as conflicted and shows up in the UI for someone to resolve. See [the devlog](https://youtu.be/kkGUARj5Wdw?t=591) for a demonstration of resolving a conflict.
 
-* A merge never fails. A metadata conflict is something for a person to look at later, not a reason to refuse a sync, because a branch that can't be consumed would be stuck forever. Metadata conflicts are *not* git conflicts; they are first-class conflicts that haxy lets you resolve in the UI.
+* A merge never fails. A metadata conflict is something for a person to look at later, not a reason to refuse a sync, because a branch that can't be consumed would be stuck forever. Metadata conflicts are *not* git conflicts; they are first-class conflicts stored in xitdb.
 
 Where events live
 
