@@ -1412,7 +1412,7 @@ pub const SearchHeader = struct {
         {
             var spacer = try Spacer.init(allocator);
             errdefer spacer.deinit(allocator);
-            try box.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null });
+            try box.children.put(allocator, spacer.getFocus().id, .{ .widget = .{ .spacer = spacer }, .rect = null, .min_size = null, .flex = .grow });
         }
 
         if (session.data.host_kind == .server) {
