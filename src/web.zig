@@ -395,7 +395,7 @@ fn handleRequest(
         };
         // a page that can't be built shows the not-found page instead
         const body = renderPage(io, allocator, host, session_token, session_data, wants_json) catch |err| switch (err) {
-            error.NotFound => blk: {
+            error.NotFound, error.ObjectNotFound => blk: {
                 session_data.current_page = .not_found;
                 break :blk try renderPage(io, allocator, host, session_token, session_data, wants_json);
             },
