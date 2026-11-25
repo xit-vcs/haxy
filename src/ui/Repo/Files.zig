@@ -29,7 +29,7 @@ const max_markdown_lines = 2000;
 
 // budget for the total bytes of file content preloaded (windowed) per page,
 // so selecting a preloaded file shows its contents without a reload.
-const max_preloaded_bytes = 2 * 1024 * 1024;
+const max_preloaded_bytes = 256 * 1024;
 
 // how many rows a listing holds, for a directory and for search results alike.
 const max_list_entries = 1000;
