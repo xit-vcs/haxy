@@ -14,21 +14,21 @@ const progress = @import("./progress.zig");
 const popularity = @import("./popularity.zig");
 
 // listener resource limits. the watchdog gives peers a hard deadline to start
-// a session, times out non-interactive sessions that stall while we're blocked
-// on the peer, and bounds the post-CLOSE drain.
+// a session, times out sessions that stall while we're blocked on the peer
+// (interactive ones after a longer idle), and bounds the post-CLOSE drain.
 const max_connections: u32 = 4096;
 const watchdog_interval = std.Io.Duration.fromSeconds(5);
 // covers the client's host key, passphrase and security key prompts
 const presession_timeout_ticks: u32 = 24; // 120 seconds
 // a push sits silent while the client runs its pre-push hook and packs
 const idle_timeout_ticks: u32 = 180; // 15 minutes
+// a TUI user may sit idle for a while, but a silent peer is disconnected after this long
+const interactive_timeout_ticks: u32 = 720; // 1 hour
 // a pack that stops arriving has lost its client, and holds the repo's lock
 const receiving_timeout_ticks: u32 = 24; // 120 seconds
 // a slow client is still receiving what the kernel has queued
 const close_drain_timeout_ticks: u32 = 6; // 25-30 seconds
 const escape_timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(25), .clock = .awake } };
-
-var active_connections: std.atomic.Value(u32) = .init(0);
 
 const any_repo_opts: rp.AnyRepoOpts(.xit) = .{ .ProgressCtx = *progress.Sideband };
 
@@ -120,13 +120,6 @@ pub fn runListener(
             defer stream.close(ctx.io);
             const peer = stream.socket.address;
 
-            const prev_count = active_connections.fetchAdd(1, .acq_rel);
-            defer _ = active_connections.fetchSub(1, .acq_rel);
-            if (prev_count >= max_connections) {
-                serve_common.logError(ctx.io, ctx.err, "ssh connection limit reached: ip={f}\n", .{peer});
-                return;
-            }
-
             var connection = Watchdog.Connection{ .stream = &stream };
             ctx.watchdog.add(ctx.io, &connection);
             defer ctx.watchdog.remove(ctx.io, &connection);
@@ -170,7 +163,7 @@ pub fn runListener(
         .session_handler = session_handler,
         .watchdog = watchdog,
         .err = err,
-    }, handle);
+    }, max_connections, handle);
 }
 
 /// one task watches every connection. a connection links its entry only
@@ -200,7 +193,7 @@ pub const Watchdog = struct {
                     self.ticks += 1;
                     return self.ticks >= presession_timeout_ticks;
                 },
-                .session, .receiving => {
+                .session, .receiving, .interactive => {
                     // our own work between packets is not the peer idling
                     const seen = self.idle_state.activity.load(.acquire);
                     defer self.last_seen = seen;
@@ -209,9 +202,13 @@ pub const Watchdog = struct {
                     } else {
                         self.ticks = 0;
                     }
-                    return self.ticks >= if (phase == .receiving) receiving_timeout_ticks else idle_timeout_ticks;
+                    const limit: u32 = switch (phase) {
+                        .receiving => receiving_timeout_ticks,
+                        .interactive => interactive_timeout_ticks,
+                        else => idle_timeout_ticks,
+                    };
+                    return self.ticks >= limit;
                 },
-                .interactive => return false,
                 .closing => {
                     self.ticks += 1;
                     return self.ticks >= close_drain_timeout_ticks;
